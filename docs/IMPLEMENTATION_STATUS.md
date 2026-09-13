@@ -56,7 +56,7 @@ Intentionally deferred, not yet scheduled as tasks:
 | `objectWorkflow.ts` parent/child + dependency-aware helpers | MODIFY | Not ported — TASK-005/TASK-006 (BACKLOG) |
 | `interpreter.ts` confidence/ambiguity heuristics | MODIFY | Not ported — TASK-004 (BACKLOG, needs TASK-002) |
 | App.tsx UI surfaces (Objects workbench, digest strip, dependency/parent editors, history panel) | MODIFY / UNCLEAR (confirm flow) | Not ported — TASK-008 (BACKLOG) |
-| `docs/QA_CHECKLIST.md` | MODIFY | Not ported — TASK-014 (READY) |
+| `docs/QA_CHECKLIST.md` | MODIFY | Done — TASK-014: ported with Git Policy section rewritten to reference AGENTS.md; North Star Fit/Product Behavior/Data Safety unchanged |
 | `docs/OVERNIGHT_LOG.md` | DROP | Done — TASK-013: file never existed on `main`, so nothing to remove; reviewed and found no rationale not already captured in this doc, `docs/ARCHIVE_SALVAGE_AUDIT.md`, or `docs/DECISIONS.md` |
 
 ## Technical debt
