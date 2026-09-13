@@ -132,41 +132,6 @@ Review: pending
 
 ---
 
-### TASK-014 - Update QA_CHECKLIST.md Git Policy Section
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P3
-Milestone: M0
-
-Depends On:
-- None
-
-Goal:
-docs/QA_CHECKLIST.md's Git Policy section still reflects the single-agent overnight process ("do not commit/push until told", "keep progress in OVERNIGHT_LOG.md"), which is obsolete under AGENTS.md's git rules.
-
-Scope:
-- replace the Git Policy section in docs/QA_CHECKLIST.md with a reference to AGENTS.md
-- keep the North Star Fit, Product Behavior, and Data Safety sections as-is
-
-Do Not:
-- modify application code
-- change the substantive checklist content outside the Git Policy section
-
-Deliverable:
-Updated docs/QA_CHECKLIST.md.
-
-Acceptance Criteria:
-- Git Policy section matches current AGENTS.md rules
-- rest of the checklist unchanged
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ## BACKLOG
 
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
@@ -609,4 +574,42 @@ docs/OVERNIGHT_LOG.md was never added to `main` — it exists only on the archiv
 
 Result:
 Commit: 1cb1e3c
+Review: pending
+
+---
+
+### TASK-014 - Update QA_CHECKLIST.md Git Policy Section
+
+Status: DONE
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P3
+Milestone: M0
+
+Depends On:
+- None
+
+Goal:
+docs/QA_CHECKLIST.md's Git Policy section still reflects the single-agent overnight process ("do not commit/push until told", "keep progress in OVERNIGHT_LOG.md"), which is obsolete under AGENTS.md's git rules.
+
+Scope:
+- replace the Git Policy section in docs/QA_CHECKLIST.md with a reference to AGENTS.md
+- keep the North Star Fit, Product Behavior, and Data Safety sections as-is
+
+Do Not:
+- modify application code
+- change the substantive checklist content outside the Git Policy section
+
+Deliverable:
+Updated docs/QA_CHECKLIST.md.
+
+Acceptance Criteria:
+- Git Policy section matches current AGENTS.md rules
+- rest of the checklist unchanged
+
+Finding:
+docs/QA_CHECKLIST.md did not exist on `main` (only on the archived `wip/pre-orchestration` branch). Ported it here with the North Star Fit, Product Behavior, and Data Safety sections byte-for-byte unchanged from the archived version, and rewrote only the Git Policy section to reference AGENTS.md (work only on assigned branch/worktree, commit completed work, never merge into main, report the commit SHA, verify acceptance criteria/tests/typecheck/lint/build before completion) in place of the obsolete overnight-checkpoint instructions. Linked the file from README.md, completing the cross-reference TASK-012 deferred.
+
+Result:
+Commit: pending
 Review: pending
