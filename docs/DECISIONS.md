@@ -48,3 +48,6 @@ When should the Adaptive Plan automatically recalculate?
 
 ### OD-006: Plan Pinning
 How may a user pin work so automatic recalculation cannot move it?
+
+### OD-007: Semantic Object Membership Cardinality
+May a semantic object belong to multiple projects or contexts, or only one parent? Raised by the `wip/pre-orchestration` salvage audit (docs/ARCHIVE_SALVAGE_AUDIT.md), which found a single-parent `belongs_to` relationship modeled without this being a ratified decision. This gates how the Relationship model's project-containment shape is implemented.
