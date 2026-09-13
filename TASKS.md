@@ -562,5 +562,5 @@ Note:
 docs/QA_CHECKLIST.md was not linked from README.md here because it does not yet exist on this branch (only on the archived wip/pre-orchestration branch) — that link is added in TASK-014, which ports the file.
 
 Result:
-Commit: pending
+Commit: 0af355e
 Review: pending
