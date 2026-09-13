@@ -1,8 +1,15 @@
-import type { AppState, CanvasElement, ThoughtObject } from './domain'
+import type { AppState, CanvasElement, HistoryEvent, Interpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject } from './domain'
 
 const KEY = 'thoughtflow-state-v1'
 const uid = () => crypto.randomUUID()
 const today = new Date().toISOString().slice(0, 10)
+const objectKinds: ObjectKind[] = ['idea', 'action', 'reminder', 'project', 'commitment', 'person', 'reference', 'objective']
+const objectStatuses: ObjectStatus[] = ['inbox', 'review', 'confirmed', 'complete', 'archived']
+const sourceTypes: SourceType[] = ['text', 'voice', 'canvas']
+const relationshipTypes: Relationship['type'][] = ['belongs_to', 'relates_to', 'depends_on', 'supports']
+const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow']
+const effortValues: Required<ObjectMetadata>['effort'][] = ['small', 'medium', 'large']
+const attentionValues: Required<ObjectMetadata>['attentionLoad'][] = ['low', 'medium', 'high']
 
 const seed: AppState = {
   objects: [
@@ -23,13 +30,16 @@ export function loadState(): AppState {
     return isAppState(saved) ? saved : seed
   } catch { return seed }
 }
-export function saveState(state: AppState) { localStorage.setItem(KEY, JSON.stringify(state)) }
+export function saveState(state: AppState) {
+  if (isAppState(state)) localStorage.setItem(KEY, JSON.stringify(state))
+}
 export function isAppState(value: unknown): value is AppState {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Partial<AppState>
-  return Array.isArray(candidate.objects) && Array.isArray(candidate.canvas) && candidate.objects.every(item =>
-    item && typeof item.id === 'string' && typeof item.originalContent === 'string' && typeof item.kind === 'string' && typeof item.status === 'string'
-  ) && candidate.canvas.every(item => item && typeof item.id === 'string' && typeof item.type === 'string')
+  return Array.isArray(candidate.objects) &&
+    Array.isArray(candidate.canvas) &&
+    candidate.objects.every(isThoughtObject) &&
+    candidate.canvas.every(isCanvasElement)
 }
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()
@@ -37,4 +47,76 @@ export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalConten
 }
 export function newCanvasElement(type: CanvasElement['type'], x: number, y: number): CanvasElement {
   return { id: uid(), type, x, y, width: type === 'container' ? 320 : 190, height: type === 'container' ? 210 : undefined, text: type === 'container' ? 'Untitled group' : 'New thought' }
+}
+
+function isThoughtObject(value: unknown): value is ThoughtObject {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<ThoughtObject>
+  return typeof item.id === 'string' &&
+    objectKinds.includes(item.kind as ObjectKind) &&
+    typeof item.originalContent === 'string' &&
+    sourceTypes.includes(item.source as SourceType) &&
+    typeof item.createdAt === 'string' &&
+    isInterpretation(item.interpretation) &&
+    typeof item.confidence === 'number' &&
+    item.confidence >= 0 &&
+    item.confidence <= 1 &&
+    Array.isArray(item.relationships) &&
+    item.relationships.every(isRelationship) &&
+    Array.isArray(item.history) &&
+    item.history.every(isHistoryEvent) &&
+    objectStatuses.includes(item.status as ObjectStatus) &&
+    isMetadata(item.metadata) &&
+    (item.context === undefined || typeof item.context === 'string')
+}
+
+function isInterpretation(value: unknown): value is Interpretation {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<Interpretation>
+  return typeof item.summary === 'string' &&
+    objectKinds.includes(item.suggestedKind as ObjectKind) &&
+    typeof item.rationale === 'string' &&
+    (item.suggestedProject === undefined || typeof item.suggestedProject === 'string') &&
+    (item.suggestedDate === undefined || typeof item.suggestedDate === 'string')
+}
+
+function isRelationship(value: unknown): value is Relationship {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<Relationship>
+  return typeof item.targetId === 'string' && relationshipTypes.includes(item.type as Relationship['type'])
+}
+
+function isHistoryEvent(value: unknown): value is HistoryEvent {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<HistoryEvent>
+  return typeof item.at === 'string' && typeof item.event === 'string'
+}
+
+function isMetadata(value: unknown): value is ObjectMetadata {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<ObjectMetadata>
+  return optionalScore(item.urgency) &&
+    optionalScore(item.strategicImportance) &&
+    (item.deadline === undefined || typeof item.deadline === 'string') &&
+    (item.effort === undefined || effortValues.includes(item.effort)) &&
+    (item.attentionLoad === undefined || attentionValues.includes(item.attentionLoad))
+}
+
+function optionalScore(value: unknown) {
+  return value === undefined || ([1, 2, 3, 4, 5] as const).includes(value as 1 | 2 | 3 | 4 | 5)
+}
+
+function isCanvasElement(value: unknown): value is CanvasElement {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<CanvasElement>
+  return typeof item.id === 'string' &&
+    canvasTypes.includes(item.type as CanvasElement['type']) &&
+    typeof item.x === 'number' &&
+    typeof item.y === 'number' &&
+    (item.width === undefined || typeof item.width === 'number') &&
+    (item.height === undefined || typeof item.height === 'number') &&
+    (item.text === undefined || typeof item.text === 'string') &&
+    (item.fromId === undefined || typeof item.fromId === 'string') &&
+    (item.toId === undefined || typeof item.toId === 'string') &&
+    (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
 }

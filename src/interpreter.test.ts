@@ -19,12 +19,21 @@ describe('interpret', () => {
 })
 
 describe('persisted state validation', () => {
-  it('accepts an object and canvas collection with required identifiers', () => {
-    expect(isAppState({ objects: [{ id: 'a', originalContent: 'A thought', kind: 'idea', status: 'review' }], canvas: [{ id: 'b', type: 'text' }] })).toBe(true)
+  it('accepts complete object and canvas collections', () => {
+    expect(isAppState({ objects: [object({ id: 'a', status: 'review' })], canvas: [{ id: 'b', type: 'text', x: 10, y: 20 }] })).toBe(true)
   })
 
   it('rejects malformed saved state instead of loading it', () => {
     expect(isAppState({ objects: [{ originalContent: 'Missing id' }], canvas: null })).toBe(false)
+  })
+
+  it('rejects unknown object kinds and statuses', () => {
+    expect(isAppState({ objects: [{ ...object({ id: 'a' }), kind: 'task' }], canvas: [] })).toBe(false)
+    expect(isAppState({ objects: [{ ...object({ id: 'b' }), status: 'later' }], canvas: [] })).toBe(false)
+  })
+
+  it('rejects canvas arrows without endpoints', () => {
+    expect(isAppState({ objects: [], canvas: [{ id: 'arrow', type: 'arrow', x: 0, y: 0 }] })).toBe(false)
   })
 })
 
