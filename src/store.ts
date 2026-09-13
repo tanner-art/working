@@ -18,9 +18,19 @@ const seed: AppState = {
 }
 
 export function loadState(): AppState {
-  try { return JSON.parse(localStorage.getItem(KEY) ?? '') as AppState } catch { return seed }
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? '')
+    return isAppState(saved) ? saved : seed
+  } catch { return seed }
 }
 export function saveState(state: AppState) { localStorage.setItem(KEY, JSON.stringify(state)) }
+export function isAppState(value: unknown): value is AppState {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<AppState>
+  return Array.isArray(candidate.objects) && Array.isArray(candidate.canvas) && candidate.objects.every(item =>
+    item && typeof item.id === 'string' && typeof item.originalContent === 'string' && typeof item.kind === 'string' && typeof item.status === 'string'
+  ) && candidate.canvas.every(item => item && typeof item.id === 'string' && typeof item.type === 'string')
+}
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()
   return { id: uid(), createdAt: now, context: undefined, relationships: [], history: [{ at: now, event: 'Captured' }], status: partial.confidence < .8 ? 'review' : 'confirmed', metadata: {}, ...partial }

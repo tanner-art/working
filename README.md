@@ -27,8 +27,10 @@ npm install
 npm run dev
 ```
 
+Before each push, run `pnpm test` and `pnpm run build`. GitHub Actions runs the same checks on every push and pull request.
+
 ## First vertical slice
 
-Implemented: text capture, voice-capture affordance, interpretation/confidence/review, local persistent semantic objects, Today, a separate commitments view, and an infinite-feeling pan/zoom canvas with text, groups, arrows, drag, and persistence.
+Implemented: text capture, voice-capture affordance, interpretation/confidence/review, a reusable object workbench for changing type/status/context/effort/deadline, local persistent semantic objects, Today, a separate commitments view, and an infinite-feeling pan/zoom canvas with text, groups, arrows, drag, deletion, and persistence.
 
 Intentionally deferred: real speech recognition, external calendar sync, collaborative/remote persistence, freehand paths and resize handles, autonomous scheduling, and ROI optimization.
