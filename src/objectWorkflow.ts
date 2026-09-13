@@ -1,11 +1,12 @@
 import type { CanvasElement, ObjectKind, ObjectStatus, ThoughtObject } from './domain'
+import { unresolvedDependencies } from './dependencies'
 
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
 export const confirmedActions = (objects: ThoughtObject[]) =>
   activeObjects(objects)
-    .filter(item => item.kind === 'action' && item.status === 'confirmed')
+    .filter(item => item.kind === 'action' && item.status === 'confirmed' && unresolvedDependencies(item, objects).length === 0)
     .sort((left, right) => focusScore(right) - focusScore(left))
 
 export const fixedCommitments = (objects: ThoughtObject[]) =>
@@ -20,7 +21,7 @@ export const recentObjects = (objects: ThoughtObject[], limit = 6) =>
     .slice(0, limit)
 
 export function confirmObject(object: ThoughtObject, kind: ObjectKind = object.kind): ThoughtObject {
-  return withHistory({ ...object, kind, status: 'confirmed', confidence: 1 }, `Confirmed as ${kind}`)
+  return withHistory({ ...object, kind, status: 'confirmed' }, `Confirmed as ${kind}`)
 }
 
 export function updateObject(original: ThoughtObject, draft: ThoughtObject): ThoughtObject {
@@ -33,7 +34,43 @@ export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): Th
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
-  return withHistory({ ...object, kind, interpretation: { ...object.interpretation, suggestedKind: kind } }, `Changed type to ${kind}`)
+  return withHistory({ ...object, kind }, `Changed type to ${kind}`)
+}
+
+export function setBelongsTo(object: ThoughtObject, targetId?: string): ThoughtObject {
+  const relationships = object.relationships.filter(item => item.type !== 'belongs_to')
+  const next = targetId ? [...relationships, { targetId, type: 'belongs_to' as const }] : relationships
+  return withHistory({ ...object, relationships: next }, targetId ? 'Linked to parent' : 'Cleared parent link')
+}
+
+export function parentCandidates(objects: ThoughtObject[], objectId: string) {
+  const byId = new Map(objects.map(item => [item.id, item]))
+  const hasUnsafeAncestry = (candidateId: string) => {
+    const visiting = new Set<string>()
+    const checked = new Set<string>()
+    const visit = (id: string): boolean => {
+      if (id === objectId || visiting.has(id)) return true
+      if (checked.has(id)) return false
+      visiting.add(id)
+      const unsafe = byId.get(id)?.relationships.some(link => link.type === 'belongs_to' && visit(link.targetId)) ?? false
+      visiting.delete(id)
+      checked.add(id)
+      return unsafe
+    }
+    return visit(candidateId)
+  }
+  return activeObjects(objects).filter(item =>
+    (item.kind === 'project' || item.kind === 'objective') && !hasUnsafeAncestry(item.id)
+  )
+}
+
+export function parentObject(objects: ThoughtObject[], object: ThoughtObject) {
+  const parentId = object.relationships.find(item => item.type === 'belongs_to')?.targetId
+  return parentId ? activeObjects(objects).find(item => item.id === parentId) : undefined
+}
+
+export function projectChildren(objects: ThoughtObject[], parentId: string) {
+  return activeObjects(objects).filter(item => item.id !== parentId && item.relationships.some(link => link.type === 'belongs_to' && link.targetId === parentId))
 }
 
 export function canvasObjectDraft(element: CanvasElement) {
@@ -70,6 +107,8 @@ function describeChanges(original: ThoughtObject, draft: ThoughtObject) {
   const changes: string[] = []
   if (original.kind !== draft.kind) changes.push(`type to ${draft.kind}`)
   if (original.status !== draft.status) changes.push(`status to ${draft.status}`)
+  const dependencyIds = (item: ThoughtObject) => item.relationships.filter(link => link.type === 'depends_on').map(link => link.targetId).sort().join('\n')
+  if (dependencyIds(original) !== dependencyIds(draft)) changes.push('dependencies')
   if ((original.context ?? '') !== (draft.context ?? '')) changes.push('context')
   if ((original.metadata.deadline ?? '') !== (draft.metadata.deadline ?? '')) changes.push('deadline')
   if ((original.metadata.effort ?? '') !== (draft.metadata.effort ?? '')) changes.push('effort')
@@ -78,5 +117,6 @@ function describeChanges(original: ThoughtObject, draft: ThoughtObject) {
   if ((original.metadata.urgency ?? '') !== (draft.metadata.urgency ?? '')) changes.push('urgency')
   if ((original.metadata.resourceCost ?? '') !== (draft.metadata.resourceCost ?? '')) changes.push('resource cost')
   if ((original.metadata.roi ?? '') !== (draft.metadata.roi ?? '')) changes.push('ROI')
+  if ((original.relationships.find(item => item.type === 'belongs_to')?.targetId ?? '') !== (draft.relationships.find(item => item.type === 'belongs_to')?.targetId ?? '')) changes.push('parent link')
   return changes
 }

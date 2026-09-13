@@ -1,6 +1,6 @@
 # Threadline
 
-Start with [docs/NORTH_STAR.md](docs/NORTH_STAR.md). It is the product compass for this repo: preserve raw thought, build semantic structure around it, and avoid collapsing the system into a generic notes/tasks/calendar app.
+Start with [docs/NORTH_STAR.md](docs/NORTH_STAR.md). It is the product compass for this repo: preserve raw thought, build semantic structure around it, and avoid collapsing the system into a generic notes/tasks/calendar app. Use [docs/QA_CHECKLIST.md](docs/QA_CHECKLIST.md) before calling a product slice complete.
 
 An AI-native personal thought-to-execution MVP. The product deliberately preserves raw capture and makes every later interpretation editable and reversible.
 
@@ -16,13 +16,15 @@ The intended architecture is defined in [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 The current MVP predates these boundaries. Its `ThoughtObject` combines original content, source, creation time, contextual metadata, AI interpretation, confidence, relationships, history, and lifecycle status. Screens use the same persisted state:
 
-- Capture stores original content and an interpretation together in a `ThoughtObject`; separate immutable CaptureRecords are not yet implemented.
+- Capture stores original content and the recorded interpretation together in a `ThoughtObject`; later user corrections change type/status and add history. Separate immutable CaptureRecords are not yet implemented.
 - Review exposes uncertain interpretations for an explicit confirmation.
 - Today displays confirmed actions separately from fixed commitments.
 - Commitments displays time-bound reminders and commitments without mixing in flexible execution work.
 - Canvas persists text nodes, groups, and directed arrows independently from semantic interpretations, so a later AI pass can infer from spatial relationships without overwriting the canvas.
 
-The current interpreter is deterministic and isolated in `src/interpreter.ts`. Implementing the intended architecture will require changes to the domain model and acceptance flow, including replacing confidence-based Action confirmation with explicit user confirmation. No application changes or data migrations are included in this documentation update.
+The current interpreter is deterministic and isolated in `src/interpreter.ts`. Implementing the intended architecture will require changes to the domain model and acceptance flow, including replacing confidence-based Action confirmation with explicit user confirmation. No application changes or data migrations are included in this documentation update. A provider-backed service still needs asynchronous request handling, errors, and a defined interpretation contract.
+
+See [implementation status](docs/IMPLEMENTATION_STATUS.md) for verified behavior, missing core features, and pending checks.
 
 ## Run
 
