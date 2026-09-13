@@ -132,41 +132,6 @@ Review: pending
 
 ---
 
-### TASK-013 - Retire OVERNIGHT_LOG.md
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P3
-Milestone: M0
-
-Depends On:
-- None
-
-Goal:
-The single-agent overnight-checkpoint process docs/OVERNIGHT_LOG.md documents is superseded by the AGENTS.md/TASKS.md multi-agent lifecycle. Extract any still-relevant design rationale into docs/DECISIONS.md, then retire the file.
-
-Scope:
-- review docs/OVERNIGHT_LOG.md for rationale not captured elsewhere
-- add any load-bearing rationale to docs/DECISIONS.md
-- remove docs/OVERNIGHT_LOG.md and its README.md reference, if any
-
-Do Not:
-- modify application code
-
-Deliverable:
-docs/OVERNIGHT_LOG.md removed; any load-bearing rationale preserved in docs/DECISIONS.md.
-
-Acceptance Criteria:
-- no unique design rationale is lost
-- no dangling references to the removed file
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-014 - Update QA_CHECKLIST.md Git Policy Section
 
 Status: READY
@@ -563,4 +528,42 @@ docs/QA_CHECKLIST.md was not linked from README.md here because it does not yet 
 
 Result:
 Commit: 0af355e
+Review: pending
+
+---
+
+### TASK-013 - Retire OVERNIGHT_LOG.md
+
+Status: DONE
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P3
+Milestone: M0
+
+Depends On:
+- None
+
+Goal:
+The single-agent overnight-checkpoint process docs/OVERNIGHT_LOG.md documents is superseded by the AGENTS.md/TASKS.md multi-agent lifecycle. Extract any still-relevant design rationale into docs/DECISIONS.md, then retire the file.
+
+Scope:
+- review docs/OVERNIGHT_LOG.md for rationale not captured elsewhere
+- add any load-bearing rationale to docs/DECISIONS.md
+- remove docs/OVERNIGHT_LOG.md and its README.md reference, if any
+
+Do Not:
+- modify application code
+
+Deliverable:
+docs/OVERNIGHT_LOG.md removed; any load-bearing rationale preserved in docs/DECISIONS.md.
+
+Acceptance Criteria:
+- no unique design rationale is lost
+- no dangling references to the removed file
+
+Finding:
+docs/OVERNIGHT_LOG.md was never added to `main` — it exists only on the archived `wip/pre-orchestration` branch, so there was nothing to delete here. Reviewed the archived file's full contents (`git show wip/pre-orchestration:docs/OVERNIGHT_LOG.md`): it is almost entirely a mechanical changelog (feature added, test count, build pass) rather than design rationale. Its few rationale-bearing lines are already captured elsewhere: preserving recorded interpretation/confidence on confirm (docs/ARCHIVE_SALVAGE_AUDIT.md item 5, TASK-003 scope), fail-loud storage over silent seed fallback (docs/ARCHIVE_SALVAGE_AUDIT.md item 5, TASK-011), and not displaying invented values for unconfigured data (already an ARCHITECTURE.md principle: "Unknown values remain unknown rather than implying zero cost or importance"). Its operational notes (overnight checkpoint cadence, commit-only-when-told) are fully superseded by AGENTS.md and add nothing further. No new docs/DECISIONS.md entry was added as a result. Confirmed no reference to the file exists in README.md; the mentions in docs/ARCHIVE_SALVAGE_AUDIT.md and docs/IMPLEMENTATION_STATUS.md are intentional historical/tracking references, not dangling links.
+
+Result:
+Commit: pending
 Review: pending
