@@ -1,5 +1,7 @@
 # Threadline
 
+Start with [docs/NORTH_STAR.md](docs/NORTH_STAR.md). It is the product compass for this repo: preserve raw thought, build semantic structure around it, and avoid collapsing the system into a generic notes/tasks/calendar app.
+
 An AI-native personal thought-to-execution MVP. The product deliberately preserves raw capture and makes every later interpretation editable and reversible.
 
 ## Stack
