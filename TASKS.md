@@ -24,55 +24,6 @@ Only READY tasks may be newly assigned.
 
 ## READY
 
-### TASK-001 - Audit Current Implementation Against Architecture
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P0
-Milestone: M0
-
-Depends On:
-- None
-
-Goal:
-Determine what currently exists in the application and how it maps to the new North Star and architecture.
-
-Scope:
-- inspect existing repository
-- inspect preserved pre-orchestration branch where useful
-- identify implemented features
-- identify architectural mismatches
-- identify reusable work
-- identify abandoned or experimental work
-
-Do Not:
-- modify application code
-- refactor
-- implement missing functionality
-
-Deliverable:
-Create or update docs/IMPLEMENTATION_STATUS.md with:
-- current stack
-- implemented features
-- incomplete features
-- architecture mismatches
-- reusable components
-- technical debt
-- proposed follow-up tasks
-
-Acceptance Criteria:
-- no application code changed
-- every major existing subsystem is accounted for
-- proposed work is separated from observed current state
-- newly proposed tasks include dependencies
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
 
 Status: READY
@@ -564,4 +515,49 @@ None.
 
 ## DONE
 
-None.
+### TASK-001 - Audit Current Implementation Against Architecture
+
+Status: DONE
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M0
+
+Depends On:
+- None
+
+Goal:
+Determine what currently exists in the application and how it maps to the new North Star and architecture.
+
+Scope:
+- inspect existing repository
+- inspect preserved pre-orchestration branch where useful
+- identify implemented features
+- identify architectural mismatches
+- identify reusable work
+- identify abandoned or experimental work
+
+Do Not:
+- modify application code
+- refactor
+- implement missing functionality
+
+Deliverable:
+Create or update docs/IMPLEMENTATION_STATUS.md with:
+- current stack
+- implemented features
+- incomplete features
+- architecture mismatches
+- reusable components
+- technical debt
+- proposed follow-up tasks
+
+Acceptance Criteria:
+- no application code changed
+- every major existing subsystem is accounted for
+- proposed work is separated from observed current state
+- newly proposed tasks include dependencies
+
+Result:
+Commit: 17f3d29
+Review: pending
