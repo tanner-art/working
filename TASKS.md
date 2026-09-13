@@ -132,41 +132,6 @@ Review: pending
 
 ---
 
-### TASK-011 - Land store.ts Load/Save Failure Handling
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P2
-Milestone: M1
-
-Depends On:
-- None
-
-Goal:
-Port the `wip/pre-orchestration` src/store.ts changes: `loadStateResult`/`saveState` surface load/save failures (bad JSON, quota errors) instead of silently substituting seed data or swallowing exceptions, plus the App.tsx retry/backup-download UI.
-
-Scope:
-- src/store.ts: loadStateResult, saveState error returns
-- src/App.tsx: load-failure screen, save-error banner with retry and JSON backup download
-
-Do Not:
-- change the persistence backend or schema (this is orthogonal to TASK-002)
-
-Deliverable:
-Working failure-surfacing load/save path with backup download.
-
-Acceptance Criteria:
-- pnpm check passes
-- a corrupted localStorage value pauses editing instead of overwriting saved data
-- a failed save offers retry and backup download without losing in-memory work
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-012 - Consolidate Implementation Status Documentation
 
 Status: READY
@@ -511,7 +476,50 @@ None.
 
 ## MERGE_READY
 
-None.
+### TASK-011 - Land store.ts Load/Save Failure Handling
+
+Status: MERGE_READY
+Owner: Codex B
+Reviewer: Codex independent review (`task011_review`)
+Priority: P2
+Milestone: M1
+
+Depends On:
+- None
+
+Goal:
+Port the `wip/pre-orchestration` src/store.ts changes: `loadStateResult`/`saveState` surface load/save failures (bad JSON, quota errors) instead of silently substituting seed data or swallowing exceptions, plus the App.tsx retry/backup-download UI.
+
+Scope:
+- src/store.ts: loadStateResult, saveState error returns
+- src/App.tsx: load-failure screen, save-error banner with retry and JSON backup download
+
+Do Not:
+- change the persistence backend or schema (this is orthogonal to TASK-002)
+
+Deliverable:
+Working failure-surfacing load/save path with backup download.
+
+Acceptance Criteria:
+- pnpm check passes
+- a corrupted localStorage value pauses editing instead of overwriting saved data
+- a failed save offers retry and backup download without losing in-memory work
+
+Result:
+Commit: 0795769
+Review: Approved by independent reviewer; no blocking findings.
+Source: `wip/pre-orchestration` commit `7c0ee6b`; store.ts ported unchanged, only persistence UI and its three alert styles selected from App.tsx/styles.css.
+Validation:
+- `pnpm check` passed: 18 tests (including 4 persistence tests), TypeScript check, and production build. No lint script is configured.
+- Browser: corrupted JSON pauses editing and remains byte-for-byte unchanged through repeated load retry; valid recovered data loads on retry.
+- Browser: injected quota failure preserves new captured work in memory and leaves prior stored data intact; failed retry retains the warning.
+- Browser: downloaded JSON contains the unsaved thought, existing objects, and all four original canvas elements including the connector.
+- Browser: successful save retry clears the warning, saves the current state, and the recovered work survives reload. No browser page errors reported.
+- Git diff inspected; `git diff --check` passed; no schema, backend, interpretation, or unrelated UI changes.
+Proposed follow-up (not implemented; does not block TASK-011): guided backup import/restoration and corrupted-data recovery. The archived load-error screen deliberately pauses editing and offers retry; it does not provide a recovery/import wizard.
+Integration: implementation complete on `agent/codex-b`; not merged or pushed to main.
+
+---
 
 ## DONE
 
