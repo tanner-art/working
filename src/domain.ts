@@ -30,6 +30,8 @@ export interface ObjectMetadata {
   effort?: 'small' | 'medium' | 'large'
   attentionLoad?: 'low' | 'medium' | 'high'
   strategicImportance?: 1 | 2 | 3 | 4 | 5
+  resourceCost?: 'low' | 'medium' | 'high'
+  roi?: 1 | 2 | 3 | 4 | 5
 }
 export interface Relationship { targetId: string; type: 'belongs_to' | 'relates_to' | 'depends_on' | 'supports' }
 export interface HistoryEvent { at: string; event: string }

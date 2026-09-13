@@ -97,9 +97,11 @@ function isMetadata(value: unknown): value is ObjectMetadata {
   const item = value as Partial<ObjectMetadata>
   return optionalScore(item.urgency) &&
     optionalScore(item.strategicImportance) &&
+    optionalScore(item.roi) &&
     (item.deadline === undefined || typeof item.deadline === 'string') &&
     (item.effort === undefined || effortValues.includes(item.effort)) &&
-    (item.attentionLoad === undefined || attentionValues.includes(item.attentionLoad))
+    (item.attentionLoad === undefined || attentionValues.includes(item.attentionLoad)) &&
+    (item.resourceCost === undefined || attentionValues.includes(item.resourceCost))
 }
 
 function optionalScore(value: unknown) {

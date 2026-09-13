@@ -53,7 +53,9 @@ function focusScore(object: ThoughtObject) {
   const urgency = object.metadata.urgency ?? 3
   const effort = object.metadata.effort === 'small' ? 2 : object.metadata.effort === 'medium' ? 1 : 0
   const attention = object.metadata.attentionLoad === 'low' ? 2 : object.metadata.attentionLoad === 'medium' ? 1 : 0
-  return importance * 4 + urgency * 3 + effort + attention
+  const roi = object.metadata.roi ?? 3
+  const resourceCost = object.metadata.resourceCost === 'low' ? 2 : object.metadata.resourceCost === 'medium' ? 1 : 0
+  return importance * 4 + urgency * 3 + roi * 2 + effort + attention + resourceCost
 }
 
 function withHistory(object: ThoughtObject, event: string): ThoughtObject {
@@ -69,5 +71,8 @@ function describeChanges(original: ThoughtObject, draft: ThoughtObject) {
   if ((original.metadata.effort ?? '') !== (draft.metadata.effort ?? '')) changes.push('effort')
   if ((original.metadata.attentionLoad ?? '') !== (draft.metadata.attentionLoad ?? '')) changes.push('attention load')
   if ((original.metadata.strategicImportance ?? '') !== (draft.metadata.strategicImportance ?? '')) changes.push('importance')
+  if ((original.metadata.urgency ?? '') !== (draft.metadata.urgency ?? '')) changes.push('urgency')
+  if ((original.metadata.resourceCost ?? '') !== (draft.metadata.resourceCost ?? '')) changes.push('resource cost')
+  if ((original.metadata.roi ?? '') !== (draft.metadata.roi ?? '')) changes.push('ROI')
   return changes
 }

@@ -35,6 +35,11 @@ describe('persisted state validation', () => {
   it('rejects canvas arrows without endpoints', () => {
     expect(isAppState({ objects: [], canvas: [{ id: 'arrow', type: 'arrow', x: 0, y: 0 }] })).toBe(false)
   })
+
+  it('validates optional resource and ROI dimensions', () => {
+    expect(isAppState({ objects: [object({ metadata: { resourceCost: 'low', roi: 5 } })], canvas: [] })).toBe(true)
+    expect(isAppState({ objects: [object({ metadata: { resourceCost: 'expensive' as 'high', roi: 9 as 5 } })], canvas: [] })).toBe(false)
+  })
 })
 
 describe('object workflow', () => {
@@ -43,8 +48,8 @@ describe('object workflow', () => {
   })
 
   it('ranks confirmed actions by independent priority dimensions', () => {
-    const lowAttention = object({ id: 'low', kind: 'action', metadata: { strategicImportance: 4, urgency: 3, effort: 'small', attentionLoad: 'low' } })
-    const heavy = object({ id: 'heavy', kind: 'action', metadata: { strategicImportance: 2, urgency: 3, effort: 'large', attentionLoad: 'high' } })
+    const lowAttention = object({ id: 'low', kind: 'action', metadata: { strategicImportance: 4, urgency: 3, effort: 'small', attentionLoad: 'low', resourceCost: 'low', roi: 4 } })
+    const heavy = object({ id: 'heavy', kind: 'action', metadata: { strategicImportance: 2, urgency: 3, effort: 'large', attentionLoad: 'high', resourceCost: 'high', roi: 2 } })
     expect(confirmedActions([heavy, lowAttention]).map(item => item.id)).toEqual(['low', 'heavy'])
   })
 
