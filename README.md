@@ -29,7 +29,7 @@ npm install
 npm run dev
 ```
 
-Before each push, run `pnpm test` and `pnpm run build`. GitHub Actions runs the same checks on every push and pull request.
+Before each push, run `pnpm check`. GitHub Actions runs the same gate on every push and pull request.
 
 ## First vertical slice
 
