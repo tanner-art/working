@@ -32,6 +32,10 @@ export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): Th
   return withHistory({ ...object, status }, `Marked ${status}`)
 }
 
+export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
+  return withHistory({ ...object, kind, interpretation: { ...object.interpretation, suggestedKind: kind } }, `Changed type to ${kind}`)
+}
+
 export function canvasObjectDraft(element: CanvasElement) {
   const originalContent = element.text?.trim()
   if (!originalContent || element.type === 'arrow') return null

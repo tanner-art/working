@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ObjectKind, ThoughtObject } from './domain'
 import { interpret } from './interpreter'
-import { activeObjects, canvasObjectDraft, confirmedActions, fixedCommitments, confirmObject, updateObject } from './objectWorkflow'
+import { activeObjects, canvasObjectDraft, confirmedActions, fixedCommitments, confirmObject, setObjectKind, updateObject } from './objectWorkflow'
 import { isAppState } from './store'
 
 describe('interpret', () => {
@@ -68,6 +68,15 @@ describe('object workflow', () => {
     expect(edited.history.at(-1)?.event).toContain('context')
   })
 
+  it('lets review change the proposed type without rewriting original content', () => {
+    const original = object({ kind: 'idea', originalContent: 'AI sales training', status: 'review' })
+    const changed = setObjectKind(original, 'project')
+    expect(changed.originalContent).toBe('AI sales training')
+    expect(changed.kind).toBe('project')
+    expect(changed.interpretation.suggestedKind).toBe('project')
+    expect(changed.history.at(-1)?.event).toContain('Changed type')
+  })
+
   it('creates a reviewable semantic draft from canvas text without changing the canvas', () => {
     const draft = canvasObjectDraft({ id: 'node', type: 'text', x: 10, y: 20, text: 'AI sales training' })
     expect(draft).toMatchObject({ kind: 'idea', originalContent: 'AI sales training', source: 'canvas', confidence: .72 })
@@ -84,7 +93,7 @@ function object(overrides: Partial<ThoughtObject> & { id?: string; kind?: Object
   return {
     id: overrides.id ?? 'object',
     kind: overrides.kind ?? 'idea',
-    originalContent: 'Captured thought',
+    originalContent: overrides.originalContent ?? 'Captured thought',
     source: 'text',
     createdAt: overrides.createdAt ?? '2026-09-13T00:00:00.000Z',
     interpretation: { summary: 'Captured thought', suggestedKind: overrides.kind ?? 'idea', rationale: 'test object' },
