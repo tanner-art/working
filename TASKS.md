@@ -62,41 +62,6 @@ Review: pending
 
 ---
 
-### TASK-009 - Decision: Ratify OD-001 Confirmation Rules
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P0
-Milestone: M1
-
-Depends On:
-- None
-
-Goal:
-Resolve OD-001: exactly which explicit interaction(s) confirm an AI-proposed interpretation as an Action, and which non-consequential interpretations may be accepted automatically (per D-003).
-
-Scope:
-- evaluate the `wip/pre-orchestration` Review "Confirm interpretation" button as a candidate answer (docs/ARCHIVE_SALVAGE_AUDIT.md item 4)
-- record the decision in docs/DECISIONS.md, moving OD-001 to Accepted with a new D-number
-
-Do Not:
-- write or modify application code
-- resolve OD-003 or OD-007 in the same pass
-
-Deliverable:
-docs/DECISIONS.md updated with the ratified confirmation rule.
-
-Acceptance Criteria:
-- OD-001 moved from Open Decisions to Accepted with a clear, testable rule
-- TASK-003 can proceed without further clarification
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-010 - Wire Canvas Undo/Redo and Decide OD-002 Revision Persistence
 
 Status: READY
@@ -560,4 +525,39 @@ Acceptance Criteria:
 
 Result:
 Commit: 17f3d29
+Review: pending
+
+---
+
+### TASK-009 - Decision: Ratify OD-001 Confirmation Rules
+
+Status: DONE
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M1
+
+Depends On:
+- None
+
+Goal:
+Resolve OD-001: exactly which explicit interaction(s) confirm an AI-proposed interpretation as an Action, and which non-consequential interpretations may be accepted automatically (per D-003).
+
+Scope:
+- evaluate the `wip/pre-orchestration` Review "Confirm interpretation" button as a candidate answer (docs/ARCHIVE_SALVAGE_AUDIT.md item 4)
+- record the decision in docs/DECISIONS.md, moving OD-001 to Accepted with a new D-number
+
+Do Not:
+- write or modify application code
+- resolve OD-003 or OD-007 in the same pass
+
+Deliverable:
+docs/DECISIONS.md updated with the ratified confirmation rule.
+
+Acceptance Criteria:
+- OD-001 moved from Open Decisions to Accepted with a clear, testable rule
+- TASK-003 can proceed without further clarification
+
+Result:
+Commit: pending
 Review: pending

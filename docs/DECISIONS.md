@@ -29,10 +29,35 @@ Canvas geometry and visual relationships exist independently of optional semanti
 ### D-008: Scope Cannot Self-Expand
 Agents may discover and propose work but may not implement work outside their assigned scope.
 
-## Open Decisions
+### D-009: Confirmation Rules for Semantic Objects and Actions
 
-### OD-001: Confirmation Rules
-Exactly when may an AI interpretation become a confirmed semantic object?
+Resolves OD-001. Ratified 2026-09-13 by TASK-009, evaluating (but not adopting wholesale) the archived `wip/pre-orchestration` Review "Confirm interpretation" flow (docs/ARCHIVE_SALVAGE_AUDIT.md item 4) as one candidate.
+
+**General principle.** Automatic acceptance is permitted only for low-consequence, reversible organizational meaning. Any transition that makes an item eligible for execution, scheduling, or notification delivery — a consequential transition — requires exactly one explicit, discrete, user-initiated confirmation interaction targeted at that specific item. Confirmation is never inferred from confidence score, elapsed time, a default value, or a batch/bulk operation that did not specifically target the item.
+
+**Definition: explicit confirmation interaction.** A UI or conversational interaction whose evident, singular purpose is to affirm a specific proposed interpretation or transition — e.g., a dedicated "Confirm" control on a specific interpretation, an affirmative reply ("Yes", "Confirmed", "That's right") in a conversational review turn, or the user directly authoring a field's value themselves (typing or selecting it with intent). A value that was merely pre-filled, defaulted, or left untouched by the user does not count, even if it is technically "present" in a saved record.
+
+**Case-by-case rules:**
+
+1. **Low-consequence interpretations** (e.g., Idea, Reference, informational context/tags with no execution or obligation implied) MAY be organized automatically at any confidence level. This is auto-filing, not "confirmation" in the OD-001 sense — it carries no obligation and remains cheaply reversible.
+
+2. **Uncertain interpretations** (low confidence, or flagged as conditional/ambiguous/a question — per the confidence-capping heuristics already in `src/interpreter.ts`) MUST enter Review and MUST NOT auto-advance out of Review by any means other than an explicit confirmation interaction. No timeout, default, or unrelated edit may move them out of Review.
+
+3. **Consequential state transitions** — specifically: (a) ProposedAction → Action, (b) creation or edit of a Commitment's obligation or of a deadline treated as fixed, (c) any transition that grants Adaptive Plan / execution-queue / notification-delivery eligibility — always require an explicit confirmation interaction, regardless of the interpretation's confidence.
+
+4. **ProposedAction → Action** specifically requires a discrete confirmation interaction distinct from merely selecting "Action" as a type. Choosing a kind is a classification edit, not confirmation. The archived Review "Confirm interpretation" button qualifies as this discrete interaction when it is the dedicated gesture the user pressed — but a general-purpose object editor's Status dropdown, used to flip status to "confirmed" as one field among many during an unrelated edit, does NOT qualify and must not grant Action eligibility on its own. (The archived implementation allowed exactly this second path; it does not satisfy this rule and must not be carried forward as-is.)
+
+5. **Hard Commitments** require their own explicit confirmation for the obligation itself, separate from confirming any date/time as fixed. Confirming that a commitment exists does not by itself fix a deadline or schedule a CalendarEvent; scheduling that event is a separate confirmed action. This mirrors the Commitment/CalendarEvent distinction in D-005.
+
+6. **User corrections and reclassification.** A user directly typing or selecting a field's new value is itself an explicit act and satisfies confirmation for that specific field. It does not, however, retroactively confirm other consequential fields on the same object — e.g., reclassifying an Idea to Action still requires the discrete Action-confirmation interaction from rule 4; touching the record for an unrelated reason grants no free pass.
+
+7. **Explicit confirmation vs. inferred intent.** Every consequential transition must be traceable in the object's history to one specific, timestamped user gesture and the specific transition it authorized (e.g., "Confirmed as Action" is a valid history entry; "status changed" from a generic multi-field save is not sufficient evidence of confirmation for a consequential transition).
+
+**Reversibility.** Confirmation does not lock the object. Reversing a confirmed Action or Commitment back toward ProposedAction/Review must remain possible, must preserve the CaptureRecord and full Interpretation/history (D-001), and must not delete or silently overwrite other confirmed, unrelated meaning. Already-delivered notifications or other external effects of a confirmed Action are not retroactively undone by a later reversal.
+
+**Verdict on the archived candidate.** The archived Review "Confirm interpretation" button is an acceptable instance of the rule-4 confirmation gesture for that entry point, but it is not sufficient as the sole gate: the same archived app also let the generic object-editor Status dropdown set status to "confirmed" outside Review. TASK-003 must ensure only a dedicated confirmation gesture can grant Action/Commitment eligibility from any surface, not only from Review.
+
+## Open Decisions
 
 ### OD-002: Canvas Revision Granularity
 How granular should canvas history and retained revisions be?
