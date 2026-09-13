@@ -38,35 +38,31 @@ It is an input method for thinking.
 
 Everything eventually feeds into the same underlying semantic system.
 
-## Object Model
+## Preserving Expression and Meaning
 
-The system should support objects such as:
+Voice, text, and canvas input create or reference an immutable CaptureRecord: a record of what the user originally expressed. Later corrections and edits preserve the earlier expression rather than overwriting it.
+
+The semantic flow is:
+
+Capture → Interpretation(s) → Semantic Objects → Relationships → Views / Plans
+
+One capture can support multiple interpretations and multiple objects. Semantic objects reference their captures; they do not each own a duplicate of the original content.
+
+The system should support extensible semantic objects such as:
 
 - Idea
 - Action
 - Project
-- Reminder
 - Commitment
 - Person
 - Reference
 - Objective
 
-Objects must be extensible.
+An Action represents executable work. Work merely suspected by AI stays a proposed interpretation (a ProposedAction) until the user confirms it. Confidence alone must not silently turn a suggestion into an Action.
 
-Type classification should not destroy the original captured thought.
+A Commitment represents an obligation or promise. A CalendarEvent represents something scheduled at a time. A commitment may have a calendar event, but a promise can exist without a scheduled event, and an event does not itself establish an obligation.
 
-Every object should retain:
-
-- original content
-- source type: voice, text, or canvas
-- creation timestamp
-- context or location
-- AI interpretation
-- confidence
-- relationships
-- history
-- status
-- metadata
+Reminders are scheduling/notification instructions attached to an Action, Commitment, Project, Idea, or other object. Asking to be reminded about an idea does not turn it into a task or commitment.
 
 ## AI Interpretation
 
@@ -74,9 +70,10 @@ When something is captured:
 
 1. Attempt to understand it.
 2. Determine whether enough information exists to classify and store it.
-3. If confidence is high, automatically classify it.
+3. If confidence is high, automatically organize non-consequential meaning where appropriate; inferred work remains proposed until confirmed.
 4. If confidence is low or a consequential decision is required, put it into Review.
-5. Never silently create a hard commitment from ambiguous input.
+5. Never silently create an Action from AI-suspected work or a hard commitment from ambiguous input.
+6. Preserve provenance and allow interpretations to be rejected, changed, or reversed without changing the original capture.
 
 Examples:
 
@@ -109,76 +106,41 @@ The user should be able to say:
 - "That's an idea, not an action"
 - "Remind me Tuesday"
 
-## Calendars
+## Calendars and Planning
 
-There are two calendars.
+### Calendar
 
-### Commitment Calendar
+The calendar shows scheduled events such as appointments, meetings, and calls. Events may link to semantic commitments. Unscheduled promises remain visible as commitments without inventing a calendar time.
 
-This represents external or hard time commitments.
+A deadline is a constraint, not automatically a calendar event. It may be displayed alongside events as a distinct due-date marker.
 
-Examples:
+Fixed calendar events should only move through an explicit cancellation or rescheduling decision, not because a flexible work plan is recalculated.
 
-- appointments
-- meetings
-- scheduled calls
-- deadlines
-- events
+### Adaptive Plan
 
-This calendar should remain relatively fixed.
+The Adaptive Plan continuously recalculates how available time and attention can be allocated to confirmed executable work. Its work allocations are flexible and distinct from fixed calendar events.
 
-It should only change when the underlying commitment changes:
+It considers urgency, deadlines, effort, attention load, available time, dependencies, strategic importance, and resource constraints, with optional ROI later.
 
-- cancellation
-- reschedule
-- no-show
-- new appointment
-
-### Execution Plan
-
-This is a living plan.
-
-It determines when the user should work on projects and actions based on:
-
-- urgency
-- deadline
-- effort
-- attention load
-- available time
-- dependencies
-- strategic importance
-- resource constraints
-- eventually ROI
-
-The execution plan is expected to move.
-
-Do not treat the execution plan as a conventional static task list.
+The plan should explain recommendations and adapt when capacity, estimates, constraints, or priorities change. It is a living allocation of work, not a conventional static task list.
 
 ## Prioritization Model
 
-Do not create one simplistic priority field and hide everything inside it.
+Do not hide everything inside one simplistic priority field.
 
-Maintain independent dimensions:
+Keep these estimates and value judgments separate:
 
-- urgency
-- deadline
-- effort
-- attention_load
-- strategic_importance
-- dependencies
-- resource_cost
-- roi
-- status
+- effort: how much time or work is required
+- attention load: how cognitively demanding or disruptive the work is
+- strategic importance: contribution to meaningful objectives
+- resource cost: required money, people, or other resources
+- optional ROI: expected return relative to investment
 
-Priority can then be calculated from these dimensions.
+Urgency describes how soon something matters and may be derived partly from its deadline and remaining work. A deadline is a constraint/input, not another interchangeable priority score.
 
-Important distinctions:
+Dependencies are graph constraints that determine what can proceed and in what order. They are not scalar scoring dimensions. Available time, attention capacity, and other resource limits also constrain feasible plans; status determines whether work is eligible.
 
-- Effort is how much time or work the thing requires.
-- Attention load is how cognitively demanding or disruptive the thing is.
-- Urgency is how soon it matters.
-
-These are not the same variable.
+Prioritization should compare feasible work using these distinct inputs without conflating effort, attention, urgency, or value.
 
 ## Resource Model
 
@@ -237,7 +199,7 @@ Projects can contain:
 
 - actions
 - ideas
-- reminders
+- commitments
 - people
 - references
 - dependencies
@@ -254,6 +216,8 @@ Projects should have:
 - resource requirements
 - strategic importance
 - optional ROI
+
+Reminders may attach to the project or its objects without becoming project content types.
 
 Projects are living systems.
 
@@ -286,8 +250,8 @@ The system should have a 7 AM morning digest.
 
 It should include:
 
-1. Fixed commitments today
-2. Important upcoming commitments
+1. Fixed calendar events today and their linked commitments
+2. Important upcoming commitments and deadlines, including unscheduled obligations
 3. Recommended execution for today
 4. Items that require user decisions
 5. Major project or objective status when relevant
@@ -331,29 +295,15 @@ and infer semantic relationships.
 
 Never destroy or overwrite the original canvas structure when generating semantic interpretations.
 
-## Technical Principles
+## Sources of Truth and Reversibility
 
-Build this as a real product architecture, not a demo.
+Immutable captures and preserved canvas revisions are the source of truth for what the user actually expressed. The semantic graph is the source of truth for the system's current interpretation.
 
-Separate:
+Interpretations must remain reversible. Changing meaning must not rewrite the original expression or erase the user's canvas structure.
 
-- capture
-- semantic object model
-- AI interpretation
-- review
-- scheduling
-- calendar commitments
-- execution planning
-- canvas
-- persistence
+Calendar, project, review, idea, and planning views share the semantic graph. The canvas also preserves its own visual expression: a text block or shape can exist without becoming an Idea, Action, or Project, and may optionally link to semantic meaning.
 
-The semantic model should be the central source of truth.
-
-The UI is a projection of the underlying objects.
-
-A calendar view, project view, review view, idea view, and canvas should all operate on the same underlying objects.
-
-Do not create isolated databases for each interface.
+Entity boundaries, provenance, and flows are described in [ARCHITECTURE.md](ARCHITECTURE.md). These describe the intended architecture; the current MVP has not yet implemented all of these boundaries.
 
 ## MVP
 
@@ -362,12 +312,12 @@ The first vertical slice should not attempt the entire vision.
 Build:
 
 1. Capture screen with text input, voice placeholder/interface, and optional context.
-2. AI interpretation pipeline that classifies into Idea, Action, Reminder, or Project with confidence and suggested metadata.
+2. AI interpretation pipeline that proposes Ideas, Actions, Projects, and other meaning with confidence and provenance; suspected work requires confirmation before becoming an Action.
 3. Review screen for uncertain items, with confirm/edit classification.
-4. Basic persistent object model.
-5. Basic commitment calendar.
+4. Persistent captures with reversible interpretations and semantic objects that reference them.
+5. Basic calendar that distinguishes scheduled events from semantic commitments and deadlines.
 6. Basic infinite canvas with text nodes, arrows, containers, free positioning, and persistence.
-7. Today screen with today's commitments and manually confirmed actions.
+7. Today screen with today's events, relevant commitments and deadlines, and manually confirmed actions.
 
 Do not implement sophisticated ROI optimization or autonomous scheduling yet.
 
