@@ -25,13 +25,24 @@ const seed: AppState = {
 }
 
 export function loadState(): AppState {
-  try {
-    const saved = JSON.parse(localStorage.getItem(KEY) ?? '')
-    return isAppState(saved) ? saved : seed
-  } catch { return seed }
+  return loadStateResult().state
 }
-export function saveState(state: AppState) {
-  if (isAppState(state)) localStorage.setItem(KEY, JSON.stringify(state))
+export function loadStateResult(): { state: AppState; error?: string } {
+  try {
+    const raw = localStorage.getItem(KEY)
+    if (raw === null) return { state: seed }
+    const saved = JSON.parse(raw)
+    return isAppState(saved) ? { state: saved } : { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' }
+  } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
+}
+export function saveState(state: AppState): string | undefined {
+  if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state))
+    return undefined
+  } catch {
+    return 'Changes are only in this open tab. Saving failed; keep this tab open and retry or download a backup.'
+  }
 }
 export function isAppState(value: unknown): value is AppState {
   if (!value || typeof value !== 'object') return false

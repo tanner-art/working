@@ -3,7 +3,7 @@ import type { AppState, CanvasElement, ObjectKind, ThoughtObject } from './domai
 import { objectLabels } from './domain'
 import { interpret } from './interpreter'
 import { canvasObjectDraft, confirmObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
-import { loadState, makeObject, newCanvasElement, saveState } from './store'
+import { loadStateResult, makeObject, newCanvasElement, saveState } from './store'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'canvas'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -11,13 +11,21 @@ const nav: { id: View; label: string; icon: string }[] = [
 ]
 
 export function App() {
-  const [state, setState] = useState<AppState>(loadState)
+  const [initial] = useState(loadStateResult)
+  const [state, setState] = useState<AppState>(initial.state)
+  const [saveError, setSaveError] = useState<string | undefined>()
   const [view, setView] = useState<View>('today')
   const [draft, setDraft] = useState('')
   const [context, setContext] = useState('')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   const update = (fn: (current: AppState) => AppState) => setState(current => fn(current))
-  useEffect(() => saveState(state), [state])
+  useEffect(() => { if (!initial.error) setSaveError(saveState(state)) }, [state, initial.error])
+  const downloadBackup = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url; link.download = 'threadline-backup.json'; link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
   const reviewCount = state.objects.filter(item => item.status === 'review').length
   const capture = () => {
     const content = draft.trim()
@@ -39,9 +47,11 @@ export function App() {
     setSelectedObjectId(item.id)
   }
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
+  if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   return <main className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">D</span><span>Personal space</span></div></aside>
     <section className="content">
+      {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       {view === 'today' && <Today objects={state.objects} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onOpen={setSelectedObjectId} />}
