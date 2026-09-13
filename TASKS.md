@@ -611,5 +611,5 @@ Finding:
 docs/QA_CHECKLIST.md did not exist on `main` (only on the archived `wip/pre-orchestration` branch). Ported it here with the North Star Fit, Product Behavior, and Data Safety sections byte-for-byte unchanged from the archived version, and rewrote only the Git Policy section to reference AGENTS.md (work only on assigned branch/worktree, commit completed work, never merge into main, report the commit SHA, verify acceptance criteria/tests/typecheck/lint/build before completion) in place of the obsolete overnight-checkpoint instructions. Linked the file from README.md, completing the cross-reference TASK-012 deferred.
 
 Result:
-Commit: pending
+Commit: 2c42fa1
 Review: pending
