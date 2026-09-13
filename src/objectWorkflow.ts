@@ -1,4 +1,4 @@
-import type { ObjectKind, ObjectStatus, ThoughtObject } from './domain'
+import type { CanvasElement, ObjectKind, ObjectStatus, ThoughtObject } from './domain'
 
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
@@ -30,6 +30,22 @@ export function updateObject(original: ThoughtObject, draft: ThoughtObject): Tho
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
   return withHistory({ ...object, status }, `Marked ${status}`)
+}
+
+export function canvasObjectDraft(element: CanvasElement) {
+  const originalContent = element.text?.trim()
+  if (!originalContent || element.type === 'arrow') return null
+  return {
+    kind: 'idea' as ObjectKind,
+    originalContent,
+    source: 'canvas' as const,
+    confidence: .72,
+    interpretation: {
+      summary: originalContent.length > 84 ? `${originalContent.slice(0, 81)}...` : originalContent,
+      suggestedKind: 'idea' as ObjectKind,
+      rationale: 'Captured from canvas; review before turning spatial thought into structure.'
+    }
+  }
 }
 
 function focusScore(object: ThoughtObject) {

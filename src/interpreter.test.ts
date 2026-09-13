@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ObjectKind, ThoughtObject } from './domain'
 import { interpret } from './interpreter'
-import { activeObjects, confirmedActions, fixedCommitments, confirmObject, updateObject } from './objectWorkflow'
+import { activeObjects, canvasObjectDraft, confirmedActions, fixedCommitments, confirmObject, updateObject } from './objectWorkflow'
 import { isAppState } from './store'
 
 describe('interpret', () => {
@@ -61,6 +61,17 @@ describe('object workflow', () => {
     expect(confirmed.kind).toBe('project')
     expect(edited.history).toHaveLength(3)
     expect(edited.history.at(-1)?.event).toContain('context')
+  })
+
+  it('creates a reviewable semantic draft from canvas text without changing the canvas', () => {
+    const draft = canvasObjectDraft({ id: 'node', type: 'text', x: 10, y: 20, text: 'AI sales training' })
+    expect(draft).toMatchObject({ kind: 'idea', originalContent: 'AI sales training', source: 'canvas', confidence: .72 })
+    expect(draft?.interpretation.rationale).toContain('Captured from canvas')
+  })
+
+  it('does not create semantic drafts from empty nodes or arrows', () => {
+    expect(canvasObjectDraft({ id: 'empty', type: 'text', x: 0, y: 0, text: ' ' })).toBeNull()
+    expect(canvasObjectDraft({ id: 'arrow', type: 'arrow', x: 0, y: 0, fromId: 'a', toId: 'b' })).toBeNull()
   })
 })
 
