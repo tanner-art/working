@@ -569,3 +569,41 @@ Acceptance Criteria:
 Result:
 Commit: 22580a0
 Review: pending
+
+---
+
+### TASK-012 - Consolidate Implementation Status Documentation
+
+Status: DONE
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P3
+Milestone: M0
+
+Depends On:
+- None
+
+Goal:
+Merge `wip/pre-orchestration` docs/IMPLEMENTATION_STATUS.md content and the related README.md updates with docs/ARCHIVE_SALVAGE_AUDIT.md into a single canonical status doc that references TASKS.md IDs.
+
+Scope:
+- docs/IMPLEMENTATION_STATUS.md: create/update as the canonical, ongoing status doc
+- README.md: update links accordingly
+
+Do Not:
+- modify application code
+- restate docs/ARCHIVE_SALVAGE_AUDIT.md's historical findings verbatim; summarize and cross-reference it instead
+
+Deliverable:
+docs/IMPLEMENTATION_STATUS.md reconciled with docs/ARCHIVE_SALVAGE_AUDIT.md, referencing TASK IDs.
+
+Acceptance Criteria:
+- no contradicting status claims between IMPLEMENTATION_STATUS.md and the audit
+- every gap listed maps to a TASKS.md entry or is explicitly noted as unscoped
+
+Note:
+docs/QA_CHECKLIST.md was not linked from README.md here because it does not yet exist on this branch (only on the archived wip/pre-orchestration branch) — that link is added in TASK-014, which ports the file.
+
+Result:
+Commit: pending
+Review: pending
