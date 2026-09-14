@@ -26,9 +26,9 @@ Only READY tasks may be newly assigned.
 
 ### TASK-023 - Sticky Canvas Group Membership
 
-Status: REVIEW
+Status: MERGE_READY
 Owner: Codex B
-Reviewer: Unassigned
+Reviewer: Independent Codex review (approved)
 Priority: P1
 Milestone: M4
 
@@ -38,7 +38,32 @@ Scope: explicit attach/detach controls; bulk attach of blocks fully inside a gro
 
 Acceptance: legacy canvases remain valid; invalid or nested membership fails closed; group motion preserves relative member positions; resizing retains explicit membership; converting or deleting a group safely detaches its members; pnpm check and git diff --check pass.
 
-Result: implementation complete; commit pending. Validation: 182 tests, TypeScript, production build, and git diff check pass.
+Result: implementation commit dee16c3. Independent review approved. TASK-022 integration preserves both connection styling and sticky groups; pnpm check passed with 187 tests, TypeScript, and production build, and git diff --check passed. Merge commit pending.
+
+---
+
+### TASK-022 - Rich Canvas Connection Styling
+
+Status: REVIEW
+Owner: Codex canvas-edges
+Reviewer: Unassigned
+Milestone: M4
+Issue: https://github.com/tanner-art/working/issues/26
+
+Scope: selectable canvas connections with straight or curved paths, solid/dashed/dotted
+patterns, and light/regular/bold weights. Styling remains visual canvas expression,
+persists with AppState, validates fail-loud, preserves legacy connections, and participates
+in session undo/redo. No semantic relationship inference or endpoint manipulation.
+
+Acceptance: accessible pointer/keyboard selection and controls; geometry, validation,
+migration, persistence, and undo tests; pnpm check and git diff --check.
+
+Validation (2026-09-14): pnpm check passed (181 tests across 11 files, TypeScript,
+production build); git diff --check passed. Legacy connections retain implicit straight,
+solid, regular defaults. Invalid and misplaced style fields fail validation without write.
+
+Limitation: arcs use a computed cubic curve between existing automatic ports; this slice
+does not add draggable path control points or endpoint ports.
 
 ---
 
