@@ -22,6 +22,42 @@ Only READY tasks may be newly assigned.
 
 ---
 
+## IN_PROGRESS
+
+### TASK-021 - Canvas Block Resizing and Shape Changes
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Independent Codex review (approved)
+Milestone: M4
+Issue: https://github.com/tanner-art/working/issues/20
+
+Lifecycle: explicitly assigned by user, READY -> IN_PROGRESS on 2026-09-14.
+Dependencies: current canvas and TASK-010 session history are present in this worktree.
+Scope: pointer and keyboard resizing; conversion between supported text/group forms;
+bounded dimensions; stable content, IDs, connectors and semantic evidence; session undo/redo
+and current-state persistence; desktop/mobile verification. No unrelated drawing tools.
+Acceptance: meaningful geometry/history/persistence tests, pnpm check, git diff --check,
+desktop/mobile browser checks and independent review.
+Delivery: implementation prepared, uncommitted per explicit user instruction; do not merge.
+Validation (2026-09-14): pnpm check passed (142 tests across 9 files, TypeScript and
+production build); git diff --check passed. No lint script is configured. Dependencies
+were installed offline from a copy of the local cache without changing the lockfile.
+Author browser attempts were blocked, then orchestrator browser validation confirmed the
+selected-block shape and numeric size controls plus labeled resize handles. Independent
+review approved the implementation with no actionable findings.
+
+Limitations: conversion covers the existing text block and group container only;
+current state persists, undo history remains session-only per D-010. Legacy implicit
+sizes use explicit rendering defaults. Group conversion does not create containment
+relationships. Existing Capture node stores text evidence without a durable canvas
+revision/semantic-node link; this task preserves existing evidence and IDs, and does
+not introduce that missing provenance feature.
+Follow-ups (not implemented): durable canvas revisions/linking remain the separate
+follow-up required by D-010.
+
+---
+
 ## READY
 
 
