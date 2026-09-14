@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppState, ThoughtObject } from './domain'
+import * as migrationApi from './migration'
+import * as workflowApi from './objectWorkflow'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
+import { confirmObject, confirmedActions, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState } from './store'
 import { interpret } from './interpreter'
 
@@ -240,5 +242,236 @@ describe('TASK-002 migration', () => {
       mutate(changed)
       expect(isPersistedState(changed)).toBe(false)
     }
+  })
+})
+
+
+describe('TASK-003 dedicated confirmation', () => {
+  const proposed = (kind: 'action' | 'commitment' = 'action') => legacyUiProjection(migrateLegacyState(legacy([thought({ kind })])))
+  const persist = (state: AppState) => legacyUiProjection(JSON.parse(JSON.stringify(reconcileLegacyUi(state))))
+
+  it.each(['action', 'commitment'] as const)('records one exact timestamped %s gesture with interpretation provenance', kind => {
+    const view = proposed(kind)
+    const original = structuredClone(view.model!)
+    view.objects[0] = confirmObject(view.objects[0])
+    const confirmed = persist(view)
+    const reading = confirmed.model!.interpretations.at(-1)!
+    expect(reading.confirmation).toEqual({ at: view.objects[0].history.at(-1)!.at, transition: kind,
+      objectId: 'original', interpretationId: reading.id, historyIndex: 1, source: 'review-confirmation' })
+    expect(Number.isFinite(Date.parse(reading.confirmation!.at))).toBe(true)
+    expect(reading.legacy.history[1].confirmation).toEqual({ objectId: 'original', transition: kind, summary: 'Reading', source: 'review-confirmation' })
+    expect(confirmObject(confirmed.objects[0])).toEqual(confirmed.objects[0])
+    expect(confirmed.model!.captures).toEqual(original.captures)
+    expect(confirmed.model!.interpretations[0]).toEqual(original.interpretations[0])
+    expect(confirmed.model!.calendarEvents).toEqual([])
+    expect(confirmedActions(confirmed.objects)).toHaveLength(kind === 'action' ? 1 : 0)
+  })
+
+  it.each(['action', 'commitment'] as const)('generic %s saves cannot import confirmation, history, changed meaning or source', kind => {
+    const view = proposed(kind)
+    const original = view.objects[0]
+    const draft = { ...confirmObject(original), id: 'other', source: 'text' as const, createdAt: 'changed',
+      originalContent: 'changed', confidence: 1, interpretation: { ...original.interpretation, summary: 'Another obligation' },
+      context: 'New context', metadata: { urgency: 5 as const, deadline: '2026-10-01' } }
+    const updated = updateObject(original, draft)
+    expect(updated).toMatchObject({ id: original.id, source: original.source, createdAt: original.createdAt,
+      originalContent: original.originalContent, interpretation: original.interpretation, confidence: original.confidence, status: 'review' })
+    expect(updated.history.some(h => h.confirmation)).toBe(false)
+    view.objects[0] = updated
+    const result = persist(view)
+    expect(result.model!.interpretations.at(-1)?.confirmation).toBeUndefined()
+    expect(result.model!.semanticObjects).toEqual([])
+    expect(confirmedActions(result.objects)).toEqual([])
+  })
+
+  it('raw statuses and unrelated saves cannot accept uncertain Ideas', () => {
+    for (const status of ['confirmed', 'complete', 'archived'] as const) {
+      const view = legacyUiProjection(migrateLegacyState(legacy()))
+      view.objects[0] = { ...view.objects[0], status, context: 'Edited context' }
+      const result = persist(view)
+      expect(result.objects[0].status).toBe('review')
+      expect(result.model!.interpretations.at(-1)?.reviewState).toBe('review')
+    }
+  })
+
+  it.each(['action', 'commitment'] as const)('never confirms schema-v1 %s from confirmation-looking history text', kind => {
+    const item = thought({ kind, status: 'confirmed', history: [
+      { at: '2026-09-13T10:00:00Z', event: 'Captured' },
+      { at: '2026-09-13T10:01:00Z', event: `Confirmed as ${kind}` }
+    ] })
+    storage(JSON.stringify(legacy([item])))
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.state.model!.interpretations[0].confirmation).toBeUndefined()
+    expect(loaded.state.model!.semanticObjects).toEqual([])
+    expect(loaded.state.objects[0].history).toEqual(item.history)
+    expect(loaded.state.objects[0].status).toBe('review')
+    expect(confirmedActions(loaded.state.objects)).toEqual([])
+    expect(saveState(loaded.state)).toBeUndefined()
+    expect(confirmedActions(loadStateResult().state.objects)).toEqual([])
+    loaded.state.objects[0] = confirmObject(loaded.state.objects[0])
+    expect(persist(loaded.state).model!.interpretations.at(-1)?.confirmation?.objectId).toBe(item.id)
+  })
+
+  it('rejects direct Action eligibility from only an unstructured confirmation string', () => {
+    const item = thought({ kind: 'action', status: 'confirmed', history: [
+      { at: '2026-09-13T10:01:00Z', event: 'Confirmed as action' }
+    ] })
+    expect(confirmedActions([item])).toEqual([])
+    expect(confirmedActions([confirmObject(item)])).toHaveLength(1)
+  })
+
+  it('does not trust a history string in new saves or grant eligibility from status alone', () => {
+    const view = proposed()
+    const original = view.objects[0]
+    expect(confirmedActions([{ ...original, status: 'confirmed' }])).toEqual([])
+    view.objects[0] = { ...original, status: 'confirmed', history: [...original.history, { at: new Date().toISOString(), event: 'Confirmed as action' }] }
+    expect(() => reconcileLegacyUi(view)).toThrow()
+  })
+
+  it.each(['objectId', 'transition', 'summary', 'source', 'at'] as const)('rejects mismatched confirmation evidence: %s', field => {
+    const view = proposed()
+    const confirmed = confirmObject(view.objects[0])
+    const event = confirmed.history.at(-1)!
+    if (field === 'at') event.at = 'not a timestamp'
+    else Object.assign(event.confirmation!, { [field]: 'other' })
+    view.objects[0] = confirmed
+    const result = persist(view)
+    expect(result.model!.interpretations.at(-1)?.confirmation).toBeUndefined()
+    expect(confirmedActions(result.objects)).toEqual([])
+  })
+
+  it('requires a separate gesture after Idea → Action and after Action → Idea → Action', () => {
+    let view = legacyUiProjection(migrateLegacyState(legacy([thought({ status: 'confirmed', confidence: .99 })])))
+    view.objects[0] = confirmObject(view.objects[0], 'action')
+    expect(view.objects[0].status).toBe('review')
+    view = persist(view)
+    expect(view.model!.interpretations.at(-1)?.proposedAction).toEqual({ summary: 'Reading' })
+    expect(confirmedActions(view.objects)).toEqual([])
+    view.objects[0] = confirmObject(view.objects[0])
+    view = persist(view)
+    expect(confirmedActions(view.objects)).toHaveLength(1)
+    const firstConfirmation = view.model!.interpretations.at(-1)!
+    view.objects[0] = setObjectKind(view.objects[0], 'idea')
+    view = persist(view)
+    view.objects[0] = setObjectKind(view.objects[0], 'action')
+    view.objects[0] = updateObject(view.objects[0], { ...view.objects[0], status: 'confirmed' })
+    view = persist(view)
+    expect(confirmedActions(view.objects)).toEqual([])
+    expect(view.model!.interpretations).toContainEqual(firstConfirmation)
+    view.objects[0] = confirmObject(view.objects[0])
+    expect(confirmedActions(persist(view).objects)).toHaveLength(1)
+  })
+
+  it.each(['rejected', 'reversed'] as const)('preserves withdrawn, superseded and unrelated confirmed meaning on %s', decision => {
+    let view = legacyUiProjection(migrateLegacyState(legacy([thought({ kind: 'action' }), thought({ id: 'unrelated', kind: 'action' })])))
+    view.objects = view.objects.map(o => confirmObject(o))
+    view = persist(view)
+    const before = structuredClone(view.model!)
+    // An event already linked to the confirmed meaning must survive withdrawal unchanged.
+    view.model!.calendarEvents.push({ id: 'event', title: 'Previously scheduled', startsAt: '2026-10-01T10:00:00Z',
+      temporalContext: 'UTC', objectIds: ['original'], captureIds: ['capture:original'], status: 'scheduled' })
+    const event = structuredClone(view.model!.calendarEvents[0])
+    view.objects[0] = reverseObject(view.objects[0], decision)
+    view = persist(view)
+    expect(confirmedActions(view.objects).map(o => o.id)).toEqual(['unrelated'])
+    expect(view.model!.captures).toEqual(before.captures)
+    expect(view.model!.interpretations.slice(0, before.interpretations.length)).toEqual(before.interpretations)
+    expect(view.model!.semanticObjects.find(o => o.id === 'unrelated')).toEqual(before.semanticObjects.find(o => o.id === 'unrelated'))
+    expect(view.model!.calendarEvents).toEqual([event])
+    expect(view.model!.interpretations.at(-1)?.reviewState).toBe(decision === 'rejected' ? 'rejected' : 'review')
+    view.objects[0] = updateObject(view.objects[0], { ...view.objects[0], status: 'confirmed', metadata: { urgency: 5 } })
+    view = persist(view)
+    expect(confirmedActions(view.objects).map(o => o.id)).toEqual(['unrelated'])
+    view.objects[0] = confirmObject(view.objects[0])
+    expect(confirmedActions(persist(view).objects)).toHaveLength(2)
+  })
+
+  it('retains multiple real gestures during failed-save retry and uses the latest exact authorization', () => {
+    let view = proposed()
+    view.objects[0] = confirmObject(view.objects[0])
+    view.objects[0] = reverseObject(view.objects[0])
+    view.objects[0] = confirmObject(view.objects[0])
+    view = persist(view)
+    expect(confirmedActions(view.objects)).toHaveLength(1)
+    expect(view.model!.interpretations.at(-1)?.confirmation?.historyIndex).toBe(3)
+    expect(view.objects[0].history.map(h => h.reviewDecision)).toContain('reversed')
+  })
+
+  it('records a capture reviewed before its first successful save as proposal then confirmed meaning', () => {
+    storage(null)
+    const view = loadStateResult().state
+    const result = interpret('Send the draft')
+    const captured = makeObject({ ...result, originalContent: 'Send the draft', source: 'text' })
+    view.objects.push(confirmObject(captured))
+    expect(saveState(view)).toBeUndefined()
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(confirmedActions(loaded.state.objects).map(o => o.id)).toEqual([captured.id])
+    const readings = loaded.state.model!.interpretations.filter(i => i.legacy.id === captured.id)
+    expect(readings).toHaveLength(2)
+    expect(readings[0].proposedAction).toBeDefined()
+    expect(readings[1].confirmation?.objectId).toBe(captured.id)
+  })
+
+  it('exposes no compatibility registrar through the public modules', () => {
+    expect(workflowApi).not.toHaveProperty('registerPersistedConfirmation')
+    expect(migrationApi).not.toHaveProperty('registerPersistedConfirmation')
+    expect(migrationApi).not.toHaveProperty('registerCompatibility')
+  })
+
+  it('reads existing schema-v2 dedicated confirmation without inventing new provenance', () => {
+    const view = proposed()
+    view.objects[0] = confirmObject(view.objects[0])
+    const model = reconcileLegacyUi(view)
+    const reading = model.interpretations.at(-1)!
+    delete reading.legacy.history.at(-1)!.confirmation
+    Object.assign(reading, { confirmation: { at: reading.confirmation!.at, transition: 'action' } })
+    const plain = thought({ ...reading.legacy, status: 'confirmed' })
+    expect(isPersistedState(model)).toBe(true)
+    // Validation must not attach authority to caller-owned history, even on success.
+    expect(workflowApi.hasConfirmation(plain)).toBe(false)
+    const projected = legacyUiProjection(model)
+    expect(workflowApi.hasConfirmation(plain)).toBe(false)
+    expect(confirmedActions(projected.objects)).toHaveLength(1)
+    // A detached text-only copy has no validated schema-v2 provenance.
+    expect(confirmedActions(structuredClone(projected.objects))).toEqual([])
+    const invalid = structuredClone(model)
+    Object.assign(invalid.interpretations.at(-1)!, { confirmation: undefined })
+    expect(isPersistedState(invalid)).toBe(false)
+    expect(() => legacyUiProjection(invalid)).toThrow()
+    expect(workflowApi.hasConfirmation(thought({ ...invalid.interpretations.at(-1)!.legacy, status: 'confirmed' }))).toBe(false)
+    projected.objects[0] = updateObject(projected.objects[0], { ...projected.objects[0], context: 'Updated' })
+    expect(persist(projected).model!.interpretations.at(-1)?.confirmation).toEqual(reading.confirmation)
+  })
+
+  it.each(['complete', 'archived'] as const)('generic reopening from %s returns to Review for another dedicated gesture', status => {
+    let view = proposed()
+    view.objects[0] = confirmObject(view.objects[0])
+    view = persist(view)
+    view.objects[0] = setObjectStatus(view.objects[0], status)
+    view = persist(view)
+    view.objects[0] = updateObject(view.objects[0], { ...view.objects[0], status: 'confirmed' })
+    view = persist(view)
+    expect(view.objects[0].status).toBe('review')
+    expect(confirmedActions(view.objects)).toEqual([])
+    view.objects[0] = confirmObject(view.objects[0])
+    expect(confirmedActions(persist(view).objects)).toHaveLength(1)
+  })
+
+  it('save/reload retains eligibility and reversal across sequential saves from the same UI baseline', () => {
+    storage(JSON.stringify(legacy([thought({ kind: 'action' })])))
+    const view = loadStateResult().state
+    view.objects[0] = confirmObject(view.objects[0])
+    expect(saveState(view)).toBeUndefined()
+    expect(confirmedActions(loadStateResult().state.objects)).toHaveLength(1)
+    view.objects[0] = updateObject(view.objects[0], { ...view.objects[0], metadata: { urgency: 5 } })
+    expect(saveState(view)).toBeUndefined()
+    view.objects[0] = reverseObject(view.objects[0])
+    expect(saveState(view)).toBeUndefined()
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(confirmedActions(loaded.state.objects)).toEqual([])
+    expect(loaded.state.model!.interpretations).toHaveLength(4)
   })
 })

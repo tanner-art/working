@@ -1,5 +1,20 @@
-import type { AppState, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
+import type { AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { isAppState } from './store'
+
+// Compatibility authority stays inside migration. Validation uses detached copies;
+// only validated projections expose registered history entries to callers.
+const persistedConfirmations = new WeakMap<HistoryEvent, ConfirmationGesture>()
+
+export function hasConfirmation(object: ThoughtObject): boolean {
+  for (const entry of object.history.slice().reverse()) {
+    if (entry.reviewDecision || entry.event.startsWith('Changed type') || entry.event === 'Marked review' || entry.event === 'Marked inbox' || entry.event.includes('status to review') || entry.event.includes('status to inbox') || entry.event.startsWith('Edited type')) return false
+    const confirmation = entry.confirmation ?? persistedConfirmations.get(entry)
+    if (confirmation) return confirmation.objectId === object.id &&
+      confirmation.transition === object.kind && confirmation.summary === object.interpretation.summary &&
+      confirmation.source === 'review-confirmation' && Number.isFinite(Date.parse(entry.at))
+  }
+  return false
+}
 
 const copy = <T>(value: T): T => structuredClone(value)
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
@@ -15,34 +30,47 @@ function evidence(item: ThoughtObject): Interpretation['legacy'] {
   return copy(rest)
 }
 
-function append(model: PersistedState, item: ThoughtObject, previous?: Interpretation) {
+function append(model: PersistedState, item: ThoughtObject, previous?: Interpretation, persistedConfirmation?: Interpretation['confirmation']) {
   const capture = model.captures.find(c => c.id === `capture:${item.id}`)
   if (!capture) model.captures.push({ id: `capture:${item.id}`, source: item.source, createdAt: item.createdAt,
     originalContent: item.originalContent, context: item.context, evidence: 'text-only' })
   else if (capture.originalContent !== item.originalContent || capture.source !== item.source || capture.createdAt !== item.createdAt) fail()
   const version = (previous?.version ?? 0) + 1
   const consequential = item.kind === 'action' || item.kind === 'commitment'
-  // Only a newly recorded dedicated gesture can authorize a consequential transition.
-  const gesture = previous && item.history.slice(previous.legacy.history.length)
-    .find(h => h.event === `Confirmed as ${item.kind}` && h.at.length > 0)
-  const confirmation = consequential && ['confirmed', 'complete', 'archived'].includes(item.status)
-    ? gesture ? { at: gesture.at, transition: item.kind as 'action' | 'commitment' }
+  // Text alone never authorizes a gesture. Compatibility requires a structured
+  // confirmation from schema-v2 validation or an already validated save baseline.
+  const additions = previous ? item.history.slice(previous.legacy.history.length) : []
+  const gesture = additions.slice().reverse().find(h => h.event === `Confirmed as ${item.kind}` && Number.isFinite(Date.parse(h.at)) &&
+    (h.confirmation ? h.confirmation.objectId === item.id && h.confirmation.transition === item.kind &&
+      h.confirmation.summary === item.interpretation.summary && h.confirmation.source === 'review-confirmation' : persistedConfirmation?.transition === item.kind && persistedConfirmation.at === h.at))
+  const compatibleItem = copy(item)
+  if (persistedConfirmation) registerCompatibility(compatibleItem, persistedConfirmation)
+  const activeGesture = hasConfirmation(item) || hasConfirmation(compatibleItem)
+  const confirmation = consequential && activeGesture && ['confirmed', 'complete', 'archived'].includes(item.status)
+    ? gesture ? { at: gesture.at, transition: item.kind as 'action' | 'commitment',
+      ...(gesture.confirmation ? { objectId: item.id, interpretationId: `interpretation:${item.id}:${version}`,
+        historyIndex: item.history.indexOf(gesture), source: 'review-confirmation' as const } : {}) }
       : previous?.confirmation?.transition === item.kind ? previous.confirmation : undefined
     : undefined
-  const accepted = item.kind !== 'reminder' && (!consequential || !!confirmation) && !['review', 'inbox'].includes(item.status)
+  const decision = item.history.slice().reverse().find(h => h.reviewDecision || h.confirmation)
+  const rejected = decision?.reviewDecision === 'rejected'
+  const awaitingReview = previous && previous.reviewState !== 'accepted'
+  const accepted = !rejected && item.kind !== 'reminder' && (!consequential || !!confirmation) &&
+    (!awaitingReview || !!gesture) && !['review', 'inbox'].includes(item.status)
   const interpretation: Interpretation = {
     id: `interpretation:${item.id}:${version}`, version, previousId: previous?.id,
     captureIds: [`capture:${item.id}`], recordedAt: item.history.at(-1)?.at ?? item.createdAt,
     summary: item.interpretation.summary, rationale: item.interpretation.rationale, confidence: item.confidence,
     proposedKind: item.kind === 'reminder' ? 'unresolved' : item.kind,
     proposedAction: item.kind === 'action' && !confirmation ? { summary: item.interpretation.summary } : undefined,
-    reviewState: accepted ? 'accepted' : 'review', confirmation,
+    reviewState: rejected ? 'rejected' : accepted ? 'accepted' : 'review', confirmation,
     proposedReminder: item.kind === 'reminder' ? { id: `reminder:${item.id}`, captureIds: [`capture:${item.id}`],
       trigger: { kind: 'unresolved', wording: item.originalContent, legacyDate: item.interpretation.suggestedDate ?? item.metadata.deadline },
       deliveryState: 'needs-review' } : previous?.proposedReminder,
     legacy: evidence(item)
   }
   model.interpretations.push(interpretation)
+  const withdrawn = model.semanticObjects.find(o => o.id === item.id)
   model.semanticObjects = model.semanticObjects.filter(o => o.id !== item.id)
   // Unresolved reminders and unconfirmed consequential meaning remain interpretations.
   if (item.kind !== 'reminder' && (!consequential || confirmation)) {
@@ -54,6 +82,9 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
       summary: interpretation.summary, status: accepted ? item.status : 'review', metadata,
       reminders: interpretation.proposedReminder ? [copy(interpretation.proposedReminder)] : [] }
     model.semanticObjects.push(object)
+  }
+  if (withdrawn && !model.semanticObjects.some(o => o.id === item.id)) {
+    model.semanticObjects.push({ ...withdrawn, status: 'review' })
   }
   model.relationships = model.relationships.filter(r => r.sourceId !== item.id)
   item.relationships.forEach((r, index) => model.relationships.push({ ...copy(r), id: `relationship:${item.id}:${index}`,
@@ -72,14 +103,28 @@ export function migrateLegacyState(value: unknown): PersistedState {
 
 /** Existing screens receive a projection; canonical evidence travels through AppState spreads. */
 export function legacyUiProjection(model: PersistedState): AppState {
+  if (!isPersistedState(model)) return fail()
+  return projectModel(model)
+}
+
+function registerCompatibility(item: ThoughtObject, confirmation: NonNullable<Interpretation['confirmation']>) {
+  const entry = item.history.find(h => h.at === confirmation.at && h.event === `Confirmed as ${confirmation.transition}`)
+  if (entry && !entry.confirmation) persistedConfirmations.set(entry, {
+    objectId: item.id, transition: confirmation.transition, summary: item.interpretation.summary, source: 'review-confirmation'
+  })
+}
+
+function projectModel(model: PersistedState): AppState {
   const objects = model.legacyUiIds.map(id => {
     const reading = latest(model, id)
     const capture = model.captures.find(c => c.id === reading.captureIds[0]) ?? fail()
     const semantic = model.semanticObjects.find(o => o.id === id)
-    return { ...copy(reading.legacy), originalContent: capture.originalContent, source: capture.source,
+    const item: ThoughtObject = { ...copy(reading.legacy), originalContent: capture.originalContent, source: capture.source,
       createdAt: capture.createdAt, status: semantic?.status ??
         (reading.legacy.kind !== 'action' && reading.legacy.kind !== 'commitment' &&
           (reading.legacy.status === 'archived' || reading.legacy.status === 'complete') ? reading.legacy.status : 'review' as const) }
+    if (reading.confirmation) registerCompatibility(item, reading.confirmation)
+    return item
   })
   return { objects, canvas: copy(model.canvas), model: copy(model) }
 }
@@ -96,8 +141,17 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   for (const item of state.objects) {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
-    if (old && !equal(item.history.slice(0, old.history.length), old.history)) return fail()
-    append(model, item, old ? latest(model, item.id) : undefined)
+    if (old && (!equal(item.history.slice(0, old.history.length), old.history) ||
+      !equal(item.interpretation, old.interpretation) || item.confidence !== old.confidence)) return fail()
+    const additions = old ? item.history.slice(old.history.length) : item.history
+    if (additions.some(h => h.event.startsWith('Confirmed as ') && !h.confirmation)) return fail()
+    // A capture can be reviewed while its first save is pending/failed. Retain a
+    // proposed baseline before recording the dedicated gestures in that same save.
+    if (!old && additions.some(h => h.confirmation)) {
+      const firstGesture = item.history.findIndex(h => h.confirmation)
+      append(model, { ...item, status: 'review', history: item.history.slice(0, firstGesture) })
+      append(model, item, latest(model, item.id))
+    } else append(model, item, old ? latest(model, item.id) : undefined, old ? latest(model, item.id).confirmation : undefined)
   }
   model.legacyUiIds = state.objects.map(o => o.id)
   model.canvas = copy(state.canvas)
@@ -128,7 +182,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
       if (!isAppState({ objects: [item], canvas: [] })) return false
       const previous = rebuilt.interpretations.filter(i => i.legacy.id === item.id).at(-1)
       if (previous && !equal(item.history.slice(0, previous.legacy.history.length), previous.legacy.history)) return false
-      append(rebuilt, item, previous)
+      append(rebuilt, item, previous, reading.confirmation)
       if (!equal(rebuilt.interpretations.at(-1), reading)) return false
     }
     if (!equal(rebuilt.semanticObjects, m.semanticObjects) || !equal(rebuilt.relationships, m.relationships)) return false
@@ -140,6 +194,6 @@ export function isPersistedState(value: unknown): value is PersistedState {
       ['scheduled', 'cancelled'].includes(e.status) && Array.isArray(e.objectIds) &&
       e.objectIds.every(id => m.semanticObjects.some(o => o.id === id)) && Array.isArray(e.captureIds) &&
       e.captureIds.every(id => m.captures.some(c => c.id === id)))) return false
-    return isAppState(legacyUiProjection(m))
+    return isAppState(projectModel(m))
   } catch { return false }
 }

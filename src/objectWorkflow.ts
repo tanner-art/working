@@ -1,11 +1,14 @@
 import type { CanvasElement, ObjectKind, ObjectStatus, ThoughtObject } from './domain'
+import { hasConfirmation } from './migration'
+
+export { hasConfirmation } from './migration'
 
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
 export const confirmedActions = (objects: ThoughtObject[]) =>
   activeObjects(objects)
-    .filter(item => item.kind === 'action' && item.status === 'confirmed')
+    .filter(item => item.kind === 'action' && item.status === 'confirmed' && hasConfirmation(item))
     .sort((left, right) => focusScore(right) - focusScore(left))
 
 /** Legacy calendar surface cannot project CalendarEvents yet. An unscheduled promise is not fixed time. */
@@ -17,14 +20,22 @@ export const recentObjects = (objects: ThoughtObject[], limit = 6) =>
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, limit)
 
+/** The dedicated Review gesture authorizes only the displayed classification and summary. */
 export function confirmObject(object: ThoughtObject, kind: ObjectKind = object.kind): ThoughtObject {
-  return withHistory({ ...object, kind, status: 'confirmed' }, `Confirmed as ${kind}`)
+  if (kind !== object.kind) return setObjectKind(object, kind)
+  if (kind === 'reminder' || (object.status === 'confirmed' && hasConfirmation(object))) return object
+  return { ...object, status: 'confirmed', history: [...object.history, {
+    at: new Date().toISOString(), event: `Confirmed as ${kind}`,
+    confirmation: { objectId: object.id, transition: kind, summary: object.interpretation.summary, source: 'review-confirmation' }
+  }] }
 }
 
 export function updateObject(original: ThoughtObject, draft: ThoughtObject): ThoughtObject {
   const status = draft.kind !== original.kind ? 'review' : compatibleStatus(original, draft.status)
   const changes = describeChanges(original, { ...draft, status })
-  return withHistory({ ...draft, originalContent: original.originalContent, interpretation: original.interpretation, confidence: original.confidence, status }, changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
+  // A generic save accepts editable fields only. It cannot import a draft's gesture/history or source evidence.
+  return withHistory({ ...original, kind: draft.kind, context: draft.context, metadata: draft.metadata, status },
+    changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
 }
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
@@ -32,13 +43,23 @@ export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): Th
   return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` : `Kept in review; ${status} requires confirmation`)
 }
 
-/** Generic legacy edits cannot release unresolved meaning; confirmObject is the dedicated gesture. */
 function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
-  return object.status === 'review' || object.status === 'inbox' ? 'review' : status
+  return (['complete', 'archived'].includes(object.status) && status === 'confirmed') || object.status === 'review' || object.status === 'inbox' ||
+    ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object)) ? 'review' : status
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
-  return withHistory({ ...object, kind, status: 'review' }, `Changed type to ${kind}`)
+  return { ...object, kind, status: 'review', history: [...object.history, {
+    at: new Date().toISOString(), event: `Changed type to ${kind}`, reviewDecision: 'superseded'
+  }] }
+}
+
+/** Withdraw only this item's current interpretation. Never claim to undo external effects. */
+export function reverseObject(object: ThoughtObject, decision: 'rejected' | 'reversed' = 'reversed'): ThoughtObject {
+  return { ...object, status: 'review', history: [...object.history, {
+    at: new Date().toISOString(), event: decision === 'rejected' ? 'Rejected interpretation; retained for review' : 'Reversed confirmation; external effects unchanged',
+    reviewDecision: decision
+  }] }
 }
 
 export function canvasObjectDraft(element: CanvasElement) {

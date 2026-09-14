@@ -99,43 +99,6 @@ Review: pending
 
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
 
-### TASK-003 - Introduce ProposedAction and Explicit Confirmation
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P0
-Milestone: M1
-
-Depends On:
-- TASK-002
-- TASK-009 (OD-001 must be ratified first)
-
-Goal:
-Implement ProposedAction (D-003): AI-suspected work stays proposed until the confirmation rule from OD-001/TASK-009 is met. Port and adapt the `wip/pre-orchestration` src/objectWorkflow.ts helpers (confirmObject and related history/provenance preservation) onto the new entity model.
-
-Scope:
-- src/domain.ts: ProposedAction shape (per TASK-002's entity split)
-- src/objectWorkflow.ts: confirmation flow per the ratified OD-001 rule
-- preserve recorded interpretation/confidence on confirm and reclassify, per docs/ARCHIVE_SALVAGE_AUDIT.md item 5
-
-Do Not:
-- implement dependency graph or parent/child linking (separate tasks)
-
-Deliverable:
-Working confirm flow producing real Actions only per the ratified rule.
-
-Acceptance Criteria:
-- pnpm check passes
-- no AI-suspected work becomes an Action without the confirmed interaction
-- confirming/reclassifying does not overwrite the original recorded interpretation
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
 
 Status: BACKLOG
@@ -324,7 +287,51 @@ Review: pending
 
 None.
 
+
 ## REVIEW
+
+### TASK-003 - Introduce ProposedAction and Explicit Confirmation
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Unassigned
+Priority: P0
+Milestone: M1
+
+Depends On:
+- TASK-002
+- TASK-009 (OD-001 must be ratified first)
+
+Goal:
+Implement ProposedAction (D-003): AI-suspected work stays proposed until the confirmation rule from OD-001/TASK-009 is met. Port and adapt the `wip/pre-orchestration` src/objectWorkflow.ts helpers (confirmObject and related history/provenance preservation) onto the new entity model.
+
+Scope:
+- src/domain.ts: ProposedAction shape (per TASK-002's entity split)
+- src/objectWorkflow.ts: confirmation flow per the ratified OD-001 rule
+- preserve recorded interpretation/confidence on confirm and reclassify, per docs/ARCHIVE_SALVAGE_AUDIT.md item 5
+
+Do Not:
+- implement dependency graph or parent/child linking (separate tasks)
+
+Deliverable:
+Working confirm flow producing real Actions only per the ratified rule.
+
+Acceptance Criteria:
+- pnpm check passes
+- no AI-suspected work becomes an Action without the confirmed interaction
+- confirming/reclassifying does not overwrite the original recorded interpretation
+
+Result:
+Commit: Uncommitted per user instruction.
+Review: Pending independent review.
+Validation: `pnpm check` passed (74 tests, TypeScript check, production Vite build); no lint script configured. `git diff --check` passed. Diff inspected; browser smoke testing remains for independent review.
+Implementation: named ProposedAction; exact item/summary/type confirmation gestures with timestamp, history index and interpretation provenance; protected generic editor and eligibility selector; explicit rejection/reversal and preserved history. Free-form capture remains proposed. Existing schema-v2 confirmations remain readable without fabricating new provenance. Tests cover lifecycle/editor bypasses, malformed provenance, reclassification, preserved capture/rationale/confidence, rejection/reversal with unrelated meaning and linked events, and save/reload including delayed first save and retry.
+Limitations: compatibility adapter remains the schema-v2 writer; withdrawal retains previously accepted semantic identities in Review to preserve event references. No external effects are reversed. OD-003 downstream conflict/partial acceptance policy remains open. No direct-create-Action interaction, fixed deadline confirmation, scheduling, notification delivery, dependencies, containment, heuristics, or PWA work added.
+Follow-ups (not implemented, do not block this slice): independent browser/review validation; resolve OD-003 before downstream conflict automation. Canonical status/migration documents contain earlier implementation claims and need a separately assigned documentation refresh outside this allowlist.
+P1 review fix: removed plain-history confirmation eligibility; schema-v1 text stays unconfirmed. Older schema-v2 structured confirmations are validated before projection and carried as item-bound in-memory provenance. Regression coverage includes malicious legacy strings, direct selector bypass, invalid schema-v2 projection, and preserved explicit confirmation. Left uncommitted for orchestration review.
+Lifecycle: assigned IN_PROGRESS after integrated TASK-002 and TASK-009/D-009; moved to REVIEW with owner Codex B. No commit, push, merge, branch change, runner or credential edits.
+
+---
 
 ### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
 
