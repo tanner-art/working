@@ -1,0 +1,59 @@
+{
+  "repo": "/Users/domitian/Documents/Codex/working",
+  "github": "tanner-art/working",
+  "state": "/Users/domitian/Documents/Codex/threadline-runner-state",
+  "worktrees": "/Users/domitian/Documents/Codex/threadline-agent-worktrees",
+  "path": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+  "gh": "/Users/domitian/Documents/Codex/working-runner/scripts/runner/github.py",
+  "git": "/usr/bin/git",
+  "pnpm": "/opt/homebrew/bin/pnpm",
+  "allowed_authors": [
+    "tanner-art"
+  ],
+  "agent_timeout": 1800,
+  "agents": {
+    "codex-a": {
+      "command": [
+        "/opt/homebrew/bin/codex",
+        "exec",
+        "--ignore-user-config",
+        "-s",
+        "workspace-write",
+        "--json",
+        "-"
+      ],
+      "env": {
+        "CODEX_HOME": "/Users/domitian/.codex-a"
+      }
+    },
+    "codex-b": {
+      "command": [
+        "/opt/homebrew/bin/codex",
+        "exec",
+        "--ignore-user-config",
+        "-s",
+        "workspace-write",
+        "--json",
+        "-"
+      ],
+      "env": {
+        "CODEX_HOME": "/Users/domitian/.codex-b"
+      }
+    },
+    "claude": {
+      "command": [
+        "/opt/homebrew/bin/claude",
+        "-p",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "--output-format",
+        "json",
+        "--tools",
+        "Read,Edit,Write,Glob,Grep"
+      ],
+      "env": {}
+    }
+  }
+}

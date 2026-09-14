@@ -97,40 +97,6 @@ Review: pending
 
 ---
 
-### TASK-012 - Consolidate Implementation Status Documentation
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P3
-Milestone: M0
-
-Depends On:
-- None
-
-Goal:
-Merge `wip/pre-orchestration` docs/IMPLEMENTATION_STATUS.md content and the related README.md updates with docs/ARCHIVE_SALVAGE_AUDIT.md into a single canonical status doc that references TASKS.md IDs.
-
-Scope:
-- docs/IMPLEMENTATION_STATUS.md: create/update as the canonical, ongoing status doc
-- README.md: update links accordingly
-
-Do Not:
-- modify application code
-- restate docs/ARCHIVE_SALVAGE_AUDIT.md's historical findings verbatim; summarize and cross-reference it instead
-
-Deliverable:
-docs/IMPLEMENTATION_STATUS.md reconciled with docs/ARCHIVE_SALVAGE_AUDIT.md, referencing TASK IDs.
-
-Acceptance Criteria:
-- no contradicting status claims between IMPLEMENTATION_STATUS.md and the audit
-- every gap listed maps to a TASKS.md entry or is explicitly noted as unscoped
-
-Result:
-Commit: pending
-Review: pending
-
----
 
 ## BACKLOG
 
@@ -371,9 +337,13 @@ None.
 
 ## MERGE_READY
 
+None.
+
+## DONE — Integrated persistence
+
 ### TASK-011 - Land store.ts Load/Save Failure Handling
 
-Status: MERGE_READY
+Status: DONE
 Owner: Codex B
 Reviewer: Codex independent review (`task011_review`)
 Priority: P2
@@ -412,7 +382,7 @@ Validation:
 - Browser: successful save retry clears the warning, saves the current state, and the recovered work survives reload. No browser page errors reported.
 - Git diff inspected; `git diff --check` passed; no schema, backend, interpretation, or unrelated UI changes.
 Proposed follow-up (not implemented; does not block TASK-011): guided backup import/restoration and corrupted-data recovery. The archived load-error screen deliberately pauses editing and offers retry; it does not provide a recovery/import wizard.
-Integration: implementation complete on `agent/codex-b`; not merged or pushed to main.
+Integration: ported as 3458372 and 5553a7f; verified on local and remote main 88ed680 on 2026-09-13. pnpm check passed 18 tests and build.
 
 ---
 
@@ -535,7 +505,7 @@ Note:
 docs/QA_CHECKLIST.md was not linked from README.md here because it does not yet exist on this branch (only on the archived wip/pre-orchestration branch) — that link is added in TASK-014, which ports the file.
 
 Result:
-Commit: 0af355e
+Commit: e519189 (source 0af355e)
 Review: pending
 
 ---
@@ -573,7 +543,7 @@ Finding:
 docs/OVERNIGHT_LOG.md was never added to `main` — it exists only on the archived `wip/pre-orchestration` branch, so there was nothing to delete here. Reviewed the archived file's full contents (`git show wip/pre-orchestration:docs/OVERNIGHT_LOG.md`): it is almost entirely a mechanical changelog (feature added, test count, build pass) rather than design rationale. Its few rationale-bearing lines are already captured elsewhere: preserving recorded interpretation/confidence on confirm (docs/ARCHIVE_SALVAGE_AUDIT.md item 5, TASK-003 scope), fail-loud storage over silent seed fallback (docs/ARCHIVE_SALVAGE_AUDIT.md item 5, TASK-011), and not displaying invented values for unconfigured data (already an ARCHITECTURE.md principle: "Unknown values remain unknown rather than implying zero cost or importance"). Its operational notes (overnight checkpoint cadence, commit-only-when-told) are fully superseded by AGENTS.md and add nothing further. No new docs/DECISIONS.md entry was added as a result. Confirmed no reference to the file exists in README.md; the mentions in docs/ARCHIVE_SALVAGE_AUDIT.md and docs/IMPLEMENTATION_STATUS.md are intentional historical/tracking references, not dangling links.
 
 Result:
-Commit: 1cb1e3c
+Commit: a051f8f (source 1cb1e3c)
 Review: pending
 
 ---
@@ -611,5 +581,49 @@ Finding:
 docs/QA_CHECKLIST.md did not exist on `main` (only on the archived `wip/pre-orchestration` branch). Ported it here with the North Star Fit, Product Behavior, and Data Safety sections byte-for-byte unchanged from the archived version, and rewrote only the Git Policy section to reference AGENTS.md (work only on assigned branch/worktree, commit completed work, never merge into main, report the commit SHA, verify acceptance criteria/tests/typecheck/lint/build before completion) in place of the obsolete overnight-checkpoint instructions. Linked the file from README.md, completing the cross-reference TASK-012 deferred.
 
 Result:
-Commit: 2c42fa1
+Commit: e3d8b12 (source 2c42fa1)
 Review: pending
+
+---
+
+### TASK-015 - Autonomous local GitHub queue runner
+
+Status: REVIEW
+Owner: Primary orchestrator
+Reviewer: Independent runner_review — findings fixed; no remaining review blockers
+Priority: P0
+Milestone: M0
+Depends On: canonical main inventory and preservation (verified 2026-09-13)
+
+Scope: version scripts/runner; isolated fresh task worktrees; separate Codex A/B and Claude auth; authorized GitHub issue queue; launchd; dry-run; validation, commit, push, draft PR; failure records and explicit retry. Reconcile stale task/status docs and record takeover evidence. No main merges or product feature work.
+
+Acceptance: test queue guards, verify all headless clients and launchd PATH, demonstrate TASK-016 issue → agent → tests → commit → push → draft PR, retain all legacy work.
+Commit: 94680e5; lifecycle hardening and smoke proof: 16c90cf
+Validation: all three headless clients passed; controlled TASK-016 cycle succeeded. launchd installed but macOS Documents access blocks execution; user permission pending.
+
+### TASK-016 - Autonomous runner smoke note
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Primary orchestrator
+Priority: P3
+Milestone: M0
+Depends On: TASK-015 runner available for controlled smoke test
+Scope: create only docs/RUNNER_SMOKE.md explaining human PR review and merge approval.
+Acceptance: pnpm check passes; runner opens draft PR and does not merge.
+Commit: 65ce52f5e908f10986b448f8b19cad01c178a553
+Result: issue #1 → headless Codex B → pnpm check (18 tests/build) → pushed branch → draft PR #2. Primary orchestrator reviewed the four-line diff; no findings. Awaiting user review/merge.
+
+
+### TASK-017 - Verify launchd execution after macOS permission grant
+
+Status: CHANGES_REQUESTED
+Owner: Codex B
+Reviewer: Primary orchestrator
+Priority: P3
+Milestone: M0
+Depends On: TASK-015 controlled runner deployment and user-granted Documents access
+Scope: create only docs/LAUNCHD_SMOKE.md, explaining that launchd polls the approved queue and human review remains required.
+Acceptance: launchd starts task; agent writes the scoped note; pnpm check passes; runner commits, pushes, opens a draft PR, and returns idle. No merge.
+Commit: pending
+Verification: launchd picked up issue #4 and created a fresh worktree. Dependency preparation timed out on macOS pnpm Documents permission; attempt preserved. User permission and explicit retry required.
