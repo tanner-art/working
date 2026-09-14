@@ -7,6 +7,21 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
     process = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                start_new_session=True)
+    previous = {}
+    def stop(signum, frame):
+        try: os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+        try: process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
+        # A descendant may ignore TERM even after its direct parent has exited.
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        raise SystemExit(128+signum)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous[sig]=signal.signal(sig,stop)
     try:
         output, _ = process.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -15,9 +30,13 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             output, _ = process.communicate()
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
         if log:
             with open(log,'a') as f: f.write(output)
         raise RuntimeError(f'{args[0]} timed out; attempt preserved')
+    finally:
+        for sig, handler in previous.items(): signal.signal(sig,handler)
     result = subprocess.CompletedProcess(args, process.returncode, output)
     if log:
         with open(log, 'a') as f:
@@ -94,9 +113,11 @@ def main():
         try:
             agent,body=select(issue,c['allowed_authors'])
             if agent not in c['agents']: raise ValueError('Agent is not enabled')
-            for dep in body.get('depends_on',[]):
-                if json.loads(github('issue','view',str(dep),'--repo',c['github'],'--json','state'))['state']!='CLOSED':
-                    raise ValueError(f'Dependency #{dep} is open')
+            blocked = [dep for dep in body.get('depends_on',[])
+                       if json.loads(github('issue','view',str(dep),'--repo',c['github'],'--json','state'))['state']!='CLOSED']
+            if blocked:
+                print(json.dumps({'issue':n,'status':'waiting','dependencies':blocked}))
+                continue
             # Keep canonical checkout clean; fetch only updates remote tracking refs.
             if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
             g('fetch','origin','main');base=g('rev-parse','origin/main')
@@ -124,18 +145,28 @@ Assigned instructions:
 '''
             data['status']='agent';save(record,data)
             run(config['command'],cwd=wt,env=agentenv,timeout=c.get('agent_timeout',1800),log=log,input=prompt)
-            if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
-                raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
-            names=g('diff','--name-only',cwd=wt).splitlines()+g('diff','--cached','--name-only',cwd=wt).splitlines()+g('ls-files','--others','--exclude-standard',cwd=wt).splitlines()
-            if not names: raise ValueError('Agent produced no change')
-            if any(p not in body['paths'] for p in names): raise ValueError('Change outside allowed paths; preserved for inspection')
-            if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
+            def verify_changes():
+                if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
+                    raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
+                names=g('diff','--name-only',cwd=wt).splitlines()+g('diff','--cached','--name-only',cwd=wt).splitlines()+g('ls-files','--others','--exclude-standard',cwd=wt).splitlines()
+                if not names: raise ValueError('Agent produced no change')
+                if any(p not in body['paths'] for p in names): raise ValueError('Change outside allowed paths; preserved for inspection')
+                if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
+            verify_changes()
             data['status']='validation';save(record,data)
             run([pnpm,'check'],cwd=wt,env=env,timeout=600,log=log)
+            verify_changes()
             g('diff','--check',cwd=wt)
             g('add','--',*body['paths'],cwd=wt)
             g('commit','-m',f'{body["task"]}: address queue issue #{n}',cwd=wt)
-            data['commit']=g('rev-parse','HEAD',cwd=wt);save(record,data)
+            data['commit']=g('rev-parse','HEAD',cwd=wt)
+            if g('rev-parse','HEAD^',cwd=wt)!=base or g('branch','--show-current',cwd=wt)!=branch:
+                raise ValueError('Unexpected commit ancestry or branch')
+            committed=g('diff-tree','--no-commit-id','--name-only','-r','HEAD',cwd=wt).splitlines()
+            if not committed or any(p not in body['paths'] for p in committed) or g('status','--porcelain',cwd=wt):
+                raise ValueError('Unexpected committed paths or dirty state; not pushed')
+            g('show','--format=','--check','HEAD',cwd=wt)
+            save(record,data)
             g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)

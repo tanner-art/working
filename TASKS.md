@@ -588,7 +588,7 @@ Review: pending
 
 ### TASK-015 - Autonomous local GitHub queue runner
 
-Status: IN_PROGRESS
+Status: REVIEW
 Owner: Primary orchestrator
 Reviewer: Independent review required
 Priority: P0
@@ -598,11 +598,12 @@ Depends On: canonical main inventory and preservation (verified 2026-09-13)
 Scope: version scripts/runner; isolated fresh task worktrees; separate Codex A/B and Claude auth; authorized GitHub issue queue; launchd; dry-run; validation, commit, push, draft PR; failure records and explicit retry. Reconcile stale task/status docs and record takeover evidence. No main merges or product feature work.
 
 Acceptance: test queue guards, verify all headless clients and launchd PATH, demonstrate TASK-016 issue → agent → tests → commit → push → draft PR, retain all legacy work.
-Commit: pending
+Commit: 94680e5 (follow-up hardening commit pending)
+Validation: all three headless clients passed; controlled TASK-016 cycle succeeded. launchd installed but macOS Documents access blocks execution; user permission pending.
 
 ### TASK-016 - Autonomous runner smoke note
 
-Status: READY
+Status: REVIEW
 Owner: Codex B
 Reviewer: Primary orchestrator
 Priority: P3
@@ -610,4 +611,5 @@ Milestone: M0
 Depends On: TASK-015 runner available for controlled smoke test
 Scope: create only docs/RUNNER_SMOKE.md explaining human PR review and merge approval.
 Acceptance: pnpm check passes; runner opens draft PR and does not merge.
-Commit: pending
+Commit: 65ce52f5e908f10986b448f8b19cad01c178a553
+Result: issue #1 → headless Codex B → pnpm check (18 tests/build) → pushed branch → draft PR #2. Primary orchestrator reviewed the four-line diff; no findings. Awaiting user review/merge.
