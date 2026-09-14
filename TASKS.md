@@ -245,42 +245,6 @@ Review: pending
 
 ---
 
-### TASK-007 - Rebuild Morning Digest on Commitment/CalendarEvent Split
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P1
-Milestone: M3
-
-Depends On:
-- TASK-002
-
-Goal:
-Port `wip/pre-orchestration` src/morningDigest.ts (fixed-today/upcoming/recommended/needs-review/project-signals buckets, local-calendar-day date matching) onto the split Commitment/CalendarEvent/Reminder-instruction model, and add the M3 delivery mechanism (7 AM digest).
-
-Scope:
-- src/morningDigest.ts: rebuild fixedCommitments-equivalent source without conflating Commitment and Reminder
-- delivery mechanism for the 7 AM digest (per NORTH_STAR.md)
-- port corresponding tests
-
-Do Not:
-- implement Adaptive Plan recalculation (M5)
-
-Deliverable:
-Morning Digest built on the correct entity split, with a delivery mechanism.
-
-Acceptance Criteria:
-- pnpm check passes
-- digest buckets no longer conflate Commitment and Reminder kinds
-- date-matching bug fix (local calendar day) preserved
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-008 - Reintegrate Salvaged UI onto New Entity Model
 
 Status: BACKLOG
@@ -325,6 +289,47 @@ Review: pending
 None.
 
 ## REVIEW
+
+### TASK-007 - Rebuild Morning Digest on Commitment/CalendarEvent Split
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent orchestration review
+Priority: P1
+Milestone: M3
+
+Depends On:
+- TASK-002
+
+Goal:
+Port `wip/pre-orchestration` src/morningDigest.ts (fixed-today/upcoming/recommended/needs-review/project-signals buckets, local-calendar-day date matching) onto the split Commitment/CalendarEvent/Reminder-instruction model, and add the M3 delivery mechanism (7 AM digest).
+
+Scope:
+- src/morningDigest.ts: rebuild fixedCommitments-equivalent source without conflating Commitment and Reminder
+- delivery mechanism for the 7 AM digest (per NORTH_STAR.md)
+- port corresponding tests
+
+Do Not:
+- implement Adaptive Plan recalculation (M5)
+
+Deliverable:
+Morning Digest built on the correct entity split, with a delivery mechanism.
+
+Acceptance Criteria:
+- pnpm check passes
+- digest buckets no longer conflate Commitment and Reminder kinds
+- date-matching bug fix (local calendar day) preserved
+
+Result:
+Commit: intentionally uncommitted per user instruction
+Review: pending independent orchestration review
+Lifecycle: explicitly assigned by user after TASK-002 integration; moved to IN_PROGRESS, then REVIEW on this branch.
+Validation: 64 tests, TypeScript and production build passed (`pnpm check`); 13 focused tests also pass in Los Angeles and Tokyo timezones. No lint configured. `git diff --check` passed. Browser check attempted but sandbox blocked server listening and browser socket creation.
+P1 correction: fixed-event and confirmed-deadline buckets explicitly blocked until dedicated timestamped confirmation provenance exists (D-009). Unverified dates/status do not grant temporal eligibility or hide confirmed obligations. UI and regression tests reflect this limitation; prerequisite follow-up is proposed in docs/TASK-007_DELIVERY.md. Independent rereview pending.
+Implementation and limitations: canonical digest plus opt-in 7 AM in-app notice/catch-up; no closed-app push. Exact backend/product blockers, proposed follow-up and browser review checklist: docs/TASK-007_DELIVERY.md.
+
+---
+
 
 ### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
 

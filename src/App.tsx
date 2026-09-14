@@ -1,3 +1,4 @@
+import { MorningDigest } from './DigestPanel'
 import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
@@ -102,6 +103,7 @@ export function App() {
     <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">D</span><span>Personal space</span></div></aside>
     <section className="content">
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
+      <MorningDigest state={state} visible={view === 'today'} onShow={() => setView('today')} />
       {view === 'today' && <Today objects={state.objects} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onOpen={setSelectedObjectId} />}
