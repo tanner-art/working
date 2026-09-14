@@ -1,70 +1,53 @@
 # Threadline Implementation Status
 
-Canonical, living status doc. Updated 2026-09-13 by TASK-012. This supersedes the `wip/pre-orchestration`-era `docs/IMPLEMENTATION_STATUS.md` (never present on `main`; only ever existed on the archived branch). For the full historical audit — feature-by-feature KEEP/MODIFY/DROP/UNCLEAR findings, architectural reasoning, and the proposed salvage dependency order — see [docs/ARCHIVE_SALVAGE_AUDIT.md](ARCHIVE_SALVAGE_AUDIT.md). This document does not restate that audit; it tracks current reality and links each open gap to a `TASKS.md` entry.
+Canonical living status, reconciled with `main` at `39c8c45` on 2026-09-14. For the original salvage analysis and its historical KEEP/MODIFY/DROP findings, see [ARCHIVE_SALVAGE_AUDIT.md](ARCHIVE_SALVAGE_AUDIT.md). Current lifecycle and priority live only in [TASKS.md](../TASKS.md).
 
-## Current stack
+## Current stack and delivery
 
-- React + TypeScript + Vite
-- Browser localStorage for the initial persisted repository
-- No separate stores per screen and no UI state framework
-- `pnpm check` runs `vitest run` then the production build; GitHub Actions runs the same gate
+- React, TypeScript, and Vite.
+- A single local-first repository persisted in browser `localStorage`, with schema migration, visible load/save failures, retry, and backup export.
+- `pnpm check` runs the unit suite, TypeScript check, and production build; GitHub Actions uses the same gate.
+- Threadline is installable as a PWA. The current production alias is `https://working-ten-rust.vercel.app`.
+- The claimed `temporary-zippy-agate-50psn81` Vercel project is connected to `tanner-art/working` and awaits the next push for its first current automatic deployment.
 
-## Currently implemented (on `main`)
+## Implemented on `main`
 
-- Text capture with a deterministic, regex-based interpreter (`src/interpreter.ts`) classifying into Idea, Action, Reminder, or Project with confidence and rationale.
-- Review screen for uncertain interpretations, with type correction and confirm-to-object.
-- Today screen showing confirmed actions and fixed commitments.
-- A separate Commitments view (time-bound reminders and commitments only; no flexible execution work mixed in).
-- An infinite-feeling pan/zoom Canvas with text nodes, groups, arrows, drag, deletion, and persistence — no undo/redo, no freehand or arbitrary shapes, no resize.
-- A single persisted `AppState` (`ThoughtObject[]` + `CanvasElement[]`) in `src/store.ts`, loaded/saved to localStorage with silent seed-data fallback on any read/parse failure.
+- Text capture with preserved CaptureRecord evidence, distinct Interpretation records, and separately persisted semantic objects.
+- Deterministic interpretation behind a replaceable service interface, with confidence, rationale, review, supersession, and explicit confirmation/reversal controls.
+- Separate commitments and CalendarEvents, including dedicated temporal confirmation evidence for fixed deadlines and scheduling.
+- Today and Morning Digest surfaces with fixed-today, upcoming, recommended, needs-review, and project-signal sections.
+- A responsive full month Calendar with navigation, selected-day details, scheduled events, visibly unconfirmed proposed dates, and unscheduled commitments.
+- A reusable Objects workbench, explicit action eligibility, and cycle-safe dependency graph.
+- A pan/zoom Canvas with text blocks, group containers, arrows, drag, deletion, persistence, session undo/redo, pointer and keyboard resizing, and text/group shape conversion.
+- Mobile installation metadata, icons, and service-worker app-shell caching.
 
-## Architecture mismatches (tracked, not yet fixed)
+The merged baseline passes 176 tests, TypeScript, and the production build.
 
-The current MVP predates the entity boundaries in `docs/ARCHITECTURE.md`. Specifically:
+## Active and next work
 
-| Gap | Architecture requirement | Tracked by |
-| --- | --- | --- |
-| `ThoughtObject` fuses original content, interpretation, and lifecycle state into one record | Separate CaptureRecord / Interpretation / Semantic Object (D-002) | TASK-002 |
-| `reminder` is a first-class `ObjectKind` | Reminder is an attached instruction, not a core object (D-004) | TASK-002 |
-| Commitment and CalendarEvent are not distinguished; `fixedCommitments()` conflates `commitment` and `reminder` kinds | Commitment and CalendarEvent are distinct (D-005) | TASK-002, TASK-007 |
-| `confirmObject()` sets `status: 'confirmed'` directly from a click, and the generic object editor can also set status to `confirmed` via a plain dropdown | Consequential transitions require one explicit, traceable confirmation gesture (D-009) | TASK-003 |
-| `Relationship` is a flat `{targetId, type}` pair | Relationships need explicit endpoint identity, scope, and provenance | TASK-005, TASK-006 (bundled into TASK-002/003) |
-| `loadState`/`saveState` silently fall back to seed data or swallow write failures | Persistence must fail loud and preserve user work | TASK-011 |
-| Canvas has no undo/redo and no revision history | Canvas edits should create preserved revisions (OD-002, open) | TASK-010 |
+- TASK-022 adds richer connection presentation and manipulation: line weight, dotted styling, and curved/arc routing.
+- TASK-023 adds explicit sticky group membership so moving a group can move its contained blocks while preserving undo/redo and persistence.
+- TASK-006 remains blocked on OD-007, the single-parent versus multi-membership containment decision. TASK-008 follows it with the complete project/object workbench experience.
+- Provider-backed interpretation, closed-app Web Push delivery, and durable canvas revision persistence remain backlog items. See `TASKS.md` for their current scope.
 
-## Incomplete / deferred features
+## Current product decision on voice
 
-Intentionally deferred, not yet scheduled as tasks:
+Native voice capture and speech recognition are removed from the active pipeline by the user's 2026-09-14 decision. Users can use device or operating-system dictation in the text capture field. The existing voice affordance should not be treated as a promised feature; removing or relabeling that placeholder in the UI can be folded into the next appropriate product-polish task. Preserved-audio provenance rules remain relevant only if native audio capture is revived.
 
-- Real speech recognition (voice capture is a placeholder affordance only).
-- Provider-backed (AI) interpretation — the interpreter is deterministic and explicitly acknowledged as a stopgap (TASK-004 relocates it behind an interface but does not add a real model).
-- External calendar sync, collaborative/remote persistence.
-- Freehand canvas paths, general shapes, resize handles, multi-select, true nested grouping.
-- Adaptive Plan (recalculating execution allocations), morning digest delivery mechanism, ROI optimization, autonomous scheduling.
-- Project/objective containment UI (Objects workbench, parent/child linking, dependency graph) — implemented once on `wip/pre-orchestration` but not yet ported to the current architecture; see TASK-005, TASK-006, TASK-008.
+## Remaining architecture and product gaps
 
-## Reusable work not yet ported
+| Gap | Next decision or task |
+| --- | --- |
+| Project/objective containment cardinality and UI | OD-007, then TASK-006 |
+| Complete search/filter/history/project workbench | TASK-008 |
+| Curved and styled connection arrows | TASK-022 |
+| Sticky group membership and group movement | TASK-023 |
+| Provider-backed interpretation | Unscoped backlog using TASK-004 interface |
+| Closed-app notifications | Unscoped backend/product decision and Web Push task |
+| Durable canvas revisions across reloads | Follow-up to D-010 |
+| External calendar sync and collaborative persistence | Deferred |
+| Adaptive Plan, ROI optimization, autonomous scheduling | Deferred |
 
-`docs/ARCHIVE_SALVAGE_AUDIT.md` found substantial application work on the archived `wip/pre-orchestration` branch built on top of the current architecture docs but against the old flat `ThoughtObject` model. None of it has been ported to `main` yet. Per-item classification and reasoning live in the audit; current porting status:
+## Documentation boundary
 
-| Item | Audit verdict | Status |
-| --- | --- | --- |
-| `canvasHistory.ts` undo/redo stack | MODIFY | Not ported — TASK-010 (READY) |
-| `dependencies.ts` cycle-safe dependency graph | MODIFY | Not ported — TASK-005 (BACKLOG, needs TASK-002/003) |
-| `morningDigest.ts` | MODIFY | Not ported — TASK-007 (BACKLOG, needs TASK-002) |
-| `store.ts` load/save failure handling | KEEP | Not ported — TASK-011 (READY) |
-| `objectWorkflow.ts` parent/child + dependency-aware helpers | MODIFY | Not ported — TASK-005/TASK-006 (BACKLOG) |
-| `interpreter.ts` confidence/ambiguity heuristics | MODIFY | Not ported — TASK-004 (BACKLOG, needs TASK-002) |
-| App.tsx UI surfaces (Objects workbench, digest strip, dependency/parent editors, history panel) | MODIFY / UNCLEAR (confirm flow) | Not ported — TASK-008 (BACKLOG) |
-| `docs/QA_CHECKLIST.md` | MODIFY | Done — TASK-014: ported with Git Policy section rewritten to reference AGENTS.md; North Star Fit/Product Behavior/Data Safety unchanged |
-| `docs/OVERNIGHT_LOG.md` | DROP | Done — TASK-013: file never existed on `main`, so nothing to remove; reviewed and found no rationale not already captured in this doc, `docs/ARCHIVE_SALVAGE_AUDIT.md`, or `docs/DECISIONS.md` |
-
-## Technical debt
-
-- No automated accessibility testing; the archived branch's fixes (labeled filters, native controls) were never ported since the UI they apply to isn't on `main` yet.
-- `pnpm check` covers unit tests and build only; no browser/E2E smoke coverage exists on `main`.
-- No data migration tooling exists yet for the entity split TASK-002 will require.
-
-## Proposed follow-up tasks
-
-None beyond what is already tracked in `TASKS.md` (TASK-002 through TASK-014, sourced from `docs/ARCHIVE_SALVAGE_AUDIT.md`). This document will be updated as those tasks land; it should not accumulate a second, divergent backlog.
+`TASKS.md` is the only task lifecycle board. This file records shipped capability and material gaps; it does not maintain a second backlog. Delivery-specific limitations remain in the relevant task documents, including `docs/TASK-007_DELIVERY.md`, `docs/TASK-019_DELIVERY.md`, and `docs/MIGRATION.md`.
