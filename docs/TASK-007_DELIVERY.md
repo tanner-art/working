@@ -1,5 +1,7 @@
 # TASK-007 delivery and review notes
 
+These notes record the TASK-007 delivery baseline. TASK-019 now implements the separate temporal confirmation prerequisite and enables validated event/deadline buckets; see [TASK-019 delivery and independent review](TASK-019_DELIVERY.md) for the current contract, limitations and pending validation. The closed-app delivery blocker below remains unchanged.
+
 ## Implemented slice
 
 Morning Digest derives from CaptureRecord-backed Interpretations and SemanticObjects, plus separate CalendarEvents. It never changes captures, interpretations, objects, reminders, events or their delivery eligibility. The legacy UI is reconciled through the existing pure adapter so newly confirmed work appears immediately, without waiting for reload.
