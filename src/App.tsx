@@ -4,6 +4,15 @@ import { objectLabels } from './domain'
 import { interpret } from './interpreter'
 import { canvasObjectDraft, confirmObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, newCanvasElement, saveState } from './store'
+import type { CanvasHistory } from './canvasHistory'
+import {
+  canRedoCanvas,
+  canUndoCanvas,
+  commitCanvas as commitCanvasHistory,
+  emptyCanvasHistory,
+  redoCanvas as redoCanvasHistory,
+  undoCanvas as undoCanvasHistory,
+} from './canvasHistory'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'canvas'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -18,8 +27,49 @@ export function App() {
   const [draft, setDraft] = useState('')
   const [context, setContext] = useState('')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  // Session-only canvas undo/redo stack, kept at the App level (not inside Canvas) so
+  // switching views does not discard it. See docs/DECISIONS.md D-010 (resolves OD-002).
+  // `canvasHistory.present` and `state.canvas` are written together, from the same
+  // returned CanvasHistory, in every handler below, so they never drift apart — see
+  // the adaptation note in src/canvasHistory.ts.
+  const [canvasHistory, setCanvasHistory] = useState<CanvasHistory>(() => emptyCanvasHistory(initial.state.canvas))
   const update = (fn: (current: AppState) => AppState) => setState(current => fn(current))
   useEffect(() => { if (!initial.error) setSaveError(saveState(state)) }, [state, initial.error])
+  const commitCanvas = (next: CanvasElement[]) => {
+    const nextHistory = commitCanvasHistory(canvasHistory, next)
+    setCanvasHistory(nextHistory)
+    update(current => ({ ...current, canvas: nextHistory.present }))
+  }
+  const undoCanvas = () => {
+    const nextHistory = undoCanvasHistory(canvasHistory)
+    if (nextHistory === canvasHistory) return
+    setCanvasHistory(nextHistory)
+    update(current => ({ ...current, canvas: nextHistory.present }))
+  }
+  const redoCanvas = () => {
+    const nextHistory = redoCanvasHistory(canvasHistory)
+    if (nextHistory === canvasHistory) return
+    setCanvasHistory(nextHistory)
+    update(current => ({ ...current, canvas: nextHistory.present }))
+  }
+  useEffect(() => {
+    if (view !== 'canvas') return
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null
+      return element?.tagName === 'INPUT' || element?.tagName === 'TEXTAREA' || Boolean(element?.isContentEditable)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return // never hijack native text-field undo
+      const isModifier = event.metaKey || event.ctrlKey
+      if (!isModifier) return
+      const key = event.key.toLowerCase()
+      if (key === 'z' && event.shiftKey) { event.preventDefault(); redoCanvas() }
+      else if (key === 'z') { event.preventDefault(); undoCanvas() }
+      else if (key === 'y') { event.preventDefault(); redoCanvas() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [view, canvasHistory])
   const downloadBackup = () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -56,7 +106,7 @@ export function App() {
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onOpen={setSelectedObjectId} />}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
-      {view === 'canvas' && <Canvas elements={state.canvas} onChange={canvas => update(current => ({ ...current, canvas }))} onCaptureObject={captureCanvasObject} />}
+      {view === 'canvas' && <Canvas elements={state.canvas} onCommit={commitCanvas} canUndo={canUndoCanvas(canvasHistory)} canRedo={canRedoCanvas(canvasHistory)} onUndo={undoCanvas} onRedo={redoCanvas} onCaptureObject={captureCanvasObject} />}
     </section>
     {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} />}
   </main>
@@ -119,18 +169,76 @@ function ObjectPanel({ object, onClose, onSave }: { object: ThoughtObject; onClo
     </aside>
   </div>
 }
-function Canvas({ elements, onChange, onCaptureObject }: { elements: CanvasElement[]; onChange: (elements: CanvasElement[]) => void; onCaptureObject: (element: CanvasElement) => void }) {
-  const [pan, setPan] = useState({ x: 0, y: 0 }); const [scale, setScale] = useState(1); const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null); const drag = useRef<{ id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number } } | null>(null)
-  const positioned = (id?: string) => elements.find(item => item.id === id)
-  const add = (type: 'text' | 'container') => { const next = newCanvasElement(type, 260 - pan.x, 160 - pan.y); onChange([...elements, next]); setSelected(next.id) }
-  const down = (event: React.PointerEvent, item?: CanvasElement) => { const point = { startX: event.clientX, startY: event.clientY }; drag.current = item ? { ...point, id: item.id, originalX: item.x, originalY: item.y } : { ...point, pan: true, originalPan: pan }; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
-  const move = (event: React.PointerEvent) => { if (!drag.current) return; const dx = (event.clientX - drag.current.startX) / scale; const dy = (event.clientY - drag.current.startY) / scale; if (drag.current.pan) setPan({ x: drag.current.originalPan!.x + dx * scale, y: drag.current.originalPan!.y + dy * scale }); else if (drag.current.id) onChange(elements.map(item => item.id === drag.current!.id ? { ...item, x: drag.current!.originalX! + dx, y: drag.current!.originalY! + dy } : item)) }
-  const end = () => { drag.current = null }
-  const clickNode = (event: React.MouseEvent, id: string) => { event.stopPropagation(); if (connectFrom && connectFrom !== id) { onChange([...elements, { id: crypto.randomUUID(), type: 'arrow', x: 0, y: 0, fromId: connectFrom, toId: id }]); setConnectFrom(null) } else setSelected(id) }
+function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptureObject }: { elements: CanvasElement[]; onCommit: (elements: CanvasElement[]) => void; canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void; onCaptureObject: (element: CanvasElement) => void }) {
+  const [pan, setPan] = useState({ x: 0, y: 0 }); const [scale, setScale] = useState(1); const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
+  // Undo/redo (and delete) can remove the currently selected or connect-from node out
+  // from under this component without it ever unmounting. Clear any reference to an id
+  // that no longer exists so a stale connect-from can never produce a dangling arrow.
+  useEffect(() => {
+    const ids = new Set(elements.map(item => item.id))
+    setSelected(current => (current && !ids.has(current)) ? null : current)
+    setConnectFrom(current => (current && !ids.has(current)) ? null : current)
+  }, [elements])
+  // Live drag/text-edit state stays local to Canvas so every pointer move or keystroke
+  // does not push an undo step; only the final, committed result is sent to onCommit,
+  // which groups a whole drag or text edit into exactly one undo step.
+  const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
+  const drag = useRef<{ id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
+  const positioned = (id?: string) => {
+    const item = elements.find(value => value.id === id)
+    if (!item) return undefined
+    return dragOffset && dragOffset.id === id ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
+  }
+  const add = (type: 'text' | 'container') => {
+    // Placement must account for both pan and zoom: a screen-space offset has to be
+    // converted into world space by dividing by scale, or nodes land in the wrong spot
+    // whenever the canvas is zoomed.
+    const worldX = (260 - pan.x) / scale
+    const worldY = (160 - pan.y) / scale
+    const next = newCanvasElement(type, worldX, worldY)
+    onCommit([...elements, next])
+    setSelected(next.id)
+  }
+  const down = (event: React.PointerEvent, item?: CanvasElement) => { const point = { startX: event.clientX, startY: event.clientY, dx: 0, dy: 0, moved: false }; drag.current = item ? { ...point, id: item.id, originalX: item.x, originalY: item.y } : { ...point, pan: true, originalPan: pan }; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
+  const move = (event: React.PointerEvent) => {
+    if (!drag.current) return
+    const dx = (event.clientX - drag.current.startX) / scale
+    const dy = (event.clientY - drag.current.startY) / scale
+    drag.current.dx = dx; drag.current.dy = dy
+    if (dx !== 0 || dy !== 0) drag.current.moved = true
+    if (drag.current.pan) setPan({ x: drag.current.originalPan!.x + dx * scale, y: drag.current.originalPan!.y + dy * scale })
+    else if (drag.current.id) setDragOffset({ id: drag.current.id, dx, dy })
+  }
+  const end = () => {
+    const current = drag.current
+    drag.current = null
+    if (current && !current.pan && current.id && current.moved) {
+      const next = elements.map(item => item.id === current.id ? { ...item, x: current.originalX! + current.dx, y: current.originalY! + current.dy } : item)
+      onCommit(next)
+    }
+    setDragOffset(null)
+  }
+  const clickNode = (event: React.MouseEvent, id: string) => {
+    event.stopPropagation()
+    // Validate the connect-from endpoint still exists (not just non-null) so a stale
+    // reference left over from an undo/redo/delete can never produce a dangling arrow.
+    const connectFromValid = connectFrom !== null && elements.some(item => item.id === connectFrom)
+    if (connectFromValid && connectFrom !== id) {
+      onCommit([...elements, { id: crypto.randomUUID(), type: 'arrow', x: 0, y: 0, fromId: connectFrom, toId: id }])
+      setConnectFrom(null)
+    } else {
+      setSelected(id)
+    }
+  }
   const arrows = elements.filter(item => item.type === 'arrow')
   const selectedElement = selected ? positioned(selected) : undefined
   const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
-  const removeSelected = () => { if (!selected) return; onChange(elements.filter(item => item.id !== selected && item.fromId !== selected && item.toId !== selected)); setSelected(null); setConnectFrom(null) }
-  return <div className="canvas-page"><div className="canvas-head"><div><p className="eyebrow">Spatial formulation</p><h1>Untitled canvas</h1></div><div className="canvas-tools"><button onClick={() => add('text')}>+ Text</button><button onClick={() => add('container')}>+ Group</button><button disabled={!selected} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button><button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button><button disabled={!selected} onClick={removeSelected}>Delete</button><span/><button onClick={() => setScale(value => Math.max(.55, value - .15))}>−</button><span>{Math.round(scale * 100)}%</span><button onClick={() => setScale(value => Math.min(1.6, value + .15))}>＋</button></div></div><div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div><div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerLeave={end} onClick={() => setSelected(null)}><div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}><svg className="arrows" aria-hidden="true">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; return <line key={arrow.id} x1={from.x + (from.width ?? 160) / 2} y1={from.y + 42} x2={to.x + (to.width ?? 160) / 2} y2={to.y + 22} markerEnd="url(#head)" /> })}<defs><marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" /></marker></defs></svg>{elements.filter(item => item.type !== 'arrow').map(item => <div key={item.id} className={`canvas-node ${item.type} ${selected === item.id ? 'selected' : ''}`} style={{ left: item.x, top: item.y, width: item.width, height: item.height }} onClick={event => clickNode(event, item.id)}><div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}><span></span><span></span><span></span></div>{item.type === 'container' && <small>GROUP</small>}<textarea value={item.text} onChange={event => onChange(elements.map(value => value.id === item.id ? { ...value, text: event.target.value } : value))} onPointerDown={event => event.stopPropagation()} /></div>)}</div></div></div>
+  const removeSelected = () => { if (!selected) return; onCommit(elements.filter(item => item.id !== selected && item.fromId !== selected && item.toId !== selected)); setSelected(null); setConnectFrom(null) }
+  const commitText = (item: CanvasElement) => {
+    if (editing && editing.id === item.id && editing.text !== item.text) onCommit(elements.map(value => value.id === item.id ? { ...value, text: editing.text } : value))
+    setEditing(null)
+  }
+  return <div className="canvas-page"><div className="canvas-head"><div><p className="eyebrow">Spatial formulation</p><h1>Untitled canvas</h1></div><div className="canvas-tools"><button onClick={() => add('text')}>+ Text</button><button onClick={() => add('container')}>+ Group</button><button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button><button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button><button disabled={!selected} onClick={removeSelected}>Delete</button><span/><button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button><button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button><span/><button onClick={() => setScale(value => Math.max(.55, value - .15))}>−</button><span>{Math.round(scale * 100)}%</span><button onClick={() => setScale(value => Math.min(1.6, value + .15))}>＋</button></div></div><div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div><div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerLeave={end} onClick={() => setSelected(null)}><div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}><svg className="arrows" aria-hidden="true">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; return <line key={arrow.id} x1={from.x + (from.width ?? 160) / 2} y1={from.y + 42} x2={to.x + (to.width ?? 160) / 2} y2={to.y + 22} markerEnd="url(#head)" /> })}<defs><marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" /></marker></defs></svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, width: item.width, height: item.height }} onClick={event => clickNode(event, item.id)}><div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}><span></span><span></span><span></span></div>{item.type === 'container' && <small>GROUP</small>}<textarea value={editing && editing.id === item.id ? editing.text : (item.text ?? '')} onFocus={() => setEditing({ id: item.id, text: item.text ?? '' })} onChange={event => setEditing({ id: item.id, text: event.target.value })} onBlur={() => commitText(item)} onPointerDown={event => event.stopPropagation()} /></div> })}</div></div></div>
 }
 function Empty({ text }: { text: string }) { return <div className="empty">{text}</div> }
