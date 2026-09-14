@@ -24,6 +24,24 @@ Only READY tasks may be newly assigned.
 
 ## IN_PROGRESS
 
+### TASK-023 - Sticky Canvas Group Membership
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Unassigned
+Priority: P1
+Milestone: M4
+
+Goal: Let users explicitly attach text blocks to a canvas group so moving the group moves its members together.
+
+Scope: explicit attach/detach controls; bulk attach of blocks fully inside a group; atomic group movement; resize, conversion, deletion, undo/redo, and persisted-state compatibility; accessible controls and focused tests. Canvas groups do not change semantic project membership.
+
+Acceptance: legacy canvases remain valid; invalid or nested membership fails closed; group motion preserves relative member positions; resizing retains explicit membership; converting or deleting a group safely detaches its members; pnpm check and git diff --check pass.
+
+Result: implementation complete; commit pending. Validation: 182 tests, TypeScript, production build, and git diff check pass.
+
+---
+
 ### TASK-021 - Canvas Block Resizing and Shape Changes
 
 Status: REVIEW

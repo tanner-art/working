@@ -1,4 +1,5 @@
 import { CANVAS_SIZE, canvasSize, canvasConnector, resizeCanvasNode, convertCanvasNode, type CanvasShape } from './canvasGeometry'
+import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
@@ -214,7 +215,9 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     const item = elements.find(value => value.id === id)
     if (!item) return undefined
     if (resizePreview?.id === id) return resizePreview
-    return dragOffset && dragOffset.id === id ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
+    const dragged = dragOffset ? elements.find(value => value.id === dragOffset.id) : undefined
+    return dragOffset && (dragOffset.id === id || (dragged?.type === 'container' && item.groupId === dragged.id))
+      ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
   }
   const add = (type: 'text' | 'container') => {
     // Placement must account for both pan and zoom: a screen-space offset has to be
@@ -246,7 +249,7 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     drag.current = null
     if (current && !current.pan && current.id && current.moved) {
       const size = current.resize && canvasSize(current.resize)
-      const next = size ? resizeCanvasNode(elements, current.id, size.width + current.dx, size.height + current.dy) : elements.map(item => item.id === current.id ? { ...item, x: current.originalX! + current.dx, y: current.originalY! + current.dy } : item)
+      const next = size ? resizeCanvasNode(elements, current.id, size.width + current.dx, size.height + current.dy) : moveCanvasNode(elements, current.id, current.originalX! + current.dx, current.originalY! + current.dy)
       onCommit(next)
     }
     setDragOffset(null)
@@ -265,9 +268,10 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     }
   }
   const arrows = elements.filter(item => item.type === 'arrow')
+  const groups = canvasGroups(elements)
   const selectedElement = selected ? positioned(selected) : undefined
   const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
-  const removeSelected = () => { if (!selected) return; onCommit(elements.filter(item => item.id !== selected && item.fromId !== selected && item.toId !== selected)); setSelected(null); setConnectFrom(null) }
+  const removeSelected = () => { if (!selected) return; onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null) }
   const commitText = (item: CanvasElement) => {
     if (editing && editing.id === item.id && editing.text !== item.text) onCommit(elements.map(value => value.id === item.id ? { ...value, text: editing.text } : value))
     setEditing(null)
@@ -298,8 +302,10 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     <option value="text">Text block</option>
     <option value="container">Group container</option>
     </select>
-    </label>{(['width', 'height'] as const).map(axis => <label key={axis}>{axis === 'width' ? 'Width' : 'Height'}<input key={`${selectedElement.id}-${canvasSize(selectedElement)[axis]}`} aria-label={`Block ${axis}`} type="number" min={axis === 'width' ? CANVAS_SIZE.minWidth : CANVAS_SIZE.minHeight} max={axis === 'width' ? CANVAS_SIZE.maxWidth : CANVAS_SIZE.maxHeight} defaultValue={canvasSize(selectedElement)[axis]} onBlur={event => { const size = canvasSize(selectedElement); const value = event.target.value === '' ? size[axis] : event.target.valueAsNumber; onCommit(resizeCanvasNode(elements, selectedElement.id, axis === 'width' ? value : size.width, axis === 'height' ? value : size.height)); event.target.value = String(canvasSize({ ...selectedElement, [axis]: value })[axis]) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
-    </label>)}</>}<span>{selectedElement ? 'Drag ↘ or use arrow keys on its handle (Shift: 10 px). Size fields apply on Enter or leaving the field.' : 'Select a block to change its size or shape.'}</span>
+    </label>{selectedElement.type === 'text' && <label>Move with group <select aria-label="Move with group" value={selectedElement.groupId ?? ''} onChange={event => onCommit(setCanvasGroup(elements, selectedElement.id, event.target.value || undefined))}>
+    <option value="">None</option>{groups.map(group => <option key={group.id} value={group.id}>{group.text?.trim() || 'Untitled group'}</option>)}
+    </select></label>}{selectedElement.type === 'container' && <button className="secondary" onClick={() => onCommit(attachBlocksInside(elements, selectedElement.id))}>Attach blocks inside</button>}{(['width', 'height'] as const).map(axis => <label key={axis}>{axis === 'width' ? 'Width' : 'Height'}<input key={`${selectedElement.id}-${canvasSize(selectedElement)[axis]}`} aria-label={`Block ${axis}`} type="number" min={axis === 'width' ? CANVAS_SIZE.minWidth : CANVAS_SIZE.minHeight} max={axis === 'width' ? CANVAS_SIZE.maxWidth : CANVAS_SIZE.maxHeight} defaultValue={canvasSize(selectedElement)[axis]} onBlur={event => { const size = canvasSize(selectedElement); const value = event.target.value === '' ? size[axis] : event.target.valueAsNumber; onCommit(resizeCanvasNode(elements, selectedElement.id, axis === 'width' ? value : size.width, axis === 'height' ? value : size.height)); event.target.value = String(canvasSize({ ...selectedElement, [axis]: value })[axis]) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+    </label>)}</>}<span>{selectedElement ? 'Group membership stays attached when a group moves. Resizing does not remove members.' : 'Select a block to change its size, shape, or group.'}</span>
     </div>
     <div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => setSelected(null)}>

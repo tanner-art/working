@@ -66,7 +66,9 @@ export function isAppState(value: unknown): value is AppState {
   return Array.isArray(candidate.objects) &&
     Array.isArray(candidate.canvas) &&
     candidate.objects.every(isThoughtObject) &&
-    candidate.canvas.every(isCanvasElement)
+    candidate.canvas.every(isCanvasElement) &&
+    candidate.canvas.every(item => item.groupId === undefined ||
+      (item.type === 'text' && candidate.canvas!.some(group => group.id === item.groupId && group.type === 'container')))
 }
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()
@@ -147,5 +149,6 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.text === undefined || typeof item.text === 'string') &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&
+    (item.groupId === undefined || typeof item.groupId === 'string') &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
 }

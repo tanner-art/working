@@ -59,6 +59,8 @@ export interface CanvasElement {
   text?: string
   fromId?: string
   toId?: string
+  /** Optional canvas-only containment. Only text blocks may belong to a group. */
+  groupId?: string
 }
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
 export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState; temporalHistory?: TemporalDecision[] }
