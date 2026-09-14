@@ -35,7 +35,20 @@ export interface ObjectMetadata {
   roi?: 1 | 2 | 3 | 4 | 5
 }
 export interface Relationship { targetId: string; type: 'belongs_to' | 'relates_to' | 'depends_on' | 'supports' }
-export interface HistoryEvent { at: string; event: string }
+export interface ConfirmationGesture {
+  objectId: string
+  transition: ObjectKind
+  summary: string
+  source: 'review-confirmation'
+}
+export interface HistoryEvent {
+  at: string
+  event: string
+  confirmation?: ConfirmationGesture
+  reviewDecision?: 'rejected' | 'reversed' | 'superseded'
+}
+/** Executable meaning still awaiting a dedicated confirmation gesture. */
+export interface ProposedAction { summary: string }
 export interface CanvasElement {
   id: string
   type: 'text' | 'container' | 'arrow'
@@ -75,9 +88,9 @@ export interface Interpretation {
   readonly rationale: string
   readonly confidence: number
   readonly proposedKind: SemanticKind | 'unresolved'
-  readonly proposedAction?: { summary: string }
-  readonly reviewState: 'review' | 'accepted'
-  readonly confirmation?: { at: string; transition: 'action' | 'commitment' }
+  readonly proposedAction?: ProposedAction
+  readonly reviewState: 'review' | 'accepted' | 'rejected'
+  readonly confirmation?: { at: string; transition: 'action' | 'commitment'; objectId?: string; interpretationId?: string; historyIndex?: number; source?: 'review-confirmation' }
   readonly proposedReminder?: ReminderInstruction
   /** Lossless historical UI evidence, not executable meaning or authoritative capture. */
   readonly legacy: Omit<ThoughtObject, 'originalContent' | 'source' | 'createdAt'>

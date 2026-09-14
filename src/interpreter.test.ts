@@ -1,19 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import type { ObjectKind, ThoughtObject } from './domain'
-import { interpret } from './interpreter'
+import { interpretationService } from './interpretationService'
+
 import { activeObjects, canvasObjectDraft, confirmedActions, fixedCommitments, confirmObject, setObjectKind, updateObject } from './objectWorkflow'
 import { isAppState } from './store'
 
+const interpret = (originalContent: string) => interpretationService.interpret({
+  id: 'capture:test', source: 'text', createdAt: '2026-09-14T00:00:00.000Z', originalContent, evidence: 'text-only',
+})
+
 describe('interpret', () => {
-  it('recognizes an explicit action with high confidence', () => {
-    const result = interpret('Give marketing guys access')
-    expect(result.kind).toBe('action')
+  it('recognizes an explicit action with high confidence', async () => {
+    const result = await interpret('Give marketing guys access')
+    expect(result.proposedKind).toBe('action')
     expect(result.confidence).toBeGreaterThanOrEqual(.8)
   })
 
-  it('routes ambiguous topic captures through review confidence', () => {
-    const result = interpret('AI sales training')
-    expect(result.kind).toBe('idea')
+  it('routes ambiguous topic captures through review confidence', async () => {
+    const result = await interpret('AI sales training')
+    expect(result.proposedKind).toBe('idea')
     expect(result.confidence).toBeLessThan(.8)
   })
 })
@@ -50,7 +55,7 @@ describe('object workflow', () => {
   it('ranks confirmed actions by independent priority dimensions', () => {
     const lowAttention = object({ id: 'low', kind: 'action', metadata: { strategicImportance: 4, urgency: 3, effort: 'small', attentionLoad: 'low', resourceCost: 'low', roi: 4 } })
     const heavy = object({ id: 'heavy', kind: 'action', metadata: { strategicImportance: 2, urgency: 3, effort: 'large', attentionLoad: 'high', resourceCost: 'high', roi: 2 } })
-    expect(confirmedActions([heavy, lowAttention]).map(item => item.id)).toEqual(['low', 'heavy'])
+    expect(confirmedActions([confirmObject(heavy), confirmObject(lowAttention)]).map(item => item.id)).toEqual(['low', 'heavy'])
   })
 
   it('does not treat reminders as fixed calendar items', () => {
@@ -64,7 +69,7 @@ describe('object workflow', () => {
   })
 
   it('preserves object history when confirming and editing', () => {
-    const confirmed = confirmObject(object({ status: 'review' }), 'project')
+    const confirmed = confirmObject(object({ status: 'review', kind: 'project' }))
     const edited = updateObject(confirmed, { ...confirmed, context: 'Carvers' })
     expect(confirmed.status).toBe('confirmed')
     expect(confirmed.kind).toBe('project')

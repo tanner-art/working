@@ -99,79 +99,6 @@ Review: pending
 
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
 
-### TASK-003 - Introduce ProposedAction and Explicit Confirmation
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P0
-Milestone: M1
-
-Depends On:
-- TASK-002
-- TASK-009 (OD-001 must be ratified first)
-
-Goal:
-Implement ProposedAction (D-003): AI-suspected work stays proposed until the confirmation rule from OD-001/TASK-009 is met. Port and adapt the `wip/pre-orchestration` src/objectWorkflow.ts helpers (confirmObject and related history/provenance preservation) onto the new entity model.
-
-Scope:
-- src/domain.ts: ProposedAction shape (per TASK-002's entity split)
-- src/objectWorkflow.ts: confirmation flow per the ratified OD-001 rule
-- preserve recorded interpretation/confidence on confirm and reclassify, per docs/ARCHIVE_SALVAGE_AUDIT.md item 5
-
-Do Not:
-- implement dependency graph or parent/child linking (separate tasks)
-
-Deliverable:
-Working confirm flow producing real Actions only per the ratified rule.
-
-Acceptance Criteria:
-- pnpm check passes
-- no AI-suspected work becomes an Action without the confirmed interaction
-- confirming/reclassifying does not overwrite the original recorded interpretation
-
-Result:
-Commit: pending
-Review: pending
-
----
-
-### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P2
-Milestone: M1
-
-Depends On:
-- TASK-002 (Interpretation becomes a first-class entity this sits behind)
-
-Goal:
-Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
-
-Scope:
-- define an Interpretation-service interface per TASK-002's entity model
-- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
-- port corresponding src/interpreter.test.ts coverage
-
-Do Not:
-- integrate a real AI/provider-backed interpreter (future work, not this task)
-
-Deliverable:
-Interpretation-service interface with the ported deterministic heuristics behind it.
-
-Acceptance Criteria:
-- pnpm check passes
-- existing interpreter regression tests pass against the new interface
-- interface is swappable for a future provider-backed implementation without call-site changes
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
 
 Status: BACKLOG
@@ -245,6 +172,42 @@ Review: pending
 
 ---
 
+### TASK-007 - Rebuild Morning Digest on Commitment/CalendarEvent Split
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M3
+
+Depends On:
+- TASK-002
+
+Goal:
+Port `wip/pre-orchestration` src/morningDigest.ts (fixed-today/upcoming/recommended/needs-review/project-signals buckets, local-calendar-day date matching) onto the split Commitment/CalendarEvent/Reminder-instruction model, and add the M3 delivery mechanism (7 AM digest).
+
+Scope:
+- src/morningDigest.ts: rebuild fixedCommitments-equivalent source without conflating Commitment and Reminder
+- delivery mechanism for the 7 AM digest (per NORTH_STAR.md)
+- port corresponding tests
+
+Do Not:
+- implement Adaptive Plan recalculation (M5)
+
+Deliverable:
+Morning Digest built on the correct entity split, with a delivery mechanism.
+
+Acceptance Criteria:
+- pnpm check passes
+- digest buckets no longer conflate Commitment and Reminder kinds
+- date-matching bug fix (local calendar day) preserved
+
+Result:
+Commit: pending
+Review: pending
+
+---
+
 ### TASK-008 - Reintegrate Salvaged UI onto New Entity Model
 
 Status: BACKLOG
@@ -290,46 +253,90 @@ None.
 
 ## REVIEW
 
-### TASK-007 - Rebuild Morning Digest on Commitment/CalendarEvent Split
+### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
 
 Status: REVIEW
-Owner: Codex A
-Reviewer: Pending independent orchestration review
-Priority: P1
-Milestone: M3
+Owner: Codex B
+Reviewer: Unassigned
+Priority: P2
+Milestone: M1
 
 Depends On:
-- TASK-002
+- TASK-002 (Interpretation becomes a first-class entity this sits behind)
 
 Goal:
-Port `wip/pre-orchestration` src/morningDigest.ts (fixed-today/upcoming/recommended/needs-review/project-signals buckets, local-calendar-day date matching) onto the split Commitment/CalendarEvent/Reminder-instruction model, and add the M3 delivery mechanism (7 AM digest).
+Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
 
 Scope:
-- src/morningDigest.ts: rebuild fixedCommitments-equivalent source without conflating Commitment and Reminder
-- delivery mechanism for the 7 AM digest (per NORTH_STAR.md)
-- port corresponding tests
+- define an Interpretation-service interface per TASK-002's entity model
+- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
+- port corresponding src/interpreter.test.ts coverage
 
 Do Not:
-- implement Adaptive Plan recalculation (M5)
+- integrate a real AI/provider-backed interpreter (future work, not this task)
 
 Deliverable:
-Morning Digest built on the correct entity split, with a delivery mechanism.
+Interpretation-service interface with the ported deterministic heuristics behind it.
 
 Acceptance Criteria:
 - pnpm check passes
-- digest buckets no longer conflate Commitment and Reminder kinds
-- date-matching bug fix (local calendar day) preserved
+- existing interpreter regression tests pass against the new interface
+- interface is swappable for a future provider-backed implementation without call-site changes
 
 Result:
-Commit: intentionally uncommitted per user instruction
-Review: pending independent orchestration review
-Lifecycle: explicitly assigned by user after TASK-002 integration; moved to IN_PROGRESS, then REVIEW on this branch.
-Validation: 64 tests, TypeScript and production build passed (`pnpm check`); 13 focused tests also pass in Los Angeles and Tokyo timezones. No lint configured. `git diff --check` passed. Browser check attempted but sandbox blocked server listening and browser socket creation.
-P1 correction: fixed-event and confirmed-deadline buckets explicitly blocked until dedicated timestamped confirmation provenance exists (D-009). Unverified dates/status do not grant temporal eligibility or hide confirmed obligations. UI and regression tests reflect this limitation; prerequisite follow-up is proposed in docs/TASK-007_DELIVERY.md. Independent rereview pending.
-Implementation and limitations: canonical digest plus opt-in 7 AM in-app notice/catch-up; no closed-app push. Exact backend/product blockers, proposed follow-up and browser review checklist: docs/TASK-007_DELIVERY.md.
+Commit: Uncommitted per user instruction.
+Review: Pending independent orchestration review.
+Lifecycle: Promoted BACKLOG → READY after verifying TASK-002 entities are present on this branch; assigned to Codex B and moved to IN_PROGRESS for GitHub issue #14; moved to REVIEW after implementation and validation.
+Validation: `pnpm check` passed (107 tests, TypeScript check, production Vite build); no lint script configured. `git diff --check` passed and diff inspected. Dependencies installed from the existing temporary offline cache with the frozen lockfile after registry access failed; no dependency/lockfile changes.
+Implementation: asynchronous CaptureRecord → InterpretationProposal service with a single implementation composition point; deterministic archive heuristics; compatibility capture adapter and awaited UI call; regression, substitution, failure, provenance, confirmation and persistence tests.
+Limitations: one proposal per text capture; persistence owns interpretation identity/version/history. The existing schema-v2 compatibility writer remains authoritative for persistence; unsupported separate action summaries or rewritten reminder triggers fail explicitly. Reminder targets/timing remain unresolved in Review; no provider, scheduling, notification or canvas interpretation integration. Drafts remain in memory while interpretation is pending. Browser validation and independent orchestration review remain pending.
+Follow-ups (not implemented; do not block this task): independent browser/review checks; resolve OD-004 before richer reminder semantics; broader canonical writer and durable pending-capture support before expanding the provider contract. GitHub CLI is unauthenticated, so remote issue #14 was not read or changed; the local issue description in `/private/tmp/task004-issue.md` matches this assignment.
+Delivery: left entirely uncommitted per user instruction; no reset, rebase, clean, merge, branch switch, push, or access to another worktree.
 
 ---
 
+### TASK-003 - Introduce ProposedAction and Explicit Confirmation
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Unassigned
+Priority: P0
+Milestone: M1
+
+Depends On:
+- TASK-002
+- TASK-009 (OD-001 must be ratified first)
+
+Goal:
+Implement ProposedAction (D-003): AI-suspected work stays proposed until the confirmation rule from OD-001/TASK-009 is met. Port and adapt the `wip/pre-orchestration` src/objectWorkflow.ts helpers (confirmObject and related history/provenance preservation) onto the new entity model.
+
+Scope:
+- src/domain.ts: ProposedAction shape (per TASK-002's entity split)
+- src/objectWorkflow.ts: confirmation flow per the ratified OD-001 rule
+- preserve recorded interpretation/confidence on confirm and reclassify, per docs/ARCHIVE_SALVAGE_AUDIT.md item 5
+
+Do Not:
+- implement dependency graph or parent/child linking (separate tasks)
+
+Deliverable:
+Working confirm flow producing real Actions only per the ratified rule.
+
+Acceptance Criteria:
+- pnpm check passes
+- no AI-suspected work becomes an Action without the confirmed interaction
+- confirming/reclassifying does not overwrite the original recorded interpretation
+
+Result:
+Commit: Uncommitted per user instruction.
+Review: Pending independent review.
+Validation: `pnpm check` passed (74 tests, TypeScript check, production Vite build); no lint script configured. `git diff --check` passed. Diff inspected; browser smoke testing remains for independent review.
+Implementation: named ProposedAction; exact item/summary/type confirmation gestures with timestamp, history index and interpretation provenance; protected generic editor and eligibility selector; explicit rejection/reversal and preserved history. Free-form capture remains proposed. Existing schema-v2 confirmations remain readable without fabricating new provenance. Tests cover lifecycle/editor bypasses, malformed provenance, reclassification, preserved capture/rationale/confidence, rejection/reversal with unrelated meaning and linked events, and save/reload including delayed first save and retry.
+Limitations: compatibility adapter remains the schema-v2 writer; withdrawal retains previously accepted semantic identities in Review to preserve event references. No external effects are reversed. OD-003 downstream conflict/partial acceptance policy remains open. No direct-create-Action interaction, fixed deadline confirmation, scheduling, notification delivery, dependencies, containment, heuristics, or PWA work added.
+Follow-ups (not implemented, do not block this slice): independent browser/review validation; resolve OD-003 before downstream conflict automation. Canonical status/migration documents contain earlier implementation claims and need a separately assigned documentation refresh outside this allowlist.
+P1 review fix: removed plain-history confirmation eligibility; schema-v1 text stays unconfirmed. Older schema-v2 structured confirmations are validated before projection and carried as item-bound in-memory provenance. Regression coverage includes malicious legacy strings, direct selector bypass, invalid schema-v2 projection, and preserved explicit confirmation. Left uncommitted for orchestration review.
+Lifecycle: assigned IN_PROGRESS after integrated TASK-002 and TASK-009/D-009; moved to REVIEW with owner Codex B. No commit, push, merge, branch change, runner or credential edits.
+
+---
 
 ### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
 
