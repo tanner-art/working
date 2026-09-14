@@ -1,5 +1,7 @@
-import type { AppState, CanvasElement, HistoryEvent, Interpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject } from './domain'
+import type { AppState, CanvasElement, HistoryEvent, LegacyInterpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject, PersistedState } from './domain'
+import { migrateLegacyState, isPersistedState, legacyUiProjection, reconcileLegacyUi } from './migration'
 
+const sessions = new WeakMap<PersistedState, { model: PersistedState; raw: string | null }>()
 const KEY = 'thoughtflow-state-v1'
 const uid = () => crypto.randomUUID()
 const today = new Date().toISOString().slice(0, 10)
@@ -30,15 +32,29 @@ export function loadState(): AppState {
 export function loadStateResult(): { state: AppState; error?: string } {
   try {
     const raw = localStorage.getItem(KEY)
-    if (raw === null) return { state: seed }
+    if (raw === null) {
+      const state = legacyUiProjection(migrateLegacyState(seed))
+      sessions.set(state.model!, { model: structuredClone(state.model!), raw })
+      return { state }
+    }
     const saved = JSON.parse(raw)
-    return isAppState(saved) ? { state: saved } : { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' }
+    const model = isPersistedState(saved) ? saved : migrateLegacyState(saved)
+    const state = legacyUiProjection(model)
+    sessions.set(state.model!, { model: structuredClone(state.model!), raw })
+    return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
 export function saveState(state: AppState): string | undefined {
   if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
   try {
-    localStorage.setItem(KEY, JSON.stringify(state))
+    const session = state.model && sessions.get(state.model)
+    const raw = localStorage.getItem(KEY)
+    // Never replace unreadable data or a concurrent tab's changes with a stale snapshot.
+    if (session ? raw !== session.raw : raw !== null) return 'Stored data changed or was not loaded by this session. Reload before saving; stored data has been left untouched.'
+    const model = reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+    const nextRaw = JSON.stringify(model)
+    localStorage.setItem(KEY, nextRaw)
+    if (state.model) sessions.set(state.model, { model, raw: nextRaw })
     return undefined
   } catch {
     return 'Changes are only in this open tab. Saving failed; keep this tab open and retry or download a backup.'
@@ -54,7 +70,7 @@ export function isAppState(value: unknown): value is AppState {
 }
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()
-  return { id: uid(), createdAt: now, context: undefined, relationships: [], history: [{ at: now, event: 'Captured' }], status: partial.confidence < .8 ? 'review' : 'confirmed', metadata: {}, ...partial }
+  return { id: uid(), createdAt: now, context: undefined, relationships: [], history: [{ at: now, event: 'Captured' }], status: partial.confidence < .8 || ['action', 'commitment', 'reminder'].includes(partial.kind) ? 'review' : 'confirmed', metadata: {}, ...partial }
 }
 export function newCanvasElement(type: CanvasElement['type'], x: number, y: number): CanvasElement {
   return { id: uid(), type, x, y, width: type === 'container' ? 320 : 190, height: type === 'container' ? 210 : undefined, text: type === 'container' ? 'Untitled group' : 'New thought' }
@@ -81,9 +97,9 @@ function isThoughtObject(value: unknown): value is ThoughtObject {
     (item.context === undefined || typeof item.context === 'string')
 }
 
-function isInterpretation(value: unknown): value is Interpretation {
+function isInterpretation(value: unknown): value is LegacyInterpretation {
   if (!value || typeof value !== 'object') return false
-  const item = value as Partial<Interpretation>
+  const item = value as Partial<LegacyInterpretation>
   return typeof item.summary === 'string' &&
     objectKinds.includes(item.suggestedKind as ObjectKind) &&
     typeof item.rationale === 'string' &&
@@ -124,10 +140,10 @@ function isCanvasElement(value: unknown): value is CanvasElement {
   const item = value as Partial<CanvasElement>
   return typeof item.id === 'string' &&
     canvasTypes.includes(item.type as CanvasElement['type']) &&
-    typeof item.x === 'number' &&
-    typeof item.y === 'number' &&
-    (item.width === undefined || typeof item.width === 'number') &&
-    (item.height === undefined || typeof item.height === 'number') &&
+    Number.isFinite(item.x) &&
+    Number.isFinite(item.y) &&
+    (item.width === undefined || Number.isFinite(item.width)) &&
+    (item.height === undefined || Number.isFinite(item.height)) &&
     (item.text === undefined || typeof item.text === 'string') &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&
