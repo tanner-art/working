@@ -50,7 +50,7 @@ describe('object workflow', () => {
   it('ranks confirmed actions by independent priority dimensions', () => {
     const lowAttention = object({ id: 'low', kind: 'action', metadata: { strategicImportance: 4, urgency: 3, effort: 'small', attentionLoad: 'low', resourceCost: 'low', roi: 4 } })
     const heavy = object({ id: 'heavy', kind: 'action', metadata: { strategicImportance: 2, urgency: 3, effort: 'large', attentionLoad: 'high', resourceCost: 'high', roi: 2 } })
-    expect(confirmedActions([heavy, lowAttention]).map(item => item.id)).toEqual(['low', 'heavy'])
+    expect(confirmedActions([confirmObject(heavy), confirmObject(lowAttention)]).map(item => item.id)).toEqual(['low', 'heavy'])
   })
 
   it('does not treat reminders as fixed calendar items', () => {
@@ -64,7 +64,7 @@ describe('object workflow', () => {
   })
 
   it('preserves object history when confirming and editing', () => {
-    const confirmed = confirmObject(object({ status: 'review' }), 'project')
+    const confirmed = confirmObject(object({ status: 'review', kind: 'project' }))
     const edited = updateObject(confirmed, { ...confirmed, context: 'Carvers' })
     expect(confirmed.status).toBe('confirmed')
     expect(confirmed.kind).toBe('project')
