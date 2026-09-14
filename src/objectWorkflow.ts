@@ -1,4 +1,5 @@
-import type { CanvasElement, ObjectKind, ObjectStatus, ThoughtObject } from './domain'
+import type { CanvasElement, ObjectKind, ObjectStatus, SemanticRelationship, ThoughtObject } from './domain'
+import { unresolvedDependencies } from './dependencies'
 import { hasConfirmation } from './migration'
 
 export { hasConfirmation } from './migration'
@@ -6,9 +7,11 @@ export { hasConfirmation } from './migration'
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
-export const confirmedActions = (objects: ThoughtObject[]) =>
+/** Confirmed and eligible: an unresolved `depends_on` link keeps a confirmed Action out of the queue without hiding it in a score. */
+export const confirmedActions = (objects: ThoughtObject[], relationships: SemanticRelationship[] = []) =>
   activeObjects(objects)
-    .filter(item => item.kind === 'action' && item.status === 'confirmed' && hasConfirmation(item))
+    .filter(item => item.kind === 'action' && item.status === 'confirmed' && hasConfirmation(item) &&
+      unresolvedDependencies(item, relationships, objects).length === 0)
     .sort((left, right) => focusScore(right) - focusScore(left))
 
 /** Legacy calendar surface cannot project CalendarEvents yet. An unscheduled promise is not fixed time. */
