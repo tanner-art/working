@@ -49,4 +49,14 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     expect(saveState({ objects: [] } as unknown as AppState)).toContain('format is invalid')
     expect(setItem).not.toHaveBeenCalled()
   })
+
+  it('fails loudly for invalid connection styling without replacing stored data', () => {
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem })
+    const invalid: AppState = { objects: [], canvas: [{ id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'a', toId: 'b', connectionPattern: 'wavy' as 'solid' }] }
+    expect(saveState(invalid)).toContain('format is invalid')
+    const misplaced: AppState = { objects: [], canvas: [{ id: 'block', type: 'text', x: 0, y: 0, connectionWeight: 'bold' }] }
+    expect(saveState(misplaced)).toContain('format is invalid')
+    expect(setItem).not.toHaveBeenCalled()
+  })
 })

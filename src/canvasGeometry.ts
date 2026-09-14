@@ -1,6 +1,9 @@
 import type { CanvasElement } from './domain'
 
 export type CanvasShape = Exclude<CanvasElement['type'], 'arrow'>
+export type ConnectionPath = NonNullable<CanvasElement['connectionPath']>
+export type ConnectionPattern = NonNullable<CanvasElement['connectionPattern']>
+export type ConnectionWeight = NonNullable<CanvasElement['connectionWeight']>
 export const CANVAS_SIZE = { minWidth: 120, minHeight: 100, maxWidth: 1200, maxHeight: 900 } as const
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)))
 
@@ -27,4 +30,25 @@ export function convertCanvasNode(elements: CanvasElement[], id: string, type: C
 export function canvasConnector(from: CanvasElement, to: CanvasElement) {
   const a = canvasSize(from), b = canvasSize(to)
   return { x1: from.x + a.width / 2, y1: from.y + a.height, x2: to.x + b.width / 2, y2: to.y }
+}
+
+export function canvasConnectorPath(from: CanvasElement, to: CanvasElement, path: ConnectionPath = 'straight') {
+  const { x1, y1, x2, y2 } = canvasConnector(from, to)
+  if (path === 'straight') return `M ${x1} ${y1} L ${x2} ${y2}`
+  const bend = Math.max(48, Math.abs(y2 - y1) * .45)
+  return `M ${x1} ${y1} C ${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2}`
+}
+
+export function connectionAppearance(connection: CanvasElement) {
+  const weight = connection.connectionWeight ?? 'regular'
+  const pattern = connection.connectionPattern ?? 'solid'
+  return {
+    strokeWidth: weight === 'light' ? 1 : weight === 'bold' ? 5 : 2,
+    strokeDasharray: pattern === 'dashed' ? '12 8' : pattern === 'dotted' ? '2 7' : undefined,
+    strokeLinecap: pattern === 'dotted' ? 'round' as const : 'butt' as const,
+  }
+}
+
+export function updateCanvasConnection(elements: CanvasElement[], id: string, patch: Pick<CanvasElement, 'connectionPath' | 'connectionPattern' | 'connectionWeight'>) {
+  return elements.map(element => element.id === id && element.type === 'arrow' ? { ...element, ...patch } : element)
 }
