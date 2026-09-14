@@ -135,42 +135,6 @@ Review: pending
 
 ---
 
-### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P1
-Milestone: M2
-
-Depends On:
-- TASK-002
-- TASK-003 (Relationship type upgrade with scope/provenance is bundled with the entity work)
-
-Goal:
-Port `wip/pre-orchestration` src/dependencies.ts (unresolvedDependencies, cycle-safe dependencyCandidates) onto the upgraded Relationship type (explicit endpoints, scope, provenance per docs/ARCHITECTURE.md).
-
-Scope:
-- src/dependencies.ts: adapt to the new Relationship shape
-- src/objectWorkflow.ts: dependency-aware confirmedActions filtering
-- port corresponding tests
-
-Do Not:
-- change dependency semantics beyond what the Relationship upgrade requires
-
-Deliverable:
-Working dependency graph (cycle-safe, completion-aware) on the new Relationship model.
-
-Acceptance Criteria:
-- pnpm check passes
-- cycle detection and completion-based eligibility behave the same as in docs/ARCHIVE_SALVAGE_AUDIT.md item 2
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-006 - Port Parent/Child Project Linking onto Upgraded Relationship Model
 
 Status: BACKLOG
@@ -289,6 +253,48 @@ None.
 
 
 ## REVIEW
+
+### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
+
+Status: REVIEW
+Owner: Claude
+Reviewer: Unassigned
+Priority: P1
+Milestone: M2
+
+Depends On:
+- TASK-002
+- TASK-003 (Relationship type upgrade with scope/provenance is bundled with the entity work)
+
+Goal:
+Port `wip/pre-orchestration` src/dependencies.ts (unresolvedDependencies, cycle-safe dependencyCandidates) onto the upgraded Relationship type (explicit endpoints, scope, provenance per docs/ARCHITECTURE.md).
+
+Scope:
+- src/dependencies.ts: adapt to the new Relationship shape
+- src/objectWorkflow.ts: dependency-aware confirmedActions filtering
+- port corresponding tests
+
+Do Not:
+- change dependency semantics beyond what the Relationship upgrade requires
+
+Deliverable:
+Working dependency graph (cycle-safe, completion-aware) on the new Relationship model.
+
+Acceptance Criteria:
+- pnpm check passes
+- cycle detection and completion-based eligibility behave the same as in docs/ARCHIVE_SALVAGE_AUDIT.md item 2
+
+Result:
+Commit: Uncommitted per orchestration instruction (left for independent review).
+Review: Pending independent review.
+Validation: `pnpm check` passed (91 tests, including 17 new in `src/dependencies.test.ts`; TypeScript check; production Vite build). No lint script is configured. `git diff --check` passed. Browser smoke testing not performed (no new UI surface added; see Limitations).
+Implementation: New `src/dependencies.ts` ports `unresolvedDependencies`/`dependencyCandidates` from `wip/pre-orchestration` onto the canonical `SemanticRelationship` shape (`docs/ARCHITECTURE.md`'s explicit endpoints/scope/provenance), reading `sourceId`/`targetId` instead of the old implicit-source `{targetId, type}` shape. The cycle-safe BFS walk and the "target complete" resolution check are otherwise unchanged from the archived algorithm (docs/ARCHIVE_SALVAGE_AUDIT.md item 2). `objectWorkflow.ts`'s `confirmedActions` gained an optional `relationships: SemanticRelationship[] = []` parameter and now also requires `unresolvedDependencies(...).length === 0`, layered onto (not replacing) the existing `hasConfirmation` gate from TASK-003/D-009 — an action still needs both an explicit confirmation gesture and a resolved dependency graph to be eligible. The default empty-array parameter keeps every pre-existing single-argument call site (all of TASK-003's `migration.test.ts` suite) compiling and behaviorally unchanged. Wired `src/App.tsx`'s `Today` view to pass `state.model?.relationships ?? []` through to `confirmedActions` so the canonical relationship data actually reaches the eligibility check at runtime; no dependency-editing UI was added (that is TASK-008's "dependency editor in the object drawer").
+Tests: `src/dependencies.test.ts` (17 tests) covers: unresolved-dependency detection and resolution-on-completion, a dependency on a missing/removed target staying unresolved rather than silently satisfied, non-`depends_on` relationship types being ignored, relationship direction (an incoming `depends_on` edge is not mistaken for the object's own outgoing dependency), direct and transitive/indirect cycle exclusion, self-dependency exclusion, already-linked-target exclusion, archived/non-work-kind exclusion, an unrelated incoming edge not falsely blocking a safe candidate, and `confirmedActions` interaction cases (unresolved dependency blocks an otherwise-confirmed action; resolving the dependency admits it; an object with matching shape but no explicit confirmation gesture is never admitted regardless of dependencies; omitting the `relationships` argument defaults to no constraints without throwing).
+Limitations: No dependency-editing UI was added; `depends_on` relationships can currently only be constructed programmatically (e.g., via a future TASK-008 editor or direct state), not through the running app. `dependencyCandidates` is implemented and tested but not yet called from any UI (also TASK-008 scope). Parent/child project linking (TASK-006) was not touched. Browser smoke testing was not performed since no new interactive surface was added; `pnpm check` (unit tests + typecheck + build) is the validation performed.
+Follow-ups (not implemented, do not block this slice): TASK-008 should wire a dependency editor (add/remove `depends_on` relationships from the object drawer) and a blocked-vs-ready indicator using `unresolvedDependencies`/`dependencyCandidates`, per docs/ARCHIVE_SALVAGE_AUDIT.md item 4. TASK-006 remains separately scoped for parent/child (`belongs_to`) linking on the same `SemanticRelationship` model.
+Lifecycle: Promoted BACKLOG -> READY -> IN_PROGRESS -> REVIEW on this branch/worktree; owner set to Claude. No commit, push, merge, branch change, or credential edits.
+
+---
 
 ### TASK-003 - Introduce ProposedAction and Explicit Confirmation
 
