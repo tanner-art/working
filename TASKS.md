@@ -99,42 +99,6 @@ Review: pending
 
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
 
-### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
-
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P2
-Milestone: M1
-
-Depends On:
-- TASK-002 (Interpretation becomes a first-class entity this sits behind)
-
-Goal:
-Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
-
-Scope:
-- define an Interpretation-service interface per TASK-002's entity model
-- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
-- port corresponding src/interpreter.test.ts coverage
-
-Do Not:
-- integrate a real AI/provider-backed interpreter (future work, not this task)
-
-Deliverable:
-Interpretation-service interface with the ported deterministic heuristics behind it.
-
-Acceptance Criteria:
-- pnpm check passes
-- existing interpreter regression tests pass against the new interface
-- interface is swappable for a future provider-backed implementation without call-site changes
-
-Result:
-Commit: pending
-Review: pending
-
----
-
 ### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
 
 Status: BACKLOG
@@ -287,8 +251,49 @@ Review: pending
 
 None.
 
-
 ## REVIEW
+
+### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Unassigned
+Priority: P2
+Milestone: M1
+
+Depends On:
+- TASK-002 (Interpretation becomes a first-class entity this sits behind)
+
+Goal:
+Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
+
+Scope:
+- define an Interpretation-service interface per TASK-002's entity model
+- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
+- port corresponding src/interpreter.test.ts coverage
+
+Do Not:
+- integrate a real AI/provider-backed interpreter (future work, not this task)
+
+Deliverable:
+Interpretation-service interface with the ported deterministic heuristics behind it.
+
+Acceptance Criteria:
+- pnpm check passes
+- existing interpreter regression tests pass against the new interface
+- interface is swappable for a future provider-backed implementation without call-site changes
+
+Result:
+Commit: Uncommitted per user instruction.
+Review: Pending independent orchestration review.
+Lifecycle: Promoted BACKLOG → READY after verifying TASK-002 entities are present on this branch; assigned to Codex B and moved to IN_PROGRESS for GitHub issue #14; moved to REVIEW after implementation and validation.
+Validation: `pnpm check` passed (107 tests, TypeScript check, production Vite build); no lint script configured. `git diff --check` passed and diff inspected. Dependencies installed from the existing temporary offline cache with the frozen lockfile after registry access failed; no dependency/lockfile changes.
+Implementation: asynchronous CaptureRecord → InterpretationProposal service with a single implementation composition point; deterministic archive heuristics; compatibility capture adapter and awaited UI call; regression, substitution, failure, provenance, confirmation and persistence tests.
+Limitations: one proposal per text capture; persistence owns interpretation identity/version/history. The existing schema-v2 compatibility writer remains authoritative for persistence; unsupported separate action summaries or rewritten reminder triggers fail explicitly. Reminder targets/timing remain unresolved in Review; no provider, scheduling, notification or canvas interpretation integration. Drafts remain in memory while interpretation is pending. Browser validation and independent orchestration review remain pending.
+Follow-ups (not implemented; do not block this task): independent browser/review checks; resolve OD-004 before richer reminder semantics; broader canonical writer and durable pending-capture support before expanding the provider contract. GitHub CLI is unauthenticated, so remote issue #14 was not read or changed; the local issue description in `/private/tmp/task004-issue.md` matches this assignment.
+Delivery: left entirely uncommitted per user instruction; no reset, rebase, clean, merge, branch switch, push, or access to another worktree.
+
+---
 
 ### TASK-003 - Introduce ProposedAction and Explicit Confirmation
 

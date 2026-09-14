@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
-import { interpret } from './interpreter'
+import { createInterpretedObject } from './captureInterpretation'
 import { canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, newCanvasElement, saveState } from './store'
 import type { CanvasHistory } from './canvasHistory'
@@ -24,6 +24,8 @@ export function App() {
   const [state, setState] = useState<AppState>(initial.state)
   const [saveError, setSaveError] = useState<string | undefined>()
   const [view, setView] = useState<View>('today')
+  const capturePending = useRef(false)
+  const [captureError, setCaptureError] = useState<string | undefined>()
   const [draft, setDraft] = useState('')
   const [context, setContext] = useState('')
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
@@ -77,14 +79,23 @@ export function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
   const reviewCount = state.objects.filter(item => item.status === 'review').length
-  const capture = () => {
+  const capture = async () => {
     const content = draft.trim()
-    if (!content) return
-    const result = interpret(content)
-    const item = makeObject({ kind: result.kind, originalContent: content, source: 'text', confidence: result.confidence, interpretation: result.interpretation })
-    item.context = context.trim() || undefined
-    update(current => ({ ...current, objects: [item, ...current.objects] }))
-    setDraft(''); setContext(''); setView(item.status === 'review' ? 'review' : 'today')
+    if (!content || capturePending.current) return
+    capturePending.current = true
+    setCaptureError(undefined)
+    try {
+      const item = await createInterpretedObject(content, context.trim() || undefined)
+      update(current => ({ ...current, objects: [item, ...current.objects] }))
+      // Preserve any new typing while an asynchronous interpreter is running.
+      setDraft(current => current === draft ? '' : current)
+      setContext(current => current === context ? '' : current)
+      setView('review')
+    } catch {
+      setCaptureError('Unable to interpret this thought. Your draft is preserved; retry capturing it.')
+    } finally {
+      capturePending.current = false
+    }
   }
   const revise = (id: string, kind: ObjectKind) => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? confirmObject(item, kind) : item) }))
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
@@ -102,6 +113,7 @@ export function App() {
   return <main className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">D</span><span>Personal space</span></div></aside>
     <section className="content">
+      {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       {view === 'today' && <Today objects={state.objects} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}

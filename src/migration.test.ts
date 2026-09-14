@@ -4,8 +4,8 @@ import * as migrationApi from './migration'
 import * as workflowApi from './objectWorkflow'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import { confirmObject, confirmedActions, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
-import { loadStateResult, makeObject, saveState } from './store'
-import { interpret } from './interpreter'
+import { loadStateResult, saveState } from './store'
+import { createInterpretedObject } from './captureInterpretation'
 
 const key = 'thoughtflow-state-v1'
 const thought = (patch: Partial<ThoughtObject> = {}): ThoughtObject => ({
@@ -181,11 +181,10 @@ describe('TASK-002 migration', () => {
     expect(JSON.parse(db.raw()!).interpretations).toHaveLength(3)
   })
 
-  it('persists newly captured data in the real schema and leaves inferred work proposed', () => {
+  it('persists newly captured data in the real schema and leaves inferred work proposed', async () => {
     const db = storage(null)
     const state = loadStateResult().state
-    const result = interpret('Send the draft')
-    state.objects.push(makeObject({ ...result, originalContent: 'Send the draft', source: 'text' }))
+    state.objects.push(await createInterpretedObject('Send the draft'))
     expect(saveState(state)).toBeUndefined()
     const saved = JSON.parse(db.raw()!)
     expect(saved.schemaVersion).toBe(2)
@@ -398,11 +397,10 @@ describe('TASK-003 dedicated confirmation', () => {
     expect(view.objects[0].history.map(h => h.reviewDecision)).toContain('reversed')
   })
 
-  it('records a capture reviewed before its first successful save as proposal then confirmed meaning', () => {
+  it('records a capture reviewed before its first successful save as proposal then confirmed meaning', async () => {
     storage(null)
     const view = loadStateResult().state
-    const result = interpret('Send the draft')
-    const captured = makeObject({ ...result, originalContent: 'Send the draft', source: 'text' })
+    const captured = await createInterpretedObject('Send the draft')
     view.objects.push(confirmObject(captured))
     expect(saveState(view)).toBeUndefined()
     const loaded = loadStateResult()

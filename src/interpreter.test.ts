@@ -1,19 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import type { ObjectKind, ThoughtObject } from './domain'
-import { interpret } from './interpreter'
+import { interpretationService } from './interpretationService'
+
 import { activeObjects, canvasObjectDraft, confirmedActions, fixedCommitments, confirmObject, setObjectKind, updateObject } from './objectWorkflow'
 import { isAppState } from './store'
 
+const interpret = (originalContent: string) => interpretationService.interpret({
+  id: 'capture:test', source: 'text', createdAt: '2026-09-14T00:00:00.000Z', originalContent, evidence: 'text-only',
+})
+
 describe('interpret', () => {
-  it('recognizes an explicit action with high confidence', () => {
-    const result = interpret('Give marketing guys access')
-    expect(result.kind).toBe('action')
+  it('recognizes an explicit action with high confidence', async () => {
+    const result = await interpret('Give marketing guys access')
+    expect(result.proposedKind).toBe('action')
     expect(result.confidence).toBeGreaterThanOrEqual(.8)
   })
 
-  it('routes ambiguous topic captures through review confidence', () => {
-    const result = interpret('AI sales training')
-    expect(result.kind).toBe('idea')
+  it('routes ambiguous topic captures through review confidence', async () => {
+    const result = await interpret('AI sales training')
+    expect(result.proposedKind).toBe('idea')
     expect(result.confidence).toBeLessThan(.8)
   })
 })
