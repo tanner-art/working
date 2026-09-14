@@ -23,8 +23,11 @@ export function resizeCanvasNode(elements: CanvasElement[], id: string, width: n
   })
 }
 export function convertCanvasNode(elements: CanvasElement[], id: string, type: CanvasShape): CanvasElement[] {
-  return elements.map(node => node.id === id && node.type !== 'arrow' && node.type !== type
-    ? { ...node, ...canvasSize(node), type } : node)
+  return elements.map(node => {
+    if (node.groupId === id && type === 'text') return { ...node, groupId: undefined }
+    return node.id === id && node.type !== 'arrow' && node.type !== type
+      ? { ...node, ...canvasSize(node), type, groupId: undefined } : node
+  })
 }
 // Fixed bottom/top center ports follow live geometry without changing endpoint IDs.
 export function canvasConnector(from: CanvasElement, to: CanvasElement) {

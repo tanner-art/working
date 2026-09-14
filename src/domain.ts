@@ -59,6 +59,8 @@ export interface CanvasElement {
   text?: string
   fromId?: string
   toId?: string
+  /** Optional canvas-only containment. Only text blocks may belong to a group. */
+  groupId?: string
   connectionPath?: 'straight' | 'curved'
   connectionPattern?: 'solid' | 'dashed' | 'dotted'
   connectionWeight?: 'light' | 'regular' | 'bold'
