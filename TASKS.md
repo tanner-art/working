@@ -590,7 +590,7 @@ Review: pending
 
 Status: REVIEW
 Owner: Primary orchestrator
-Reviewer: Independent review required
+Reviewer: Independent runner_review — findings fixed; no remaining review blockers
 Priority: P0
 Milestone: M0
 Depends On: canonical main inventory and preservation (verified 2026-09-13)
@@ -598,7 +598,7 @@ Depends On: canonical main inventory and preservation (verified 2026-09-13)
 Scope: version scripts/runner; isolated fresh task worktrees; separate Codex A/B and Claude auth; authorized GitHub issue queue; launchd; dry-run; validation, commit, push, draft PR; failure records and explicit retry. Reconcile stale task/status docs and record takeover evidence. No main merges or product feature work.
 
 Acceptance: test queue guards, verify all headless clients and launchd PATH, demonstrate TASK-016 issue → agent → tests → commit → push → draft PR, retain all legacy work.
-Commit: 94680e5 (follow-up hardening commit pending)
+Commit: 94680e5; lifecycle hardening and smoke proof: 16c90cf
 Validation: all three headless clients passed; controlled TASK-016 cycle succeeded. launchd installed but macOS Documents access blocks execution; user permission pending.
 
 ### TASK-016 - Autonomous runner smoke note
