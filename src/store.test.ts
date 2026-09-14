@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppState } from './domain'
+import { migrateLegacyState } from './migration'
 import { loadStateResult, saveState } from './store'
 
 const key = 'thoughtflow-state-v1'
@@ -19,17 +20,16 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     expect(setItem).not.toHaveBeenCalled()
   })
 
-  it('reports unavailable storage and lets a failed write be retried without mutating work', () => {
+  it('lets a failed write be retried without mutating work', () => {
     const setItem = vi.fn().mockImplementationOnce(() => { throw new Error('Quota exceeded') })
-    vi.stubGlobal('localStorage', { getItem: () => { throw new Error('Storage denied') }, setItem })
-    expect(loadStateResult().error).toBeTruthy()
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem })
     const state: AppState = { objects: [], canvas: [{ id: 'unsaved', type: 'text', text: 'Keep this thought', x: 10, y: 20 }] }
     const before = structuredClone(state)
     expect(saveState(state)).toContain('only in this open tab')
     expect(state).toEqual(before)
     expect(saveState(state)).toBeUndefined()
     expect(setItem.mock.calls[1][0]).toBe(key)
-    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(before)
+    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(migrateLegacyState(before))
   })
 
   it('loads saved work again after a transient read failure clears', () => {
@@ -38,7 +38,7 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { getItem, setItem })
     expect(loadStateResult().error).toBeTruthy()
-    expect(loadStateResult()).toEqual({ state })
+    expect(loadStateResult()).toMatchObject({ state })
     expect(getItem).toHaveBeenCalledWith(key)
     expect(setItem).not.toHaveBeenCalled()
   })

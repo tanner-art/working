@@ -1,7 +1,7 @@
-import type { Interpretation, ObjectKind } from './domain'
+import type { LegacyInterpretation, ObjectKind } from './domain'
 
 const lower = (value: string) => value.toLowerCase()
-export function interpret(content: string): { kind: ObjectKind; confidence: number; interpretation: Interpretation } {
+export function interpret(content: string): { kind: ObjectKind; confidence: number; interpretation: LegacyInterpretation } {
   const value = lower(content)
   const date = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{1,2}\/\d{1,2})\b/.test(value)
   let kind: ObjectKind = 'idea'; let confidence = .66; let rationale = 'This reads like a possibility to explore.'

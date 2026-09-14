@@ -53,10 +53,14 @@ describe('object workflow', () => {
     expect(confirmedActions([heavy, lowAttention]).map(item => item.id)).toEqual(['low', 'heavy'])
   })
 
-  it('only treats confirmed reminders and commitments as fixed calendar items', () => {
+  it('does not treat reminders as fixed calendar items', () => {
     const reminder = object({ id: 'reminder', kind: 'reminder' })
     const uncertain = object({ id: 'uncertain', kind: 'commitment', status: 'review' })
-    expect(fixedCommitments([reminder, uncertain]).map(item => item.id)).toEqual(['reminder'])
+    expect(fixedCommitments([reminder, uncertain]).map(item => item.id)).toEqual([])
+  })
+
+  it('does not place unscheduled commitments in the legacy fixed calendar', () => {
+    expect(fixedCommitments([object({ kind: 'commitment', status: 'confirmed' })])).toEqual([])
   })
 
   it('preserves object history when confirming and editing', () => {
@@ -73,13 +77,14 @@ describe('object workflow', () => {
     const changed = setObjectKind(original, 'project')
     expect(changed.originalContent).toBe('AI sales training')
     expect(changed.kind).toBe('project')
-    expect(changed.interpretation.suggestedKind).toBe('project')
+    expect(changed.interpretation).toEqual(original.interpretation)
+    expect(changed.confidence).toBe(original.confidence)
     expect(changed.history.at(-1)?.event).toContain('Changed type')
   })
 
   it('creates a reviewable semantic draft from canvas text without changing the canvas', () => {
-    const draft = canvasObjectDraft({ id: 'node', type: 'text', x: 10, y: 20, text: 'AI sales training' })
-    expect(draft).toMatchObject({ kind: 'idea', originalContent: 'AI sales training', source: 'canvas', confidence: .72 })
+    const draft = canvasObjectDraft({ id: 'node', type: 'text', x: 10, y: 20, text: '  AI sales training\n' })
+    expect(draft).toMatchObject({ kind: 'idea', originalContent: '  AI sales training\n', source: 'canvas', confidence: .72 })
     expect(draft?.interpretation.rationale).toContain('Captured from canvas')
   })
 

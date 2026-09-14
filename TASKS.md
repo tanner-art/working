@@ -24,43 +24,6 @@ Only READY tasks may be newly assigned.
 
 ## READY
 
-### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
-
-Status: READY
-Owner: Unassigned
-Reviewer: Unassigned
-Priority: P0
-Milestone: M1
-
-Depends On:
-- None
-
-Goal:
-Implement the entity boundaries in docs/ARCHITECTURE.md: separate immutable CaptureRecord, versioned Interpretation, and Semantic Object; replace Reminder as a first-class ObjectKind with an attached reminder instruction (D-004); split Commitment from CalendarEvent (D-005).
-
-Scope:
-- redesign src/domain.ts around CaptureRecord, Interpretation, Semantic Object, Commitment, CalendarEvent, Reminder instruction
-- define a migration/compat path for existing localStorage ThoughtObject data
-- update src/store.ts validation for the new shapes only as required by the schema change
-
-Do Not:
-- change persistence backend (localStorage stays)
-- implement Adaptive Plan, ProposedAction confirmation flow, or UI (separate tasks)
-- resolve OD-001, OD-003, OD-007 (raise them, do not silently decide them)
-
-Deliverable:
-Updated src/domain.ts and a documented migration note for existing saved state.
-
-Acceptance Criteria:
-- pnpm check passes
-- no data loss path for existing localStorage state (migrate or clearly fail loud, per D-001)
-- docs/ARCHIVE_SALVAGE_AUDIT.md item 5 concerns addressed (Reminder-as-kind, ThoughtObject fusion)
-
-Result:
-Commit: pending
-Review: pending
-
----
 
 ### TASK-010 - Wire Canvas Undo/Redo and Decide OD-002 Revision Persistence
 
@@ -363,7 +326,47 @@ None.
 
 ## REVIEW
 
-None.
+### TASK-002 - Split ThoughtObject into CaptureRecord / Interpretation / Semantic Object
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Independent Codex review (`review_task002`)
+Priority: P0
+Milestone: M1
+
+Depends On:
+- None
+
+Goal:
+Implement the entity boundaries in docs/ARCHITECTURE.md: separate immutable CaptureRecord, versioned Interpretation, and Semantic Object; replace Reminder as a first-class ObjectKind with an attached reminder instruction (D-004); split Commitment from CalendarEvent (D-005).
+
+Scope:
+- redesign src/domain.ts around CaptureRecord, Interpretation, Semantic Object, Commitment, CalendarEvent, Reminder instruction
+- define a migration/compat path for existing localStorage ThoughtObject data
+- update src/store.ts validation for the new shapes only as required by the schema change
+
+Do Not:
+- change persistence backend (localStorage stays)
+- implement Adaptive Plan, ProposedAction confirmation flow, or UI (separate tasks)
+- resolve OD-001, OD-003, OD-007 (raise them, do not silently decide them)
+
+Deliverable:
+Updated src/domain.ts and a documented migration note for existing saved state.
+
+Acceptance Criteria:
+- pnpm check passes
+- no data loss path for existing localStorage state (migrate or clearly fail loud, per D-001)
+- docs/ARCHIVE_SALVAGE_AUDIT.md item 5 concerns addressed (Reminder-as-kind, ThoughtObject fusion)
+
+Result:
+Commit: pending orchestrator
+Review: Approved after changes requested; no remaining blocking findings.
+Validation: `pnpm check` passed (39 tests, TypeScript, Vite build); no lint script configured. `git diff --check` passed. Browser checks not performed.
+Implementation: persisted schema v2, conservative legacy migration, versioned evidence, reminder attachment and separate CalendarEvents; unchanged App.tsx/canvas contract. See docs/MIGRATION.md for migration rules and limitations.
+Lifecycle: Codex B recorded IN_PROGRESS before implementation, then REVIEW with commit pending orchestrator.
+Requested changes: closed Complete/Archive/generic-status compatibility bypasses for unresolved items, preserved terminal proposal evidence in Review, added actual helper-chain regression coverage, and removed the TASK-004 reminder heuristic. See docs/MIGRATION.md for retained scope and deferred behavior. Left uncommitted for independent rereview.
+
+---
 
 ## CHANGES_REQUESTED
 

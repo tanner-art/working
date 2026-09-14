@@ -8,10 +8,8 @@ export const confirmedActions = (objects: ThoughtObject[]) =>
     .filter(item => item.kind === 'action' && item.status === 'confirmed')
     .sort((left, right) => focusScore(right) - focusScore(left))
 
-export const fixedCommitments = (objects: ThoughtObject[]) =>
-  activeObjects(objects).filter(item =>
-    (item.kind === 'commitment' || item.kind === 'reminder') && item.status === 'confirmed'
-  )
+/** Legacy calendar surface cannot project CalendarEvents yet. An unscheduled promise is not fixed time. */
+export const fixedCommitments = (_objects: ThoughtObject[]): ThoughtObject[] => []
 
 export const recentObjects = (objects: ThoughtObject[], limit = 6) =>
   activeObjects(objects)
@@ -20,25 +18,32 @@ export const recentObjects = (objects: ThoughtObject[], limit = 6) =>
     .slice(0, limit)
 
 export function confirmObject(object: ThoughtObject, kind: ObjectKind = object.kind): ThoughtObject {
-  return withHistory({ ...object, kind, status: 'confirmed', confidence: 1 }, `Confirmed as ${kind}`)
+  return withHistory({ ...object, kind, status: 'confirmed' }, `Confirmed as ${kind}`)
 }
 
 export function updateObject(original: ThoughtObject, draft: ThoughtObject): ThoughtObject {
-  const changes = describeChanges(original, draft)
-  return withHistory(draft, changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
+  const status = draft.kind !== original.kind ? 'review' : compatibleStatus(original, draft.status)
+  const changes = describeChanges(original, { ...draft, status })
+  return withHistory({ ...draft, originalContent: original.originalContent, interpretation: original.interpretation, confidence: original.confidence, status }, changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
 }
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
-  return withHistory({ ...object, status }, `Marked ${status}`)
+  const safeStatus = compatibleStatus(object, status)
+  return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` : `Kept in review; ${status} requires confirmation`)
+}
+
+/** Generic legacy edits cannot release unresolved meaning; confirmObject is the dedicated gesture. */
+function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
+  return object.status === 'review' || object.status === 'inbox' ? 'review' : status
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
-  return withHistory({ ...object, kind, interpretation: { ...object.interpretation, suggestedKind: kind } }, `Changed type to ${kind}`)
+  return withHistory({ ...object, kind, status: 'review' }, `Changed type to ${kind}`)
 }
 
 export function canvasObjectDraft(element: CanvasElement) {
-  const originalContent = element.text?.trim()
-  if (!originalContent || element.type === 'arrow') return null
+  const originalContent = element.text
+  if (!originalContent?.trim() || element.type === 'arrow') return null
   return {
     kind: 'idea' as ObjectKind,
     originalContent,
