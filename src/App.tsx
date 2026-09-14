@@ -1,3 +1,5 @@
+import { CANVAS_SIZE, canvasSize, canvasConnector, resizeCanvasNode, convertCanvasNode, type CanvasShape } from './canvasGeometry'
+import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
 import { useEffect, useRef, useState } from 'react'
@@ -120,6 +122,7 @@ export function App() {
       <MorningDigest state={state} visible={view === 'today'} onShow={() => setView('today')} />
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
+      {view === 'review' && <TemporalReview state={state} onUpdate={update} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
@@ -145,7 +148,7 @@ function Today({ objects, relationships, onCapture, onOpen }: { objects: Thought
 }
 function Capture({ draft, context, onDraft, onContext, onCapture }: { draft: string; context: string; onDraft: (v: string) => void; onContext: (v: string) => void; onCapture: () => void }) { return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" /><p className="lede">Don’t decide what it is yet. Write it how you would say it.</p><div className="capture-box"><textarea autoFocus value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') onCapture() }} /><div className="capture-footer"><label>Context <input value={context} onChange={event => onContext(event.target.value)} placeholder="Optional — where this belongs" /></label><button className="primary" onClick={onCapture}>Interpret thought <span>⌘↵</span></button></div></div><div className="voice-placeholder"><span>⌁</span><div><strong>Voice capture</strong><p>Coming in the next pass. The source will remain attached to the same original thought.</p></div></div></div> }
 function Review({ objects, onChangeKind, onConfirm, onReject, onOpen }: { objects: ThoughtObject[]; onChangeKind: (id: string, kind: ObjectKind) => void; onConfirm: (id: string, kind: ObjectKind) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
-  return <div className="page"><Header eyebrow="Decision interface" title="A few things need your judgment." />{objects.length === 0 ? <Empty text="Nothing is waiting for review. Ambiguous captures will appear here, with a proposed interpretation." /> : <div className="review-list">{objects.map(item => <article className="review-card" key={item.id}><div className="source-line"><span>Raw capture</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.originalContent}</blockquote><div className="proposal"><span className="spark">✦</span><div><p>{item.kind === 'action' ? 'Proposed Action — not yet executable.' : `Proposed ${objectLabels[item.kind]}.`}</p><p>{item.interpretation.summary}</p>{item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision === 'rejected' && <p>Rejected interpretation. Preserved here so you can revise or reconsider it.</p>}<small>{item.kind === 'action' ? 'Confirm this Action to make this work eligible for execution.' : item.kind === 'commitment' ? 'Confirm this obligation only. This does not fix a deadline or schedule an event.' : 'Confirm this interpretation to accept its meaning.'}</small><small>{item.interpretation.rationale}</small></div><em>{Math.round(item.confidence * 100)}% confident</em></div><div className="review-actions"><select aria-label="Review object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Adjust details</button><button className="secondary" onClick={() => onReject(item.id)}>Reject interpretation</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm interpretation</button></div></article>)}</div>}</div>
+  return <div className="page"><Header eyebrow="Decision interface" title="A few things need your judgment." />{objects.length === 0 ? <Empty text="No object interpretations are waiting. Timing proposals are reviewed separately above." /> : <div className="review-list">{objects.map(item => <article className="review-card" key={item.id}><div className="source-line"><span>Raw capture</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.originalContent}</blockquote><div className="proposal"><span className="spark">✦</span><div><p>{item.kind === 'action' ? 'Proposed Action — not yet executable.' : `Proposed ${objectLabels[item.kind]}.`}</p><p>{item.interpretation.summary}</p>{item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision === 'rejected' && <p>Rejected interpretation. Preserved here so you can revise or reconsider it.</p>}<small>{item.kind === 'action' ? 'Confirm this Action to make this work eligible for execution.' : item.kind === 'commitment' ? 'Confirm this obligation only. This does not fix a deadline or schedule an event.' : 'Confirm this interpretation to accept its meaning.'}</small><small>{item.interpretation.rationale}</small></div><em>{Math.round(item.confidence * 100)}% confident</em></div><div className="review-actions"><select aria-label="Review object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Adjust details</button><button className="secondary" onClick={() => onReject(item.id)}>Reject interpretation</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm interpretation</button></div></article>)}</div>}</div>
 }
 function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id: string) => void; accent?: 'commitment' }) {
   const detail = item.interpretation.suggestedDate ?? item.context ?? item.interpretation.rationale
@@ -203,42 +206,51 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
   // Live drag/text-edit state stays local to Canvas so every pointer move or keystroke
   // does not push an undo step; only the final, committed result is sent to onCommit,
   // which groups a whole drag or text edit into exactly one undo step.
+  const [resizePreview, setResizePreview] = useState<CanvasElement | null>(null)
   const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
-  const drag = useRef<{ id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
+  const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
     if (!item) return undefined
+    if (resizePreview?.id === id) return resizePreview
     return dragOffset && dragOffset.id === id ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
   }
   const add = (type: 'text' | 'container') => {
     // Placement must account for both pan and zoom: a screen-space offset has to be
     // converted into world space by dividing by scale, or nodes land in the wrong spot
     // whenever the canvas is zoomed.
-    const worldX = (260 - pan.x) / scale
+    const worldX = ((window.innerWidth < 720 ? 32 : 260) - pan.x) / scale
     const worldY = (160 - pan.y) / scale
     const next = newCanvasElement(type, worldX, worldY)
     onCommit([...elements, next])
     setSelected(next.id)
   }
-  const down = (event: React.PointerEvent, item?: CanvasElement) => { const point = { startX: event.clientX, startY: event.clientY, dx: 0, dy: 0, moved: false }; drag.current = item ? { ...point, id: item.id, originalX: item.x, originalY: item.y } : { ...point, pan: true, originalPan: pan }; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
+  const down = (event: React.PointerEvent, item?: CanvasElement, resize = false) => { if (event.button !== 0 || drag.current) return; if (item) setSelected(item.id); const point = { pointerId: event.pointerId, resize: resize ? item : undefined, startX: event.clientX, startY: event.clientY, dx: 0, dy: 0, moved: false }; drag.current = item ? { ...point, id: item.id, originalX: item.x, originalY: item.y } : { ...point, pan: true, originalPan: pan }; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
   const move = (event: React.PointerEvent) => {
-    if (!drag.current) return
+    if (!drag.current || drag.current.pointerId !== event.pointerId) return
     const dx = (event.clientX - drag.current.startX) / scale
     const dy = (event.clientY - drag.current.startY) / scale
     drag.current.dx = dx; drag.current.dy = dy
     if (dx !== 0 || dy !== 0) drag.current.moved = true
-    if (drag.current.pan) setPan({ x: drag.current.originalPan!.x + dx * scale, y: drag.current.originalPan!.y + dy * scale })
+    if (drag.current.resize) {
+      const node = drag.current.resize, size = canvasSize(node)
+      setResizePreview(resizeCanvasNode([node], node.id, size.width + dx, size.height + dy)[0])
+    } else if (drag.current.pan) setPan({ x: drag.current.originalPan!.x + dx * scale, y: drag.current.originalPan!.y + dy * scale })
     else if (drag.current.id) setDragOffset({ id: drag.current.id, dx, dy })
   }
-  const end = () => {
+  const cancel = () => { drag.current = null; setDragOffset(null); setResizePreview(null) }
+  const end = (event: React.PointerEvent) => {
+    if (drag.current?.pointerId !== event.pointerId) return
     const current = drag.current
     drag.current = null
     if (current && !current.pan && current.id && current.moved) {
-      const next = elements.map(item => item.id === current.id ? { ...item, x: current.originalX! + current.dx, y: current.originalY! + current.dy } : item)
+      const size = current.resize && canvasSize(current.resize)
+      const next = size ? resizeCanvasNode(elements, current.id, size.width + current.dx, size.height + current.dy) : elements.map(item => item.id === current.id ? { ...item, x: current.originalX! + current.dx, y: current.originalY! + current.dy } : item)
       onCommit(next)
     }
     setDragOffset(null)
+    setResizePreview(null)
   }
   const clickNode = (event: React.MouseEvent, id: string) => {
     event.stopPropagation()
@@ -260,6 +272,55 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     if (editing && editing.id === item.id && editing.text !== item.text) onCommit(elements.map(value => value.id === item.id ? { ...value, text: editing.text } : value))
     setEditing(null)
   }
-  return <div className="canvas-page"><div className="canvas-head"><div><p className="eyebrow">Spatial formulation</p><h1>Untitled canvas</h1></div><div className="canvas-tools"><button onClick={() => add('text')}>+ Text</button><button onClick={() => add('container')}>+ Group</button><button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button><button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button><button disabled={!selected} onClick={removeSelected}>Delete</button><span/><button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button><button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button><span/><button onClick={() => setScale(value => Math.max(.55, value - .15))}>−</button><span>{Math.round(scale * 100)}%</span><button onClick={() => setScale(value => Math.min(1.6, value + .15))}>＋</button></div></div><div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div><div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerLeave={end} onClick={() => setSelected(null)}><div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}><svg className="arrows" aria-hidden="true">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; return <line key={arrow.id} x1={from.x + (from.width ?? 160) / 2} y1={from.y + 42} x2={to.x + (to.width ?? 160) / 2} y2={to.y + 22} markerEnd="url(#head)" /> })}<defs><marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" /></marker></defs></svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, width: item.width, height: item.height }} onClick={event => clickNode(event, item.id)}><div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}><span></span><span></span><span></span></div>{item.type === 'container' && <small>GROUP</small>}<textarea value={editing && editing.id === item.id ? editing.text : (item.text ?? '')} onFocus={() => setEditing({ id: item.id, text: item.text ?? '' })} onChange={event => setEditing({ id: item.id, text: event.target.value })} onBlur={() => commitText(item)} onPointerDown={event => event.stopPropagation()} /></div> })}</div></div></div>
+  return <div className="canvas-page">
+    <div className="canvas-head">
+    <div>
+    <p className="eyebrow">Spatial formulation</p>
+    <h1>Untitled canvas</h1>
+    </div>
+    <div className="canvas-tools">
+    <button onClick={() => add('text')}>+ Text</button>
+    <button onClick={() => add('container')}>+ Group</button>
+    <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
+    <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
+    <button disabled={!selected} onClick={removeSelected}>Delete</button>
+    <span/>
+    <button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button>
+    <button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button>
+    <span/>
+    <button onClick={() => setScale(value => Math.max(.55, value - .15))}>−</button>
+    <span>{Math.round(scale * 100)}%</span>
+    <button onClick={() => setScale(value => Math.min(1.6, value + .15))}>＋</button>
+    </div>
+    </div>
+    <div className="canvas-properties">{selectedElement && <>
+    <label>Shape <select aria-label="Block shape" value={selectedElement.type} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
+    <option value="text">Text block</option>
+    <option value="container">Group container</option>
+    </select>
+    </label>{(['width', 'height'] as const).map(axis => <label key={axis}>{axis === 'width' ? 'Width' : 'Height'}<input key={`${selectedElement.id}-${canvasSize(selectedElement)[axis]}`} aria-label={`Block ${axis}`} type="number" min={axis === 'width' ? CANVAS_SIZE.minWidth : CANVAS_SIZE.minHeight} max={axis === 'width' ? CANVAS_SIZE.maxWidth : CANVAS_SIZE.maxHeight} defaultValue={canvasSize(selectedElement)[axis]} onBlur={event => { const size = canvasSize(selectedElement); const value = event.target.value === '' ? size[axis] : event.target.valueAsNumber; onCommit(resizeCanvasNode(elements, selectedElement.id, axis === 'width' ? value : size.width, axis === 'height' ? value : size.height)); event.target.value = String(canvasSize({ ...selectedElement, [axis]: value })[axis]) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+    </label>)}</>}<span>{selectedElement ? 'Drag ↘ or use arrow keys on its handle (Shift: 10 px). Size fields apply on Enter or leaving the field.' : 'Select a block to change its size or shape.'}</span>
+    </div>
+    <div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
+    <div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => setSelected(null)}>
+    <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
+    <svg className="arrows" aria-hidden="true">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; return <line key={arrow.id} {...canvasConnector(from, to)} markerEnd="url(#head)" /> })}<defs>
+    <marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L7,3 z" />
+    </marker>
+    </defs>
+    </svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown) }} onClick={event => clickNode(event, item.id)}>
+    <div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}>
+    <span>
+    </span>
+    <span>
+    </span>
+    <span>
+    </span>
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea value={editing && editing.id === item.id ? editing.text : (item.text ?? '')} aria-label="Block text" onFocus={() => { setSelected(item.id); setEditing({ id: item.id, text: item.text ?? '' }) }} onChange={event => setEditing({ id: item.id, text: event.target.value })} onBlur={() => commitText(item)} onPointerDown={event => event.stopPropagation()} />
+    <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>
+    </div> })}</div>
+    </div>
+    </div>
 }
 function Empty({ text }: { text: string }) { return <div className="empty">{text}</div> }

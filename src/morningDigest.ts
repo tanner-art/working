@@ -1,3 +1,5 @@
+import { isPersistedState } from './migration'
+import { activeTemporalDecisions, temporalFactIsCurrent } from './temporalConfirmation'
 import type { CalendarEvent, Interpretation, PersistedState, SemanticObject } from './domain'
 
 export function localDateKey(date: Date): string {
@@ -41,16 +43,20 @@ export function buildMorningDigest(model: PersistedState, now = new Date()): Mor
   const confirmed = confirmedSemanticObjects(model)
   const commitments = confirmed.filter(o => o.kind === 'commitment')
   const byId = (a: SemanticObject, b: SemanticObject) => a.id.localeCompare(b.id)
+  // Temporal buckets require full canonical validation, including journal targets.
+  const temporal = isPersistedState(model) ? activeTemporalDecisions(model).filter(e => temporalFactIsCurrent(model, e)) : []
+  const events = model.calendarEvents.filter(e => e.status === 'scheduled' && temporal.some(t => t.target.kind === 'event-scheduling' && t.target.eventId === e.id))
+  const deadlines = confirmed.flatMap(o => {
+    const evidence = temporal.find(t => t.target.kind === 'fixed-deadline' && t.target.objectId === o.id)
+    return evidence?.target.kind === 'fixed-deadline' ? [{ ...o, metadata: { ...o.metadata, deadline: evidence.target.date } }] : []
+  })
   return {
     day,
-    // D-009 requires separate timestamped scheduling/deadline confirmation.
-    // The current schema cannot record it. Status strings and date metadata are
-    // not evidence; keep these buckets blocked until that provenance exists.
-    fixedToday: [],
-    upcoming: [],
-    // No schedule can currently be verified. Unverified timing must not hide
-    // a confirmed obligation or be presented as its fixed deadline.
-    unscheduledCommitments: commitments.sort(byId).slice(0, 3),
+    fixedToday: events.filter(e => localDateKey(new Date(e.startsAt)) === day)
+      .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt) || a.id.localeCompare(b.id)).slice(0, 3)
+      .map(event => ({ event, commitments: commitments.filter(o => event.objectIds.includes(o.id)) })),
+    upcoming: deadlines.sort((a, b) => a.metadata.deadline!.localeCompare(b.metadata.deadline!) || byId(a, b)).slice(0, 3),
+    unscheduledCommitments: commitments.filter(o => !events.some(e => e.objectIds.includes(o.id))).sort(byId).slice(0, 3),
     // Deterministic selection, not an Adaptive Plan or a new composite priority score.
     recommended: confirmed.filter(o => o.kind === 'action' && !model.relationships.some(r =>
       r.scope === 'semantic' && r.sourceId === o.id && r.type === 'depends_on' &&

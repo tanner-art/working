@@ -65,3 +65,16 @@
   .month-grid th { font-size: 9px; padding: 6px 0; }
   .calendar-toolbar h2 { font-size: 16px; }
 }
+/* TASK-021: explicit bounds keep text and connector geometry in agreement. */
+.canvas-page { grid-template-rows: auto auto auto minmax(0, 1fr); }
+.canvas-properties { height: 110px; overflow-y: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 18px; background: #f7f6f1; }
+.canvas-properties label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.canvas-properties input { width: 80px; }
+.canvas-properties input, .canvas-properties select { min-height: 44px; border: 1px solid #a5b59f; border-radius: 6px; background: #fffefa; padding: 6px; }
+.canvas-properties > span { font-size: 11px; color: #52634f; }
+.canvas-node { display: flex; flex-direction: column; }
+.canvas-node textarea { flex: 1; min-height: 0; padding-bottom: 22px; overflow: auto; }
+.canvas-resize-handle { position: absolute; right: -8px; bottom: -8px; width: 44px; height: 44px; border: 1px solid #718966; border-radius: 8px; background: #edf5e5; color: #263b23; cursor: nwse-resize; touch-action: none; opacity: 0; }
+.canvas-node:hover .canvas-resize-handle, .canvas-node.selected .canvas-resize-handle, .canvas-node:focus-within .canvas-resize-handle { opacity: 1; }
+.canvas-resize-handle:focus-visible, .canvas-properties :focus-visible { outline: 3px solid #507737; outline-offset: 2px; }
+@media (max-width: 720px) { .canvas-page { height: calc(100dvh - 58px); } .canvas-head { padding: 12px 18px; } .canvas-properties { height: 150px; gap: 6px; } .canvas-resize-handle { opacity: 1; } }

@@ -26,15 +26,10 @@ export interface CalendarMonth {
 }
 
 /**
- * Seam for D-009 temporal-confirmation provenance, reconciled after TASK-019 (parallel work) merges.
- * domain.ts's CalendarEvent has no `confirmation`/provenance field yet, and no path in this codebase
- * currently creates one — so nothing can yet prove a CalendarEvent's `startsAt` passed an explicit
- * scheduling-confirmation gesture. `status: 'scheduled'` and a parseable `startsAt` are structural
- * facts, not evidence of that gesture, so this fails closed and reports every event not display-ready
- * until TASK-019 defines what a provenanced CalendarEvent looks like. Callers that already have such
- * evidence (or tests exercising grid/linking behavior independent of provenance) pass their own
- * predicate as the fifth argument to buildCalendarMonth. Swap this one predicate — not the
- * rendering/grid code — once TASK-019 lands.
+ * Seam for D-009 temporal-confirmation provenance. A scheduled status and parseable timestamp are
+ * structural facts, not evidence of a separate scheduling-confirmation gesture, so the reusable
+ * default fails closed. CalendarView supplies a predicate backed by TASK-019's active temporal
+ * decisions; tests focused on grid/linking behavior can supply their own predicate.
  */
 export type TemporalProvenanceCheck = (event: CalendarEvent) => boolean
 export const defaultTemporalProvenanceCheck: TemporalProvenanceCheck = () => false

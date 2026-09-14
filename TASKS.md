@@ -22,6 +22,42 @@ Only READY tasks may be newly assigned.
 
 ---
 
+## IN_PROGRESS
+
+### TASK-021 - Canvas Block Resizing and Shape Changes
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Independent Codex review (approved)
+Milestone: M4
+Issue: https://github.com/tanner-art/working/issues/20
+
+Lifecycle: explicitly assigned by user, READY -> IN_PROGRESS on 2026-09-14.
+Dependencies: current canvas and TASK-010 session history are present in this worktree.
+Scope: pointer and keyboard resizing; conversion between supported text/group forms;
+bounded dimensions; stable content, IDs, connectors and semantic evidence; session undo/redo
+and current-state persistence; desktop/mobile verification. No unrelated drawing tools.
+Acceptance: meaningful geometry/history/persistence tests, pnpm check, git diff --check,
+desktop/mobile browser checks and independent review.
+Delivery: implementation prepared, uncommitted per explicit user instruction; do not merge.
+Validation (2026-09-14): pnpm check passed (142 tests across 9 files, TypeScript and
+production build); git diff --check passed. No lint script is configured. Dependencies
+were installed offline from a copy of the local cache without changing the lockfile.
+Author browser attempts were blocked, then orchestrator browser validation confirmed the
+selected-block shape and numeric size controls plus labeled resize handles. Independent
+review approved the implementation with no actionable findings.
+
+Limitations: conversion covers the existing text block and group container only;
+current state persists, undo history remains session-only per D-010. Legacy implicit
+sizes use explicit rendering defaults. Group conversion does not create containment
+relationships. Existing Capture node stores text evidence without a durable canvas
+revision/semantic-node link; this task preserves existing evidence and IDs, and does
+not introduce that missing provenance feature.
+Follow-ups (not implemented): durable canvas revisions/linking remain the separate
+follow-up required by D-010.
+
+---
+
 ## READY
 
 
@@ -249,6 +285,8 @@ Review: pending
 
 ## IN_PROGRESS
 
+
+
 None.
 
 ## REVIEW
@@ -300,9 +338,27 @@ Review: Pending independent review.
 Files: `src/calendar.ts`, `src/calendar.test.ts`, `src/CalendarView.tsx` added; `src/App.tsx`, `src/styles.css`, `src/morningDigest.ts` modified.
 Validation: `pnpm check` passed — 158 tests (30 new in `calendar.test.ts`, all pre-existing tests including `morningDigest.test.ts` unchanged and passing after the extraction refactor), TypeScript check, and production Vite build. No lint script is configured. `git diff --check` passed (no whitespace errors). Diff inspected; no unrelated files touched.
 Browser validation: dev server driven headlessly (Playwright, installed to a scratch `/tmp` directory only — never added to this repo's `package.json`/lockfile, and removed afterward) at 1280×900 and 375×812. Verified: month navigation (prev/next/today, including year-boundary rollover), today vs. selected-day states shown simultaneously and distinctly, mobile layout collapses correctly, a seeded unconfirmed commitment's proposed date renders as a dashed/labeled "unconfirmed" chip on the correct day and never as an event, clicking it opens the real `ObjectPanel` showing `status: review` and the matching "Proposed date (not fixed)" field, keyboard Tab+Enter operates the Previous-month control with a visible focus ring, and no console/page errors were observed in any of the above.
-Limitations: no `CalendarEvent` can currently be created anywhere in the app (no interpreter/UI path produces one — same gap noted for `fixedCommitments()`/`buildMorningDigest` before this task), so the Events bucket is exercised in tests but is empty in the live seeded app today; this is expected and matches the existing codebase's D-009 posture, not a defect in this task. `defaultTemporalProvenanceCheck` fails closed: an event is hidden until the caller supplies evidence of the separate scheduling confirmation required by D-009. TASK-019 provides the provenance implementation that must be connected during integration. Component-level (React) tests were not added: this repo has no DOM testing library installed (`vitest` runs in the default `node` environment; no `jsdom`/`@testing-library/react` in `package.json`) and adding one was out of scope for a UI slice, so calendar logic is covered by pure unit tests in `calendar.test.ts` and by the manual/scripted browser pass above instead.
+Limitations: no `CalendarEvent` can currently be created anywhere in the app (no interpreter/UI path produces one — same gap noted for `fixedCommitments()`/`buildMorningDigest` before this task), so the Events bucket is exercised in tests but is empty in the live seeded app today; this is expected and matches the existing codebase's D-009 posture, not a defect in this task. `defaultTemporalProvenanceCheck` fails closed, while CalendarView now supplies TASK-019's active exact-fact temporal confirmation predicate. Component-level (React) tests were not added: this repo has no DOM testing library installed (`vitest` runs in the default `node` environment; no `jsdom`/`@testing-library/react` in `package.json`) and adding one was out of scope for a UI slice, so calendar logic is covered by pure unit tests in `calendar.test.ts` and by the manual/scripted browser pass above instead.
 Discovered (not implemented, does not block this task): TASKS.md's own status entries for TASK-002/003/004/005/007/012 (and TASK-018, TASK-019, TASK-020 are entirely absent) are stale relative to `main`'s actual git history — `git log` shows TASK-002 through TASK-018 already merged into `main` via PRs, but this file still lists several of them as REVIEW/BACKLOG and never mentions TASK-018 at all. `docs/IMPLEMENTATION_STATUS.md` has the same drift. Recommend a small doc-sync task once the current parallel work (this task + TASK-019) lands, so the board reflects `main` accurately; not fixed here since AGENTS.md scopes each task to its own assignment.
-Follow-ups (not implemented; do not block this task): reconcile `defaultTemporalProvenanceCheck` with TASK-019's D-009 provenance once merged; a future task should add the actual "schedule this Commitment as a CalendarEvent" confirmation UI (TASK-019 or a successor) so the Events bucket has real data to show; consider surfacing Reminder instructions on the calendar once OD-004 (reminder timing semantics) is resolved — intentionally left out of this task's scope.
+Follow-ups (not implemented; do not block this task): a future task should add the actual "schedule this Commitment as a CalendarEvent" confirmation UI so the Events bucket has real data to show; consider surfacing Reminder instructions on the calendar once OD-004 (reminder timing semantics) is resolved — intentionally left out of this task's scope.
+
+---
+
+### TASK-019 - Confirm fixed deadlines and CalendarEvent scheduling
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Independent Codex review (approved)
+Priority: P1
+Milestone: M3
+Depends On: TASK-002, TASK-003, TASK-007, TASK-009 (implementation/decision prerequisites present in this worktree; board integration statuses remain unchanged).
+
+Goal: Record distinct timestamped temporal confirmation and reversal under D-005/D-009, expose supported proposals in Review, and enable only provenance-backed digest timing.
+Scope: Domain, persisted validation, focused Review controls, digest eligibility, regression tests. No notification backend, recurrence, autonomous scheduling, or missing calendar semantics.
+Acceptance Criteria: separate timestamped exact-target temporal evidence; dedicated per-fact confirmation/reversal; no Action/Commitment/status/date bypass; preserved source/history and fail-loud persistence; provenance-backed digest buckets; focused integrity/persistence tests, pnpm check and browser attempt.
+Lifecycle: Assigned directly by user as GitHub issue #19 after verifying prerequisite implementations in this worktree; recorded IN_PROGRESS before coding, then REVIEW. Board dependency statuses were not rewritten.
+Result: Implementation approved for integration. `pnpm check` passed (148 tests, TypeScript, production build); no lint configured. `git diff --check` passed. Independent review found no actionable issues. Orchestrator browser validation confirmed separate obligation and fixed-deadline gestures plus reversal controls.
+Delivery, limitations and proposed follow-ups: [docs/TASK-019_DELIVERY.md](docs/TASK-019_DELIVERY.md).
 
 ---
 

@@ -1,3 +1,4 @@
+import { validTemporalHistory } from './temporalConfirmation'
 import type { AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { isAppState } from './store'
 
@@ -155,6 +156,11 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   }
   model.legacyUiIds = state.objects.map(o => o.id)
   model.canvas = copy(state.canvas)
+  if (state.temporalHistory !== undefined) {
+    const previousHistory = model.temporalHistory ?? []
+    if (!equal(state.temporalHistory.slice(0, previousHistory.length), previousHistory)) return fail()
+    model.temporalHistory = copy(state.temporalHistory)
+  }
   if (!isPersistedState(model)) return fail()
   return model
 }
@@ -164,7 +170,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'temporalHistory'].includes(key))) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
       m.relationships, m.legacyUiIds, m.canvas].every(Array.isArray)) return false
     if (![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents, m.relationships, m.canvas]
@@ -194,6 +200,6 @@ export function isPersistedState(value: unknown): value is PersistedState {
       ['scheduled', 'cancelled'].includes(e.status) && Array.isArray(e.objectIds) &&
       e.objectIds.every(id => m.semanticObjects.some(o => o.id === id)) && Array.isArray(e.captureIds) &&
       e.captureIds.every(id => m.captures.some(c => c.id === id)))) return false
-    return isAppState(projectModel(m))
+    return validTemporalHistory(m) && isAppState(projectModel(m))
   } catch { return false }
 }

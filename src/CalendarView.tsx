@@ -3,6 +3,7 @@ import type { AppState } from './domain'
 import { objectLabels } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { localDateKey } from './morningDigest'
+import { activeTemporalDecisions, temporalFactIsCurrent } from './temporalConfirmation'
 import {
   addMonths, buildCalendarMonth, dayAriaLabel, dayNumber, monthLabel, parseLocalDateKey, WEEKDAY_LABELS
 } from './calendar'
@@ -16,7 +17,11 @@ export function CalendarView({ state, onOpen }: { state: AppState; onOpen: (id: 
   const todayKey = useMemo(() => localDateKey(new Date()), [])
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { year: d.getFullYear(), month: d.getMonth() } })
   const [selected, setSelected] = useState(todayKey)
-  const calendar = useMemo(() => buildCalendarMonth(model, cursor.year, cursor.month, new Date()), [model, cursor])
+  const confirmedEventIds = useMemo(() => new Set(activeTemporalDecisions(model)
+    .filter(entry => entry.target.kind === 'event-scheduling' && temporalFactIsCurrent(model, entry))
+    .map(entry => entry.target.kind === 'event-scheduling' ? entry.target.eventId : '')), [model])
+  const calendar = useMemo(() => buildCalendarMonth(model, cursor.year, cursor.month, new Date(),
+    event => confirmedEventIds.has(event.id)), [model, cursor, confirmedEventIds])
   const cells = calendar.weeks.flat()
   const selectedCell = cells.find(day => day.date === selected) ?? cells.find(day => day.isToday)
 
