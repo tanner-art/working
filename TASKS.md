@@ -99,35 +99,35 @@ Review: pending
 
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
 
-### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
+### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
 
 Status: BACKLOG
 Owner: Unassigned
 Reviewer: Unassigned
-Priority: P2
-Milestone: M1
+Priority: P1
+Milestone: M2
 
 Depends On:
-- TASK-002 (Interpretation becomes a first-class entity this sits behind)
+- TASK-002
+- TASK-003 (Relationship type upgrade with scope/provenance is bundled with the entity work)
 
 Goal:
-Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
+Port `wip/pre-orchestration` src/dependencies.ts (unresolvedDependencies, cycle-safe dependencyCandidates) onto the upgraded Relationship type (explicit endpoints, scope, provenance per docs/ARCHITECTURE.md).
 
 Scope:
-- define an Interpretation-service interface per TASK-002's entity model
-- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
-- port corresponding src/interpreter.test.ts coverage
+- src/dependencies.ts: adapt to the new Relationship shape
+- src/objectWorkflow.ts: dependency-aware confirmedActions filtering
+- port corresponding tests
 
 Do Not:
-- integrate a real AI/provider-backed interpreter (future work, not this task)
+- change dependency semantics beyond what the Relationship upgrade requires
 
 Deliverable:
-Interpretation-service interface with the ported deterministic heuristics behind it.
+Working dependency graph (cycle-safe, completion-aware) on the new Relationship model.
 
 Acceptance Criteria:
 - pnpm check passes
-- existing interpreter regression tests pass against the new interface
-- interface is swappable for a future provider-backed implementation without call-site changes
+- cycle detection and completion-based eligibility behave the same as in docs/ARCHIVE_SALVAGE_AUDIT.md item 2
 
 Result:
 Commit: pending
@@ -251,48 +251,47 @@ Review: pending
 
 None.
 
-
 ## REVIEW
 
-### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
+### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
 
 Status: REVIEW
-Owner: Claude
+Owner: Codex B
 Reviewer: Unassigned
-Priority: P1
-Milestone: M2
+Priority: P2
+Milestone: M1
 
 Depends On:
-- TASK-002
-- TASK-003 (Relationship type upgrade with scope/provenance is bundled with the entity work)
+- TASK-002 (Interpretation becomes a first-class entity this sits behind)
 
 Goal:
-Port `wip/pre-orchestration` src/dependencies.ts (unresolvedDependencies, cycle-safe dependencyCandidates) onto the upgraded Relationship type (explicit endpoints, scope, provenance per docs/ARCHITECTURE.md).
+Relocate the `wip/pre-orchestration` src/interpreter.ts heuristics (clustered-capture detection, uncertainty/conditional/question confidence capping, reminder-phrase routing) behind a proper Interpretation-service interface, keeping the interpreter itself deterministic for now.
 
 Scope:
-- src/dependencies.ts: adapt to the new Relationship shape
-- src/objectWorkflow.ts: dependency-aware confirmedActions filtering
-- port corresponding tests
+- define an Interpretation-service interface per TASK-002's entity model
+- port existing heuristics from docs/ARCHIVE_SALVAGE_AUDIT.md item 5 with no behavior regression
+- port corresponding src/interpreter.test.ts coverage
 
 Do Not:
-- change dependency semantics beyond what the Relationship upgrade requires
+- integrate a real AI/provider-backed interpreter (future work, not this task)
 
 Deliverable:
-Working dependency graph (cycle-safe, completion-aware) on the new Relationship model.
+Interpretation-service interface with the ported deterministic heuristics behind it.
 
 Acceptance Criteria:
 - pnpm check passes
-- cycle detection and completion-based eligibility behave the same as in docs/ARCHIVE_SALVAGE_AUDIT.md item 2
+- existing interpreter regression tests pass against the new interface
+- interface is swappable for a future provider-backed implementation without call-site changes
 
 Result:
-Commit: Uncommitted per orchestration instruction (left for independent review).
-Review: Pending independent review.
-Validation: `pnpm check` passed (91 tests, including 17 new in `src/dependencies.test.ts`; TypeScript check; production Vite build). No lint script is configured. `git diff --check` passed. Browser smoke testing not performed (no new UI surface added; see Limitations).
-Implementation: New `src/dependencies.ts` ports `unresolvedDependencies`/`dependencyCandidates` from `wip/pre-orchestration` onto the canonical `SemanticRelationship` shape (`docs/ARCHITECTURE.md`'s explicit endpoints/scope/provenance), reading `sourceId`/`targetId` instead of the old implicit-source `{targetId, type}` shape. The cycle-safe BFS walk and the "target complete" resolution check are otherwise unchanged from the archived algorithm (docs/ARCHIVE_SALVAGE_AUDIT.md item 2). `objectWorkflow.ts`'s `confirmedActions` gained an optional `relationships: SemanticRelationship[] = []` parameter and now also requires `unresolvedDependencies(...).length === 0`, layered onto (not replacing) the existing `hasConfirmation` gate from TASK-003/D-009 — an action still needs both an explicit confirmation gesture and a resolved dependency graph to be eligible. The default empty-array parameter keeps every pre-existing single-argument call site (all of TASK-003's `migration.test.ts` suite) compiling and behaviorally unchanged. Wired `src/App.tsx`'s `Today` view to pass `state.model?.relationships ?? []` through to `confirmedActions` so the canonical relationship data actually reaches the eligibility check at runtime; no dependency-editing UI was added (that is TASK-008's "dependency editor in the object drawer").
-Tests: `src/dependencies.test.ts` (17 tests) covers: unresolved-dependency detection and resolution-on-completion, a dependency on a missing/removed target staying unresolved rather than silently satisfied, non-`depends_on` relationship types being ignored, relationship direction (an incoming `depends_on` edge is not mistaken for the object's own outgoing dependency), direct and transitive/indirect cycle exclusion, self-dependency exclusion, already-linked-target exclusion, archived/non-work-kind exclusion, an unrelated incoming edge not falsely blocking a safe candidate, and `confirmedActions` interaction cases (unresolved dependency blocks an otherwise-confirmed action; resolving the dependency admits it; an object with matching shape but no explicit confirmation gesture is never admitted regardless of dependencies; omitting the `relationships` argument defaults to no constraints without throwing).
-Limitations: No dependency-editing UI was added; `depends_on` relationships can currently only be constructed programmatically (e.g., via a future TASK-008 editor or direct state), not through the running app. `dependencyCandidates` is implemented and tested but not yet called from any UI (also TASK-008 scope). Parent/child project linking (TASK-006) was not touched. Browser smoke testing was not performed since no new interactive surface was added; `pnpm check` (unit tests + typecheck + build) is the validation performed.
-Follow-ups (not implemented, do not block this slice): TASK-008 should wire a dependency editor (add/remove `depends_on` relationships from the object drawer) and a blocked-vs-ready indicator using `unresolvedDependencies`/`dependencyCandidates`, per docs/ARCHIVE_SALVAGE_AUDIT.md item 4. TASK-006 remains separately scoped for parent/child (`belongs_to`) linking on the same `SemanticRelationship` model.
-Lifecycle: Promoted BACKLOG -> READY -> IN_PROGRESS -> REVIEW on this branch/worktree; owner set to Claude. No commit, push, merge, branch change, or credential edits.
+Commit: Uncommitted per user instruction.
+Review: Pending independent orchestration review.
+Lifecycle: Promoted BACKLOG → READY after verifying TASK-002 entities are present on this branch; assigned to Codex B and moved to IN_PROGRESS for GitHub issue #14; moved to REVIEW after implementation and validation.
+Validation: `pnpm check` passed (107 tests, TypeScript check, production Vite build); no lint script configured. `git diff --check` passed and diff inspected. Dependencies installed from the existing temporary offline cache with the frozen lockfile after registry access failed; no dependency/lockfile changes.
+Implementation: asynchronous CaptureRecord → InterpretationProposal service with a single implementation composition point; deterministic archive heuristics; compatibility capture adapter and awaited UI call; regression, substitution, failure, provenance, confirmation and persistence tests.
+Limitations: one proposal per text capture; persistence owns interpretation identity/version/history. The existing schema-v2 compatibility writer remains authoritative for persistence; unsupported separate action summaries or rewritten reminder triggers fail explicitly. Reminder targets/timing remain unresolved in Review; no provider, scheduling, notification or canvas interpretation integration. Drafts remain in memory while interpretation is pending. Browser validation and independent orchestration review remain pending.
+Follow-ups (not implemented; do not block this task): independent browser/review checks; resolve OD-004 before richer reminder semantics; broader canonical writer and durable pending-capture support before expanding the provider contract. GitHub CLI is unauthenticated, so remote issue #14 was not read or changed; the local issue description in `/private/tmp/task004-issue.md` matches this assignment.
+Delivery: left entirely uncommitted per user instruction; no reset, rebase, clean, merge, branch switch, push, or access to another worktree.
 
 ---
 
