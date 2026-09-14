@@ -285,9 +285,29 @@ Review: pending
 
 ## IN_PROGRESS
 
+
+
 None.
 
 ## REVIEW
+
+### TASK-019 - Confirm fixed deadlines and CalendarEvent scheduling
+
+Status: REVIEW
+Owner: Codex B
+Reviewer: Independent Codex review (approved)
+Priority: P1
+Milestone: M3
+Depends On: TASK-002, TASK-003, TASK-007, TASK-009 (implementation/decision prerequisites present in this worktree; board integration statuses remain unchanged).
+
+Goal: Record distinct timestamped temporal confirmation and reversal under D-005/D-009, expose supported proposals in Review, and enable only provenance-backed digest timing.
+Scope: Domain, persisted validation, focused Review controls, digest eligibility, regression tests. No notification backend, recurrence, autonomous scheduling, or missing calendar semantics.
+Acceptance Criteria: separate timestamped exact-target temporal evidence; dedicated per-fact confirmation/reversal; no Action/Commitment/status/date bypass; preserved source/history and fail-loud persistence; provenance-backed digest buckets; focused integrity/persistence tests, pnpm check and browser attempt.
+Lifecycle: Assigned directly by user as GitHub issue #19 after verifying prerequisite implementations in this worktree; recorded IN_PROGRESS before coding, then REVIEW. Board dependency statuses were not rewritten.
+Result: Implementation approved for integration. `pnpm check` passed (148 tests, TypeScript, production build); no lint configured. `git diff --check` passed. Independent review found no actionable issues. Orchestrator browser validation confirmed separate obligation and fixed-deadline gestures plus reversal controls.
+Delivery, limitations and proposed follow-ups: [docs/TASK-019_DELIVERY.md](docs/TASK-019_DELIVERY.md).
+
+---
 
 ### TASK-004 - Port Interpreter Heuristics Behind an Interpretation-Service Interface
 

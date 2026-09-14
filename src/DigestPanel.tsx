@@ -59,8 +59,13 @@ export function MorningDigest({ state, visible, onShow }: { state: AppState; vis
       <button className="secondary" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide digest' : 'View digest'}</button>
       {expanded && <div>
         <p>{digest.day} · Live summary</p>
-        <h3>Calendar events and fixed deadlines unavailable</h3>
-        <p>These digest sections are deferred until separate, timestamped confirmation of event scheduling and fixed deadlines can be recorded. Saved dates and scheduled status alone do not establish confirmed timing.</p>
+        <h3>Confirmed events today</h3>
+        <ul>{digest.fixedToday.map(({ event, commitments }) => <li key={event.id}>{event.title} — {new Date(event.startsAt).toLocaleTimeString()} (device time) · {event.temporalContext}{commitments.map(o => <span key={o.id}> · Obligation: {o.summary}</span>)}</li>)}</ul>
+        {!digest.fixedToday.length && <p>No separately confirmed events today.</p>}
+        <h3>Fixed deadlines</h3>
+        <p>Up to three confirmed deadlines, earliest first, including overdue dates. Date-only constraints do not reserve calendar time.</p>
+        <ul>{digest.upcoming.map(o => <li key={o.id}>{o.summary} — {o.metadata.deadline}</li>)}</ul>
+        {!digest.upcoming.length && <p>No separately confirmed deadlines to surface.</p>}
         <h3>Confirmed obligations — schedule unverified</h3><ul>{digest.unscheduledCommitments.map(o => <li key={o.id}>{o.summary}</li>)}</ul>
         {!digest.unscheduledCommitments.length && <p>No confirmed obligations to surface.</p>}
         <h3>Recommended execution</h3><p>Up to three confirmed actions, ordered by recorded strategic importance. Known unfinished dependencies are excluded.</p><ul>{digest.recommended.map(o => <li key={o.id}>{o.summary}</li>)}</ul>
