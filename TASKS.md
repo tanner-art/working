@@ -38,7 +38,7 @@ Scope: explicit attach/detach controls; bulk attach of blocks fully inside a gro
 
 Acceptance: legacy canvases remain valid; invalid or nested membership fails closed; group motion preserves relative member positions; resizing retains explicit membership; converting or deleting a group safely detaches its members; pnpm check and git diff --check pass.
 
-Result: implementation commit dee16c3. Independent review approved. TASK-022 integration preserves both connection styling and sticky groups; pnpm check passed with 187 tests, TypeScript, and production build, and git diff --check passed. Merge commit pending.
+Result: implementation commit dee16c3; TASK-022 integration merge commit 2b9d3fe. Independent review approved. Integration preserves both connection styling and sticky groups; pnpm check passed with 187 tests, TypeScript, and production build, and git diff --check passed.
 
 ---
 
