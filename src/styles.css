@@ -20,3 +20,8 @@
 .storage-alert { padding: 16px 24px; background: #fff1d6; color: #654617; border-bottom: 1px solid #dab776; }
 .storage-alert p { margin: 0 0 12px; }
 .storage-alert button { margin-right: 8px; }
+
+.digest-panel { margin: 20px clamp(16px, 4vw, 56px); padding: 20px; border: 1px solid #ddd9ce; border-radius: 16px; overflow-wrap: anywhere; }
+.digest-panel:empty { display: none; }
+.digest-panel p, .digest-panel li { line-height: 1.6; }
+.digest-panel button { margin: 4px 8px 4px 0; white-space: normal; }

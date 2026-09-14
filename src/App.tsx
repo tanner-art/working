@@ -1,3 +1,4 @@
+import { MorningDigest } from './DigestPanel'
 import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
@@ -115,6 +116,7 @@ export function App() {
     <section className="content">
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
+      <MorningDigest state={state} visible={view === 'today'} onShow={() => setView('today')} />
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
