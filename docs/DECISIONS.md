@@ -57,10 +57,29 @@ Resolves OD-001. Ratified 2026-09-13 by TASK-009, evaluating (but not adopting w
 
 **Verdict on the archived candidate.** The archived Review "Confirm interpretation" button is an acceptable instance of the rule-4 confirmation gesture for that entry point, but it is not sufficient as the sole gate: the same archived app also let the generic object-editor Status dropdown set status to "confirmed" outside Review. TASK-003 must ensure only a dedicated confirmation gesture can grant Action/Commitment eligibility from any surface, not only from Review.
 
-## Open Decisions
+### D-010: Canvas Revision Persistence Policy (Session Undo Now, Durable Revisions Later)
 
-### OD-002: Canvas Revision Granularity
-How granular should canvas history and retained revisions be?
+Resolves OD-002. Ratified 2026-09-13 by TASK-010.
+
+**Scope of this decision.** This decision governs only the *editing-history* undo/redo stack wired in TASK-010 (src/canvasHistory.ts). It does not implement, and must not be read as implementing, durable canvas revision storage referenced by CaptureRecords (docs/ARCHITECTURE.md's "Canvas edits create new preserved revisions of expression").
+
+**What ships now.**
+- The canvas continues to persist exactly as it does today: `AppState.canvas` (a flat `CanvasElement[]`) is saved via `saveState`/localStorage as the single current canvas state. No new persisted schema is introduced.
+- Undo/redo is a bounded, in-memory stack of full `CanvasElement[]` snapshots (`src/canvasHistory.ts`), scoped to one browser session. It is not written to localStorage and does not survive a reload; reloading starts with an empty undo stack against whatever canvas state was last saved.
+- Each undo step is one atomic user edit (an add, a connect, a delete, one completed drag, or one committed text edit), not a fine-grained log of every pointer-move or keystroke.
+
+**What this explicitly is not.** This is not the durable, provenance-preserving canvas revision mechanism ARCHITECTURE.md describes for CaptureRecords ("Canvas edits create new preserved revisions of expression rather than mutating historical evidence... Undo/redo changes the active state while retaining the source revision referenced by an interpretation"). Session undo/redo lets a user reverse their own recent in-session edits; it gives no guarantee that a canvas state referenced by an existing capture/interpretation remains reconstructable after reload, after the undo stack is cleared, or after this session ends.
+
+**Durable revision granularity (resolves the OD-002 granularity question).** A durable canvas revision is created when a user explicitly captures canvas content for semantic interpretation (i.e., the existing "Capture node" action, or its future equivalents). A capture references an immutable snapshot of the full canvas plus the set of selected element IDs at that instant — not a single element in isolation, since arrows and spatial layout carry meaning per D-007. Ordinary edits between captures (adds, moves, connects, deletes, text edits) persist only as current canvas state (`AppState.canvas`) and as session undo/redo steps per this decision; they do not themselves create a durable revision. A future explicit manual "snapshot" feature may add further user-triggered revisions; autosaving a revision on every keystroke or pointer move is explicitly not part of this policy — that would defeat the "one atomic user edit per undo step" granularity above and create far more revisions than any interpretation needs to reference.
+
+**Required properties of any future durable-revision implementation, whenever it lands:**
+1. Durable canvas revisions must be immutable snapshots, referenced by canvas CaptureRecords/interpretations by stable identity — not the mutable session undo/redo stack this decision describes.
+2. Durable revisions must be retained independently of the bounded, session-only undo/redo stack: clearing or exhausting the undo stack (bounded per D-010's implementation) must never delete a revision a capture depends on.
+3. Implementing durable revision storage requires TASK-002 (CaptureRecord/Interpretation split) to land first, since canvas CaptureRecords need the entity boundaries TASK-002 introduces to reference revisions correctly (per docs/ARCHITECTURE.md's entity table). Durable implementation remains deferred until TASK-002 is integrated; this decision fixes the granularity above but does not implement it.
+
+**Non-goal for TASK-010.** TASK-010 does not implement durable revision storage, does not add a revision table/schema, and does not claim canvas history survives anything beyond the current browser session.
+
+## Open Decisions
 
 ### OD-003: Interpretation Reversal
 What happens when an interpretation is reversed after downstream user edits depend on it?
