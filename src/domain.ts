@@ -61,7 +61,7 @@ export interface CanvasElement {
   toId?: string
 }
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
-export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState }
+export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState; temporalHistory?: TemporalDecision[] }
 
 export const objectLabels: Record<ObjectKind, string> = {
   idea: 'Idea', action: 'Action', reminder: 'Reminder', project: 'Project', commitment: 'Commitment', person: 'Person', reference: 'Reference', objective: 'Objective'
@@ -129,6 +129,7 @@ export interface SemanticRelationship extends Relationship {
   provenance: { interpretationId: string; evidence: 'legacy-unverified' }
 }
 export interface PersistedState {
+  temporalHistory?: TemporalDecision[]
   schemaVersion: 2
   captures: CaptureRecord[]
   interpretations: Interpretation[]
@@ -138,4 +139,18 @@ export interface PersistedState {
   /** Active UI identities include unresolved proposals without semantic objects. */
   legacyUiIds: string[]
   canvas: CanvasElement[]
+}
+
+/** A snapshot of exactly one proposed temporal fact; never obligation evidence. */
+export type TemporalTarget =
+  | { kind: 'fixed-deadline'; objectId: string; interpretationId: string; date: string }
+  | { kind: 'event-scheduling'; eventId: string; interpretationId: string; startsAt: string; temporalContext: string; title: string; objectIds: string[]; captureIds: string[] }
+export interface TemporalDecision {
+  id: string
+  at: string
+  source: 'review-temporal-confirmation'
+  decision: 'confirmed' | 'reversed'
+  target: TemporalTarget
+  /** Reversal names the exact confirmation it withdraws. */
+  reverses?: string
 }
