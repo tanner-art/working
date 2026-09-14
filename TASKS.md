@@ -291,6 +291,59 @@ None.
 
 ## REVIEW
 
+### TASK-020 - Full Calendar Month View (CalendarEvents, Commitments, Proposed Dates)
+
+Status: REVIEW
+Owner: Claude
+Reviewer: Unassigned
+Priority: P1
+Milestone: M3
+GitHub Issue: #21
+
+Depends On:
+- None. Built directly against the CalendarEvent/Commitment/Interpretation model already on this branch (`src/domain.ts`, `src/migration.ts`, `src/morningDigest.ts`); no schema change.
+
+Goal:
+Give the user a real navigable month calendar (NORTH_STAR.md "Calendar" section, ROADMAP.md M3), not just the existing Commitments list, while keeping the app's existing D-009 discipline: never plot an unconfirmed date as if it were a scheduled time.
+
+Scope:
+- `src/calendar.ts` (new): pure month-grid math (Sunday-start weeks, local-calendar-day bucketing, no UTC-parse shifting) plus three explicitly separated buckets per day: display-ready `CalendarEvent`s (with resolved linked semantic objects), confirmed Commitments with no linked event (`unscheduledCommitments`, not pinned to a day), and `ProposedDateMarker`s sourced only from `Interpretation.legacy.metadata.deadline` (the user-authored "Proposed date (not fixed)" field), never from AI's `suggestedDate` placeholder text or from a `SemanticObject`'s metadata (deadline is stripped there on confirm — see migration.ts's `delete metadata.deadline`).
+- A small pluggable `TemporalProvenanceCheck` seam (`defaultTemporalProvenanceCheck`) gating which CalendarEvents are display-ready, documented as the reconciliation point for TASK-019 (Agent B, parallel D-009 temporal-confirmation work) — swap that one predicate, not the grid/rendering code, once TASK-019 defines real event-scheduling provenance.
+- `src/CalendarView.tsx` (new): month grid, prev/next/today controls, today/selected-day states, a day-detail panel (Events / Proposed dates, clearly separated and labeled), and an always-visible Unscheduled Commitments list. Clicking a linked object, a proposed-date marker, or an unscheduled commitment opens the existing `ObjectPanel` via the same `onOpen`/`selectedObjectId` mechanism `Today`/`Review`/`Commitments` already use.
+- `src/App.tsx`: new `calendar` nav entry wired to `CalendarView`.
+- `src/styles.css`: calendar grid/detail/chip styles plus a mobile breakpoint (existing `@media (max-width: 720px)` pattern).
+- `src/morningDigest.ts`: extracted `confirmedSemanticObjects`/`currentInterpretations` (previously inlined in `buildMorningDigest`) so the calendar's Commitment/proposed-date filtering uses the exact same "confirmed obligation" and "current (non-superseded) interpretation" definitions as the Morning Digest — behavior-preserving refactor, `morningDigest.test.ts` unchanged and still passing.
+- `src/calendar.test.ts` (new): date-grid invariants (full Sunday-start weeks, no gaps/duplicates/DST drift, leap years, year-boundary months), local-time correctness for both event instants and date-only proposed-date strings, event provenance filtering, linked/unscheduled commitment resolution, superseded/rejected/archived exclusion, and the `dayAriaLabel` accessibility-label pure function.
+
+Do Not:
+- add external calendar sync, recurrence, or autonomous scheduling
+- add a way to create/schedule a `CalendarEvent` from the UI (that is scheduling confirmation — TASK-019's territory per D-009 rule 5, not this task)
+- change `CalendarEvent`'s schema or add a provenance/confirmation field to it (left to TASK-019; this task only defines the seam that will consume it)
+- fix the pre-existing TASKS.md/IMPLEMENTATION_STATUS.md staleness noted below (out of scope; flagged, not fixed)
+
+Deliverable:
+A working, responsive, keyboard-accessible month calendar reachable from the sidebar, with CalendarEvents, linked/unscheduled Commitments, and unverified proposed dates always visually and textually distinct.
+
+Acceptance Criteria:
+- `pnpm check` passes
+- `git diff --check` passes
+- month grid is correct for leap years, year boundaries, and DST-adjacent months (tested via invariants, not hardcoded week counts)
+- a `metadata.deadline` string is never plotted as, or visually confused with, a `CalendarEvent`
+- prev/next/today controls and day cells are reachable and operable by keyboard alone, with visible focus and correct `aria-label`/`aria-current`/`aria-pressed`
+- desktop and mobile widths both verified in a running browser
+
+Result:
+Commit: Uncommitted per user instruction.
+Review: Pending independent review.
+Files: `src/calendar.ts`, `src/calendar.test.ts`, `src/CalendarView.tsx` added; `src/App.tsx`, `src/styles.css`, `src/morningDigest.ts` modified.
+Validation: `pnpm check` passed — 158 tests (30 new in `calendar.test.ts`, all pre-existing tests including `morningDigest.test.ts` unchanged and passing after the extraction refactor), TypeScript check, and production Vite build. No lint script is configured. `git diff --check` passed (no whitespace errors). Diff inspected; no unrelated files touched.
+Browser validation: dev server driven headlessly (Playwright, installed to a scratch `/tmp` directory only — never added to this repo's `package.json`/lockfile, and removed afterward) at 1280×900 and 375×812. Verified: month navigation (prev/next/today, including year-boundary rollover), today vs. selected-day states shown simultaneously and distinctly, mobile layout collapses correctly, a seeded unconfirmed commitment's proposed date renders as a dashed/labeled "unconfirmed" chip on the correct day and never as an event, clicking it opens the real `ObjectPanel` showing `status: review` and the matching "Proposed date (not fixed)" field, keyboard Tab+Enter operates the Previous-month control with a visible focus ring, and no console/page errors were observed in any of the above.
+Limitations: no `CalendarEvent` can currently be created anywhere in the app (no interpreter/UI path produces one — same gap noted for `fixedCommitments()`/`buildMorningDigest` before this task), so the Events bucket is exercised in tests but is empty in the live seeded app today; this is expected and matches the existing codebase's D-009 posture, not a defect in this task. `defaultTemporalProvenanceCheck` fails closed, while CalendarView now supplies TASK-019's active exact-fact temporal confirmation predicate. Component-level (React) tests were not added: this repo has no DOM testing library installed (`vitest` runs in the default `node` environment; no `jsdom`/`@testing-library/react` in `package.json`) and adding one was out of scope for a UI slice, so calendar logic is covered by pure unit tests in `calendar.test.ts` and by the manual/scripted browser pass above instead.
+Discovered (not implemented, does not block this task): TASKS.md's own status entries for TASK-002/003/004/005/007/012 (and TASK-018, TASK-019, TASK-020 are entirely absent) are stale relative to `main`'s actual git history — `git log` shows TASK-002 through TASK-018 already merged into `main` via PRs, but this file still lists several of them as REVIEW/BACKLOG and never mentions TASK-018 at all. `docs/IMPLEMENTATION_STATUS.md` has the same drift. Recommend a small doc-sync task once the current parallel work (this task + TASK-019) lands, so the board reflects `main` accurately; not fixed here since AGENTS.md scopes each task to its own assignment.
+Follow-ups (not implemented; do not block this task): a future task should add the actual "schedule this Commitment as a CalendarEvent" confirmation UI so the Events bucket has real data to show; consider surfacing Reminder instructions on the calendar once OD-004 (reminder timing semantics) is resolved — intentionally left out of this task's scope.
+
+---
+
 ### TASK-019 - Confirm fixed deadlines and CalendarEvent scheduling
 
 Status: REVIEW

@@ -23,13 +23,24 @@ export interface MorningDigest {
   projectSignals: SemanticObject[]
 }
 
-export function buildMorningDigest(model: PersistedState, now = new Date()): MorningDigest {
-  const day = localDateKey(now)
+/** Interpretation versions still reachable from the UI: every version except one superseded by a newer `previousId` link. */
+export function currentInterpretations(model: PersistedState): Interpretation[] {
   const superseded = new Set(model.interpretations.map(i => i.previousId))
-  const current = model.interpretations.filter(i => !superseded.has(i.id))
-  const confirmed = model.semanticObjects.filter(o => o.status === 'confirmed' &&
+  return model.interpretations.filter(i => !superseded.has(i.id))
+}
+
+/** Confirmed, non-superseded semantic objects — the shared "real obligation/eligible work" base for the digest and the calendar (src/calendar.ts). */
+export function confirmedSemanticObjects(model: PersistedState): SemanticObject[] {
+  const current = currentInterpretations(model)
+  return model.semanticObjects.filter(o => o.status === 'confirmed' &&
     (!['action', 'commitment'].includes(o.kind) || current.some(i => o.interpretationIds.includes(i.id) &&
       i.reviewState === 'accepted' && i.confirmation?.transition === o.kind)))
+}
+
+export function buildMorningDigest(model: PersistedState, now = new Date()): MorningDigest {
+  const day = localDateKey(now)
+  const current = currentInterpretations(model)
+  const confirmed = confirmedSemanticObjects(model)
   const commitments = confirmed.filter(o => o.kind === 'commitment')
   const byId = (a: SemanticObject, b: SemanticObject) => a.id.localeCompare(b.id)
   // Temporal buckets require full canonical validation, including journal targets.
