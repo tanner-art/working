@@ -1,4 +1,5 @@
 import { MorningDigest } from './DigestPanel'
+import { CalendarView } from './CalendarView'
 import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
@@ -15,9 +16,9 @@ import {
   undoCanvas as undoCanvasHistory,
 } from './canvasHistory'
 
-type View = 'today' | 'capture' | 'review' | 'commitments' | 'canvas'
+type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Review', icon: '◇' }, { id: 'commitments', label: 'Commitments', icon: '□' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Review', icon: '◇' }, { id: 'commitments', label: 'Commitments', icon: '□' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }
 ]
 
 export function App() {
@@ -121,6 +122,7 @@ export function App() {
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
+      {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
       {view === 'canvas' && <Canvas elements={state.canvas} onCommit={commitCanvas} canUndo={canUndoCanvas(canvasHistory)} canRedo={canRedoCanvas(canvasHistory)} onUndo={undoCanvas} onRedo={redoCanvas} onCaptureObject={captureCanvasObject} />}
     </section>
     {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
