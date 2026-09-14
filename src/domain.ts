@@ -59,6 +59,9 @@ export interface CanvasElement {
   text?: string
   fromId?: string
   toId?: string
+  connectionPath?: 'straight' | 'curved'
+  connectionPattern?: 'solid' | 'dashed' | 'dotted'
+  connectionWeight?: 'light' | 'regular' | 'bold'
 }
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
 export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState; temporalHistory?: TemporalDecision[] }

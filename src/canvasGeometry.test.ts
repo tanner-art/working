@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasElement } from './domain'
-import { canvasSize, canvasConnector, convertCanvasNode, resizeCanvasNode } from './canvasGeometry'
+import { canvasSize, canvasConnector, canvasConnectorPath, connectionAppearance, convertCanvasNode, resizeCanvasNode, updateCanvasConnection } from './canvasGeometry'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
 import { loadStateResult, saveState } from './store'
 
@@ -75,5 +75,39 @@ describe('canvas size and conversion', () => {
       expect(loaded.state.model).toEqual({ ...evidence, canvas: snapshot.present })
       expect(emptyCanvasHistory(loaded.state.canvas).past).toEqual([])
     }
+  })
+
+  it('renders straight and curved connectors from the same live endpoint geometry', () => {
+    expect(canvasConnectorPath(nodes[0], nodes[1])).toBe('M 65 125 L 660 400')
+    expect(canvasConnectorPath(nodes[0], nodes[1], 'curved')).toBe('M 65 125 C 65 248.75, 660 276.25, 660 400')
+  })
+
+  it('maps connection pattern and weight to visible SVG styling with legacy defaults', () => {
+    expect(connectionAppearance(nodes[2])).toEqual({ strokeWidth: 2, strokeDasharray: undefined, strokeLinecap: 'butt' })
+    expect(connectionAppearance({ ...nodes[2], connectionPattern: 'dotted', connectionWeight: 'bold' }))
+      .toEqual({ strokeWidth: 5, strokeDasharray: '2 7', strokeLinecap: 'round' })
+    expect(connectionAppearance({ ...nodes[2], connectionPattern: 'dashed', connectionWeight: 'light' }))
+      .toEqual({ strokeWidth: 1, strokeDasharray: '12 8', strokeLinecap: 'butt' })
+  })
+
+  it('updates only the selected connection and participates in exact undo/redo', () => {
+    const styled = updateCanvasConnection(nodes, 'link', { connectionPath: 'curved', connectionPattern: 'dashed', connectionWeight: 'bold' })
+    expect(styled[0]).toBe(nodes[0])
+    expect(styled[2]).toEqual({ ...nodes[2], connectionPath: 'curved', connectionPattern: 'dashed', connectionWeight: 'bold' })
+    const history = commitCanvas(emptyCanvasHistory(nodes), styled)
+    expect(undoCanvas(history).present).toEqual(nodes)
+    expect(redoCanvas(undoCanvas(history)).present).toEqual(styled)
+  })
+
+  it('persists styled connections while preserving legacy connections unchanged', () => {
+    let raw: string | null = null
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const initial = loadStateResult().state
+    expect(initial.canvas.find(item => item.type === 'arrow')).not.toHaveProperty('connectionPath')
+    const styled = updateCanvasConnection(initial.canvas, 'canvas-arrow', { connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
+    expect(saveState({ ...initial, canvas: styled })).toBeUndefined()
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.state.canvas.find(item => item.id === 'canvas-arrow')).toMatchObject({ connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
   })
 })

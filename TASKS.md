@@ -24,6 +24,31 @@ Only READY tasks may be newly assigned.
 
 ## IN_PROGRESS
 
+### TASK-022 - Rich Canvas Connection Styling
+
+Status: REVIEW
+Owner: Codex canvas-edges
+Reviewer: Unassigned
+Milestone: M4
+Issue: https://github.com/tanner-art/working/issues/26
+
+Scope: selectable canvas connections with straight or curved paths, solid/dashed/dotted
+patterns, and light/regular/bold weights. Styling remains visual canvas expression,
+persists with AppState, validates fail-loud, preserves legacy connections, and participates
+in session undo/redo. No semantic relationship inference or endpoint manipulation.
+
+Acceptance: accessible pointer/keyboard selection and controls; geometry, validation,
+migration, persistence, and undo tests; pnpm check and git diff --check.
+
+Validation (2026-09-14): pnpm check passed (181 tests across 11 files, TypeScript,
+production build); git diff --check passed. Legacy connections retain implicit straight,
+solid, regular defaults. Invalid and misplaced style fields fail validation without write.
+
+Limitation: arcs use a computed cubic curve between existing automatic ports; this slice
+does not add draggable path control points or endpoint ports.
+
+---
+
 ### TASK-021 - Canvas Block Resizing and Shape Changes
 
 Status: REVIEW

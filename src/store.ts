@@ -147,5 +147,9 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.text === undefined || typeof item.text === 'string') &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&
+    (item.connectionPath === undefined || ['straight', 'curved'].includes(item.connectionPath)) &&
+    (item.connectionPattern === undefined || ['solid', 'dashed', 'dotted'].includes(item.connectionPattern)) &&
+    (item.connectionWeight === undefined || ['light', 'regular', 'bold'].includes(item.connectionWeight)) &&
+    (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined)) &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
 }
