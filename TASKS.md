@@ -613,3 +613,17 @@ Scope: create only docs/RUNNER_SMOKE.md explaining human PR review and merge app
 Acceptance: pnpm check passes; runner opens draft PR and does not merge.
 Commit: 65ce52f5e908f10986b448f8b19cad01c178a553
 Result: issue #1 → headless Codex B → pnpm check (18 tests/build) → pushed branch → draft PR #2. Primary orchestrator reviewed the four-line diff; no findings. Awaiting user review/merge.
+
+
+### TASK-017 - Verify launchd execution after macOS permission grant
+
+Status: CHANGES_REQUESTED
+Owner: Codex B
+Reviewer: Primary orchestrator
+Priority: P3
+Milestone: M0
+Depends On: TASK-015 controlled runner deployment and user-granted Documents access
+Scope: create only docs/LAUNCHD_SMOKE.md, explaining that launchd polls the approved queue and human review remains required.
+Acceptance: launchd starts task; agent writes the scoped note; pnpm check passes; runner commits, pushes, opens a draft PR, and returns idle. No merge.
+Commit: pending
+Verification: launchd picked up issue #4 and created a fresh worktree. Dependency preparation timed out on macOS pnpm Documents permission; attempt preserved. User permission and explicit retry required.
