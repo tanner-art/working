@@ -1,6 +1,6 @@
 # Threadline Implementation Status
 
-Canonical living status, reconciled with `main` at `39c8c45` on 2026-09-14. For the original salvage analysis and its historical KEEP/MODIFY/DROP findings, see [ARCHIVE_SALVAGE_AUDIT.md](ARCHIVE_SALVAGE_AUDIT.md). Current lifecycle and priority live only in [TASKS.md](../TASKS.md).
+Canonical living status, reconciled with `main` at `1feb87a` on 2026-09-14. For the original salvage analysis and its historical KEEP/MODIFY/DROP findings, see [ARCHIVE_SALVAGE_AUDIT.md](ARCHIVE_SALVAGE_AUDIT.md). Current lifecycle and priority live only in [TASKS.md](../TASKS.md).
 
 ## Current stack and delivery
 
@@ -8,7 +8,7 @@ Canonical living status, reconciled with `main` at `39c8c45` on 2026-09-14. For 
 - A single local-first repository persisted in browser `localStorage`, with schema migration, visible load/save failures, retry, and backup export.
 - `pnpm check` runs the unit suite, TypeScript check, and production build; GitHub Actions uses the same gate.
 - Threadline is installable as a PWA. The current production alias is `https://working-ten-rust.vercel.app`.
-- The claimed `temporary-zippy-agate-50psn81` Vercel project is connected to `tanner-art/working` and awaits the next push for its first current automatic deployment.
+- `main` now includes both TASK-022 (rich canvas connection styling) and TASK-023 (sticky group membership) as of `1feb87a`; the next push brings the production alias, and the claimed `temporary-zippy-agate-50psn81` Vercel project's first automatic deployment, up to date with these features.
 
 ## Implemented on `main`
 
@@ -18,15 +18,13 @@ Canonical living status, reconciled with `main` at `39c8c45` on 2026-09-14. For 
 - Today and Morning Digest surfaces with fixed-today, upcoming, recommended, needs-review, and project-signal sections.
 - A responsive full month Calendar with navigation, selected-day details, scheduled events, visibly unconfirmed proposed dates, and unscheduled commitments.
 - A reusable Objects workbench, explicit action eligibility, and cycle-safe dependency graph.
-- A pan/zoom Canvas with text blocks, group containers, arrows, drag, deletion, persistence, session undo/redo, pointer and keyboard resizing, and text/group shape conversion.
+- A pan/zoom Canvas with text blocks, group containers, arrows, drag, deletion, persistence, session undo/redo, pointer and keyboard resizing, text/group shape conversion, selectable connection styling (straight/curved paths, solid/dashed/dotted patterns, line weight), and explicit sticky group membership.
 - Mobile installation metadata, icons, and service-worker app-shell caching.
 
-The merged baseline passes 176 tests, TypeScript, and the production build.
+The merged baseline passes 187 tests, TypeScript, and the production build.
 
 ## Active and next work
 
-- TASK-022 adds richer connection presentation and manipulation: line weight, dotted styling, and curved/arc routing.
-- TASK-023 adds explicit sticky group membership so moving a group can move its contained blocks while preserving undo/redo and persistence.
 - TASK-006 remains blocked on OD-007, the single-parent versus multi-membership containment decision. TASK-008 follows it with the complete project/object workbench experience.
 - Provider-backed interpretation, closed-app Web Push delivery, and durable canvas revision persistence remain backlog items. See `TASKS.md` for their current scope.
 
@@ -40,8 +38,6 @@ Native voice capture and speech recognition are removed from the active pipeline
 | --- | --- |
 | Project/objective containment cardinality and UI | OD-007, then TASK-006 |
 | Complete search/filter/history/project workbench | TASK-008 |
-| Curved and styled connection arrows | TASK-022 |
-| Sticky group membership and group movement | TASK-023 |
 | Provider-backed interpretation | Unscoped backlog using TASK-004 interface |
 | Closed-app notifications | Unscoped backend/product decision and Web Push task |
 | Durable canvas revisions across reloads | Follow-up to D-010 |

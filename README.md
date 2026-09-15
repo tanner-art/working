@@ -27,6 +27,6 @@ Before each push, run `pnpm check`. GitHub Actions runs the same gate on every p
 
 ## First vertical slice
 
-Implemented: text capture, interpretation/confidence/review, explicit confirmation, a reusable object workbench, local persistent semantic objects, Today and Morning Digest, separate commitments and Calendar views, installable PWA support, and a pan/zoom canvas with text blocks, group containers, arrows, drag, resizing, shape conversion, deletion, persistence, and session undo/redo.
+Implemented: text capture, interpretation/confidence/review, explicit confirmation, a reusable object workbench, local persistent semantic objects, Today and Morning Digest, separate commitments and Calendar views, installable PWA support, and a pan/zoom canvas with text blocks, group containers, arrows, drag, resizing, shape conversion, deletion, persistence, session undo/redo, selectable connection styling, and sticky group membership.
 
-Current pipeline: richer connection styling/routing and sticky group membership. Native voice capture is removed from the active pipeline because users can use device dictation. External calendar sync, collaborative/remote persistence, autonomous scheduling, and ROI optimization remain deferred.
+Current pipeline: project/objective containment (blocked on OD-007) and the full objects workbench that follows it. Native voice capture is removed from the active pipeline because users can use device dictation. External calendar sync, collaborative/remote persistence, autonomous scheduling, and ROI optimization remain deferred.

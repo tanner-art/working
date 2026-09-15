@@ -8,7 +8,7 @@ Only READY tasks may be newly assigned. Each task has one implementation owner, 
 
 ## IN_PROGRESS
 
-Canvas connection styling and sticky group membership are active as TASK-022 and TASK-023. Their implementation branches own the detailed task entries so parallel work does not create duplicate or conflicting board records.
+None.
 
 ## READY
 
@@ -76,16 +76,26 @@ None.
 | TASK-012 | Established `docs/IMPLEMENTATION_STATUS.md` as the canonical implementation-status document. | `e519189` on `main` |
 | TASK-013 | Retired the obsolete overnight log. | `a051f8f` on `main` |
 | TASK-014 | Added the current QA checklist and aligned its Git policy with `AGENTS.md`. | `e3d8b12` on `main` |
-| TASK-015 | Added and hardened the local GitHub queue runner. | `94680e5`, `16c90cf` |
-| TASK-016 | Exercised the autonomous queue workflow for issue #1. | `65ce52f` |
-| TASK-017 | Exercised and corrected the autonomous queue workflow for issue #4. | `683fc2f` |
 | TASK-018 | Made Threadline installable on mobile as a PWA. | PR #12, `8856c3d` |
 | TASK-019 | Added separate confirmation provenance for fixed deadlines and scheduled events. | PR #23, `bd76a49` |
 | TASK-020 | Added a responsive, navigable full month Calendar view. | PR #24, `d16cb64` |
 | TASK-021 | Added bounded pointer/keyboard canvas resizing and text/group shape conversion. | PR #22, `2e4cb4e` |
+| TASK-022 | Owner Codex canvas-edges. Added selectable canvas connections with straight/curved paths, solid/dashed/dotted patterns, and light/regular/bold weights (visual-only, no semantic relationship inference); legacy connections keep implicit straight/solid/regular defaults, invalid styles fail validation without writing. | PR #28, `f8848c7` (merged `a933865`) |
+| TASK-023 | Owner Codex B. Added explicit sticky canvas group membership (attach/detach, bulk attach of fully-contained blocks, atomic group movement) preserving resize, shape conversion, deletion, undo/redo, and persisted-state compatibility; legacy canvases stay valid and invalid/nested membership fails closed. | PR #29, `dee16c3` (merged `1feb87a`) |
+
+## Off-main operational infrastructure
+
+The following are tooling/operational commits that support running the autonomous task queue itself, not Threadline product features. They live on separate, non-integrated branches and have never been merged into `main`, so they are excluded from the product DONE table above rather than marked shipped.
+
+| Task | Result | Branch (not merged) | Evidence |
+| --- | --- | --- | --- |
+| TASK-015 | Added and hardened a local GitHub issue-queue runner (launchd install, takeover inventory, lifecycle guards). | `infra/task-015-local-runner` | `94680e5`, `16c90cf` |
+| TASK-016 | Exercised the runner against queue issue #1 and recorded a smoke-test result. | `runner/task-016-1-1789352202213804000` | `65ce52f` |
+| TASK-017 | Exercised and corrected the runner against queue issue #4 and recorded a smoke-test result. | `runner/task-017-4-1789353940719539000` | `683fc2f` |
 
 ## Hosting status
 
 - The current production alias is `https://working-ten-rust.vercel.app`.
-- The claimed project at `https://temporary-zippy-agate-50psn81.vercel.app` is connected to `tanner-art/working` in GitHub and is awaiting the next push to receive the current build.
+- `main` now includes both TASK-022 (rich canvas connection styling) and TASK-023 (sticky group membership) as of `1feb87a`; the next push brings the production alias up to date with these features.
+- The claimed project at `https://temporary-zippy-agate-50psn81.vercel.app` is connected to `tanner-art/working` in GitHub and is awaiting the next push to receive the current build, which will include TASK-022 and TASK-023.
 - The local `.vercel` directory is intentionally ignored. The pending `.gitignore` change in canonical `main` must be preserved and integrated through review.
