@@ -117,5 +117,5 @@ implemented against it), and TASK-029 itself is not yet DONE. They are recorded 
 BACKLOG stubs so assignment can proceed without further scoping once TASK-029 lands.
 
 ### Exact response to move forward
-Assign TASK-029 login wiring to Agent A once TASK-026's merge status is confirmed:
+TASK-026 has merged; the next implementation step is TASK-029 login wiring:
 `Assign TASK-029 login wiring to Agent A.`

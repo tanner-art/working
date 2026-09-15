@@ -1260,26 +1260,12 @@ superseded — its combined scope is decomposed into new BACKLOG stubs TASK-034 
 storage adapter), TASK-035 (local-to-account migration/import), TASK-036 (sign-out/offline
 behavior), and TASK-037 (privacy/export/delete settings), each with its own Depends On, Scope,
 Do Not, and Acceptance Criteria.
-Validation: `pnpm check` and `git diff --check` were NOT run — no shell/Bash execution tool
-was available in this session (only file read/write/edit/glob/grep tools were provided). Only
-docs/AUTH_DATA_PLAN.md, docs/DECISIONS.md, and TASKS.md were changed, matching the assigned
-allowlist, and no application code was touched, so the existing test/build suite is expected
-to be unaffected; this must still be confirmed by the runner or a follow-up session with shell
-access before this task is treated as validated. Diffs were reviewed by rereading each edited
-file after writing it, but no automated whitespace/lint check was run.
+Validation: runner validation passed with `pnpm check` and `git diff --check`. The change is
+docs-only: docs/AUTH_DATA_PLAN.md, docs/DECISIONS.md, and TASKS.md.
 Limitations: none of TASK-034–037 are marked READY. Each depends on TASK-029, which is not yet
-DONE, and TASKS.md's own Task Lifecycle rule requires dependencies to be satisfied before
-READY — so they are recorded as concrete BACKLOG stubs instead, ready for assignment as soon
-as TASK-029 lands. No independent review of this planning doc was performed (Reviewer:
-Unassigned), consistent with prior doc-only tasks (TASK-009, TASK-012–014) in this file.
-`pnpm check`/`git diff --check` remain outstanding acceptance items for the runner to execute.
-Discovered (not implemented, does not block this task): TASK-026 (Settings and account shell)
-is the most recent commit on this branch/worktree (76a4166) but, like TASK-018/019/020 noted
-previously in TASK-020's Result, has no entry in TASKS.md's board and its merge-to-`main`
-status could not be confirmed from this worktree. TASK-029/030/032/033 all list "Depends On:
-TASK-026," so their readiness cannot be honestly resolved until that staleness gap is fixed.
-Recommend the previously proposed doc-sync task also reconcile TASK-026's board entry before
-promoting TASK-029 to READY.
+DONE, and TASKS.md's Task Lifecycle rule requires dependencies to be satisfied before READY.
+They are recorded as concrete BACKLOG stubs, ready for assignment once TASK-029 lands.
+TASK-026 has now merged to `main` via PR #39, so TASK-029 is unblocked for promotion/assignment.
 
-Commit: pending (left uncommitted for the runner, per assignment instructions)
-Review: pending
+Commit: b61a39d plus review correction pending
+Review: pending independent review
