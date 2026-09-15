@@ -140,7 +140,6 @@ follow-up required by D-010.
 
 ## READY
 
-
 ### TASK-010 - Wire Canvas Undo/Redo and Decide OD-002 Revision Persistence
 
 Status: READY
