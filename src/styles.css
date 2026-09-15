@@ -78,3 +78,43 @@
 .canvas-node:hover .canvas-resize-handle, .canvas-node.selected .canvas-resize-handle, .canvas-node:focus-within .canvas-resize-handle { opacity: 1; }
 .canvas-resize-handle:focus-visible, .canvas-properties :focus-visible { outline: 3px solid #507737; outline-offset: 2px; }
 @media (max-width: 720px) { .canvas-page { height: calc(100dvh - 58px); } .canvas-head { padding: 12px 18px; } .canvas-properties { height: 150px; gap: 6px; } .canvas-resize-handle { opacity: 1; } }
+
+/* The translucent iOS status bar overlays standalone content. Inset each
+   viewport-level surface once; nested headers/tools inherit the safe space.
+   Browser tabs retain their existing layout, even with viewport-fit=cover. */
+@media (display-mode: standalone) {
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+  }
+  .app-shell {
+    min-height: 100dvh;
+    padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+  }
+  .sidebar { padding-top: calc(28px + var(--safe-top)); }
+  .content { padding-top: var(--safe-top); }
+  .canvas-page { height: calc(100dvh - var(--safe-top) - var(--safe-bottom)); }
+  /* Fixed overlays do not inherit the shell's layout insets. */
+  .object-panel {
+    padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  /* The storage-load failure screen renders without the app shell. */
+  #root > .page {
+    padding: calc(70px + var(--safe-top)) calc(68px + var(--safe-right))
+      calc(70px + var(--safe-bottom)) calc(68px + var(--safe-left));
+  }
+}
+
+@media (display-mode: standalone) and (max-width: 720px) {
+  /* Keep the safe strip inside the sticky navigation, including after scroll. */
+  .sidebar { padding-top: calc(10px + var(--safe-top)); }
+  .content { padding-top: 0; }
+  .canvas-page { height: calc(100dvh - 58px - var(--safe-top) - var(--safe-bottom)); }
+  #root > .page {
+    padding: calc(42px + var(--safe-top)) calc(22px + var(--safe-right))
+      calc(42px + var(--safe-bottom)) calc(22px + var(--safe-left));
+  }
+}
