@@ -132,3 +132,25 @@
       calc(42px + var(--safe-bottom)) calc(22px + var(--safe-left));
   }
 }
+
+.settings-page { max-width: 900px; }
+.settings-card { padding: 24px; margin-bottom: 20px; border: 1px solid #d9ddd5; border-radius: 12px; background: #fffefa; overflow-wrap: anywhere; }
+.settings-card h2 { margin-top: 0; font-size: 20px; }
+.settings-card p { font-size: 14px; line-height: 1.6; }
+.settings-card fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 18px; }
+.settings-card label { display: grid; gap: 8px; font-size: 13px; }
+.settings-card input, .settings-card select { width: 100%; min-width: 0; min-height: 44px; padding: 10px; border: 1px solid #a5b59f; border-radius: 6px; background: #fffefa; color: #26352e; font: inherit; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.settings-card button { min-height: 44px; white-space: normal; }
+.settings-card :focus-visible { outline: 3px solid #507737; outline-offset: 3px; }
+.settings-card button:disabled { opacity: .5; cursor: default; }
+.clear-confirmation { display: grid; gap: 16px; padding: 16px; border: 1px solid #b77969; border-radius: 8px; }
+.secondary.danger-button { color: #873a28; border-color: #b77969; }
+.primary.danger-button { background: #873a28; }
+.sidebar-bottom { overflow-wrap: anywhere; }
+.sidebar-bottom .avatar { flex-shrink: 0; }
+@media (max-width: 720px) {
+  .sidebar nav { min-width: 0; }
+  .nav-item { flex-shrink: 0; }
+  .settings-card { padding: 18px; }
+}

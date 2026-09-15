@@ -1,3 +1,5 @@
+import { clearLocalData, defaultSettings, readSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
+import { DIGEST_DELIVERY_KEY, readDelivery } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { TemporalReview } from './TemporalReview'
@@ -19,16 +21,22 @@ import {
   undoCanvas as undoCanvasHistory,
 } from './canvasHistory'
 
-type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas'
+type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Review', icon: '◇' }, { id: 'commitments', label: 'Commitments', icon: '□' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Review', icon: '◇' }, { id: 'commitments', label: 'Commitments', icon: '□' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
 export function App() {
   const [initial] = useState(loadStateResult)
   const [state, setState] = useState<AppState>(initial.state)
   const [saveError, setSaveError] = useState<string | undefined>()
-  const [view, setView] = useState<View>('today')
+  const [preferences, setPreferences] = useState(() => {
+    try { return { value: readSettings(localStorage), error: '' } }
+    catch { return { value: { ...defaultSettings }, error: 'Local settings could not be read. Editing settings is paused; stored settings are untouched.' } }
+  })
+  const [view, setView] = useState<View>(preferences.value.startPage)
+  const [clearRequested, setClearRequested] = useState(false)
+  const clearing = useRef(false)
   const capturePending = useRef(false)
   const [captureError, setCaptureError] = useState<string | undefined>()
   const [draft, setDraft] = useState('')
@@ -41,7 +49,7 @@ export function App() {
   // the adaptation note in src/canvasHistory.ts.
   const [canvasHistory, setCanvasHistory] = useState<CanvasHistory>(() => emptyCanvasHistory(initial.state.canvas))
   const update = (fn: (current: AppState) => AppState) => setState(current => fn(current))
-  useEffect(() => { if (!initial.error) setSaveError(saveState(state)) }, [state, initial.error])
+  useEffect(() => { if (!initial.error && !clearing.current) setSaveError(saveState(state)) }, [state, initial.error])
   const commitCanvas = (next: CanvasElement[]) => {
     const nextHistory = commitCanvasHistory(canvasHistory, next)
     setCanvasHistory(nextHistory)
@@ -83,6 +91,15 @@ export function App() {
     link.href = url; link.download = 'threadline-backup.json'; link.click()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
+  const downloadExport = () => {
+    try {
+      const backup = { ...state, localSettings: localStorage.getItem(SETTINGS_KEY), digestDelivery: localStorage.getItem(DIGEST_DELIVERY_KEY) }
+      const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }))
+      const link = document.createElement('a')
+      link.href = url; link.download = 'threadline-export.json'; link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch { throw new Error('Export could not read browser storage. Use Download thoughts backup to preserve the work in this tab.') }
+  }
   const reviewCount = state.objects.filter(item => item.status === 'review').length
   const capture = async () => {
     const content = draft.trim()
@@ -91,6 +108,7 @@ export function App() {
     setCaptureError(undefined)
     try {
       const item = await createInterpretedObject(content, context.trim() || undefined)
+      if (clearing.current) return
       update(current => ({ ...current, objects: [item, ...current.objects] }))
       // Preserve any new typing while an asynchronous interpreter is running.
       setDraft(current => current === draft ? '' : current)
@@ -114,13 +132,18 @@ export function App() {
     setSelectedObjectId(item.id)
   }
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
+  if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   return <main className="app-shell">
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">D</span><span>Personal space</span></div></aside>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></div></aside>
     <section className="content">
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       <MorningDigest state={state} visible={view === 'today'} onShow={() => setView('today')} />
+      {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} onSave={value => {
+        writeSettings(localStorage, value)
+        setPreferences({ value, error: '' })
+      }} onDigest={() => setView('today')} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <TemporalReview state={state} onUpdate={update} />}
@@ -131,6 +154,55 @@ export function App() {
     </section>
     {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
   </main>
+}
+
+function SettingsPage({ settings, error, onSave, onDigest, onExport, onBackup, onClear }: {
+  settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void
+  onDigest: () => void; onExport: () => void; onBackup: () => void; onClear: () => void
+}) {
+  const [draft, setDraft] = useState(settings)
+  const [message, setMessage] = useState('')
+  const [failure, setFailure] = useState('')
+  const [confirming, setConfirming] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [digest, setDigest] = useState('')
+  useEffect(() => {
+    const sync = () => {
+      try { setDigest(readDelivery(localStorage).enabled ? 'Enabled' : 'Disabled') }
+      catch { setDigest('Unavailable — delivery is paused because its settings could not be read') }
+    }
+    sync()
+    window.addEventListener('storage', sync)
+    window.addEventListener('focus', sync)
+    return () => { window.removeEventListener('storage', sync); window.removeEventListener('focus', sync) }
+  }, [])
+  return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
+    <section className="settings-card"><h2>Local profile</h2><p><strong>Local-only · Not signed in yet</strong></p><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
+      {error && <p role="alert">{error}</p>}
+      <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage('Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
+        <fieldset disabled={!!error}><label>Display name / profile label<input maxLength={80} autoComplete="nickname" value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })} placeholder="Personal space" /></label>
+          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas</option></select></label>
+          <button className="primary" type="submit">Save settings</button></fieldset>
+      </form><p role="status">{message}</p>
+    </section>
+    <section className="settings-card"><h2>Morning digest</h2><p>Status: {digest}</p><p>7 AM in your device’s local time, while Threadline is open or when you return. No notifications while the app is closed.</p><button className="secondary" onClick={onDigest}>Manage digest on Today</button></section>
+    <section className="settings-card"><h2>Data controls</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
+      <p>Clearing removes all Threadline thoughts, canvas and preferences from this browser, including drafts and session undo history. This cannot be undone. Download a backup first and close other Threadline tabs.</p>
+      {!confirming ? <button className="secondary danger-button" onClick={() => setConfirming(true)}>Clear local data…</button> : <form className="clear-confirmation" onSubmit={event => { event.preventDefault(); if (confirmation === 'CLEAR') onClear() }}><label>Type CLEAR to permanently clear local data<input autoFocus autoComplete="off" value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><div className="settings-actions"><button type="button" className="secondary" onClick={() => { setConfirming(false); setConfirmation('') }}>Cancel</button><button className="primary danger-button" disabled={confirmation !== 'CLEAR'}>Permanently clear local data</button></div></form>}
+    </section>{failure && <p role="alert">{failure}</p>}
+  </div>
+}
+
+function ClearLocalData({ onBackup }: { onBackup: () => void }) {
+  const [error, setError] = useState('')
+  const [done, setDone] = useState(false)
+  const clear = () => {
+    try { clearLocalData(localStorage, 'CLEAR'); setError(''); setDone(true) }
+    catch { setError('Clearing could not finish. Some local data may already be cleared. Editing is paused; retry to finish.') }
+  }
+  // Mounted only after confirmation, with the digest and other writers unmounted.
+  useEffect(clear, [])
+  return <main className="page"><h1>{done ? 'Local data cleared' : 'Clearing local data'}</h1>{error && <p role="alert">{error}</p>}{done ? <button className="primary" onClick={() => window.location.reload()}>Start fresh</button> : <div className="settings-actions"><button className="secondary" onClick={clear}>Retry clearing</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>}</main>
 }
 
 function Header({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) { return <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1></div>{action}</header> }
