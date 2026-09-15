@@ -1,6 +1,8 @@
 import type { CanvasElement } from './domain'
 
-export type CanvasShape = Exclude<CanvasElement['type'], 'arrow'>
+export type CanvasShape = Exclude<CanvasElement['type'], 'arrow'> | NonNullable<CanvasElement['shape']>
+export const canvasShapeLabels: Record<CanvasShape, string> = { text: 'Text block', rectangle: 'Rectangle', 'rounded-rectangle': 'Rounded rectangle', ellipse: 'Ellipse', diamond: 'Diamond', container: 'Group container' }
+export const canvasNodeShape = (node: CanvasElement): CanvasShape => node.type === 'container' ? 'container' : node.shape ?? 'text'
 export type ConnectionPath = NonNullable<CanvasElement['connectionPath']>
 export type ConnectionPattern = NonNullable<CanvasElement['connectionPattern']>
 export type ConnectionWeight = NonNullable<CanvasElement['connectionWeight']>
@@ -22,14 +24,19 @@ export function resizeCanvasNode(elements: CanvasElement[], id: string, width: n
     return before.width === next.width && before.height === next.height ? node : { ...node, ...next }
   })
 }
-export function convertCanvasNode(elements: CanvasElement[], id: string, type: CanvasShape): CanvasElement[] {
+export function convertCanvasNode(elements: CanvasElement[], id: string, shape: CanvasShape): CanvasElement[] {
+  const target = elements.find(node => node.id === id)
+  if (!target || target.type === 'arrow' || canvasNodeShape(target) === shape) return elements
+  const type = shape === 'container' ? 'container' : 'text'
   return elements.map(node => {
-    if (node.groupId === id && type === 'text') return { ...node, groupId: undefined }
-    return node.id === id && node.type !== 'arrow' && node.type !== type
-      ? { ...node, ...canvasSize(node), type, groupId: undefined } : node
+    if (target.type === 'container' && node.groupId === id && type !== 'container') return { ...node, groupId: undefined }
+    return node.id === id
+      ? { ...node, ...canvasSize(node), type, shape: shape === 'text' || shape === 'container' ? undefined : shape,
+        groupId: type === 'container' ? undefined : node.groupId } : node
   })
 }
-// Fixed bottom/top center ports follow live geometry without changing endpoint IDs.
+// Bottom/top extrema lie on every supported shape boundary, including ellipse and diamond.
+// Keep these fixed ports for both straight and curved connections and legacy layouts.
 export function canvasConnector(from: CanvasElement, to: CanvasElement) {
   const a = canvasSize(from), b = canvasSize(to)
   return { x1: from.x + a.width / 2, y1: from.y + a.height, x2: to.x + b.width / 2, y2: to.y }

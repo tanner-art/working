@@ -52,6 +52,8 @@ export interface ProposedAction { summary: string }
 export interface CanvasElement {
   id: string
   type: 'text' | 'container' | 'arrow'
+  /** Visual appearance of a text block; never semantic meaning or group nesting. */
+  shape?: 'rectangle' | 'rounded-rectangle' | 'ellipse' | 'diamond'
   x: number
   y: number
   width?: number
