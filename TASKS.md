@@ -103,6 +103,40 @@ follow-up required by D-010.
 
 ## READY
 
+### TASK-025 - iPhone Home-Screen Safe-Area Controls
+
+Status: READY
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M4
+
+Goal:
+When Threadline is added to an iPhone home screen and launched in standalone mode, top controls must remain usable below the camera / Dynamic Island area. The current top dots or overflow controls sit too high on iPhone 17-class screens.
+
+Scope:
+- audit standalone iOS/PWA layout using the existing `viewport-fit=cover` and Apple web-app metadata
+- apply correct safe-area spacing for the app shell, sidebar/top controls, canvas controls, and any top-right dot/overflow controls
+- preserve desktop layout and normal Safari layout
+- update `docs/MOBILE_INSTALL.md` only if the user-facing home-screen instructions need a small clarification
+- add focused CSS/layout regression coverage where practical, or document the manual browser/device validation path if this repo still lacks a DOM/mobile test harness
+
+Do Not:
+- add native mobile wrappers
+- add push notifications
+- redesign the navigation
+- change unrelated canvas behavior
+
+Acceptance:
+- iPhone standalone/home-screen top controls are reachable below the camera area
+- desktop and mobile browser layouts still fit without overlapping controls
+- `pnpm check` and `git diff --check` pass
+- implementation reports the exact iPhone/simulator/browser validation performed
+
+Result:
+Commit: pending
+Review: pending
+
 
 ### TASK-010 - Wire Canvas Undo/Redo and Decide OD-002 Revision Persistence
 
