@@ -79,6 +79,34 @@ Resolves OD-002. Ratified 2026-09-13 by TASK-010.
 
 **Non-goal for TASK-010.** TASK-010 does not implement durable revision storage, does not add a revision table/schema, and does not claim canvas history survives anything beyond the current browser session.
 
+### D-011: Initial Auth & Per-User Data Provider — Supabase Auth + Postgres
+
+Ratified 2026-09-15 by TASK-027 (GitHub issue #37), comparing Supabase Auth + Postgres,
+Clerk + hosted database, and a minimal custom auth/database path against the app's existing
+Vite/Vercel, localStorage-first architecture.
+
+**Decision.** Threadline's first hosted login and per-user data path uses Supabase Auth
+(email sign-in to start) plus Supabase Postgres with Row Level Security (RLS) as the per-user
+data store. Full comparison, environment variables, and data ownership model:
+[AUTH_DATA_PLAN.md](AUTH_DATA_PLAN.md).
+
+**Why.** Supabase is the only compared option giving both authentication and per-user database
+isolation from a single vendor and a single set of client-safe environment variables, with row
+ownership enforced by RLS at the database layer rather than by application code an agent must
+get exactly right. Clerk has stronger prebuilt login UI components but leaves database
+selection and per-user isolation entirely custom; a fully custom auth/database path is slowest
+and highest-risk for a solo-maintained MVP.
+
+**What this does not do.** This decision does not implement any backend code, does not select
+a paid tier, and does not require migrating or deleting existing localStorage data — local-only
+usage remains fully supported and is not deprecated (see AUTH_DATA_PLAN.md's data ownership
+model).
+
+**Follow-up tasks.** TASK-029 (login UI, existing), TASK-034 (user-scoped storage adapter),
+TASK-035 (local-to-account migration/import), TASK-036 (sign-out/offline behavior), TASK-037
+(privacy/export/delete settings). TASK-030's original combined scope is superseded by
+TASK-034–037; see AUTH_DATA_PLAN.md.
+
 ## Open Decisions
 
 ### OD-003: Interpretation Reversal

@@ -228,8 +228,13 @@ Depends On:
 Goal:
 Give Threadline a real login path so the app can distinguish a local-only session from an authenticated user without breaking existing local data.
 
+Note (TASK-027): the initial auth provider is decided — Supabase Auth + Postgres, per D-011
+and [docs/AUTH_DATA_PLAN.md](docs/AUTH_DATA_PLAN.md), which also lists the required
+`VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` env vars and one-time dashboard setup. This
+task should implement login against that decision rather than re-evaluating providers.
+
 Scope:
-- choose and document the initial auth provider for the hosted Vercel app
+- wire Supabase email auth per docs/AUTH_DATA_PLAN.md (choose password or magic link)
 - add visible login/logout/account entry points from the Settings shell
 - keep existing localStorage data safe during the transition
 - show clear signed-in vs local-only state in the UI
@@ -256,7 +261,7 @@ Assign this task to Agent A after TASK-026 merges: `Assign TASK-029 login wiring
 
 ### TASK-030 - User-Owned Cloud Data Boundary
 
-Status: BACKLOG
+Status: BACKLOG (superseded — see note)
 Owner: Unassigned
 Reviewer: Unassigned
 Priority: P0
@@ -265,6 +270,12 @@ Milestone: M5
 Depends On:
 - TASK-026
 - TASK-029
+
+Note (TASK-027): this task's combined scope is superseded by the more granular TASK-034
+(user-scoped storage adapter), TASK-035 (migration/import), TASK-036 (sign-out/offline
+behavior), and TASK-037 (privacy/export/delete settings) defined in
+[docs/AUTH_DATA_PLAN.md](docs/AUTH_DATA_PLAN.md) and D-011. Do not assign this task as
+written; assign TASK-034–037 instead so scope does not overlap. Left in place for history.
 
 Goal:
 Move from one-browser local data toward data that belongs to a specific signed-in user, while preserving the existing capture/provenance model.
@@ -292,6 +303,180 @@ Acceptance Criteria:
 
 ### Exact response to move forward
 Assign this task after TASK-029: `Assign TASK-030 user-owned cloud data boundary to Claude or Agent A.`
+
+---
+
+### TASK-034 - User-Scoped Storage Adapter (Supabase)
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-029
+
+Goal:
+Give the app a storage adapter that reads and writes a signed-in user's data in Supabase
+Postgres, isolated by construction from every other user, per D-011 and
+[docs/AUTH_DATA_PLAN.md](docs/AUTH_DATA_PLAN.md).
+
+Scope:
+- define the minimum Supabase table schema for the existing persisted-state shape (objects/
+  captures, canvas state, settings, digest delivery state), each row carrying `user_id`
+- enable RLS on every such table with a `user_id = auth.uid()` policy for all operations
+- implement a storage adapter used only when a Supabase session exists; local-only mode keeps
+  using the existing `src/store.ts`/`src/settings.ts` localStorage path unchanged
+- add access-control tests proving one user cannot read or mutate another user's rows
+
+Do Not:
+- change the existing local-only persisted-state shape or its localStorage keys
+- implement migration/import of existing local data into this storage (TASK-035)
+- implement sign-out or offline-queue behavior (TASK-036)
+- build collaboration or shared workspaces
+
+Deliverable:
+A working, RLS-isolated per-user storage adapter that a signed-in session can read/write
+against, with local-only storage untouched.
+
+Acceptance Criteria:
+- user A cannot read or mutate user B's data in tests
+- local-only usage is unaffected when no Supabase session exists
+- pnpm check passes
+- required Supabase env vars and table/RLS setup are documented (cross-reference
+  docs/AUTH_DATA_PLAN.md rather than duplicating it)
+
+### Exact response to move forward
+Assign this task after TASK-029 lands: `Assign TASK-034 user-scoped storage adapter to Claude or Agent A.`
+
+---
+
+### TASK-035 - Local-to-Account Data Migration/Import
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-034
+
+Goal:
+Let a signed-in user copy their existing local-only data into their account without any
+automatic or destructive migration, per docs/AUTH_DATA_PLAN.md's data ownership model.
+
+Scope:
+- an explicit, user-initiated "Import my local data" action (D-009-style discrete
+  confirmation interaction), reachable from Settings
+- copies local `AppState`/settings/digest-delivery data into the signed-in user's Supabase
+  rows via the TASK-034 adapter; never deletes or overwrites local data as a side effect
+- shows import progress/result and handles partial-failure without data loss
+- add tests for import correctness, re-import/idempotency, and failure handling
+
+Do Not:
+- delete local data automatically after a successful import
+- run import automatically on sign-in without the explicit user action
+- rewrite capture/interpretation provenance semantics
+
+Deliverable:
+A working, explicit, non-destructive local-to-account import path.
+
+Acceptance Criteria:
+- local data remains fully intact and usable after import, until the user separately chooses
+  to clear it
+- a failed or partial import does not corrupt local or remote data
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task after TASK-034 lands: `Assign TASK-035 local-to-account data migration/import to Claude or Agent A.`
+
+---
+
+### TASK-036 - Sign-Out and Offline/Local-Only Behavior
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M5
+
+Depends On:
+- TASK-029
+- TASK-034
+
+Goal:
+Define and implement what happens when a signed-in user signs out or loses connectivity, so
+the app never silently loses in-progress work or misrepresents sync state.
+
+Scope:
+- sign-out returns the app to local-only mode without deleting the local copy of data
+- clear, honest UI state for signed-in/local-only/offline/sync-error, per
+  docs/AUTH_DATA_PLAN.md
+- define minimum offline behavior for a signed-in user who loses connectivity (e.g. read-only
+  fallback to last-synced data, or local queuing) — document the chosen behavior; a full
+  offline-write queue is out of scope if not already decided
+- add tests for sign-out state transitions and offline/error state rendering
+
+Do Not:
+- delete local data on sign-out
+- implement a general-purpose offline sync engine beyond the minimum defined here
+- silently drop unsaved work when connectivity is lost
+
+Deliverable:
+Working sign-out and honest offline/error state handling for the signed-in path.
+
+Acceptance Criteria:
+- signing out preserves local data and returns the app to a working local-only state
+- the UI never claims data is synced when it is not
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task after TASK-029 and TASK-034 land: `Assign TASK-036 sign-out and offline behavior to Claude or Agent A.`
+
+---
+
+### TASK-037 - Privacy, Export, and Delete Account Data Settings
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M5
+
+Depends On:
+- TASK-034
+
+Goal:
+Give a signed-in user a way to export and delete their account data from Settings, so account
+data ownership is not a one-way door.
+
+Scope:
+- a Settings section (within the TASK-033 control center) offering export of the signed-in
+  user's account data and deletion of that account data
+- export produces a downloadable copy of the user's Supabase-stored data
+- account data deletion requires explicit confirmation (typed confirmation or equivalent
+  discrete gesture, matching the existing `clearLocalData` pattern in src/settings.ts) and
+  does not touch local-only data unless the user separately clears that too
+- add tests for export contents and confirmed/guarded deletion
+
+Do Not:
+- delete Supabase auth account or local data as a side effect of exporting
+- implement data deletion without an explicit confirmation gesture
+- implement billing, teams, or admin roles
+
+Deliverable:
+Working export and confirmed delete for a signed-in user's account data.
+
+Acceptance Criteria:
+- exported data matches what is stored for that user
+- account data deletion requires explicit confirmation and does not silently cascade to local
+  data
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task after TASK-034 lands: `Assign TASK-037 privacy/export/delete settings to Claude or Agent A.`
 
 ---
 
@@ -1020,3 +1205,67 @@ docs/QA_CHECKLIST.md did not exist on `main` (only on the archived `wip/pre-orch
 Result:
 Commit: 2c42fa1
 Review: pending
+
+---
+
+### TASK-027 - Define Auth and Per-User Data Plan
+
+Status: DONE
+Owner: Claude
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+GitHub Issue: #37
+
+Depends On:
+- None
+
+Goal:
+Define the concrete login and per-user data path for Threadline so implementation can start
+without ambiguity, comparing Supabase Auth + Postgres, Clerk + hosted database, and a minimal
+custom auth/database path for the Vite/Vercel app.
+
+Scope:
+- docs/AUTH_DATA_PLAN.md: option comparison, recommended default, required environment
+  variables/account-level setup, and the data ownership model
+- docs/DECISIONS.md: record the provider decision as D-011
+- TASKS.md: concrete, non-overlapping READY-quality follow-up task stubs for login UI,
+  user-scoped storage adapter, migration/import of local data, sign-out/offline behavior,
+  and privacy/export/delete settings
+
+Do Not:
+- implement backend code
+- require destructive migration of existing local data
+- implement application code changes
+
+Deliverable:
+docs/AUTH_DATA_PLAN.md, D-011 in docs/DECISIONS.md, and decomposed follow-up task stubs in
+TASKS.md.
+
+Acceptance Criteria:
+- a default provider is recommended with rationale and required env vars/setup listed
+- the data ownership model defines local-only vs. signed-in vs. synced state without
+  requiring destructive migration
+- follow-up tasks are concrete and do not overlap with each other
+
+Result:
+[docs/AUTH_DATA_PLAN.md](docs/AUTH_DATA_PLAN.md) recommends Supabase Auth + Postgres (RLS)
+over Clerk + hosted database and a minimal custom auth/database path, with required env vars
+(`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, server-only `SUPABASE_SERVICE_ROLE_KEY`),
+one-time Supabase dashboard setup, and a data ownership model requiring an explicit,
+non-destructive opt-in to migrate local data (local-only usage is unaffected and remains the
+default). Recorded as D-011 in docs/DECISIONS.md. TASK-029 (login UI) is annotated with the
+ratified provider rather than duplicated. TASK-030 (User-Owned Cloud Data Boundary) is marked
+superseded — its combined scope is decomposed into new BACKLOG stubs TASK-034 (user-scoped
+storage adapter), TASK-035 (local-to-account migration/import), TASK-036 (sign-out/offline
+behavior), and TASK-037 (privacy/export/delete settings), each with its own Depends On, Scope,
+Do Not, and Acceptance Criteria.
+Validation: runner validation passed with `pnpm check` and `git diff --check`. The change is
+docs-only: docs/AUTH_DATA_PLAN.md, docs/DECISIONS.md, and TASKS.md.
+Limitations: none of TASK-034–037 are marked READY. Each depends on TASK-029, which is not yet
+DONE, and TASKS.md's Task Lifecycle rule requires dependencies to be satisfied before READY.
+They are recorded as concrete BACKLOG stubs, ready for assignment once TASK-029 lands.
+TASK-026 has now merged to `main` via PR #39, so TASK-029 is unblocked for promotion/assignment.
+
+Commit: b61a39d plus review correction pending
+Review: pending independent review
