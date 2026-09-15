@@ -1,4 +1,4 @@
-import { CANVAS_SIZE, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
+import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
@@ -219,13 +219,14 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     return dragOffset && (dragOffset.id === id || (dragged?.type === 'container' && item.groupId === dragged.id))
       ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
   }
-  const add = (type: 'text' | 'container') => {
+  const add = (shape: CanvasShape) => {
     // Placement must account for both pan and zoom: a screen-space offset has to be
     // converted into world space by dividing by scale, or nodes land in the wrong spot
     // whenever the canvas is zoomed.
     const worldX = ((window.innerWidth < 720 ? 32 : 260) - pan.x) / scale
     const worldY = (160 - pan.y) / scale
-    const next = newCanvasElement(type, worldX, worldY)
+    const base = newCanvasElement(shape === 'container' ? 'container' : 'text', worldX, worldY)
+    const next = convertCanvasNode([base], base.id, shape)[0]
     onCommit([...elements, next])
     setSelected(next.id)
   }
@@ -285,6 +286,9 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     <div className="canvas-tools">
     <button onClick={() => add('text')}>+ Text</button>
     <button onClick={() => add('container')}>+ Group</button>
+    <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
+    <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
+    </select></label>
     <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
     <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
     <button disabled={!selected} onClick={removeSelected}>Delete</button>
@@ -298,9 +302,8 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     </div>
     </div>
     <div className="canvas-properties">{selectedElement && selectedElement.type !== 'arrow' && <>
-    <label>Shape <select aria-label="Block shape" value={selectedElement.type} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
-    <option value="text">Text block</option>
-    <option value="container">Group container</option>
+    <label>Shape <select aria-label="Block shape" value={canvasNodeShape(selectedElement)} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
+    {Object.entries(canvasShapeLabels).map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
     </select>
     </label>{selectedElement.type === 'text' && <label>Move with group <select aria-label="Move with group" value={selectedElement.groupId ?? ''} onChange={event => onCommit(setCanvasGroup(elements, selectedElement.id, event.target.value || undefined))}>
     <option value="">None</option>{groups.map(group => <option key={group.id} value={group.id}>{group.text?.trim() || 'Untitled group'}</option>)}
@@ -319,7 +322,8 @@ function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptur
     <path d="M0,0 L0,6 L7,3 z" />
     </marker>
     </defs>
-    </svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown) }} onClick={event => clickNode(event, item.id)}>
+    </svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown) }} onClick={event => clickNode(event, item.id)}>
+    {(item.shape === 'ellipse' || item.shape === 'diamond') && <svg className="canvas-shape-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{item.shape === 'ellipse' ? <ellipse cx="50" cy="50" rx="50" ry="50" /> : <polygon points="50,0 100,50 50,100 0,50" />}</svg>}
     <div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}>
     <span>
     </span>

@@ -24,6 +24,43 @@ Only READY tasks may be newly assigned.
 
 ## IN_PROGRESS
 
+### TASK-024 - Accessible Canvas Node Shape Palette
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent runner review
+Milestone: M4
+Issue: #31
+Depends On: merged TASK-021, TASK-022, TASK-023 (inspected at current main 1feb87a).
+
+Scope: explicit creation and conversion of rectangle, rounded rectangle, ellipse, and
+diamond visual blocks; accessible native selectors, responsive toolbar, shape rendering,
+ geometry, group constraints, history, and persisted validation. Semantic kinds are unchanged.
+
+Acceptance: preserve old saved canvases, content and IDs, resizing, connection styling and
+boundary ports, undo/redo, group membership constraints, and mobile usability; meaningful
+regression tests, pnpm check, and diff checks.
+
+Result: added an optional visual shape field to text blocks, keeping the existing group
+membership model. Converting a group to any block shape detaches its members; converting
+a member to a group removes its membership. Shape-only changes retain membership.
+Ellipse and diamond outlines use the full node bounds with a centered scrollable editor;
+fixed bottom/top connector ports lie on every supported shape boundary. Native labeled
+creation/conversion selectors support keyboard and touch; mobile tools scroll horizontally.
+Legacy blocks retain their original appearance without adding shape metadata on load.
+
+Validation (2026-09-14): pnpm check passed: 199 tests across 12 files, TypeScript, and
+production build. git diff --check passed; implementation and test diffs inspected.
+No lint script is configured. Only the eight assigned paths changed.
+
+Limitations: browser/touch smoke testing and independent review remain pending; no browser
+tool is available in this session. Fixed ports preserve existing routing behavior and do
+not avoid overlapping nodes. Undo history remains session-only under D-010. Durable
+canvas revisions remain separately scoped work. No new follow-up implementation added.
+Delivery: changes left uncommitted for the runner, per user instruction; no git mutations.
+
+---
+
 ### TASK-023 - Sticky Canvas Group Membership
 
 Status: MERGE_READY

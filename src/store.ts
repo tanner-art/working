@@ -146,6 +146,7 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     Number.isFinite(item.y) &&
     (item.width === undefined || Number.isFinite(item.width)) &&
     (item.height === undefined || Number.isFinite(item.height)) &&
+    (item.shape === undefined || (item.type === 'text' && ['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'].includes(item.shape))) &&
     (item.text === undefined || typeof item.text === 'string') &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&

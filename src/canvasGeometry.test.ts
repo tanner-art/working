@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasElement } from './domain'
 import { canvasSize, canvasConnector, canvasConnectorPath, connectionAppearance, convertCanvasNode, resizeCanvasNode, updateCanvasConnection } from './canvasGeometry'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
+import { moveCanvasNode, setCanvasGroup } from './canvasGroups'
 import { loadStateResult, saveState } from './store'
 
 const nodes: CanvasElement[] = [
@@ -109,5 +110,43 @@ describe('canvas size and conversion', () => {
     const loaded = loadStateResult()
     expect(loaded.error).toBeUndefined()
     expect(loaded.state.canvas.find(item => item.id === 'canvas-arrow')).toMatchObject({ connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
+  })
+})
+
+
+describe('TASK-024 visual shape palette', () => {
+  it.each(['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'] as const)('preserves expression, sticky membership and history for %s', shape => {
+    const grouped = setCanvasGroup(nodes, 'a', 'b')
+    const converted = convertCanvasNode(grouped, 'a', shape)
+    expect(converted[0]).toEqual({ ...grouped[0], shape })
+    expect(converted[2]).toBe(grouped[2])
+    const moved = moveCanvasNode(converted, 'b', 550, 470)
+    expect(moved[0]).toMatchObject({ x: 20, y: 95, groupId: 'b', shape })
+    const resized = resizeCanvasNode(moved, 'a', 400, 300)
+    expect(resized[0]).toMatchObject({ shape, groupId: 'b', text: nodes[0].text })
+    const history = commitCanvas(commitCanvas(emptyCanvasHistory(grouped), converted), resized)
+    expect(undoCanvas(history).present).toEqual(converted)
+    expect(undoCanvas(undoCanvas(history)).present).toEqual(grouped)
+    expect(redoCanvas(undoCanvas(history)).present).toEqual(resized)
+    expect(convertCanvasNode(converted, 'a', shape)).toBe(converted)
+    expect(convertCanvasNode(converted, 'a', 'text')).toEqual(grouped)
+    expect(convertCanvasNode(converted, 'a', 'container')[0]).toMatchObject({ type: 'container', shape: undefined, groupId: undefined })
+    expect(convertCanvasNode(grouped, 'b', shape)[0].groupId).toBeUndefined()
+  })
+
+  it.each(['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'] as const)('anchors both path styles to %s boundary extrema after resize', shape => {
+    const from = { ...nodes[0], shape, width: 300, height: 200 }
+    const to = { ...nodes[0], id: 'other', shape, x: -500, y: -400, width: 120, height: 100 }
+    const ports = canvasConnector(from, to)
+    expect(ports).toEqual({ x1: 120, y1: 225, x2: -440, y2: -400 })
+    // Normalized ellipse equation and diamond equation both equal one at the ports.
+    for (const [node, x, y] of [[from, ports.x1, ports.y1], [to, ports.x2, ports.y2]] as const) {
+      const dx = (x - node.x - node.width / 2) / (node.width / 2)
+      const dy = (y - node.y - node.height / 2) / (node.height / 2)
+      expect(dx * dx + dy * dy).toBe(1)
+      expect(Math.abs(dx) + Math.abs(dy)).toBe(1)
+    }
+    expect(canvasConnectorPath(from, to)).toBe('M 120 225 L -440 -400')
+    expect(canvasConnectorPath(from, to, 'curved')).toMatch(/^M 120 225 C .* -440 -400$/)
   })
 })

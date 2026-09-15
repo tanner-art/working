@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AppState } from './domain'
+import type { AppState, CanvasElement } from './domain'
 import { migrateLegacyState } from './migration'
 import { loadStateResult, saveState } from './store'
 
@@ -57,6 +57,43 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     expect(saveState(invalid)).toContain('format is invalid')
     const misplaced: AppState = { objects: [], canvas: [{ id: 'block', type: 'text', x: 0, y: 0, connectionWeight: 'bold' }] }
     expect(saveState(misplaced)).toContain('format is invalid')
+    expect(setItem).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('TASK-024 shape persistence', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('migrates and roundtrips every shape with groups and styled connectors without semantic changes', () => {
+    const canvas: CanvasElement[] = [
+      { id: 'group', type: 'container', x: 0, y: 0 },
+      { id: 'legacy', type: 'text', x: 10, y: 20, text: 'Unchanged' },
+      ...(['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'] as const).map((shape, index) => ({ id: shape, type: 'text' as const, shape, x: index * 200, y: -100, width: 180, height: 120, text: 'Preserved', groupId: 'group' })),
+      { id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'ellipse', toId: 'diamond', connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' },
+    ]
+    let raw = JSON.stringify({ objects: [], canvas })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.state.canvas).toEqual(canvas)
+    expect(saveState(loaded.state)).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.canvas).toEqual(canvas)
+    expect(reloaded.state.model).toEqual(loaded.state.model)
+    expect(reloaded.state.model?.semanticObjects).toEqual([])
+    expect(reloaded.state.canvas[1]).not.toHaveProperty('shape')
+  })
+  it.each([
+    { type: 'text', shape: 'triangle' },
+    { type: 'container', shape: 'ellipse' },
+    { type: 'arrow', shape: 'diamond', fromId: 'a', toId: 'b' },
+  ])('rejects unsupported or misplaced shape metadata: %j', patch => {
+    const state = { objects: [], canvas: [{ id: 'invalid', x: 0, y: 0, ...patch }] } as AppState
+    const raw = JSON.stringify(state), setItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem })
+    expect(loadStateResult().error).toContain('left untouched')
+    expect(saveState(state)).toContain('format is invalid')
     expect(setItem).not.toHaveBeenCalled()
   })
 })
