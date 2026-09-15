@@ -212,6 +212,210 @@ Review: pending
 
 ## BACKLOG
 
+Queued app-usability tasks below are created from the current product push toward immediate hosted usability. Promote them to READY only when their listed dependencies are satisfied.
+
+### TASK-029 - Auth Provider Selection and Login Wiring
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-026
+
+Goal:
+Give Threadline a real login path so the app can distinguish a local-only session from an authenticated user without breaking existing local data.
+
+Scope:
+- choose and document the initial auth provider for the hosted Vercel app
+- add visible login/logout/account entry points from the Settings shell
+- keep existing localStorage data safe during the transition
+- show clear signed-in vs local-only state in the UI
+- add tests for login state rendering and guarded account actions
+
+Do Not:
+- migrate all application data to the backend in this task
+- implement billing, teams, sharing, or admin roles
+- claim mobile push notifications work from closed app
+
+Deliverable:
+A user can open the hosted app, find login from Settings, and see whether Threadline is local-only or signed in.
+
+Acceptance Criteria:
+- existing local-only users do not lose data
+- settings/account shell reflects authenticated, unauthenticated, and loading/error states
+- pnpm check passes
+- hosted deployment has required auth environment variables documented
+
+### Exact response to move forward
+Assign this task to Agent A after TASK-026 merges: `Assign TASK-029 login wiring to Agent A.`
+
+---
+
+### TASK-030 - User-Owned Cloud Data Boundary
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-026
+- TASK-029
+
+Goal:
+Move from one-browser local data toward data that belongs to a specific signed-in user, while preserving the existing capture/provenance model.
+
+Scope:
+- define the minimum backend schema/storage boundary for users, captures, interpretations, semantic objects, canvas state, settings, and digest delivery state
+- implement a first safe sync or import/export bridge from local-only data into the signed-in user's account
+- prevent cross-user reads/writes by construction
+- surface sync/local-only state in Settings
+- add migration and access-control tests around user ownership
+
+Do Not:
+- build collaboration or shared workspaces
+- discard local data after login without explicit user action
+- rewrite capture/interpretation provenance semantics
+
+Deliverable:
+Signed-in user data has an explicit ownership model and a safe first path from local data to account data.
+
+Acceptance Criteria:
+- user A cannot read or mutate user B's data in tests
+- local data remains recoverable until the user explicitly completes migration
+- app shows whether data is local-only, synced, or blocked by an error
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task after TASK-029: `Assign TASK-030 user-owned cloud data boundary to Claude or Agent A.`
+
+---
+
+### TASK-031 - Real AI Interpretation Provider
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-028
+
+Goal:
+Replace the deterministic placeholder interpretation experience with a provider-backed AI interpretation path that still respects Review, provenance, and confirmation rules.
+
+Scope:
+- wire a server-side interpretation endpoint/provider behind the existing interpretation boundary
+- send only the necessary capture/canvas context for interpretation
+- receive structured proposed interpretations with rationale, confidence, and provenance references
+- fail closed to Review and useful errors when the provider is unavailable
+- add tests/evaluators for ambiguous, consequential, and low-confidence captures
+
+Do Not:
+- let AI directly create confirmed Actions, Commitments, notifications, or calendar events
+- expose provider keys to the browser
+- remove the deterministic fallback/evaluator fixtures before replacement is validated
+
+Deliverable:
+A user can capture real text/canvas input and receive AI-generated proposed meaning that is reviewable, reversible, and provenance-linked.
+
+Acceptance Criteria:
+- consequential suggestions require explicit confirmation under D-009
+- provider failures do not corrupt or overwrite captures
+- structured response validation rejects malformed provider output
+- pnpm check passes
+
+### Exact response to move forward
+After TASK-028 succeeds: `Assign TASK-031 real AI interpretation provider to Claude.`
+
+---
+
+### TASK-032 - First-Run Mobile Onboarding and Home Screen Install Help
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M5
+
+Depends On:
+- TASK-025
+- TASK-026
+
+Goal:
+Make the hosted app immediately usable on iPhone, including clear Add-to-Home-Screen guidance and controls that avoid the camera/dynamic-island safe area.
+
+Scope:
+- add a lightweight first-run/onboarding surface for mobile users
+- explain Add to Home Screen steps inside the app
+- ensure top-right menus and overflow controls sit below unsafe iPhone top insets
+- keep guidance dismissible and recoverable from Settings
+- add responsive/mobile tests where practical
+
+Do Not:
+- implement native iOS app code
+- request notification permission as part of onboarding
+- block desktop users with mobile-only instructions
+
+Deliverable:
+A new iPhone user can install/use the hosted app from the home screen without controls being hidden under the top camera area.
+
+Acceptance Criteria:
+- mobile controls are reachable in browser and home-screen display modes
+- onboarding can be dismissed and reopened from Settings
+- existing desktop layout remains usable
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task to Agent A or Claude: `Assign TASK-032 mobile onboarding and home-screen install help.`
+
+---
+
+### TASK-033 - Settings as Usability Control Center
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P1
+Milestone: M5
+
+Depends On:
+- TASK-026
+
+Goal:
+Turn Settings into the place where a nontechnical user can understand and control account state, data storage, AI interpretation, mobile install status, digest delivery, and recovery/export.
+
+Scope:
+- add sections/cards for Account, Data, AI interpretation, Mobile install, Digest, and Recovery
+- show current status and next action for each section
+- link to login, sync/migration, export, clear local data, and onboarding actions as those features land
+- keep unavailable future features honest: say what is not configured yet without implying it works
+- add rendering/tests for unavailable, local-only, and configured states
+
+Do Not:
+- implement the backend/auth/provider itself in this task
+- hide risk states behind generic success copy
+- remove export/backup controls
+
+Deliverable:
+Settings becomes the app's operational dashboard for making Threadline usable immediately.
+
+Acceptance Criteria:
+- user can tell what is local, signed-in, synced, AI-enabled, mobile-ready, and recoverable
+- unavailable features have clear next actions
+- no false claims about notifications or cloud sync
+- pnpm check passes
+
+### Exact response to move forward
+Assign this task after TASK-026 merges: `Assign TASK-033 settings control center to Agent A.`
+
+---
+
 Tasks below are generated from TASK-001 / docs/ARCHIVE_SALVAGE_AUDIT.md. They are blocked on the dependencies listed and are not to be newly assigned until promoted to READY.
 
 ### TASK-005 - Port Dependency Graph Logic onto Upgraded Relationship Model
