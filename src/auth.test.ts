@@ -20,9 +20,9 @@ describe('auth configuration and presentation', () => {
     expect(config.status).toBe('configured')
     expect(readAuthConfig({ VITE_SUPABASE_URL: 'http://localhost:54321', VITE_SUPABASE_ANON_KEY: 'key' }).status).toBe('configured')
   })
-  it('does not pretend env setup installs a provider', async () => {
+  it('does not pretend env setup alone creates a session without a provider client', async () => {
     const auth = createAuthBoundary(config)
-    expect(auth.getState()).toMatchObject({ status: 'unconfigured', message: expect.stringContaining('SDK') })
+    expect(auth.getState()).toMatchObject({ status: 'unconfigured', message: expect.stringContaining('provider setup') })
     await auth.act('login', 'person@example.com')
     expect(auth.getState().status).toBe('unconfigured')
   })

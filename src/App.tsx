@@ -144,7 +144,7 @@ export function App() {
       {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} onSave={value => {
         writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
-      }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onDigest={() => setView('today')} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
+      }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <TemporalReview state={state} onUpdate={update} />}
@@ -182,26 +182,15 @@ function AccountSection() {
   </section>
 }
 
-function SettingsPage({ settings, error, onSave, onResetSettings, onDigest, onExport, onBackup, onClear }: {
+function SettingsPage({ settings, error, onSave, onResetSettings, onExport, onBackup, onClear }: {
   settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void; onResetSettings: () => void
-  onDigest: () => void; onExport: () => void; onBackup: () => void; onClear: () => void
+  onExport: () => void; onBackup: () => void; onClear: () => void
 }) {
   const [draft, setDraft] = useState(settings)
   const [message, setMessage] = useState('')
   const [failure, setFailure] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [confirmation, setConfirmation] = useState('')
-  const [digest, setDigest] = useState('')
-  useEffect(() => {
-    const sync = () => {
-      try { setDigest(readDelivery(localStorage).enabled ? 'Enabled' : 'Disabled') }
-      catch { setDigest('Unavailable — delivery is paused because its settings could not be read') }
-    }
-    sync()
-    window.addEventListener('storage', sync)
-    window.addEventListener('focus', sync)
-    return () => { window.removeEventListener('storage', sync); window.removeEventListener('focus', sync) }
-  }, [])
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
     <AccountSection />
     <section className="settings-card"><h2>Local profile</h2><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
@@ -213,7 +202,6 @@ function SettingsPage({ settings, error, onSave, onResetSettings, onDigest, onEx
           <button className="primary" type="submit">Save settings</button></fieldset>
       </form><p role="status">{message}</p>
     </section>
-    <section className="settings-card"><h2>Morning digest</h2><p>Status: {digest}</p><p>7 AM in your device’s local time, while Threadline is open or when you return. No notifications while the app is closed.</p><button className="secondary" onClick={onDigest}>Manage digest on Today</button></section>
     <section className="settings-card"><h2>Data controls</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
       <p>Clearing removes all Threadline thoughts, canvas and preferences from this browser, including drafts and session undo history. This cannot be undone. Download a backup first and close other Threadline tabs.</p>
       {!confirming ? <button className="secondary danger-button" onClick={() => setConfirming(true)}>Clear local data…</button> : <form className="clear-confirmation" onSubmit={event => { event.preventDefault(); if (confirmation === 'CLEAR') onClear() }}><label>Type CLEAR to permanently clear local data<input autoFocus autoComplete="off" value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><div className="settings-actions"><button type="button" className="secondary" onClick={() => { setConfirming(false); setConfirmation('') }}>Cancel</button><button className="primary danger-button" disabled={confirmation !== 'CLEAR'}>Permanently clear local data</button></div></form>}

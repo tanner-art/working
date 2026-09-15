@@ -254,24 +254,25 @@ Acceptance Criteria:
 - pnpm check passes
 - hosted deployment has required auth environment variables documented
 
-Result (issue #41): implemented the explicitly authorized SDK-unavailable fallback.
-Account UI and typed configuration/session boundary include honest unconfigured, signed-out,
-loading/error and signed-in states, guarded email magic-link/login and logout actions,
-subscription cleanup and stale-response protection. Production has no provider adapter;
-SDK installation failed both offline (cache miss) and online (registry DNS failure).
-Existing application storage is untouched; no backend migration or cloud-sync claim.
-See docs/AUTH_DATA_PLAN.md for exact remaining SDK/env and hosted validation steps.
+Result (issue #41): implemented Supabase client login wiring. Account UI and typed
+configuration/session boundary include honest unconfigured, signed-out, loading/error and
+signed-in states, guarded email magic-link/login and logout actions, subscription cleanup,
+stale-response protection, and a real `@supabase/supabase-js` adapter. Existing application
+storage is untouched; no backend migration or cloud-sync claim. Morning Digest settings were
+hidden from Settings per user direction while the app is being made usable on mobile. See
+docs/AUTH_DATA_PLAN.md for exact remaining env and hosted validation steps.
 
 Validation: pnpm check passed (258 tests across 14 files, TypeScript and production
-build); git diff --check passed. Implementation/test diffs inspected. No lint script is configured.
-Limitations: real login/logout, callback handling and hosted/browser smoke validation
-remain blocked/pending provider SDK and deployment setup. Independent review pending.
+build); git diff --check passed. Build emits a nonblocking bundle-size warning after adding
+Supabase; future code-splitting can address it. Implementation/test diffs inspected. No lint
+script is configured.
+Limitations: hosted email login/logout and callback handling still require choosing the
+Threadline Supabase project, configuring redirect URLs, adding Vercel env vars, and browser
+validation against the deployed app. Cloud persistence/RLS remains TASK-034.
 Delivery: left uncommitted for the runner per explicit assignment; no git mutations.
-Follow-up: finish the provider adapter within TASK-029 before treating TASK-034–037 as
-unblocked. No additional product scope was implemented.
 
 ### Exact response to move forward
-`Complete TASK-029 Supabase SDK adapter and deployment env setup in a network-enabled environment, then validate hosted email login/logout and local-data preservation.`
+`Choose the Supabase project for Threadline, set Vercel env vars, then validate hosted email login/logout and local-data preservation.`
 
 ---
 

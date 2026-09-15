@@ -116,38 +116,33 @@ session must exist before a storage adapter, migration, sign-out, or export/dele
 implemented against it), and TASK-029 itself is not yet DONE. They are recorded as concrete
 BACKLOG stubs so assignment can proceed without further scoping once TASK-029 lands.
 
-## TASK-029 delivery: SDK-unavailable fallback
+## TASK-029 delivery: Supabase client login wiring
 
-The Settings shell now has a visible Account card and a typed `src/auth.ts` boundary.
-Email magic link is the selected login method. This build has **no Supabase SDK adapter**:
-local-cache installation failed and registry installation failed with a DNS error.
-No dependency or lockfile changes were made. Setting environment variables alone will
-still show login unavailable until the adapter is installed and wired.
+The Settings shell now has a visible Account card and a typed `src/auth.ts` boundary wired to
+`@supabase/supabase-js`. Email magic link is the selected login method. When
+`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are missing or invalid, the app remains
+local-only and honestly shows auth as unconfigured. When those env vars are present, the
+client restores sessions, listens for auth state changes, sends email sign-in links, and logs
+out through Supabase Auth.
 
-The boundary reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`, reports missing/invalid
-configuration, and supports session checks, subscription cleanup, email-link requests and
-logout through an injected typed client. Tests use fake clients; they do not establish a
-real authenticated session. The UI covers unconfigured, loading, signed-out, signed-in and
-error states. Local-only **data** is shown independently of account identity. Neither
-sign-in nor sign-out migrates, clears or changes thoughts, canvas, settings or digest data.
-Auth tokens are not part of the session projection or existing exports.
+The boundary never reads or writes Threadline application storage. Local-only **data** is shown
+independently of account identity. Neither sign-in nor sign-out migrates, clears, or changes
+thoughts, canvas, settings, or digest data. Auth tokens are not part of the session projection
+or existing exports.
 
-### Remaining provider setup blocker
+### Remaining hosted setup and validation
 
-1. In a network-enabled implementation environment, install `@supabase/supabase-js` and
-   implement the `AuthClient` adapter in `src/auth.ts`. Use SDK session restoration,
-   auth-state subscriptions, email OTP/magic-link delivery and SDK sign-out; do not
-   hand-roll token storage or treat a successful email request as a signed-in session.
-2. Create/configure the Supabase project, enable Email magic links, and set exact approved
-   Site/redirect URLs for local development and hosted deployments. Supply the two public
-   Vite environment variables above and rebuild. Never supply a service-role key to Vite.
-3. Independently test link delivery/callback, reload restoration, failed/expired links,
-   logout, and network errors on the hosted app; verify local data remains byte-for-byte
-   intact through account transitions. Browser and live-provider validation are pending.
+1. Choose the Supabase project for Threadline and enable Email magic links.
+2. Set Site URL and redirect URLs for the production Vercel URL, preview URLs, and local
+   development.
+3. Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to Vercel Production and Preview
+   environment variables. Never add a service-role key with a `VITE_` prefix.
+4. Independently test link delivery/callback, reload restoration, failed/expired links,
+   logout, and network errors on the hosted app; verify local data remains intact through
+   account transitions.
 
-Cloud persistence/RLS, explicit import and account privacy controls remain TASK-034–037.
-They were not implemented or unblocked by this fallback. Independent runner review is
-required before integration; changes are deliberately uncommitted.
+Cloud persistence/RLS, explicit import, and account privacy controls remain TASK-034–037.
+They were not implemented by TASK-029.
 
 ### Exact response to move forward
-`Complete TASK-029 Supabase SDK adapter and deployment env setup in a network-enabled environment, then validate hosted email login/logout and local-data preservation.`
+`Choose the Supabase project for Threadline, set Vercel env vars, then validate hosted email login/logout and local-data preservation.`
