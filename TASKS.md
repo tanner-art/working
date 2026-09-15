@@ -216,9 +216,9 @@ Queued app-usability tasks below are created from the current product push towar
 
 ### TASK-029 - Auth Provider Selection and Login Wiring
 
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
+Status: REVIEW (authorized SDK-unavailable fallback; live login remains blocked)
+Owner: Codex A
+Reviewer: Pending independent runner review
 Priority: P0
 Milestone: M5
 
@@ -254,8 +254,24 @@ Acceptance Criteria:
 - pnpm check passes
 - hosted deployment has required auth environment variables documented
 
+Result (issue #41): implemented the explicitly authorized SDK-unavailable fallback.
+Account UI and typed configuration/session boundary include honest unconfigured, signed-out,
+loading/error and signed-in states, guarded email magic-link/login and logout actions,
+subscription cleanup and stale-response protection. Production has no provider adapter;
+SDK installation failed both offline (cache miss) and online (registry DNS failure).
+Existing application storage is untouched; no backend migration or cloud-sync claim.
+See docs/AUTH_DATA_PLAN.md for exact remaining SDK/env and hosted validation steps.
+
+Validation: pnpm check passed (258 tests across 14 files, TypeScript and production
+build); git diff --check passed. Implementation/test diffs inspected. No lint script is configured.
+Limitations: real login/logout, callback handling and hosted/browser smoke validation
+remain blocked/pending provider SDK and deployment setup. Independent review pending.
+Delivery: left uncommitted for the runner per explicit assignment; no git mutations.
+Follow-up: finish the provider adapter within TASK-029 before treating TASK-034–037 as
+unblocked. No additional product scope was implemented.
+
 ### Exact response to move forward
-Assign this task to Agent A after TASK-026 merges: `Assign TASK-029 login wiring to Agent A.`
+`Complete TASK-029 Supabase SDK adapter and deployment env setup in a network-enabled environment, then validate hosted email login/logout and local-data preservation.`
 
 ---
 

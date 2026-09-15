@@ -1,3 +1,4 @@
+import { auth, accountLabel } from './auth'
 import { clearLocalData, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY, readDelivery } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
@@ -156,6 +157,31 @@ export function App() {
   </main>
 }
 
+function AccountSection() {
+  const [state, setState] = useState(auth.getState)
+  const [email, setEmail] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    const unsubscribe = auth.subscribe(() => setState(auth.getState()))
+    const disconnect = auth.connect()
+    setState(auth.getState())
+    return () => { unsubscribe(); disconnect() }
+  }, [attempt])
+  return <section className="settings-card"><h2>Account</h2>
+    <p role="status"><strong>{accountLabel(state)}</strong></p>
+    <p>Local-only data · Your thoughts and preferences stay in this browser, including after login or logout. Account backup and cross-device sync are not available yet.</p>
+    {'message' in state && state.message && <p role={state.status === 'error' ? 'alert' : 'status'}>{state.message}</p>}
+    {state.status === 'unconfigured' && <button className="secondary" disabled>Log in with email — unavailable</button>}
+    {state.status === 'signed-out' && <form onSubmit={event => { event.preventDefault(); void auth.act('login', email) }}>
+      <label>Email address<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /></label>
+      <button className="primary">Email me a sign-in link</button>
+    </form>}
+    {state.status === 'loading' && <button className="secondary" disabled>Please wait…</button>}
+    {state.status === 'signed-in' && <button className="secondary" onClick={() => { void auth.act('logout') }}>Log out</button>}
+    {state.status === 'error' && <button className="secondary" onClick={() => setAttempt(value => value + 1)}>Retry checking account</button>}
+  </section>
+}
+
 function SettingsPage({ settings, error, onSave, onResetSettings, onDigest, onExport, onBackup, onClear }: {
   settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void; onResetSettings: () => void
   onDigest: () => void; onExport: () => void; onBackup: () => void; onClear: () => void
@@ -177,7 +203,8 @@ function SettingsPage({ settings, error, onSave, onResetSettings, onDigest, onEx
     return () => { window.removeEventListener('storage', sync); window.removeEventListener('focus', sync) }
   }, [])
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
-    <section className="settings-card"><h2>Local profile</h2><p><strong>Local-only · Not signed in yet</strong></p><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
+    <AccountSection />
+    <section className="settings-card"><h2>Local profile</h2><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
       {error && <p role="alert">{error}</p>}
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
       <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage('Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
