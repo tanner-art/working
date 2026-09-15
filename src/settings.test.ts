@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
-import { clearLocalData, defaultSettings, readSettings, SETTINGS_KEY, writeSettings } from './settings'
+import { clearLocalData, defaultSettings, readSettings, resetSettings, SETTINGS_KEY, writeSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { isPersistedState, legacyUiProjection } from './migration'
+
+const corruptSettingsRaw = ['{', 'null', '[]', '{}', '{"version":2,"displayName":"","startPage":"today"}',
+  JSON.stringify({ ...defaultSettings, startPage: 'unknown' }),
+  JSON.stringify({ ...defaultSettings, displayName: 4 }),
+  JSON.stringify({ ...defaultSettings, displayName: 'x'.repeat(81) }),
+  JSON.stringify({ ...defaultSettings, displayName: ' padded ' }),
+  JSON.stringify({ ...defaultSettings, unexpected: true }),
+]
 
 function storage() {
   const data = new Map<string, string>()
@@ -26,17 +34,23 @@ describe('local settings', () => {
     writeSettings(store, settings)
     expect(readSettings(store)).toEqual(settings)
   })
-  it.each(['{', 'null', '[]', '{}', '{"version":2,"displayName":"","startPage":"today"}',
-    JSON.stringify({ ...defaultSettings, startPage: 'unknown' }),
-    JSON.stringify({ ...defaultSettings, displayName: 4 }),
-    JSON.stringify({ ...defaultSettings, displayName: 'x'.repeat(81) }),
-    JSON.stringify({ ...defaultSettings, displayName: ' padded ' }),
-    JSON.stringify({ ...defaultSettings, unexpected: true }),
-  ])('preserves corrupt or unsupported settings: %s', raw => {
+  it.each(corruptSettingsRaw)('read rejects corrupt or unsupported settings and leaves them untouched: %s', raw => {
     const store = storage()
     store.setItem(SETTINGS_KEY, raw)
     expect(() => readSettings(store)).toThrow()
-    expect(() => writeSettings(store, defaultSettings)).toThrow()
+    expect(store.getItem(SETTINGS_KEY)).toBe(raw)
+  })
+  it.each(corruptSettingsRaw)('a valid new settings object overwrites corrupt or unsupported stored settings: %s', raw => {
+    const store = storage()
+    store.setItem(SETTINGS_KEY, raw)
+    const settings = { ...defaultSettings, displayName: 'Recovered' }
+    writeSettings(store, settings)
+    expect(readSettings(store)).toEqual(settings)
+  })
+  it.each(corruptSettingsRaw)('an invalid new settings object never overwrites corrupt or unsupported stored settings: %s', raw => {
+    const store = storage()
+    store.setItem(SETTINGS_KEY, raw)
+    expect(() => writeSettings(store, { ...defaultSettings, displayName: 'x'.repeat(81) })).toThrow()
     expect(store.getItem(SETTINGS_KEY)).toBe(raw)
   })
   it('rejects invalid writes and surfaces read and quota failures', () => {
@@ -47,6 +61,33 @@ describe('local settings', () => {
     store.setItem.mockImplementation(() => { throw Error('quota') })
     expect(() => writeSettings(store, defaultSettings)).toThrow('quota')
     expect(store.getItem(SETTINGS_KEY)).toBeNull()
+  })
+})
+
+describe('settings-only recovery', () => {
+  it.each(corruptSettingsRaw)('resets only settings to defaults, leaving corrupt value replaced: %s', raw => {
+    const store = storage()
+    store.setItem(SETTINGS_KEY, raw)
+    const value = resetSettings(store)
+    expect(value).toEqual(defaultSettings)
+    expect(readSettings(store)).toEqual(defaultSettings)
+  })
+  it('does not touch thoughts, canvas, digest or other app state', () => {
+    const store = storage()
+    store.setItem(SETTINGS_KEY, '{')
+    store.setItem('thoughtflow-state-v1', 'thoughts and canvas')
+    store.setItem(DIGEST_DELIVERY_KEY, 'digest')
+    store.setItem('unrelated', 'keep')
+    resetSettings(store)
+    expect(store.getItem('thoughtflow-state-v1')).toBe('thoughts and canvas')
+    expect(store.getItem(DIGEST_DELIVERY_KEY)).toBe('digest')
+    expect(store.getItem('unrelated')).toBe('keep')
+  })
+  it('surfaces quota failures without pretending the reset succeeded', () => {
+    const store = storage()
+    store.setItem(SETTINGS_KEY, '{')
+    store.setItem.mockImplementation(() => { throw Error('quota') })
+    expect(() => resetSettings(store)).toThrow('quota')
   })
 })
 

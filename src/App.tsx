@@ -1,4 +1,4 @@
-import { clearLocalData, defaultSettings, readSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
+import { clearLocalData, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY, readDelivery } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
@@ -143,7 +143,7 @@ export function App() {
       {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} onSave={value => {
         writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
-      }} onDigest={() => setView('today')} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
+      }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onDigest={() => setView('today')} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
       {view === 'review' && <TemporalReview state={state} onUpdate={update} />}
@@ -156,8 +156,8 @@ export function App() {
   </main>
 }
 
-function SettingsPage({ settings, error, onSave, onDigest, onExport, onBackup, onClear }: {
-  settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void
+function SettingsPage({ settings, error, onSave, onResetSettings, onDigest, onExport, onBackup, onClear }: {
+  settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void; onResetSettings: () => void
   onDigest: () => void; onExport: () => void; onBackup: () => void; onClear: () => void
 }) {
   const [draft, setDraft] = useState(settings)
@@ -179,6 +179,7 @@ function SettingsPage({ settings, error, onSave, onDigest, onExport, onBackup, o
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
     <section className="settings-card"><h2>Local profile</h2><p><strong>Local-only · Not signed in yet</strong></p><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
       {error && <p role="alert">{error}</p>}
+      {error && <p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.<button className="secondary" onClick={onResetSettings}>Reset settings to defaults</button></p>}
       <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage('Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
         <fieldset disabled={!!error}><label>Display name / profile label<input maxLength={80} autoComplete="nickname" value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })} placeholder="Personal space" /></label>
           <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas</option></select></label>

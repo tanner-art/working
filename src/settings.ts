@@ -27,10 +27,19 @@ export function readSettings(storage: Pick<Storage, 'getItem'>): LocalSettings {
   return value
 }
 
-export function writeSettings(storage: Pick<Storage, 'getItem' | 'setItem'>, settings: LocalSettings) {
+export function writeSettings(storage: Pick<Storage, 'setItem'>, settings: LocalSettings) {
+  // A valid new object is always allowed to overwrite a corrupt or unsupported stored
+  // value — that's how the settings-only recovery path lets a user save their way out.
   if (!validSettings(settings)) throw new Error('Invalid local settings.')
-  readSettings(storage) // Never overwrite corrupt or unsupported settings.
   storage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+}
+
+/** Scoped recovery for a corrupt or unsupported stored value: resets only local settings
+ *  to defaults. Leaves thoughts, canvas, digest delivery and all other app state untouched. */
+export function resetSettings(storage: Pick<Storage, 'setItem'>): LocalSettings {
+  const value = { ...defaultSettings }
+  storage.setItem(SETTINGS_KEY, JSON.stringify(value))
+  return value
 }
 
 /** Call only after a deliberate confirmation; the UI must stop active writers first. */
