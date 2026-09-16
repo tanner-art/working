@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { accountLabel, createAuthBoundary, readAuthConfig, sessionState, type AuthClient, type AuthSession } from './auth'
+import { accountLabel, createAuthBoundary, dataOwnershipLabel, readAuthConfig, sessionState, type AuthClient, type AuthSession } from './auth'
 const config = readAuthConfig({ VITE_SUPABASE_URL: 'https://example.supabase.co', VITE_SUPABASE_ANON_KEY: 'public-key' })
 const session = { user: { id: 'user-1', email: 'person@example.com' } }
 function provider() {
@@ -32,6 +32,16 @@ describe('auth configuration and presentation', () => {
     expect(sessionState({ user: { id: '' } }).status).toBe('error')
     expect(accountLabel({ status: 'loading' })).toBe('Checking account…')
     expect(accountLabel({ status: 'error', message: 'failed' })).toContain('could not be confirmed')
+  })
+  it('never claims cloud sync exists, signed in or not', () => {
+    expect(dataOwnershipLabel(sessionState(null))).toMatch(/^Local-only\./)
+    expect(dataOwnershipLabel({ status: 'unconfigured', message: 'x' })).toMatch(/^Local-only\./)
+    expect(dataOwnershipLabel({ status: 'loading' })).toMatch(/^Local-only\./)
+    expect(dataOwnershipLabel({ status: 'error', message: 'x' })).toMatch(/^Local-only\./)
+    expect(dataOwnershipLabel(sessionState(session))).toMatch(/^Signed in, but still local-only\./)
+    for (const state of [sessionState(null), sessionState(session), { status: 'loading' } as const]) {
+      expect(dataOwnershipLabel(state)).toContain('no cloud sync yet')
+    }
   })
 })
 describe('guarded account actions', () => {
