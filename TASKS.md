@@ -22,6 +22,10 @@ Only READY tasks may be newly assigned.
 
 ---
 
+## Current Product Operating Focus
+
+Every new task should explicitly serve at least one near-term product outcome: fast capture, safe user data, confirm/organize meaning, mobile usability, or real AI interpretation. Prefer tasks that move the hosted app toward immediate daily use within 24 hours over low-priority polish. Larger ideas such as AI folder clustering, resource cost, attention load, ROI, and strategic importance should be captured as follow-ups unless they directly unblock the current capture/review/storage loop.
+
 ## IN_PROGRESS
 
 ### TASK-024 - Accessible Canvas Node Shape Palette
@@ -767,6 +771,10 @@ Commit: pending
 Review: pending
 
 ---
+
+## Current Product Operating Focus
+
+Every new task should explicitly serve at least one near-term product outcome: fast capture, safe user data, confirm/organize meaning, mobile usability, or real AI interpretation. Prefer tasks that move the hosted app toward immediate daily use within 24 hours over low-priority polish. Larger ideas such as AI folder clustering, resource cost, attention load, ROI, and strategic importance should be captured as follow-ups unless they directly unblock the current capture/review/storage loop.
 
 ## IN_PROGRESS
 
