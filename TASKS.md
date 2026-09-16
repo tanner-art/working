@@ -775,6 +775,59 @@ Assign this task after TASK-034 lands: `Assign TASK-037 privacy/export/delete se
 
 ---
 
+
+### TASK-043 - Hosted Account Sync Rollout and Two-Device Validation
+
+Status: IN_PROGRESS
+Owner: Orchestrator
+Reviewer: Pending hosted validation
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-029
+- TASK-042
+
+Goal:
+Make signed-in Threadline data real on the hosted app so the same account shows the same Review queue and Bank folders on desktop and phone.
+
+Scope:
+- reconcile the hosted Supabase project/table with the TASK-042 account-storage contract
+- provision the owner-only RLS table named by `VITE_SUPABASE_DATA_TABLE` without committing project identifiers, anon keys or service-role keys
+- configure Vercel Production and Preview environment variables for Supabase Auth and account storage
+- confirm Supabase auth redirect URLs for the hosted Vercel URL and localhost development
+- validate with two test accounts across desktop and phone: explicit local import, account load, Review edits, Bank folder changes, sign-out/local preservation and cross-user isolation
+- document the exact non-secret operational checklist and any remaining account-level setup
+
+Do Not:
+- silently migrate local-only browser data on sign-in
+- expose Supabase project refs, anon keys, service-role keys or account emails in source/docs/issues
+- enable realtime merge or background sync beyond the explicit load/save behavior already delivered
+- replace a nonempty account import without a user-visible export/merge path
+
+Deliverable:
+A hosted account can copy this device’s thoughts into account storage and load the same Review and Bank data on the user's phone, while a second account cannot read or overwrite it.
+
+Acceptance Criteria:
+- hosted login works from the Vercel app and returns to the app after email auth
+- Settings → Data can copy local data into an empty signed-in account
+- phone can load the same account data and see the same Review queue and Bank folders
+- edits from one device save to account storage and can be explicitly loaded on the other
+- stale revision, offline/RLS failures and sign-out do not overwrite or erase local-only data
+- two-account smoke test confirms account isolation
+- `pnpm check` passes after any code/docs changes
+
+
+Rollout progress (2026-09-16): provisioned the TASK-042-compatible Supabase account-data table alongside the older `threadline_user_state` table instead of changing app code to the old shape. The new table has owner-only RLS, anon access revoked, authenticated select/insert/update grants, and select/insert/update policies matching the documented contract. Supabase security advisors returned no security lints. Vercel Production and Preview now have the required client-safe env names configured (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_SUPABASE_DATA_TABLE`), and production was redeployed to the `working-ten-rust.vercel.app` alias. Production returned HTTP 200 after deploy. No project refs, keys, personal emails, service-role keys or account rows were added to source/docs/issues.
+
+Validation (2026-09-16): `pnpm check` passed locally: 347 tests across 18 files, TypeScript and production build. `git diff --check` passed. Supabase security advisors clean; performance advisor only reports informational Auth DB connection allocation guidance.
+
+Remaining blocker: Supabase Auth Site URL / redirect URL settings and real email magic-link delivery require dashboard/test-inbox validation. The two-account desktop/phone smoke test has not been completed. Exact response to continue hosted validation: `Supabase auth redirect URLs are configured for the hosted app and localhost, and I am ready to run two-account desktop-to-phone validation.`
+
+Blocker / user action if no connected Supabase/Vercel dashboard access is available:
+Set up the documented `public.threadline_account_data` table with owner-only RLS, add `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` and `VITE_SUPABASE_DATA_TABLE=threadline_account_data` to Vercel, and configure Supabase auth redirect URLs. Then respond: `Hosted Supabase account sync env and RLS table are ready; validate desktop-to-phone Review and Bank sync.`
+
+---
 ### TASK-031 - Real AI Interpretation Provider
 
 Status: BACKLOG
