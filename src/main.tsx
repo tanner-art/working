@@ -1,8 +1,9 @@
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+import { BuildDashboard } from './PublicBuildDashboard'
 import './styles.css'
 
-createRoot(document.getElementById('root')!).render(<App />)
+createRoot(document.getElementById('root')!).render(window.location.pathname === '/dashboard' ? <BuildDashboard /> : <App />)
 
 // Service worker enables install-to-home-screen and an offline app shell.
 // Registered in production only so it never interferes with Vite dev/HMR.
