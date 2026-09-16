@@ -146,3 +146,92 @@ They were not implemented by TASK-029.
 
 ### Exact response to move forward
 `Choose the Supabase project for Threadline, set Vercel env vars, then validate hosted email login/logout and local-data preservation.`
+
+## TASK-042 delivery: explicit signed-in account storage (#60)
+
+The client now shares its existing Supabase auth client with an account adapter. A user
+must explicitly choose **Copy this device’s local data into my account** or **Load account
+data on this device** in Settings → Data. Signing in performs no application-data request.
+Import creates an account row only when none exists; it never replaces an existing account.
+Load validates the complete account document before opening it in memory. Neither action
+writes or deletes the device’s local thoughts, profile or digest preferences.
+
+After activation, thoughts, Review decisions, Bank context folders, canvas, settings and
+digest preference save together. The payload preserves the existing schema-v2 model and
+its AppState projection, including raw captures and interpretation history. Review and Bank
+remain projections of that same model, not separate cloud records. Exports include prior
+saved evidence revisions and current edits. Saves are serialized and use revision matching;
+a stale device cannot silently replace newer account changes. Errors stop automatic saves
+and offer retry/export. Loading again is explicit, with a warning to export unsaved work.
+Account changes pause the workspace rather than putting account content into local storage.
+Returning to local data or reloading leaves the account copy intact and restores local mode.
+
+### Deployment contract (generic; no project identifiers or credentials)
+
+Use the existing public client configuration, `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_ANON_KEY`, plus **`VITE_SUPABASE_DATA_TABLE`**, a non-secret unqualified table
+name (lowercase letters, digits and underscores, beginning with a letter). Missing or invalid
+configuration disables account data actions. No service-role key or privileged backend is
+used or required for this slice. Do not put private project details or keys in source/docs.
+
+Provision the table and RLS separately before hosted validation. The following generic SQL
+illustrates the required contract; the table name must match the public configuration.
+This task does not execute dashboard changes or SQL against any project.
+
+```sql
+create table public.threadline_account_data (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  revision uuid not null,
+  data jsonb not null check (jsonb_typeof(data) = 'object')
+);
+alter table public.threadline_account_data enable row level security;
+revoke all on public.threadline_account_data from anon;
+grant select, insert, update on public.threadline_account_data to authenticated;
+create policy "Read own Threadline data" on public.threadline_account_data
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy "Insert own Threadline data" on public.threadline_account_data
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy "Update own Threadline data" on public.threadline_account_data
+  for update to authenticated using ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+```
+
+The JSON envelope is `{ model, settings, digest }`. `model` retains the current persisted
+shape. `revision` is an opaque client-generated UUID replaced on each successful write.
+Create-only upsert uses `ON CONFLICT DO NOTHING`; edits filter by both owner and expected
+revision and require one returned row. Missing rows, denied access, malformed documents,
+network failures and conflicts never fall back to overwriting local data. RLS is essential:
+client-side owner filters alone are not a security boundary. Verify with two real accounts
+that each cannot select, insert or update the other's row before deployment.
+
+### Validation and limitations
+
+Automated checks cover adapter read/upsert/update filters, create-only import, missing
+configuration, denied/offline operations, no implicit migration, unchanged local mode,
+serialized saves, revision conflicts, stale account completions, safe retries, preservation
+of intermediate evidence, and Review/Bank/settings/digest roundtrip. `pnpm check` includes
+unit tests, TypeScript and the production build: all 300 tests across 17 files passed, as
+did TypeScript, the production build and `git diff --check`. The existing nonblocking
+bundle-size warning remains; there is no configured lint script.
+Independent runner review and real desktop/phone, auth and RLS smoke validation remain
+required; no live Supabase project was accessed by this task.
+
+This is explicit snapshot storage, not realtime collaboration: load the latest account
+version on the other device before editing. Conflicts require exporting unsaved work and
+loading again; there is no automatic merge. Import into a nonempty account is refused;
+combining multiple existing local datasets remains follow-up work. Failed saves stay in
+memory only, with an export path; there is no durable offline account cache. Session undo
+history resets on load. Reload starts local mode and requires explicit account activation.
+The account digest preference is stored and editable; its digest is available on demand.
+Scheduled account notices are not wired in this slice because the existing digest UI writes
+directly to device storage, outside the permitted paths. Local-mode digest behavior is
+unchanged. Account deletion and remote backup restoration remain TASK-037/follow-up scope.
+TASK-034–036 must be reconciled with this delivered slice before further assignment.
+
+Build-in-public note: You can explicitly copy this device’s thoughts into your account and
+load them on your phone, including Review, Bank folders and preferences. Local data stays
+intact, and competing edits stop with an error instead of silently overwriting work. The
+next visible step is hosted two-device validation; realtime merging remains future work.
+
+### Exact response to move forward (TASK-042)
+`Run independent review, provision the documented owner-only RLS table and public table-name configuration, then validate explicit import/load, desktop-to-phone Review/Bank edits, conflicts, offline errors, exports and sign-out/local preservation with two test accounts. The runner owns commit and PR delivery.`

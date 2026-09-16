@@ -44,6 +44,11 @@ export function loadStateResult(): { state: AppState; error?: string } {
     return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
+/** Serialize against the last saved evidence, including revisions added in this session. */
+export function serializeState(state: AppState): PersistedState {
+  const session = state.model && sessions.get(state.model)
+  return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+}
 export function saveState(state: AppState): string | undefined {
   if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
   try {
@@ -51,7 +56,7 @@ export function saveState(state: AppState): string | undefined {
     const raw = localStorage.getItem(KEY)
     // Never replace unreadable data or a concurrent tab's changes with a stale snapshot.
     if (session ? raw !== session.raw : raw !== null) return 'Stored data changed or was not loaded by this session. Reload before saving; stored data has been left untouched.'
-    const model = reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+    const model = serializeState(state)
     const nextRaw = JSON.stringify(model)
     localStorage.setItem(KEY, nextRaw)
     if (state.model) sessions.set(state.model, { model, raw: nextRaw })
