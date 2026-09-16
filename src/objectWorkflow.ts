@@ -41,8 +41,9 @@ export function updateObject(original: ThoughtObject, draft: ThoughtObject): Tho
   const status = draft.kind !== original.kind ? 'review' : compatibleStatus(original, draft.status)
   const changes = describeChanges(original, { ...draft, status })
   // A generic save accepts editable fields only. It cannot import a draft's gesture/history or source evidence.
-  return withHistory({ ...original, kind: draft.kind, context: draft.context, metadata: draft.metadata, status },
-    changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
+  return withHistory({ ...original, kind: draft.kind, context: draft.context,
+    interpretation: { ...original.interpretation, suggestedDate: draft.interpretation.suggestedDate },
+    metadata: draft.metadata, status }, changes.length ? `Edited ${changes.join(', ')}` : 'Edited')
 }
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
@@ -105,6 +106,7 @@ function describeChanges(original: ThoughtObject, draft: ThoughtObject) {
   if (original.status !== draft.status) changes.push(`status to ${draft.status}`)
   if ((original.context ?? '') !== (draft.context ?? '')) changes.push('context')
   if ((original.metadata.deadline ?? '') !== (draft.metadata.deadline ?? '')) changes.push('deadline')
+  if ((original.interpretation.suggestedDate ?? '') !== (draft.interpretation.suggestedDate ?? '')) changes.push('time')
   if ((original.metadata.effort ?? '') !== (draft.metadata.effort ?? '')) changes.push('effort')
   if ((original.metadata.attentionLoad ?? '') !== (draft.metadata.attentionLoad ?? '')) changes.push('attention load')
   if ((original.metadata.strategicImportance ?? '') !== (draft.metadata.strategicImportance ?? '')) changes.push('importance')
@@ -112,4 +114,19 @@ function describeChanges(original: ThoughtObject, draft: ThoughtObject) {
   if ((original.metadata.resourceCost ?? '') !== (draft.metadata.resourceCost ?? '')) changes.push('resource cost')
   if ((original.metadata.roi ?? '') !== (draft.metadata.roi ?? '')) changes.push('ROI')
   return changes
+}
+
+/** Context-only views, not inferred semantic membership or a persisted folder schema. */
+export const bankFolders = ['Personal', 'Business', 'Unfiled'] as const
+export function bankObjects(objects: ThoughtObject[]): Record<typeof bankFolders[number], ThoughtObject[]> {
+  const folders: Record<typeof bankFolders[number], ThoughtObject[]> = { Personal: [], Business: [], Unfiled: [] }
+  for (const item of objects) {
+    if (!['confirmed', 'complete'].includes(item.status) ||
+      ((item.kind === 'action' || item.kind === 'commitment') && !hasConfirmation(item))) continue
+    const context = item.context?.trim().toLowerCase()
+    const folder = context === 'personal' || context === 'home' ? 'Personal'
+      : context === 'business' || context === 'work' ? 'Business' : 'Unfiled'
+    folders[folder].push(item)
+  }
+  return folders
 }
