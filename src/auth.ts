@@ -1,4 +1,4 @@
-import { createClient, type Session } from '@supabase/supabase-js'
+import { createClient, type Session, type SupabaseClient } from '@supabase/supabase-js'
 
 /** Provider-neutral account boundary. Never reads or writes application storage. */
 export interface AuthSession { user: { id: string; email?: string } }
@@ -30,8 +30,7 @@ function authSession(session: Session | null): AuthSession | null {
   if (!session) return null
   return { user: { id: session.user.id, email: session.user.email ?? undefined } }
 }
-export function createSupabaseAuthClient(config: Extract<AuthConfig, { status: 'configured' }>, redirectTo = window.location.origin): AuthClient {
-  const supabase = createClient(config.url, config.anonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } })
+export function createSupabaseAuthClient(config: Extract<AuthConfig, { status: 'configured' }>, redirectTo = window.location.origin, supabase: SupabaseClient = createClient(config.url, config.anonKey)): AuthClient {
   return {
     async getSession() {
       const { data, error } = await supabase.auth.getSession()
@@ -66,10 +65,10 @@ export function accountLabel(state: AuthState): string {
     case 'error': return 'Account error — session could not be confirmed'
   }
 }
-/** Honest data-ownership status for nontechnical Settings copy: no state currently
- *  implies cloud storage, since that is separately scoped (D-011/TASK-034). */
-export function dataOwnershipLabel(state: AuthState): string {
-  const base = 'Everything lives in this browser on this device — there is no cloud sync yet.'
+/** Account identity alone never implies that account storage has been activated. */
+export function dataOwnershipLabel(state: AuthState, active = false): string {
+  if (active) return 'Account storage active. Edits save to your account. Load account data on another device to see the latest saved version.'
+  const base = 'This workspace lives in this browser on this device. Use Settings → Data to explicitly copy or load account data.'
   return state.status === 'signed-in' ? `Signed in, but still local-only. ${base}` : `Local-only. ${base}`
 }
 export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
@@ -116,4 +115,5 @@ const authConfig = readAuthConfig({
   VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
   VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY,
 })
-export const auth = createAuthBoundary(authConfig, authConfig.status === 'configured' ? createSupabaseAuthClient(authConfig) : undefined)
+export const supabase = authConfig.status === 'configured' ? createClient(authConfig.url, authConfig.anonKey) : undefined
+export const auth = createAuthBoundary(authConfig, authConfig.status === 'configured' ? createSupabaseAuthClient(authConfig, window.location.origin, supabase) : undefined)

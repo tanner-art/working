@@ -32,6 +32,54 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## IN_PROGRESS
 
+### TASK-042 - Signed-in Account Storage Backbone
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent runner review
+GitHub Issue: #60
+Scope: user-assigned account storage slice, restricted to the supplied allowlist.
+
+Result: Added a client-only Supabase account adapter sharing the auth client, with an
+explicit non-secret table-name configuration. Settings → Data offers create-only local
+import and confirmed account load. Sign-in never migrates data. Account activation leaves
+local storage intact; subsequent edits save a single versioned account document containing
+the unchanged persisted model, settings and digest preference. Review and Bank share that
+model. Revision guards reject stale writes; failed saves pause automatic retries with
+export/retry guidance. Account changes pause editing, and returning to local mode restores
+the original device data. Serialization preserves intermediate evidence revisions.
+
+Validation: `pnpm check` passed: 300 tests across 17 files, TypeScript and production
+build passed. No lint script is configured. `git diff --check` passed and the final implementation/test/doc diffs were inspected. Existing nonblocking production bundle-size warning remains.
+
+Files: src/App.tsx, src/auth.ts, src/auth.test.ts, src/store.ts, src/store.test.ts,
+src/accountStorage.ts, src/accountStorage.test.ts, TASKS.md, docs/AUTH_DATA_PLAN.md.
+
+Limitations: Hosted Supabase/RLS and browser/mobile smoke validation are pending. No
+credentials or project identifiers were accessed or added. This slice uses explicit reload
+and revision conflicts, not realtime merge. Import refuses nonempty accounts; unsaved cloud
+edits require export before reload. There is no durable offline account cache. Account-mode
+digest preference syncs and the digest opens on demand; scheduled account notices are not
+wired because the existing digest component writes directly to local storage. Local digest
+behavior remains unchanged. See AUTH_DATA_PLAN.md for generic table/RLS setup and details.
+
+Newly discovered work (not implemented; does not block snapshot storage): adapt the existing
+digest UI to injected account persistence, and add a guided merge for nonempty accounts.
+Reconcile overlapping TASK-034–036 backlog scopes before assigning additional storage work.
+
+Build-in-public note: Copy this device’s thoughts into your account, then explicitly load
+them on your phone with Review, Bank folders and preferences intact. Local data is preserved
+and competing saves produce a recoverable error. Hosted two-device validation comes next.
+
+Exact response to move forward: Run independent review and hosted two-account/two-device
+smoke checks using the generic RLS/table contract in docs/AUTH_DATA_PLAN.md. Verify explicit
+import/load, Review/Bank roundtrip, denied access, offline/conflict recovery, exports and
+sign-out/local preservation. The runner owns commit and PR delivery.
+
+Delivery: changes left uncommitted for the runner; no git mutations, branch changes, push,
+PR creation or merge performed.
+
+
 ### TASK-041 - Compact Digest, Review Accordion and Bank Folders
 
 Status: REVIEW

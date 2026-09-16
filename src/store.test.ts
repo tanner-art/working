@@ -1,7 +1,8 @@
+import { updateObject } from './objectWorkflow'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppState, CanvasElement } from './domain'
 import { migrateLegacyState } from './migration'
-import { loadStateResult, saveState } from './store'
+import { loadStateResult, saveState, serializeState, makeObject } from './store'
 
 const key = 'thoughtflow-state-v1'
 
@@ -95,5 +96,28 @@ describe('TASK-024 shape persistence', () => {
     expect(loadStateResult().error).toContain('left untouched')
     expect(saveState(state)).toContain('format is invalid')
     expect(setItem).not.toHaveBeenCalled()
+  })
+})
+
+describe('account import serialization', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('includes every saved evidence revision without writing local storage during serialization', () => {
+    let raw: string | null = null
+    const setItem = vi.fn((_key: string, value: string) => { raw = value })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem })
+    const item = makeObject({ kind: 'idea', originalContent: 'Immutable original', source: 'text', confidence: .9, interpretation: { summary: 'Idea', suggestedKind: 'idea', rationale: 'Explicit' } })
+    raw = JSON.stringify(migrateLegacyState({ objects: [item], canvas: [] }))
+    let state = loadStateResult().state
+    state = { ...state, objects: [updateObject(state.objects[0], { ...state.objects[0], context: 'Personal' })] }
+    expect(saveState(state)).toBeUndefined()
+    state = { ...state, objects: [updateObject(state.objects[0], { ...state.objects[0], context: 'Business' })] }
+    expect(saveState(state)).toBeUndefined()
+    const before = raw
+    const exported = serializeState(state)
+    expect(exported.interpretations.slice(0, JSON.parse(raw!).interpretations.length)).toEqual(JSON.parse(raw!).interpretations)
+    expect(exported.interpretations.map(item => item.legacy.context)).toEqual(expect.arrayContaining([undefined, 'Personal', 'Business']))
+    expect(exported.captures).toEqual(JSON.parse(raw!).captures)
+    expect(raw).toBe(before)
+    expect(setItem).toHaveBeenCalledTimes(2)
   })
 })

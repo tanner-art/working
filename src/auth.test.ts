@@ -33,14 +33,14 @@ describe('auth configuration and presentation', () => {
     expect(accountLabel({ status: 'loading' })).toBe('Checking account…')
     expect(accountLabel({ status: 'error', message: 'failed' })).toContain('could not be confirmed')
   })
-  it('never claims cloud sync exists, signed in or not', () => {
+  it('does not claim account storage is active from identity alone', () => {
     expect(dataOwnershipLabel(sessionState(null))).toMatch(/^Local-only\./)
     expect(dataOwnershipLabel({ status: 'unconfigured', message: 'x' })).toMatch(/^Local-only\./)
     expect(dataOwnershipLabel({ status: 'loading' })).toMatch(/^Local-only\./)
     expect(dataOwnershipLabel({ status: 'error', message: 'x' })).toMatch(/^Local-only\./)
     expect(dataOwnershipLabel(sessionState(session))).toMatch(/^Signed in, but still local-only\./)
     for (const state of [sessionState(null), sessionState(session), { status: 'loading' } as const]) {
-      expect(dataOwnershipLabel(state)).toContain('no cloud sync yet')
+      expect(dataOwnershipLabel(state)).toContain('explicitly copy or load')
     }
   })
 })
@@ -91,4 +91,9 @@ describe('guarded account actions', () => {
     disconnect(); disconnect = auth.connect(); await flush()
     expect(auth.getState().status).toBe('signed-out'); disconnect()
   })
+})
+
+it('reports active account storage without the local-only label', () => {
+  expect(dataOwnershipLabel(sessionState(session), true)).toContain('Account storage active')
+  expect(dataOwnershipLabel(sessionState(session), true)).not.toContain('still local-only')
 })
