@@ -16,9 +16,11 @@ app store listing; it is installed straight from the browser.
 
 1. Open the Threadline URL in **Safari**. Modern third-party iOS browsers may
    also offer Add to Home Screen, but Safari is the simplest documented path.
-2. Tap the **Share** icon (square with an arrow) in the toolbar.
+2. Tap the **Share** icon (square with an upward arrow), which may be inside
+   the **More** menu depending on your Safari layout.
 3. Scroll down and tap **Add to Home Screen**.
-4. Confirm the name (defaults to "Threadline") and tap **Add**.
+4. Confirm the name (defaults to "Threadline"). If **Open as Web App** is shown,
+   leave it on, then tap **Add**.
 5. Threadline now launches from the home screen icon in standalone mode (no
    Safari address bar or browser chrome), using the theme and background
    colors declared in `manifest.webmanifest`.
@@ -83,3 +85,44 @@ part of this installability task.
 The manifest and HTML include 192×192 and 512×512 PNG app icons plus a
 180×180 Apple touch icon. The maskable declaration uses the 512×512 asset,
 whose mark stays inside the central safe area.
+
+## In-app guidance (TASK-039)
+
+A compact, nonmodal guide appears on the first browser visit at a viewport width
+of 720px or less. It introduces Capture and Organize and provides expandable
+home-screen instructions. Desktop and already-standalone launches skip the
+automatic guide (including Safari's legacy standalone signal).
+
+**Dismiss install help** remembers the choice in this browser using a separate
+`threadline-mobile-install-v1` preference. If storage is blocked, dismissal still
+works for the visit and a message explains that it may return on reload. Unknown
+preference values show help without rewriting data. No profile schema migration
+is needed. A full export includes the preference; confirmed Clear local data
+removes it. Reset local profile leaves this preference alone.
+
+On any device, open **Settings → Mobile install → Show home screen install help**
+to reopen it. Keyboard focus moves to the guide heading and returns to the
+Settings button when dismissed. Installation is manual; the app does not infer
+that installation succeeded or request notification permission.
+
+The layout uses the browser's safe-area insets in both browser and standalone
+modes, including sticky navigation, canvas controls, object-panel overlays and
+storage recovery screens. Zero insets preserve normal desktop spacing.
+
+Safari steps follow [Apple's iPhone web-app guide](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios).
+Labels and menu placement can vary by iOS version.
+
+### Device smoke checks for review
+
+- At 320px and 390px widths, expand the guide, dismiss, reload, and reopen from
+  Settings. Confirm Capture and Organize remain reachable.
+- On a real iPhone, repeat in Safari and from the home-screen icon, in portrait
+  and landscape. Check navigation after scrolling, canvas tools and the object
+  panel close control against the camera/Dynamic Island and home indicator.
+- At desktop width, confirm no automatic guide and that Settings can open and
+  dismiss it using keyboard navigation.
+- With preference writes blocked, confirm dismissal closes the guide and shows
+  the persistence warning without interrupting capture.
+
+Real-device installation and physical safe-area checks remain required; unit
+checks of preference behavior do not validate Safari rendering or OS install UI.

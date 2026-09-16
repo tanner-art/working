@@ -32,6 +32,60 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## IN_PROGRESS
 
+### TASK-039 - First-Run Mobile Onboarding and Home Screen Install Help
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent runner review
+GitHub Issue: #52
+Depends On: TASK-025, TASK-038 (existing install assets and mobile UI inspected).
+Scope: explicitly assigned mobile usability slice; six allowed paths only. This
+implements the onboarding/install-help slice also described in backlog TASK-032;
+that older task's status and broader board priorities are left for the runner.
+
+Result: Mobile browser launches (720px or narrower) show a lightweight inline
+Capture/Organize introduction with expandable iPhone Safari home-screen steps.
+Dismissal persists separately from the existing profile schema. Settings → Mobile
+install reopens the guide on any device, with keyboard focus to its heading and
+back to the opener on dismissal. Desktop and standalone launches skip automatic
+help. Failed storage writes still allow session dismissal and display an honest
+persistence warning. Export and confirmed local-data clearing include the new
+preference; profile reset does not change it. Browser and standalone surfaces now
+both respect safe-area insets for navigation, canvas, overlays and recovery pages.
+No notification permission request, push delivery or native iOS code was added.
+
+Validation (2026-09-15): `pnpm check` passed: 271 tests across 15 files, including
+six focused onboarding preference tests, TypeScript and production Vite build.
+Tests cover first visit, desktop/standalone suppression, persisted dismissal,
+profile/data preservation, unknown values, blocked storage and confirmed clearing.
+`git diff --check` passed; all implementation, tests and documentation diffs inspected.
+No lint script is configured. Build retains the existing nonblocking bundle-size warning.
+
+Files: src/App.tsx, src/styles.css, src/settings.ts, src/settings.test.ts,
+docs/MOBILE_INSTALL.md, TASKS.md.
+Limitations: no browser automation tool or installed browser test package is available
+in this worktree. Real iPhone Safari/home-screen installation, portrait/landscape
+camera inset checks and interactive desktop/mobile smoke checks remain for runner
+review; the checklist is in docs/MOBILE_INSTALL.md. Mobile detection uses initial
+viewport width rather than device identity; an installed app opened in a browser tab
+may still offer help until dismissed. No cross-device preference sync or push support.
+Delivery: left uncommitted for the runner; no git mutations, branch changes, push,
+PR creation or merge.
+
+Build-in-public note: Threadline now offers a small first-visit mobile guide with
+iPhone home-screen instructions, a remembered dismissal and a Settings way back.
+Safe-area spacing covers browser and home-screen layouts. Device verification is
+still pending, and installation does not enable mobile push notifications.
+
+Newly discovered work (not implemented; nonblocking): reconcile overlapping
+TASK-032 with this assigned TASK-039 after independent review. No new product
+features proposed in this slice.
+
+Exact response to move forward: Run independent review and the mobile/desktop
+smoke checklist for issue #52, then let the runner commit and prepare delivery.
+
+---
+
 ### TASK-038 - Mobile-First Capture and Organize Cleanup
 
 Status: DONE
