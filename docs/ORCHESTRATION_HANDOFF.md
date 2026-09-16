@@ -46,6 +46,13 @@ The runner creates an isolated worktree from `origin/main`, runs the assigned ag
 
 ## Current High-Priority Queue
 
-- Keep `main` current before assigning the next implementation task; recently merged app work includes TASK-024 shape palette and TASK-025 iPhone home-screen safe-area controls.
-- Move immediate product usability forward next: settings/account shell, per-user storage/auth, and provider-backed AI interpretation.
+- Keep `main` current before assigning the next implementation task; recently merged app work includes TASK-024 shape palette, TASK-025 iPhone home-screen safe-area controls, TASK-029 Supabase login wiring, and TASK-038 mobile-first capture/organize cleanup.
+- Move immediate product usability forward next: user-scoped Supabase storage, hosted login validation, provider-backed AI interpretation, mobile onboarding/home-screen help, Settings as a control center, and Organize folders.
 - Continue app-moving product work before deeper engineering-assurance work unless the user redirects.
+- For the next 24-hour push, every assigned task should map to one of five outcomes: fast capture, safe user data, confirm/organize meaning, mobile usability, or real AI interpretation. Do not spend agent cycles on process polish unless it directly helps those outcomes ship faster.
+
+## Build In Public Notes
+
+Threadline is being built in public as a visible record of how a nontraditional technical founder builds an AI-native product with agents. Orchestration should preserve that story without slowing the app down.
+
+For each visible product PR, include a short plain-language progress note in the PR or issue that says what changed for users, what remains limited, and what is next. Keep raw provenance and private details out of public artifacts unless the user explicitly approves sharing them. Use `docs/provenance` and `docs/DECISIONS.md` for durable decision history, but keep implementation tasks focused on shipping usable product behavior.
