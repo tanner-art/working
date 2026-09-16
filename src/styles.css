@@ -93,10 +93,9 @@
 .canvas-node.shape-ellipse .canvas-drag-handle, .canvas-node.shape-diamond .canvas-drag-handle { position: absolute; left: 25%; top: -20px; width: 50%; height: 44px; margin: 0; justify-content: center; }
 @media (max-width: 720px) { .canvas-tools { flex-wrap: nowrap; overflow-x: auto; width: 100%; padding: 3px; } .canvas-tools > * { flex-shrink: 0; } .canvas-tools button { min-height: 44px; } }
 
-/* The translucent iOS status bar overlays standalone content. Inset each
-   viewport-level surface once; nested headers/tools inherit the safe space.
-   Browser tabs retain their existing layout, even with viewport-fit=cover. */
-@media (display-mode: standalone) {
+/* Inset viewport surfaces in browser and standalone modes. Zero-valued
+   browser/desktop insets preserve ordinary spacing. */
+@media all {
   :root {
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
@@ -122,7 +121,7 @@
   }
 }
 
-@media (display-mode: standalone) and (max-width: 720px) {
+@media (max-width: 720px) {
   /* Keep the safe strip inside the sticky navigation, including after scroll. */
   .sidebar { padding-top: calc(10px + var(--safe-top)); }
   .content { padding-top: 0; }
@@ -173,3 +172,13 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .timing-details > summary { cursor: pointer; padding: 12px 0; }
 .timing-details > .page > h2, .timing-details > .page > p { display: none; }
 @media (prefers-reduced-motion: reduce) { .capture-success { animation: none; } }
+
+/* Inline onboarding keeps capture and navigation available. */
+.install-help { margin: 20px clamp(16px, 4vw, 56px); padding: 20px; border: 1px solid #a5b59f; border-radius: 12px; background: #e8f0dc; max-width: 760px; overflow-wrap: anywhere; }
+.install-help h2 { margin: 0 0 12px; font-size: 20px; scroll-margin-top: calc(80px + var(--safe-top)); }
+.install-help p, .install-help li { font-size: 14px; line-height: 1.6; }
+.install-help summary { cursor: pointer; padding: 12px 0; font-weight: 700; font-size: 14px; }
+.install-help li + li { margin-top: 8px; }
+.install-help button { min-height: 44px; }
+.install-help :focus-visible { outline: 3px solid #507737; outline-offset: 3px; }
+.install-help .install-help-hint { font-size: 12px; margin-bottom: 0; }

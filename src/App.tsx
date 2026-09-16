@@ -1,5 +1,5 @@
 import { auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
-import { clearLocalData, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
+import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
@@ -49,6 +49,25 @@ export function App() {
     catch { return { value: { ...defaultSettings }, error: 'Local settings could not be read. Editing settings is paused; stored settings are untouched.' } }
   })
   const account = useAuthState()
+  const [installHelp, setInstallHelp] = useState(() => shouldShowMobileInstall(
+    { getItem: key => localStorage.getItem(key) },
+    window.matchMedia('(max-width: 720px)').matches,
+    window.matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true,
+  ))
+  const [installMessage, setInstallMessage] = useState('')
+  const installHeading = useRef<HTMLHeadingElement>(null)
+  const installOpener = useRef<HTMLButtonElement>(null)
+  const [focusInstallHelp, setFocusInstallHelp] = useState(false)
+  useEffect(() => {
+    if (installHelp && focusInstallHelp) installHeading.current?.focus()
+  }, [installHelp, focusInstallHelp])
+  const closeInstallHelp = () => {
+    try { dismissMobileInstall(localStorage); setInstallMessage('') }
+    catch { setInstallMessage('Install help closed for this visit. Browser storage could not remember your choice; it may appear again next time.') }
+    setInstallHelp(false)
+    if (focusInstallHelp) installOpener.current?.focus()
+    setFocusInstallHelp(false)
+  }
   const [view, setView] = useState<View>(preferences.value.startPage)
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
@@ -109,7 +128,7 @@ export function App() {
   }
   const downloadExport = () => {
     try {
-      const backup = { ...state, localSettings: localStorage.getItem(SETTINGS_KEY), digestDelivery: localStorage.getItem(DIGEST_DELIVERY_KEY) }
+      const backup = { ...state, localSettings: localStorage.getItem(SETTINGS_KEY), digestDelivery: localStorage.getItem(DIGEST_DELIVERY_KEY), mobileInstall: localStorage.getItem(MOBILE_INSTALL_KEY) }
       const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }))
       const link = document.createElement('a')
       link.href = url; link.download = 'threadline-export.json'; link.click()
@@ -155,11 +174,23 @@ export function App() {
   return <main className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => setView('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
+      {installHelp && <section className="install-help" aria-labelledby="install-help-title">
+        <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
+        <p>Capture a thought, then open Organize to review its meaning. You can use Threadline in this browser or add it to your home screen.</p>
+        <details><summary>How to add Threadline to your iPhone home screen</summary>
+          <ol><li>Open this hosted Threadline page in Safari.</li><li>Tap Share (the square with an upward arrow). It may be inside the More menu.</li><li>Choose Add to Home Screen. If shown, leave Open as Web App on, then tap Add.</li><li>Launch Threadline from its home screen icon.</li></ol>
+          <p>Already using the home screen icon? You can keep using it. On Android or desktop, look for Install app in your browser menu, if available.</p>
+        </details>
+        <p>Installation does not enable mobile push notifications. Your thoughts stay in this browser; account backup and cross-device sync are not available yet.</p>
+        <button className="secondary" onClick={closeInstallHelp}>Dismiss install help</button>
+        <p className="install-help-hint">Reopen anytime in Settings → Mobile install.</p>
+      </section>}
+      {installMessage && <p className="storage-alert" role="status">{installMessage}</p>}
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       {view === 'today' && <div className="digest-entry"><button className="secondary" onClick={() => setView('digest')}>Morning digest →</button></div>}
       <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />
-      {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+      {view === 'settings' && <SettingsPage installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
         writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
@@ -208,7 +239,7 @@ function AiInterpretationSection() {
   </section>
 }
 
-function MobileInstallSection() {
+function MobileInstallSection({ installOpener, onInstallHelp }: { installOpener: React.RefObject<HTMLButtonElement | null>; onInstallHelp: () => void }) {
   const [installed] = useState(() => typeof window !== 'undefined' && Boolean(
     window.matchMedia?.('(display-mode: standalone)').matches ||
     (window.navigator as unknown as { standalone?: boolean }).standalone,
@@ -216,11 +247,8 @@ function MobileInstallSection() {
   return <section className="settings-card"><h2>Mobile install</h2>
     <p className={installed ? 'status-pill positive' : 'status-pill'}>{installed ? 'Installed' : 'Installable now'}</p>
     {installed ? <p>Threadline is running from your home screen right now.</p> : <>
-      <p>Threadline can be added to your phone's home screen straight from your browser. There is no in-app setup wizard yet — these are the exact steps:</p>
-      <ul>
-        <li><strong>iPhone (Safari):</strong> tap Share, then Add to Home Screen.</li>
-        <li><strong>Android (Chrome):</strong> open the ⋮ menu and choose Install app, or accept the prompt if Chrome offers it.</li>
-      </ul>
+      <p>Threadline can be added to your phone's home screen straight from your browser. Mobile push notifications are not available.</p>
+      <button ref={installOpener} className="secondary" onClick={onInstallHelp}>Show home screen install help</button>
     </>}
   </section>
 }
@@ -233,7 +261,8 @@ function DigestSection({ onOpen }: { onOpen: () => void }) {
   </section>
 }
 
-function SettingsPage({ settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+function SettingsPage({ installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+  installOpener: React.RefObject<HTMLButtonElement | null>; onInstallHelp: () => void
   settings: LocalSettings; error: string; authState: AuthState; onRetryAccount: () => void
   onSave: (value: LocalSettings) => void; onResetSettings: () => void
   onExport: () => void; onBackup: () => void; onClear: () => void; onOpenDigest: () => void
@@ -256,7 +285,7 @@ function SettingsPage({ settings, error, authState, onRetryAccount, onSave, onRe
     </section>
     <DataSection state={authState} />
     <AiInterpretationSection />
-    <MobileInstallSection />
+    <MobileInstallSection installOpener={installOpener} onInstallHelp={onInstallHelp} />
     <DigestSection onOpen={onOpenDigest} />
     <section className="settings-card"><h2>Recovery</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
       <p>Clearing removes all Threadline thoughts, canvas and preferences from this browser, including drafts and session undo history. This cannot be undone. Download a backup first and close other Threadline tabs.</p>
