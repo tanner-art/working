@@ -21,6 +21,29 @@ describe('interpret', () => {
     expect(result.proposedKind).toBe('idea')
     expect(result.confidence).toBeLessThan(.8)
   })
+
+  it('keeps uncertain action-like captures low confidence', async () => {
+    const result = await interpret('Maybe give marketing guys access?')
+    expect(result.proposedKind).toBe('action')
+    expect(result.confidence).toBeLessThanOrEqual(.64)
+    expect(result.reviewState).toBe('review')
+  })
+
+  it('routes consequential timing and reminder captures to unresolved review', async () => {
+    const result = await interpret('Remind me Tuesday to call Ahmed')
+    expect(result.proposedKind).toBe('unresolved')
+    expect(result.reviewState).toBe('review')
+    if (result.proposedKind === 'unresolved') {
+      expect(result.proposedReminder.deliveryState).toBe('needs-review')
+      expect(result.proposedReminder.trigger.wording).toBe('Remind me Tuesday to call Ahmed')
+    }
+  })
+
+  it('does not turn cancellation language into high-confidence work', async () => {
+    const result = await interpret('Cancel the Tuesday launch meeting')
+    expect(result.reviewState).toBe('review')
+    expect(result.confidence).toBeLessThanOrEqual(.64)
+  })
 })
 
 describe('persisted state validation', () => {

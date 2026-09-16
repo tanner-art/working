@@ -836,6 +836,8 @@ Reviewer: Unassigned
 Priority: P0
 Milestone: M5
 
+Follow-up progress (2026-09-16): added non-secret safety hardening without enabling the provider. Settings now indicates built-in rules vs provider-attempt mode from the client feature flag, and still states proposals require Review confirmation. Added evaluator coverage for uncertain action-like captures, consequential reminder/timing captures, cancellation/change-of-intent language, provider status labels, and provider confidence bounds. Added `tsconfig.api.json` and included `tsc -p tsconfig.api.json` in `pnpm check` so `api/interpret.ts` is type-checked without calling a live provider or adding keys.
+
 Depends On:
 - TASK-028
 

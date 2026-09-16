@@ -9,11 +9,18 @@ export interface InterpretRequestBody {
 }
 
 export type ProviderConfig = { status: 'enabled' } | { status: 'disabled' }
+export interface ProviderStatus { label: string; description: string; enabled: boolean }
 
 /** Explicit opt-in only: the browser stays fully deterministic unless this is exactly
  * "enabled". Client-safe — carries no secret, only a feature toggle. */
 export function readProviderConfig(env: { VITE_AI_INTERPRETATION_PROVIDER?: string }): ProviderConfig {
   return env.VITE_AI_INTERPRETATION_PROVIDER?.trim() === 'enabled' ? { status: 'enabled' } : { status: 'disabled' }
+}
+
+export function providerStatus(config: ProviderConfig): ProviderStatus {
+  return config.status === 'enabled'
+    ? { enabled: true, label: 'Provider attempts enabled', description: 'Threadline may ask the server provider for proposed meaning, then falls back to built-in rules if the provider is unavailable. Review confirmation is still required.' }
+    : { enabled: false, label: 'Built-in rules only', description: 'Captures are organized by deterministic rules built into the app. No provider request is made unless the client feature flag is enabled.' }
 }
 
 const DEFAULT_ENDPOINT = '/api/interpret'

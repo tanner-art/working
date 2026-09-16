@@ -5,6 +5,8 @@
 // start. Validation logic below mirrors src/aiInterpretation.ts by design, not by import.
 export const config = { runtime: 'edge' }
 
+declare const process: { env: Record<string, string | undefined> }
+
 type CaptureSource = 'text' | 'voice' | 'canvas'
 interface CaptureInput {
   id: string

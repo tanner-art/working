@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "check": "pnpm test && pnpm run build"
+    "check": "pnpm test && pnpm run build && pnpm run check:api",
+    "check:api": "tsc -p tsconfig.api.json"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",
