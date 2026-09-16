@@ -216,9 +216,9 @@ Queued app-usability tasks below are created from the current product push towar
 
 ### TASK-029 - Auth Provider Selection and Login Wiring
 
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
+Status: REVIEW (authorized SDK-unavailable fallback; live login remains blocked)
+Owner: Codex A
+Reviewer: Pending independent runner review
 Priority: P0
 Milestone: M5
 
@@ -254,8 +254,25 @@ Acceptance Criteria:
 - pnpm check passes
 - hosted deployment has required auth environment variables documented
 
+Result (issue #41): implemented Supabase client login wiring. Account UI and typed
+configuration/session boundary include honest unconfigured, signed-out, loading/error and
+signed-in states, guarded email magic-link/login and logout actions, subscription cleanup,
+stale-response protection, and a real `@supabase/supabase-js` adapter. Existing application
+storage is untouched; no backend migration or cloud-sync claim. Morning Digest settings were
+hidden from Settings per user direction while the app is being made usable on mobile. See
+docs/AUTH_DATA_PLAN.md for exact remaining env and hosted validation steps.
+
+Validation: pnpm check passed (258 tests across 14 files, TypeScript and production
+build); git diff --check passed. Build emits a nonblocking bundle-size warning after adding
+Supabase; future code-splitting can address it. Implementation/test diffs inspected. No lint
+script is configured.
+Limitations: hosted email login/logout and callback handling still require choosing the
+Threadline Supabase project, configuring redirect URLs, adding Vercel env vars, and browser
+validation against the deployed app. Cloud persistence/RLS remains TASK-034.
+Delivery: left uncommitted for the runner per explicit assignment; no git mutations.
+
 ### Exact response to move forward
-Assign this task to Agent A after TASK-026 merges: `Assign TASK-029 login wiring to Agent A.`
+`Choose the Supabase project for Threadline, set Vercel env vars, then validate hosted email login/logout and local-data preservation.`
 
 ---
 
