@@ -24,6 +24,49 @@ Only READY tasks may be newly assigned.
 
 ## IN_PROGRESS
 
+### TASK-038 - Mobile-First Capture and Organize Cleanup
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent runner review
+Issue: #48
+Scope: user-assigned capture/review cleanup in the explicitly allowed paths only.
+
+Result: Capture keeps its raw-input heading, removes the lede/context field, uses a
+Capture button, preserves new typing during asynchronous capture, clears submitted text,
+and stays open with accessible success feedback. Account entry opens Settings;
+Commitments navigation is hidden with implementation retained. Today has a compact
+Morning digest entry opening the existing digest surface. Review is labeled Organize,
+retains its pending-count badge, and requires a separate confirmation before rejection.
+Rejected proposals leave the pending queue while preserving captures and history across
+reload; type correction can return them to review. Confirm, Complete, Archive and detail
+edits retain the existing explicit-confirmation rules, with a concise blocked-action reason.
+Proposed date, urgency, effort and context remain editable; advanced estimate controls
+are hidden without deleting saved metadata. Timing remains available in a disclosure.
+
+Validation (2026-09-15): pnpm check passed: 265 tests across 15 files, TypeScript and
+production build. Seven new regression cases cover rejection/reconsideration, confirmation,
+completion/archive, editable-field persistence and confirmation gates across model reload.
+git diff --check passed; implementation and test diffs inspected. No lint script configured.
+Build retains its nonblocking bundle-size warning.
+
+Files: src/App.tsx, src/styles.css, src/objectWorkflow.ts, src/objectWorkflow.test.ts, TASKS.md.
+Limitations: browser/mobile interaction smoke testing and independent review remain for
+the runner. Rejection retains evidence; it is not permanent capture deletion. Existing
+reminder proposals require reclassification before object confirmation. Digest details and
+delivery logic are preserved on the separate digest surface.
+Delivery: changes left uncommitted for the runner; no git mutations, push, PR or branch change.
+
+TODO / proposed follow-ups (not implemented; do not block this task): Organize folders;
+future AI grouping/clustering; separately scoped resource cost, attention load, ROI and
+strategic importance controls. Existing capture/provider and durable storage work remains
+separately scoped.
+
+Exact response to move forward: Run independent review and mobile browser smoke tests for
+issue #48, then let the runner commit and prepare delivery.
+
+---
+
 ### TASK-024 - Accessible Canvas Node Shape Palette
 
 Status: REVIEW

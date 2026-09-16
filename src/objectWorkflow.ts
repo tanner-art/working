@@ -7,6 +7,10 @@ export { hasConfirmation } from './migration'
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
+/** Rejected proposals retain their evidence but leave the pending decisions queue. */
+export const reviewObjects = (objects: ThoughtObject[]) => objects.filter(item =>
+  item.status === 'review' && item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision !== 'rejected')
+
 /** Confirmed and eligible: an unresolved `depends_on` link keeps a confirmed Action out of the queue without hiding it in a score. */
 export const confirmedActions = (objects: ThoughtObject[], relationships: SemanticRelationship[] = []) =>
   activeObjects(objects)
