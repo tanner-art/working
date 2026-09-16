@@ -32,6 +32,58 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## IN_PROGRESS
 
+### TASK-041 - Compact Digest, Review Accordion and Bank Folders
+
+Status: REVIEW
+Owner: Codex A
+Reviewer: Pending independent runner review
+GitHub Issue: #56
+Scope: user-assigned mobile cleanup in the six explicitly allowed paths.
+
+Result: Today has a compact Morning Digest label/caret disclosure that opens the
+live digest inline in one tap, without delivery controls or an intermediate button.
+The separate Settings digest surface retains existing delivery controls. Capture was
+verified to have no forced context field or “Interpret thought” wording, keeps a primary
+Capture button, and adds an optional Details drawer for folder/date/time on the way in.
+Organize opens with a collapsed Review count/caret row, followed by Bank folders in
+Personal, Business, Unfiled order. Confirmed/completed thoughts are grouped only by
+exact, case-insensitive context values Personal/Home or Business/Work; other contexts
+remain Unfiled. The detail editor now exposes Folder, Proposed date, Time and Effort up front,
+with Status/Urgency under Advanced; time edits update only the proposed timing evidence
+without replacing the interpretation summary. No AI inference, persisted folder schema or semantic membership was introduced.
+Review cards keep Confirm/Edit and replace Reject with a top-right accessible X.
+Dismissal requires a separate confirmation and uses existing reversible rejection
+semantics, retaining raw captures and history across reload.
+
+Validation: `pnpm check` passed: 282 tests across 15 files, TypeScript and production
+Vite build after the Capture Details/time/folder patch. Ten new cases cover conservative classification, lifecycle exclusions,
+context edits and persistence; existing rejection/reconsideration tests remain green.
+`git diff --check` passed and implementation/test diffs inspected. No lint script is
+configured. Production build retains the nonblocking bundle-size warning.
+
+Files: src/App.tsx, src/DigestPanel.tsx, src/styles.css, src/objectWorkflow.ts,
+src/objectWorkflow.test.ts, TASKS.md.
+Limitations: browser/mobile interaction and independent review remain pending; there
+is no DOM test dependency in this worktree. Folders are context-based views, not AI
+filing; arbitrary contexts are deliberately unclassified. Archived, pending and
+dismissed items are excluded from Bank. Dismissal preserves evidence rather than
+permanently deleting it; this slice adds no dismissed-items recovery list.
+Delivery: changes left uncommitted for the runner; no git mutations, branch changes,
+push, PR creation or merge.
+
+Build-in-public note: Today’s digest now opens inline, and Organize puts a small
+Review drawer above Personal and Business folders. Junk proposals can be dismissed
+with confirmation while keeping the original thought. Filing uses simple context
+labels for now; the next visible check is the mobile interaction review.
+
+Newly discovered work: none requiring implementation outside this assignment.
+
+Exact response to move forward: Run independent review and mobile/desktop smoke
+checks for issue #56: expand/collapse digest and Review, cancel/confirm X dismissal,
+Confirm/Edit a card, verify folder counts/folder dropdown edits after reload, and check
+Capture plus optional Details date/time/folder entry. Then deliver the recovered PR.
+
+
 ### TASK-040 - Settings as a Nontechnical Usability Control Center
 
 Status: REVIEW
