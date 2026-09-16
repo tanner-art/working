@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
-import { canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
+import { reviewObjects, canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, newCanvasElement, saveState } from './store'
 import type { CanvasHistory } from './canvasHistory'
 import {
@@ -22,9 +22,9 @@ import {
   undoCanvas as undoCanvasHistory,
 } from './canvasHistory'
 
-type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings'
+type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Review', icon: '◇' }, { id: 'commitments', label: 'Commitments', icon: '□' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
 export function App() {
@@ -41,7 +41,8 @@ export function App() {
   const capturePending = useRef(false)
   const [captureError, setCaptureError] = useState<string | undefined>()
   const [draft, setDraft] = useState('')
-  const [context, setContext] = useState('')
+  const [captureBusy, setCaptureBusy] = useState(false)
+  const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
   // Session-only canvas undo/redo stack, kept at the App level (not inside Canvas) so
   // switching views does not discard it. See docs/DECISIONS.md D-010 (resolves OD-002).
@@ -101,24 +102,26 @@ export function App() {
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch { throw new Error('Export could not read browser storage. Use Download thoughts backup to preserve the work in this tab.') }
   }
-  const reviewCount = state.objects.filter(item => item.status === 'review').length
+  const reviewCount = reviewObjects(state.objects).length
   const capture = async () => {
     const content = draft.trim()
     if (!content || capturePending.current) return
     capturePending.current = true
+    setCaptureBusy(true)
+    setCaptureSuccess(0)
     setCaptureError(undefined)
     try {
-      const item = await createInterpretedObject(content, context.trim() || undefined)
+      const item = await createInterpretedObject(content)
       if (clearing.current) return
       update(current => ({ ...current, objects: [item, ...current.objects] }))
       // Preserve any new typing while an asynchronous interpreter is running.
       setDraft(current => current === draft ? '' : current)
-      setContext(current => current === context ? '' : current)
-      setView('review')
+      setCaptureSuccess(value => value + 1)
     } catch {
-      setCaptureError('Unable to interpret this thought. Your draft is preserved; retry capturing it.')
+      setCaptureError('Unable to capture this thought. Your draft is preserved; retry capturing it.')
     } finally {
       capturePending.current = false
+      setCaptureBusy(false)
     }
   }
   const revise = (id: string, kind: ObjectKind) => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? confirmObject(item, kind) : item) }))
@@ -136,19 +139,20 @@ export function App() {
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   return <main className="app-shell">
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><div className="sidebar-bottom"><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></div></aside>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => setView('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
-      <MorningDigest state={state} visible={view === 'today'} onShow={() => setView('today')} />
+      {view === 'today' && <div className="digest-entry"><button className="secondary" onClick={() => setView('digest')}>Morning digest →</button></div>}
+      <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />
       {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} onSave={value => {
         writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
-      {view === 'capture' && <Capture draft={draft} context={context} onDraft={setDraft} onContext={setContext} onCapture={capture} />}
-      {view === 'review' && <TemporalReview state={state} onUpdate={update} />}
-      {view === 'review' && <Review objects={state.objects.filter(item => item.status === 'review')} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
+      {view === 'review' && <Review objects={reviewObjects(state.objects)} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
       {view === 'canvas' && <Canvas elements={state.canvas} onCommit={commitCanvas} canUndo={canUndoCanvas(canvasHistory)} canRedo={canRedoCanvas(canvasHistory)} onUndo={undoCanvas} onRedo={redoCanvas} onCaptureObject={captureCanvasObject} />}
@@ -235,9 +239,22 @@ function Today({ objects, relationships, onCapture, onOpen }: { objects: Thought
     <section className="list-section"><div className="section-heading"><div><p className="section-label">Object workbench</p><h2>Recent captures</h2></div><span>{recent.length} visible</span></div>{recent.length ? recent.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} />) : <Empty text="Capture something and it will appear here for shaping." />}</section>
   </div>
 }
-function Capture({ draft, context, onDraft, onContext, onCapture }: { draft: string; context: string; onDraft: (v: string) => void; onContext: (v: string) => void; onCapture: () => void }) { return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" /><p className="lede">Don’t decide what it is yet. Write it how you would say it.</p><div className="capture-box"><textarea autoFocus value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') onCapture() }} /><div className="capture-footer"><label>Context <input value={context} onChange={event => onContext(event.target.value)} placeholder="Optional — where this belongs" /></label><button className="primary" onClick={onCapture}>Interpret thought <span>⌘↵</span></button></div></div><div className="voice-placeholder"><span>⌁</span><div><strong>Voice capture</strong><p>Coming in the next pass. The source will remain attached to the same original thought.</p></div></div></div> }
+function Capture({ draft, busy, success, onDraft, onCapture }: { draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: () => void }) {
+  const input = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => { if (success) input.current?.focus() }, [success])
+  return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" />
+    <div className="capture-box"><textarea ref={input} autoFocus aria-label="Raw thought" value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); onCapture() } }} />
+      <div className="capture-footer"><span role="status">{success > 0 && <span className="capture-success">✓ Captured</span>}</span><button className="primary" disabled={busy || !draft.trim()} onClick={onCapture}>{busy ? 'Capturing…' : 'Capture'}</button></div>
+    </div>
+  </div>
+}
 function Review({ objects, onChangeKind, onConfirm, onReject, onOpen }: { objects: ThoughtObject[]; onChangeKind: (id: string, kind: ObjectKind) => void; onConfirm: (id: string, kind: ObjectKind) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
-  return <div className="page"><Header eyebrow="Decision interface" title="A few things need your judgment." />{objects.length === 0 ? <Empty text="No object interpretations are waiting. Timing proposals are reviewed separately above." /> : <div className="review-list">{objects.map(item => <article className="review-card" key={item.id}><div className="source-line"><span>Raw capture</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.originalContent}</blockquote><div className="proposal"><span className="spark">✦</span><div><p>{item.kind === 'action' ? 'Proposed Action — not yet executable.' : `Proposed ${objectLabels[item.kind]}.`}</p><p>{item.interpretation.summary}</p>{item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision === 'rejected' && <p>Rejected interpretation. Preserved here so you can revise or reconsider it.</p>}<small>{item.kind === 'action' ? 'Confirm this Action to make this work eligible for execution.' : item.kind === 'commitment' ? 'Confirm this obligation only. This does not fix a deadline or schedule an event.' : 'Confirm this interpretation to accept its meaning.'}</small><small>{item.interpretation.rationale}</small></div><em>{Math.round(item.confidence * 100)}% confident</em></div><div className="review-actions"><select aria-label="Review object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Adjust details</button><button className="secondary" onClick={() => onReject(item.id)}>Reject interpretation</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm interpretation</button></div></article>)}</div>}</div>
+  const [rejecting, setRejecting] = useState<string | null>(null)
+  return <div className="page"><Header eyebrow="Your thoughts" title="Organize" />{objects.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{objects.map(item => <article className="review-card" key={item.id}>
+    <div className="source-line"><span>Raw capture</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.originalContent}</blockquote>
+    <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p>{item.kind === 'commitment' && <small>Confirms the obligation only.</small>}{item.kind === 'reminder' && <small>Choose an object type before confirming.</small>}</div></div>
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm rejection"><p>Reject this proposal? Your original capture is kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Confirm rejection</button></div> : <div className="review-actions"><select aria-label="Object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Edit</button><button className="secondary" onClick={() => setRejecting(item.id)}>Reject…</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm</button></div>}
+  </article>)}</div>}</div>
 }
 function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id: string) => void; accent?: 'commitment' }) {
   const detail = item.interpretation.suggestedDate ?? item.context ?? item.interpretation.rationale
@@ -253,16 +270,13 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
   const scoreSelect = (key: 'urgency' | 'strategicImportance' | 'roi') => <select value={draft.metadata[key] ?? ''} onChange={event => metadata(key, event.target.value ? Number(event.target.value) as 1 | 2 | 3 | 4 | 5 : undefined)}>
     <option value="">Unspecified</option>{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}
   </select>
-  const loadSelect = (key: 'attentionLoad' | 'resourceCost') => <select value={draft.metadata[key] ?? ''} onChange={event => metadata(key, event.target.value)}>
-    <option value="">Unspecified</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
-  </select>
   return <div className="panel-backdrop" onMouseDown={onClose}>
     <aside className="object-panel" onMouseDown={event => event.stopPropagation()}>
       <header><div><p className="eyebrow">Object workbench</p><h2>Shape this thought</h2></div><button className="close-button" onClick={onClose} aria-label="Close object details">×</button></header>
       <div className="panel-scroll">
         <section className="raw-thought"><p className="section-label">Original capture</p><p>{object.originalContent}</p><small>{object.source} · {new Date(object.createdAt).toLocaleString()}</small></section>
         <section className="interpretation"><p className="section-label">AI proposal</p><strong>{object.interpretation.summary}</strong><small>{Math.round(object.confidence * 100)}% confident · {object.interpretation.rationale}</small></section>
-        {awaitingConfirmation && <p>Type and detail edits do not confirm work. Save changes, then use Confirm interpretation in Review.</p>}
+        {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
           <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
           <label>Status<select disabled={awaitingConfirmation} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status}>{status}</option>)}</select></label>
@@ -270,13 +284,9 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
           <label>Proposed date (not fixed)<input type="date" value={draft.metadata.deadline ?? ''} onChange={event => metadata('deadline', event.target.value)} /></label>
           <label>Urgency{scoreSelect('urgency')}</label>
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
-          <label>Attention load{loadSelect('attentionLoad')}</label>
-          <label>Strategic importance{scoreSelect('strategicImportance')}</label>
-          <label>Resource cost{loadSelect('resourceCost')}</label>
-          <label>Optional ROI{scoreSelect('roi')}</label>
         </div>
         <details><summary>Interpretation history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
-        {hasConfirmation(object) && <><p>Reversal returns this meaning to Review. External effects are unchanged.</p><button className="secondary" onClick={() => { onReverse(); onClose() }}>Reverse confirmation</button></>}
+        {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={() => { onReverse(); onClose() }}>Reverse confirmation</button></>}
       </div>
       <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'archived')); onClose() }}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'complete')); onClose() }}>Complete</button><button className="primary" onClick={() => { onSave(draft); onClose() }}>Save changes</button></footer>
     </aside>

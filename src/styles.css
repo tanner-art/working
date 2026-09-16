@@ -154,3 +154,17 @@
   .nav-item { flex-shrink: 0; }
   .settings-card { padding: 18px; }
 }
+
+/* TASK-038: compact capture and organization controls. */
+button.sidebar-bottom { border: 0; background: transparent; text-align: left; cursor: pointer; }
+button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
+.digest-entry { margin: 20px clamp(16px, 4vw, 56px) 0; }
+.capture-success { color: #416f35; font-size: 13px; animation: capture-arrive 180ms ease-out; }
+@keyframes capture-arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.reject-confirmation { margin-top: 16px; font-size: 13px; }
+.reject-confirmation button { margin: 4px 8px 0 0; min-height: 44px; }
+.review-actions button, .review-actions select { min-height: 44px; }
+.timing-details { margin: 0 clamp(22px, 4vw, 56px) 32px; }
+.timing-details > summary { cursor: pointer; padding: 12px 0; }
+.timing-details > .page > h2, .timing-details > .page > p { display: none; }
+@media (prefers-reduced-motion: reduce) { .capture-success { animation: none; } }
