@@ -775,6 +775,52 @@ Assign this task after TASK-034 lands: `Assign TASK-037 privacy/export/delete se
 
 ---
 
+
+### TASK-043 - Hosted Account Sync Rollout and Two-Device Validation
+
+Status: BACKLOG
+Owner: Unassigned
+Reviewer: Unassigned
+Priority: P0
+Milestone: M5
+
+Depends On:
+- TASK-029
+- TASK-042
+
+Goal:
+Make signed-in Threadline data real on the hosted app so the same account shows the same Review queue and Bank folders on desktop and phone.
+
+Scope:
+- reconcile the hosted Supabase project/table with the TASK-042 account-storage contract
+- provision the owner-only RLS table named by `VITE_SUPABASE_DATA_TABLE` without committing project identifiers, anon keys or service-role keys
+- configure Vercel Production and Preview environment variables for Supabase Auth and account storage
+- confirm Supabase auth redirect URLs for the hosted Vercel URL and localhost development
+- validate with two test accounts across desktop and phone: explicit local import, account load, Review edits, Bank folder changes, sign-out/local preservation and cross-user isolation
+- document the exact non-secret operational checklist and any remaining account-level setup
+
+Do Not:
+- silently migrate local-only browser data on sign-in
+- expose Supabase project refs, anon keys, service-role keys or account emails in source/docs/issues
+- enable realtime merge or background sync beyond the explicit load/save behavior already delivered
+- replace a nonempty account import without a user-visible export/merge path
+
+Deliverable:
+A hosted account can copy this device’s thoughts into account storage and load the same Review and Bank data on the user's phone, while a second account cannot read or overwrite it.
+
+Acceptance Criteria:
+- hosted login works from the Vercel app and returns to the app after email auth
+- Settings → Data can copy local data into an empty signed-in account
+- phone can load the same account data and see the same Review queue and Bank folders
+- edits from one device save to account storage and can be explicitly loaded on the other
+- stale revision, offline/RLS failures and sign-out do not overwrite or erase local-only data
+- two-account smoke test confirms account isolation
+- `pnpm check` passes after any code/docs changes
+
+Blocker / user action if no connected Supabase/Vercel dashboard access is available:
+Set up the documented `public.threadline_account_data` table with owner-only RLS, add `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` and `VITE_SUPABASE_DATA_TABLE=threadline_account_data` to Vercel, and configure Supabase auth redirect URLs. Then respond: `Hosted Supabase account sync env and RLS table are ready; validate desktop-to-phone Review and Bank sync.`
+
+---
 ### TASK-031 - Real AI Interpretation Provider
 
 Status: BACKLOG
