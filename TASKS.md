@@ -26,14 +26,18 @@ Only READY tasks may be newly assigned.
 
 Every new task should explicitly serve at least one near-term product outcome: fast capture, safe user data, confirm/organize meaning, mobile usability, or real AI interpretation. Prefer tasks that move the hosted app toward immediate daily use within 24 hours over low-priority polish. Larger ideas such as AI folder clustering, resource cost, attention load, ROI, and strategic importance should be captured as follow-ups unless they directly unblock the current capture/review/storage loop.
 
+For the next 24-hour push, tasks should be framed around making the hosted mobile app feel usable by a real account holder: capture should be quick and rewarding, review/organize should let the user safely confirm or remove proposed meaning, account storage should keep data tied to the signed-in user, and AI interpretation should start replacing deterministic placeholders. Process/documentation work is valid only when it helps agents or the user move those outcomes faster.
+
+Build-in-public rule: when a task changes visible behavior, its issue/PR should include one plain-language user-facing note that can be reused for a public progress update, plus the usual validation and `Exact response to move forward`. Keep the note honest: describe what users can do now, what is still limited, and the next visible improvement.
+
 ## IN_PROGRESS
 
 ### TASK-038 - Mobile-First Capture and Organize Cleanup
 
-Status: REVIEW
+Status: DONE
 Owner: Codex A
-Reviewer: Pending independent runner review
-Issue: #48
+Reviewer: Independent orchestration review
+Issue: #48 / PR #50
 Scope: user-assigned capture/review cleanup in the explicitly allowed paths only.
 
 Result: Capture keeps its raw-input heading, removes the lede/context field, uses a
@@ -48,26 +52,27 @@ edits retain the existing explicit-confirmation rules, with a concise blocked-ac
 Proposed date, urgency, effort and context remain editable; advanced estimate controls
 are hidden without deleting saved metadata. Timing remains available in a disclosure.
 
-Validation (2026-09-15): pnpm check passed: 265 tests across 15 files, TypeScript and
+Validation (2026-09-15/16): pnpm check passed: 265 tests across 15 files, TypeScript and
 production build. Seven new regression cases cover rejection/reconsideration, confirmation,
 completion/archive, editable-field persistence and confirmation gates across model reload.
-git diff --check passed; implementation and test diffs inspected. No lint script configured.
-Build retains its nonblocking bundle-size warning.
+git diff --check passed; implementation and test diffs inspected. GitHub Validate app checks
+and Vercel preview passed before merge. No lint script configured. Build retains its
+nonblocking bundle-size warning.
 
 Files: src/App.tsx, src/styles.css, src/objectWorkflow.ts, src/objectWorkflow.test.ts, TASKS.md.
-Limitations: browser/mobile interaction smoke testing and independent review remain for
-the runner. Rejection retains evidence; it is not permanent capture deletion. Existing
+Limitations: rejection retains evidence; it is not permanent capture deletion. Existing
 reminder proposals require reclassification before object confirmation. Digest details and
-delivery logic are preserved on the separate digest surface.
-Delivery: changes left uncommitted for the runner; no git mutations, push, PR or branch change.
+delivery logic are preserved on the separate digest surface. Full Organize folders, AI
+clustering, and provider-backed interpretation remain follow-up work.
+Delivery: merged to main via PR #50 at commit 25e7e146def759fd6c1e9a39edbb3d2b2126f045.
 
 TODO / proposed follow-ups (not implemented; do not block this task): Organize folders;
 future AI grouping/clustering; separately scoped resource cost, attention load, ROI and
 strategic importance controls. Existing capture/provider and durable storage work remains
 separately scoped.
 
-Exact response to move forward: Run independent review and mobile browser smoke tests for
-issue #48, then let the runner commit and prepare delivery.
+Exact response to move forward: Continue with the next mobile usability slice: user-scoped
+storage, real AI interpretation, and Organize folders.
 
 ---
 
@@ -818,6 +823,10 @@ Review: pending
 ## Current Product Operating Focus
 
 Every new task should explicitly serve at least one near-term product outcome: fast capture, safe user data, confirm/organize meaning, mobile usability, or real AI interpretation. Prefer tasks that move the hosted app toward immediate daily use within 24 hours over low-priority polish. Larger ideas such as AI folder clustering, resource cost, attention load, ROI, and strategic importance should be captured as follow-ups unless they directly unblock the current capture/review/storage loop.
+
+For the next 24-hour push, tasks should be framed around making the hosted mobile app feel usable by a real account holder: capture should be quick and rewarding, review/organize should let the user safely confirm or remove proposed meaning, account storage should keep data tied to the signed-in user, and AI interpretation should start replacing deterministic placeholders. Process/documentation work is valid only when it helps agents or the user move those outcomes faster.
+
+Build-in-public rule: when a task changes visible behavior, its issue/PR should include one plain-language user-facing note that can be reused for a public progress update, plus the usual validation and `Exact response to move forward`. Keep the note honest: describe what users can do now, what is still limited, and the next visible improvement.
 
 ## IN_PROGRESS
 
