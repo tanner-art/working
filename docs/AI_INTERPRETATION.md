@@ -105,12 +105,12 @@ requires editing `api/interpret.ts`'s request/response mapping; `src/aiInterpret
   documented limitation in `src/interpretationService.ts` — this slice does not change that.
 - No retry/backoff or rate limiting is implemented; a provider outage simply falls back to
   deterministic interpretation for each capture independently.
-- No telemetry/logging beyond a `console.warn` on fallback; there is no visible in-app
-  indicator today that a given proposal came from the provider vs. the deterministic
-  heuristics (out of scope for this task's allowed paths, which do not include `src/App.tsx`).
-- `api/interpret.ts` is a Vercel Edge Function outside every `tsconfig` (`tsc -b` only covers
-  `src` and `vite.config.ts`), so `pnpm run build` does not type-check it; it was written and
-  reviewed carefully by hand instead. A future task could add a dedicated `tsconfig` for `api/`.
+- Settings now shows whether the browser is in deterministic-only mode or whether provider
+  attempts are enabled by the client feature flag. This status is configuration-level only;
+  individual proposal provenance and provider success/fallback telemetry remain future work.
+- `api/interpret.ts` is type-checked by the dedicated `tsconfig.api.json` target, which is
+  included in `pnpm check`. It still is not bundled into the Vite SPA and must not import from
+  `src/`, because it runs in the Vercel Edge Function runtime.
 - The prompt and tool schema are a first pass tuned to this app's existing deterministic
   heuristics' vocabulary; TASK-031 should evaluate real interpretation quality against
   ambiguous/consequential/low-confidence fixtures before wider rollout.
@@ -118,3 +118,13 @@ requires editing `api/interpret.ts`'s request/response mapping; `src/aiInterpret
 ### Exact response to move forward
 
 `Set AI_INTERPRETATION_API_KEY in Vercel Production/Preview, deploy, and manually validate a real /api/interpret call (success, missing-key 503, and induced-failure fallback) before enabling VITE_AI_INTERPRETATION_PROVIDER=enabled anywhere; then proceed with TASK-031's broader evaluation.`
+
+
+## TASK-031 follow-up: safety and visibility hardening
+
+This follow-up keeps provider-backed interpretation disabled unless `VITE_AI_INTERPRETATION_PROVIDER=enabled` is explicitly set. It adds Settings copy that honestly distinguishes deterministic built-in rules from provider attempts, and it reiterates that all proposals remain review-only: the provider cannot confirm actions, commitments, calendar events or notifications.
+
+Additional evaluator coverage now checks uncertain action-like captures, consequential reminder/timing captures, cancellation/change-of-intent language, provider status labels, and provider confidence bounds. `pnpm check` also runs `tsc -p tsconfig.api.json` so the Vercel Edge Function receives dedicated type-check coverage without adding provider keys or calling the live provider.
+
+### Exact response to move forward
+`Set AI_INTERPRETATION_API_KEY only as a server-side Vercel env var, deploy, validate /api/interpret success and failure cases manually, then consider enabling VITE_AI_INTERPRETATION_PROVIDER=enabled in Preview only.`

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CaptureRecord } from './domain'
 import {
   createFailClosedInterpretationService, createProviderInterpretationService,
-  readProviderConfig, validateInterpretationProposal,
+  providerStatus, readProviderConfig, validateInterpretationProposal,
 } from './aiInterpretation'
 import { deterministicInterpretationService } from './interpreter'
 
@@ -35,6 +35,20 @@ describe('readProviderConfig', () => {
   it('enables only on the exact opt-in value', () => {
     expect(readProviderConfig({ VITE_AI_INTERPRETATION_PROVIDER: 'enabled' }).status).toBe('enabled')
     expect(readProviderConfig({ VITE_AI_INTERPRETATION_PROVIDER: ' enabled ' }).status).toBe('enabled')
+  })
+})
+
+
+
+describe('providerStatus', () => {
+  it('describes deterministic-only mode without claiming provider access', () => {
+    expect(providerStatus({ status: 'disabled' })).toMatchObject({ enabled: false, label: 'Built-in rules only' })
+    expect(providerStatus({ status: 'disabled' }).description).toContain('No provider request')
+  })
+
+  it('describes enabled mode as provider attempts with fail-closed fallback', () => {
+    expect(providerStatus({ status: 'enabled' })).toMatchObject({ enabled: true, label: 'Provider attempts enabled' })
+    expect(providerStatus({ status: 'enabled' }).description).toContain('falls back')
   })
 })
 
@@ -99,6 +113,11 @@ describe('validateInterpretationProposal', () => {
   it('drops a non-string or empty suggestedDate', () => {
     expect(validateInterpretationProposal(capture, { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', suggestedDate: '' }).suggestedDate).toBeUndefined()
     expect(validateInterpretationProposal(capture, { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', suggestedDate: 5 }).suggestedDate).toBeUndefined()
+  })
+
+  it('does not let a provider claim confidence above the accepted range', () => {
+    expect(() => validateInterpretationProposal(capture, { summary: 's', rationale: 'r', confidence: .99, proposedKind: 'action' })).not.toThrow()
+    expect(() => validateInterpretationProposal(capture, { summary: 's', rationale: 'r', confidence: 1.01, proposedKind: 'action' })).toThrow('invalid confidence')
   })
 })
 

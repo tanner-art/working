@@ -1,4 +1,5 @@
 import { buildMorningDigest } from './morningDigest'
+import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
 import { accountData, createAccountAdapter, createAccountSession, type AccountData, type AccountSession } from './accountStorage'
 import { readDelivery, setDeliveryEnabled } from './digestDelivery'
@@ -45,6 +46,7 @@ function useAuthState() {
 }
 
 const accountAdapter = createAccountAdapter(supabase, import.meta.env.VITE_SUPABASE_DATA_TABLE)
+const aiProviderStatus = providerStatus(readProviderConfig({ VITE_AI_INTERPRETATION_PROVIDER: import.meta.env.VITE_AI_INTERPRETATION_PROVIDER }))
 type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountData }
 export function App() {
   const account = useAuthState()
@@ -299,9 +301,10 @@ function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry:
 
 function AiInterpretationSection() {
   return <section className="settings-card"><h2>AI interpretation</h2>
-    <p className="status-pill muted">Built-in rules only</p>
-    <p>Captures are organized by deterministic rules built into the app, not a connected AI provider. Suggested type, confidence and rationale come from those rules, not a live model.</p>
-    <button className="secondary" disabled>Connect an AI provider — not built yet</button>
+    <p className={aiProviderStatus.enabled ? 'status-pill positive' : 'status-pill muted'}>{aiProviderStatus.label}</p>
+    <p>{aiProviderStatus.description}</p>
+    <p>AI proposals remain review-only. Threadline cannot confirm actions, commitments, calendar events or notifications without your explicit confirmation.</p>
+    <button className="secondary" disabled>{aiProviderStatus.enabled ? 'Provider configured by feature flag' : 'Provider not enabled'}</button>
   </section>
 }
 
