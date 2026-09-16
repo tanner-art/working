@@ -147,6 +147,11 @@
 .clear-confirmation { display: grid; gap: 16px; padding: 16px; border: 1px solid #b77969; border-radius: 8px; }
 .secondary.danger-button { color: #873a28; border-color: #b77969; }
 .primary.danger-button { background: #873a28; }
+.settings-card .status-pill { display: inline-block; font: 10px 'DM Mono'; letter-spacing: .05em; text-transform: uppercase; padding: 5px 10px; border-radius: 20px; background: #e9ebe6; color: #46564d; margin: 0 0 10px; }
+.settings-card .status-pill.positive { background: #dcefc0; color: #33472a; }
+.settings-card .status-pill.muted { background: #efece0; color: #6b6350; }
+.settings-card ul { margin: 8px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.6; color: #46564d; }
+.settings-card ul li + li { margin-top: 4px; }
 .sidebar-bottom { overflow-wrap: anywhere; }
 .sidebar-bottom .avatar { flex-shrink: 0; }
 @media (max-width: 720px) {

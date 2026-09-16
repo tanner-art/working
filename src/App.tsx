@@ -1,4 +1,4 @@
-import { auth, accountLabel } from './auth'
+import { auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
 import { clearLocalData, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
@@ -27,6 +27,19 @@ const nav: { id: View; label: string; icon: string }[] = [
   { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
+/** Single shared account subscription; several Settings cards read the same state. */
+function useAuthState() {
+  const [state, setState] = useState<AuthState>(auth.getState)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    const unsubscribe = auth.subscribe(() => setState(auth.getState()))
+    const disconnect = auth.connect()
+    setState(auth.getState())
+    return () => { unsubscribe(); disconnect() }
+  }, [attempt])
+  return { state, retry: () => setAttempt(value => value + 1) }
+}
+
 export function App() {
   const [initial] = useState(loadStateResult)
   const [state, setState] = useState<AppState>(initial.state)
@@ -35,6 +48,7 @@ export function App() {
     try { return { value: readSettings(localStorage), error: '' } }
     catch { return { value: { ...defaultSettings }, error: 'Local settings could not be read. Editing settings is paused; stored settings are untouched.' } }
   })
+  const account = useAuthState()
   const [view, setView] = useState<View>(preferences.value.startPage)
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
@@ -145,10 +159,10 @@ export function App() {
       {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => setSaveError(saveState(state))}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       {view === 'today' && <div className="digest-entry"><button className="secondary" onClick={() => setView('digest')}>Morning digest →</button></div>}
       <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />
-      {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} onSave={value => {
+      {view === 'settings' && <SettingsPage settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
         writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
-      }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} />}
+      }} onResetSettings={() => setPreferences({ value: resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={reviewObjects(state.objects)} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
@@ -161,19 +175,11 @@ export function App() {
   </main>
 }
 
-function AccountSection() {
-  const [state, setState] = useState(auth.getState)
+function AccountSection({ state, onRetry }: { state: AuthState; onRetry: () => void }) {
   const [email, setEmail] = useState('')
-  const [attempt, setAttempt] = useState(0)
-  useEffect(() => {
-    const unsubscribe = auth.subscribe(() => setState(auth.getState()))
-    const disconnect = auth.connect()
-    setState(auth.getState())
-    return () => { unsubscribe(); disconnect() }
-  }, [attempt])
   return <section className="settings-card"><h2>Account</h2>
-    <p role="status"><strong>{accountLabel(state)}</strong></p>
-    <p>Local-only data · Your thoughts and preferences stay in this browser, including after login or logout. Account backup and cross-device sync are not available yet.</p>
+    <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
+    <p>{dataOwnershipLabel(state)}</p>
     {'message' in state && state.message && <p role={state.status === 'error' ? 'alert' : 'status'}>{state.message}</p>}
     {state.status === 'unconfigured' && <button className="secondary" disabled>Log in with email — unavailable</button>}
     {state.status === 'signed-out' && <form onSubmit={event => { event.preventDefault(); void auth.act('login', email) }}>
@@ -182,13 +188,55 @@ function AccountSection() {
     </form>}
     {state.status === 'loading' && <button className="secondary" disabled>Please wait…</button>}
     {state.status === 'signed-in' && <button className="secondary" onClick={() => { void auth.act('logout') }}>Log out</button>}
-    {state.status === 'error' && <button className="secondary" onClick={() => setAttempt(value => value + 1)}>Retry checking account</button>}
+    {state.status === 'error' && <button className="secondary" onClick={onRetry}>Retry checking account</button>}
   </section>
 }
 
-function SettingsPage({ settings, error, onSave, onResetSettings, onExport, onBackup, onClear }: {
-  settings: LocalSettings; error: string; onSave: (value: LocalSettings) => void; onResetSettings: () => void
-  onExport: () => void; onBackup: () => void; onClear: () => void
+function DataSection({ state }: { state: AuthState }) {
+  return <section className="settings-card"><h2>Data</h2>
+    <p className="status-pill">{state.status === 'signed-in' ? 'Signed in · still local-only' : 'Local-only'}</p>
+    <p>{dataOwnershipLabel(state)}</p>
+    <p>Next: use Recovery below to download a backup you control — there is no cloud sync to fall back on yet.</p>
+  </section>
+}
+
+function AiInterpretationSection() {
+  return <section className="settings-card"><h2>AI interpretation</h2>
+    <p className="status-pill muted">Built-in rules only</p>
+    <p>Captures are organized by deterministic rules built into the app, not a connected AI provider. Suggested type, confidence and rationale come from those rules, not a live model.</p>
+    <button className="secondary" disabled>Connect an AI provider — not built yet</button>
+  </section>
+}
+
+function MobileInstallSection() {
+  const [installed] = useState(() => typeof window !== 'undefined' && Boolean(
+    window.matchMedia?.('(display-mode: standalone)').matches ||
+    (window.navigator as unknown as { standalone?: boolean }).standalone,
+  ))
+  return <section className="settings-card"><h2>Mobile install</h2>
+    <p className={installed ? 'status-pill positive' : 'status-pill'}>{installed ? 'Installed' : 'Installable now'}</p>
+    {installed ? <p>Threadline is running from your home screen right now.</p> : <>
+      <p>Threadline can be added to your phone's home screen straight from your browser. There is no in-app setup wizard yet — these are the exact steps:</p>
+      <ul>
+        <li><strong>iPhone (Safari):</strong> tap Share, then Add to Home Screen.</li>
+        <li><strong>Android (Chrome):</strong> open the ⋮ menu and choose Install app, or accept the prompt if Chrome offers it.</li>
+      </ul>
+    </>}
+  </section>
+}
+
+function DigestSection({ onOpen }: { onOpen: () => void }) {
+  return <section className="settings-card"><h2>Digest</h2>
+    <p className="status-pill positive">Available</p>
+    <p>The Morning Digest view already works and is reachable from Today. Scheduled delivery and notifications are not built yet — opening it here shows today's digest on demand.</p>
+    <button className="secondary" onClick={onOpen}>Open Morning Digest</button>
+  </section>
+}
+
+function SettingsPage({ settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+  settings: LocalSettings; error: string; authState: AuthState; onRetryAccount: () => void
+  onSave: (value: LocalSettings) => void; onResetSettings: () => void
+  onExport: () => void; onBackup: () => void; onClear: () => void; onOpenDigest: () => void
 }) {
   const [draft, setDraft] = useState(settings)
   const [message, setMessage] = useState('')
@@ -196,7 +244,7 @@ function SettingsPage({ settings, error, onSave, onResetSettings, onExport, onBa
   const [confirming, setConfirming] = useState(false)
   const [confirmation, setConfirmation] = useState('')
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
-    <AccountSection />
+    <AccountSection state={authState} onRetry={onRetryAccount} />
     <section className="settings-card"><h2>Local profile</h2><p>Your thoughts and preferences are stored in this browser on this device. There is no account backup or cross-device sync.</p>
       {error && <p role="alert">{error}</p>}
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
@@ -206,7 +254,11 @@ function SettingsPage({ settings, error, onSave, onResetSettings, onExport, onBa
           <button className="primary" type="submit">Save settings</button></fieldset>
       </form><p role="status">{message}</p>
     </section>
-    <section className="settings-card"><h2>Data controls</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
+    <DataSection state={authState} />
+    <AiInterpretationSection />
+    <MobileInstallSection />
+    <DigestSection onOpen={onOpenDigest} />
+    <section className="settings-card"><h2>Recovery</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
       <p>Clearing removes all Threadline thoughts, canvas and preferences from this browser, including drafts and session undo history. This cannot be undone. Download a backup first and close other Threadline tabs.</p>
       {!confirming ? <button className="secondary danger-button" onClick={() => setConfirming(true)}>Clear local data…</button> : <form className="clear-confirmation" onSubmit={event => { event.preventDefault(); if (confirmation === 'CLEAR') onClear() }}><label>Type CLEAR to permanently clear local data<input autoFocus autoComplete="off" value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><div className="settings-actions"><button type="button" className="secondary" onClick={() => { setConfirming(false); setConfirmation('') }}>Cancel</button><button className="primary danger-button" disabled={confirmation !== 'CLEAR'}>Permanently clear local data</button></div></form>}
     </section>{failure && <p role="alert">{failure}</p>}

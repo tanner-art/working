@@ -28,6 +28,80 @@ Every new task should explicitly serve at least one near-term product outcome: f
 
 ## IN_PROGRESS
 
+### TASK-040 - Settings as a Nontechnical Usability Control Center
+
+Status: REVIEW
+Owner: Claude
+Reviewer: Pending independent runner review
+Priority: P1
+Milestone: M5
+GitHub Issue: #53
+
+Depends On:
+- TASK-026 (settings/account shell), TASK-029 (Account login/logout shell)
+
+Goal: Turn Settings into a place a nontechnical user can understand at a glance on mobile,
+per the scope TASK-033/backlog described, without implying unbuilt features already work.
+
+Scope: src/App.tsx, src/styles.css, src/auth.ts, src/auth.test.ts.
+
+Result: Settings now renders explicit Account, Data, AI interpretation, Mobile install,
+Digest and Recovery cards (plus the existing Local profile card), each with a status pill and
+an honest next action. Account is unchanged functionally (existing Supabase login/logout
+shell) but now shares one subscription with the new Data card via a `useAuthState` hook, so
+retrying the account check and rendering "local-only vs signed-in" stay in sync. A new
+`dataOwnershipLabel` helper in src/auth.ts states plainly that all data is local-only —
+whether signed in or not — since cloud storage is not implemented (D-011/TASK-034 remain
+separately scoped); it is used by both the Account and Data cards. AI interpretation shows
+that only the built-in deterministic rules run today, with a disabled "Connect an AI
+provider — not built yet" control (no provider wired, matching Do Not). Mobile install
+detects standalone/home-screen display mode at render and shows "Installed" or, if not yet
+installed, the exact Safari/Chrome add-to-home-screen steps inline — there is no separate
+in-app onboarding wizard (no TASK-039/TASK-032 implementation exists in this repository; the
+existing capability is the PWA manifest/service worker already shipped, documented in
+docs/MOBILE_INSTALL.md) so the status reflects that honestly rather than claiming a walkthrough
+exists. Digest stays out of Settings as a configurable feature (no delivery/notification
+controls added, per user direction) but exposes an "Open Morning Digest" button to the
+existing, already-working digest view reachable from Today — an existing safe surface, not a
+new one. Recovery is the renamed former "Data controls" card (export/backup/clear-data) with
+its behavior unchanged. No Supabase cloud storage, AI provider backend, notifications, or
+account deletion were implemented.
+
+Validation: Could not run `pnpm check` or `git diff --check` in this session — no shell/Bash
+tool was available to this agent (the available tool set was Read/Edit/Write/Glob/Grep plus
+unrelated MCP integrations). In lieu of executing the toolchain, the diff was inspected
+manually: only the six allowed paths changed; `Grep` confirmed no trailing whitespace in any
+edited file; the edited region was re-read in full to check JSX/TypeScript structure,
+prop-drilling, and that every new identifier (`dataOwnershipLabel`, `useAuthState`,
+`AuthState` type import, `DataSection`, `AiInterpretationSection`, `MobileInstallSection`,
+`DigestSection`) is both defined and consumed with no leftover unused bindings. This is not a
+substitute for the runner actually running `pnpm check`/`git diff --check`, which remain
+required before this can move past REVIEW.
+
+Limitations: TypeScript, the Vitest suite (including the two new `dataOwnershipLabel` cases
+added to src/auth.test.ts) and the production build are unexecuted and unverified pending the
+runner. No React/DOM testing library exists in this repo (documented limitation carried over
+from TASK-020), and no `src/App.test.tsx` exists and it is outside this task's allowed paths,
+so the new Settings cards have no automated render/interaction coverage — only the pure
+`dataOwnershipLabel` helper is unit-tested. Browser/mobile smoke testing (including the
+standalone-display-mode detection in the Mobile install card) was not performed. Mobile
+install "Installed" detection relies on `display-mode: standalone`/`navigator.standalone`,
+which only reflects the current browser tab's launch context, not whether the app has ever
+been installed. TASK-034–037 (cloud storage, migration, sign-out/offline, export/delete) and
+TASK-031 (real AI interpretation) remain unimplemented and unaffected by this task.
+Delivery: changes left uncommitted for the runner; no git mutations, push, PR or branch change.
+
+Build-in-public note: Settings is now a real status dashboard instead of a login box —
+Account, Data, AI, Mobile install, Digest and Recovery each say plainly what's on, what's
+local-only, and what to do next, with nothing claimed that isn't actually working yet.
+
+### Exact response to move forward
+Run `pnpm check` and `git diff --check`, do a mobile-width browser smoke test of the new
+Settings cards (including toggling signed-in/out and installed/not-installed states), then
+commit and route to independent review for issue #53.
+
+---
+
 ### TASK-038 - Mobile-First Capture and Organize Cleanup
 
 Status: REVIEW
@@ -627,11 +701,15 @@ Assign this task to Agent A or Claude: `Assign TASK-032 mobile onboarding and ho
 
 ### TASK-033 - Settings as Usability Control Center
 
-Status: BACKLOG
+Status: BACKLOG (superseded — see note)
 Owner: Unassigned
 Reviewer: Unassigned
 Priority: P1
 Milestone: M5
+
+Note: TASK-040 (GitHub issue #53) implemented this task's scope — Account, Data, AI
+interpretation, Mobile install, Digest, and Recovery cards in Settings — under a new task ID
+assigned directly by the user. Left in place for history; do not assign this task as written.
 
 Depends On:
 - TASK-026

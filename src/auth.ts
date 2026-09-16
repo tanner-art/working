@@ -66,6 +66,12 @@ export function accountLabel(state: AuthState): string {
     case 'error': return 'Account error — session could not be confirmed'
   }
 }
+/** Honest data-ownership status for nontechnical Settings copy: no state currently
+ *  implies cloud storage, since that is separately scoped (D-011/TASK-034). */
+export function dataOwnershipLabel(state: AuthState): string {
+  const base = 'Everything lives in this browser on this device — there is no cloud sync yet.'
+  return state.status === 'signed-in' ? `Signed in, but still local-only. ${base}` : `Local-only. ${base}`
+}
 export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
   let state: AuthState = config.status === 'unconfigured' ? config : client ? { status: 'loading' } : {
     status: 'unconfigured', message: 'Login is unavailable in this build. Supabase provider setup is still required.',
