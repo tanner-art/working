@@ -235,3 +235,14 @@ next visible step is hosted two-device validation; realtime merging remains futu
 
 ### Exact response to move forward (TASK-042)
 `Run independent review, provision the documented owner-only RLS table and public table-name configuration, then validate explicit import/load, desktop-to-phone Review/Bank edits, conflicts, offline errors, exports and sign-out/local preservation with two test accounts. The runner owns commit and PR delivery.`
+
+## TASK-043 rollout status: hosted account sync provisioning
+
+Production provisioning has been started without adding project identifiers, API keys, service-role keys, personal emails or account data to source control. The hosted Supabase project now has the TASK-042-compatible `public.threadline_account_data` table alongside the earlier `public.threadline_user_state` table. The new table uses `user_id uuid primary key references auth.users(id) on delete cascade`, `revision uuid not null`, and `data jsonb not null` with an object-shape check. RLS is enabled, anon access is revoked, authenticated users have select/insert/update grants, and owner-only select/insert/update policies use `(select auth.uid()) = user_id` with both `USING` and `WITH CHECK` on update. Supabase security advisors reported no security lints after provisioning; the remaining performance notice is informational Auth connection allocation guidance, not a rollout blocker.
+
+Vercel Production and Preview now have the three required client-safe environment variable names configured: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` and `VITE_SUPABASE_DATA_TABLE`. The production app was rebuilt and deployed so the Vite client can see those variables. The production alias responded with HTTP 200 after deployment. Local validation passed with `pnpm check` and `git diff --check`.
+
+Remaining account-level validation cannot be completed from source alone: confirm Supabase Auth Site URL and redirect URLs in the dashboard, then run a real email magic-link and two-device smoke test. Use two test accounts and verify: login returns to the hosted app; Settings → Data imports only into an empty account; phone load shows the same Review queue and Bank folders; edits on one device save and can be explicitly loaded on the other; a second account cannot read or update the first account's row; sign-out/local mode keeps device data intact; stale revision and offline/RLS errors do not overwrite local data.
+
+### Exact response to continue hosted validation
+`Supabase auth redirect URLs are configured for the hosted app and localhost, and I am ready to run two-account desktop-to-phone validation.`

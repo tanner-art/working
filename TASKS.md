@@ -778,9 +778,9 @@ Assign this task after TASK-034 lands: `Assign TASK-037 privacy/export/delete se
 
 ### TASK-043 - Hosted Account Sync Rollout and Two-Device Validation
 
-Status: BACKLOG
-Owner: Unassigned
-Reviewer: Unassigned
+Status: IN_PROGRESS
+Owner: Orchestrator
+Reviewer: Pending hosted validation
 Priority: P0
 Milestone: M5
 
@@ -816,6 +816,13 @@ Acceptance Criteria:
 - stale revision, offline/RLS failures and sign-out do not overwrite or erase local-only data
 - two-account smoke test confirms account isolation
 - `pnpm check` passes after any code/docs changes
+
+
+Rollout progress (2026-09-16): provisioned the TASK-042-compatible Supabase account-data table alongside the older `threadline_user_state` table instead of changing app code to the old shape. The new table has owner-only RLS, anon access revoked, authenticated select/insert/update grants, and select/insert/update policies matching the documented contract. Supabase security advisors returned no security lints. Vercel Production and Preview now have the required client-safe env names configured (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_SUPABASE_DATA_TABLE`), and production was redeployed to the `working-ten-rust.vercel.app` alias. Production returned HTTP 200 after deploy. No project refs, keys, personal emails, service-role keys or account rows were added to source/docs/issues.
+
+Validation (2026-09-16): `pnpm check` passed locally: 347 tests across 18 files, TypeScript and production build. `git diff --check` passed. Supabase security advisors clean; performance advisor only reports informational Auth DB connection allocation guidance.
+
+Remaining blocker: Supabase Auth Site URL / redirect URL settings and real email magic-link delivery require dashboard/test-inbox validation. The two-account desktop/phone smoke test has not been completed. Exact response to continue hosted validation: `Supabase auth redirect URLs are configured for the hosted app and localhost, and I am ready to run two-account desktop-to-phone validation.`
 
 Blocker / user action if no connected Supabase/Vercel dashboard access is available:
 Set up the documented `public.threadline_account_data` table with owner-only RLS, add `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` and `VITE_SUPABASE_DATA_TABLE=threadline_account_data` to Vercel, and configure Supabase auth redirect URLs. Then respond: `Hosted Supabase account sync env and RLS table are ready; validate desktop-to-phone Review and Bank sync.`
