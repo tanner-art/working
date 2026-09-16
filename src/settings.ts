@@ -1,6 +1,19 @@
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { migrateLegacyState } from './migration'
 
+export const MOBILE_INSTALL_KEY = 'threadline-mobile-install-v1'
+
+/** Installation is manual; standalone only describes this window, not other installs. */
+export function shouldShowMobileInstall(storage: Pick<Storage, 'getItem'>, mobile: boolean, standalone: boolean): boolean {
+  if (!mobile || standalone) return false
+  try { return storage.getItem(MOBILE_INSTALL_KEY) !== 'dismissed' }
+  catch { return true } // Help remains available when browser storage is blocked.
+}
+
+export function dismissMobileInstall(storage: Pick<Storage, 'setItem'>) {
+  storage.setItem(MOBILE_INSTALL_KEY, 'dismissed')
+}
+
 export const SETTINGS_KEY = 'threadline-settings-v1'
 // Existing application storage key; keep unrelated origin data untouched.
 const STATE_KEY = 'thoughtflow-state-v1'
@@ -49,4 +62,5 @@ export function clearLocalData(storage: Pick<Storage, 'setItem' | 'removeItem'>,
   storage.setItem(STATE_KEY, JSON.stringify(migrateLegacyState({ objects: [], canvas: [] })))
   storage.removeItem(DIGEST_DELIVERY_KEY)
   storage.removeItem(SETTINGS_KEY)
+  storage.removeItem(MOBILE_INSTALL_KEY)
 }

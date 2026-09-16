@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { clearLocalData, defaultSettings, readSettings, resetSettings, SETTINGS_KEY, writeSettings } from './settings'
+import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, SETTINGS_KEY, writeSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { isPersistedState, legacyUiProjection } from './migration'
 
@@ -124,5 +124,53 @@ describe('deliberate local deletion', () => {
     expect(store.getItem(SETTINGS_KEY)).toBeNull()
     store.setItem.mockImplementation(() => { throw Error('quota') })
     expect(() => clearLocalData(store, 'CLEAR')).toThrow('quota')
+  })
+})
+
+
+describe('mobile install guidance', () => {
+  it('shows on a first mobile browser visit without writing data', () => {
+    const store = storage()
+    expect(shouldShowMobileInstall(store, true, false)).toBe(true)
+    expect(store.setItem).not.toHaveBeenCalled()
+  })
+  it('does not automatically show on desktop or in a home-screen window', () => {
+    const store = storage()
+    expect(shouldShowMobileInstall(store, false, false)).toBe(false)
+    expect(shouldShowMobileInstall(store, true, true)).toBe(false)
+    expect(shouldShowMobileInstall(store, false, true)).toBe(false)
+  })
+  it('remembers dismissal across reads without modifying profile or thoughts', () => {
+    const store = storage()
+    writeSettings(store, { ...defaultSettings, displayName: 'Keep me' })
+    store.setItem('thoughtflow-state-v1', 'preserved thoughts')
+    dismissMobileInstall(store)
+    expect(shouldShowMobileInstall(store, true, false)).toBe(false)
+    expect(readSettings(store).displayName).toBe('Keep me')
+    expect(store.getItem('thoughtflow-state-v1')).toBe('preserved thoughts')
+    resetSettings(store)
+    expect(shouldShowMobileInstall(store, true, false)).toBe(false)
+  })
+  it('offers help for an unknown preference and when storage cannot be read', () => {
+    const store = storage()
+    store.setItem(MOBILE_INSTALL_KEY, 'invalid')
+    expect(shouldShowMobileInstall(store, true, false)).toBe(true)
+    expect(store.getItem(MOBILE_INSTALL_KEY)).toBe('invalid')
+    expect(shouldShowMobileInstall({ getItem: () => { throw Error('blocked') } }, true, false)).toBe(true)
+  })
+  it('surfaces failed dismissal writes instead of claiming persistence', () => {
+    const store = storage()
+    store.setItem.mockImplementation(() => { throw Error('quota') })
+    expect(() => dismissMobileInstall(store)).toThrow('quota')
+    expect(shouldShowMobileInstall(store, true, false)).toBe(true)
+  })
+  it('clears dismissal only with confirmed local data deletion', () => {
+    const store = storage()
+    dismissMobileInstall(store)
+    expect(() => clearLocalData(store, '')).toThrow()
+    expect(shouldShowMobileInstall(store, true, false)).toBe(false)
+    clearLocalData(store, 'CLEAR')
+    expect(store.getItem(MOBILE_INSTALL_KEY)).toBeNull()
+    expect(shouldShowMobileInstall(store, true, false)).toBe(true)
   })
 })
