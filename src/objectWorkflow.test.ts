@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { makeObject } from './store'
 import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject, hasConfirmation, reviewObjects, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
+import { bankObjects, confirmObject, hasConfirmation, reviewObjects, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 
 const proposal = (kind: 'action' | 'commitment' | 'idea' = 'action') => makeObject({
   kind, source: 'text', originalContent: 'Keep the original thought', confidence: .6,
@@ -49,5 +49,42 @@ describe('Organize decisions and detail actions', () => {
       expect(hasConfirmation(saved)).toBe(false)
     }
     expect(reviewObjects([reverseObject(confirmObject(original))])).toHaveLength(1)
+  })
+})
+
+describe('Bank context folders', () => {
+  it.each([
+    [' Personal ', 'Personal'], ['HOME', 'Personal'], ['Business', 'Business'],
+    [' work ', 'Business'], ['home business', 'Unfiled'], ['Homework', 'Unfiled'],
+    ['Carvers', 'Unfiled'], ['', 'Unfiled'],
+  ])('groups context %s as %s without inferring from capture text', (context, folder) => {
+    const item = { ...confirmObject(proposal('idea')), context, originalContent: 'Business at home' }
+    const before = structuredClone(item)
+    const folders = bankObjects([item])
+    expect(folders[folder as keyof typeof folders]).toEqual([item])
+    expect(Object.values(folders).flat()).toHaveLength(1)
+    expect(item).toEqual(before)
+  })
+
+  it('excludes pending, dismissed, reversed, archived and unconfirmed executable work', () => {
+    const original = proposal()
+    const confirmed = confirmObject(original)
+    expect(Object.values(bankObjects([
+      original, reverseObject(original, 'rejected'), reverseObject(confirmed),
+      setObjectStatus(confirmed, 'archived'), { ...original, status: 'confirmed' },
+    ])).flat()).toEqual([])
+    expect(bankObjects([setObjectStatus(confirmed, 'complete')]).Unfiled).toHaveLength(1)
+  })
+
+  it('keeps context edits and folder grouping across persistence without changing capture evidence', () => {
+    const original = proposal('idea')
+    const reload = roundTrip(original)
+    const confirmed = confirmObject(original)
+    const edited = updateObject(confirmed, { ...confirmed, context: 'Business' })
+    const saved = reload(edited)
+    expect(bankObjects(saved.objects).Business).toHaveLength(1)
+    expect(saved.model!.captures[0].originalContent).toBe(original.originalContent)
+    const moved = updateObject(saved.objects[0], { ...saved.objects[0], context: 'Personal' })
+    expect(bankObjects(reload(moved).objects).Personal).toHaveLength(1)
   })
 })

@@ -4,7 +4,7 @@ import { reconcileLegacyUi } from './migration'
 import { buildMorningDigest, localDateKey } from './morningDigest'
 import { DIGEST_DELIVERY_KEY, digestIsDue, disabledDelivery, readDelivery, setDeliveryEnabled } from './digestDelivery'
 
-export function MorningDigest({ state, visible, onShow }: { state: AppState; visible: boolean; onShow: () => void }) {
+export function MorningDigest({ state, visible, onShow, inline = false }: { state: AppState; visible: boolean; onShow: () => void; inline?: boolean }) {
   const [now, setNow] = useState(() => new Date())
   const [error, setError] = useState('')
   const [settings, setSettings] = useState(disabledDelivery)
@@ -50,14 +50,14 @@ export function MorningDigest({ state, visible, onShow }: { state: AppState; vis
       setSettings(next); setError(''); setNow(new Date()); setReadyDay(undefined)
     } catch { setError('Digest settings could not be saved. Your delivery preference has not changed.') }
   }
-  return <section className="digest-panel" aria-label="Morning digest">
-    {readyDay === digest.day && <div role="status"><strong>Your morning digest is ready.</strong> <button className="secondary" onClick={() => { onShow(); setExpanded(true); setReadyDay(undefined) }}>Read digest</button></div>}
+  return <section className={inline ? "digest-panel digest-inline" : "digest-panel"} aria-label="Morning digest">
+    {!inline && readyDay === digest.day && <div role="status"><strong>Your morning digest is ready.</strong> <button className="secondary" onClick={() => { onShow(); setExpanded(true); setReadyDay(undefined) }}>Read digest</button></div>}
     {visible && <>
-      <h2>Morning digest</h2>
+      {!inline && <><h2>Morning digest</h2>
       <p>7 AM in your device’s local time. Appears here while Threadline is open, or when you return after 7 AM. No notification is sent while the app is closed.</p>
       <button className="secondary" onClick={toggle}>{settings.enabled ? 'Disable 7 AM in-app digest' : 'Enable 7 AM in-app digest'}</button>
-      <button className="secondary" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide digest' : 'View digest'}</button>
-      {expanded && <div>
+      <button className="secondary" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide digest' : 'View digest'}</button></>}
+      {(inline || expanded) && <div>
         <p>{digest.day} · Live summary</p>
         <h3>Confirmed events today</h3>
         <ul>{digest.fixedToday.map(({ event, commitments }) => <li key={event.id}>{event.title} — {new Date(event.startsAt).toLocaleTimeString()} (device time) · {event.temporalContext}{commitments.map(o => <span key={o.id}> · Obligation: {o.summary}</span>)}</li>)}</ul>
@@ -76,6 +76,6 @@ export function MorningDigest({ state, visible, onShow }: { state: AppState; vis
         {!digest.projectSignals.length && <p>No project or objective signals.</p>}
       </div>}
     </>}
-    {error && <p role="alert">{error}</p>}
+    {!inline && error && <p role="alert">{error}</p>}
   </section>
 }
