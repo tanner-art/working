@@ -1,6 +1,6 @@
 import { auth, accountLabel } from './auth'
 import { clearLocalData, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
-import { DIGEST_DELIVERY_KEY, readDelivery } from './digestDelivery'
+import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { TemporalReview } from './TemporalReview'
