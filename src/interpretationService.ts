@@ -1,5 +1,5 @@
 import type { CaptureRecord, Interpretation, ReminderInstruction } from './domain'
-import { deterministicInterpretationService } from './interpreter'
+import { aiInterpretationService } from './aiInterpretation'
 
 /** Meaning only: persistence owns identity, versions, history and acceptance.
  * This slice supports one proposal per capture. Providers never confirm work.
@@ -23,5 +23,7 @@ export interface InterpretationService {
   interpret(capture: CaptureRecord): Promise<InterpretationProposal>
 }
 
-/** Composition point: replace this implementation without changing consumers. */
-export const interpretationService: InterpretationService = deterministicInterpretationService
+/** Composition point: replace this implementation without changing consumers. Provider-backed
+ * interpretation is opt-in via VITE_AI_INTERPRETATION_PROVIDER and fails closed to the
+ * deterministic heuristics in src/interpreter.ts. See docs/AI_INTERPRETATION.md. */
+export const interpretationService: InterpretationService = aiInterpretationService
