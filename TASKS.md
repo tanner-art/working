@@ -32,6 +32,30 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## IN_PROGRESS
 
+### TASK-045 - Pin AI Interpretation to Haiku
+
+Status: IN_PROGRESS
+Owner: Orchestrator
+Reviewer: Pending independent review
+Depends On: TASK-031
+
+Scope: Pin every provider-backed Threadline interpretation request to Anthropic Haiku and
+remove the server environment override that could silently select a larger model. Keep the
+API key server-only, preserve the existing Review and failure boundaries, document the cost
+control, and add a request-level regression test proving the provider payload names Haiku.
+
+Acceptance: `/api/interpret` always requests `claude-haiku-4-5-20251001`; neither client input
+nor Vercel environment variables can select Sonnet or Opus; relevant tests, TypeScript, API
+typecheck, production build and diff check pass.
+
+Build-in-public note: Threadline's routine thought interpretation is pinned to Haiku to keep
+responses fast and API costs predictable. Larger Claude models cannot be selected through a
+deployment setting.
+
+Exact response to move forward: Independently review TASK-045's provider payload and verify a
+fresh Vercel Preview call reports a successful structured interpretation before enabling the
+browser feature flag.
+
 ### TASK-042 - Signed-in Account Storage Backbone
 
 Status: REVIEW
