@@ -31,7 +31,9 @@ server-only environment variable and never forwards it to the client.
 | --- | --- | --- |
 | `VITE_AI_INTERPRETATION_PROVIDER` | Client (Vite `VITE_*`, safe to ship in the bundle) | Feature flag only, no secret. Set to exactly `enabled` to let the browser attempt the provider endpoint. Any other value (including unset) keeps the app fully deterministic and makes zero network calls to `/api/interpret`. |
 | `AI_INTERPRETATION_API_KEY` | Server only (Vercel Production/Preview env vars) | The provider API key. Must **never** use a `VITE_` prefix — Vite exposes `VITE_*` vars to the client bundle. If unset, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
-| `AI_INTERPRETATION_MODEL` | Server only, optional | Overrides the default model id sent to the provider. |
+Threadline pins provider calls to Anthropic Haiku (`claude-haiku-4-5-20251001`) in code.
+There is no model environment override, so a dashboard change cannot silently move routine
+captures to Sonnet or Opus. Changing the model requires a reviewed code change.
 
 Local development and any environment with none of these set behaves exactly as before this
 task: deterministic-only, no network call, no setup required.
