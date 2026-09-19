@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { accountData, createAccountAdapter, createAccountSession, loadFailure, saveFailure, validateData, type AccountAdapter, type AccountRow } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, loadFailure, mergeAccountData, saveFailure, validateData, type AccountAdapter, type AccountRow } from './accountStorage'
 import { defaultSettings } from './settings'
 import { loadStateResult, makeObject, saveState } from './store'
 import { legacyUiProjection } from './migration'
@@ -160,5 +160,64 @@ describe('explicit account session', () => {
     const pending = createAccountSession({ ...db.adapter, read: () => new Promise(done => { resolve = done }) }, 'a', () => user).open()
     user = undefined; resolve(db.saved()!)
     await expect(pending).rejects.toThrow(loadFailure)
+  })
+})
+
+describe('guided account merge', () => {
+  const thought = (content: string) => makeObject({ kind: 'idea', originalContent: content, source: 'text', confidence: .9,
+    interpretation: { summary: content, rationale: 'Explicit', suggestedKind: 'idea' } })
+
+  it('combines disjoint device histories without mutating either source', () => {
+    const account = accountData({ objects: [thought('Mac idea')], canvas: [{ id: 'mac-node', type: 'text', x: 1, y: 2 }] },
+      { ...defaultSettings, displayName: 'Mac' }, { enabled: false })
+    const device = accountData({ objects: [thought('Phone idea')], canvas: [{ id: 'phone-node', type: 'text', x: 3, y: 4 }] },
+      { ...defaultSettings, displayName: 'Phone' }, { enabled: true, confirmedAt: '2026-09-19T07:00:00Z' })
+    const before = structuredClone({ account, device })
+    const result = mergeAccountData(account, device, { settings: 'device', digest: 'account' })
+    expect({ account, device }).toEqual(before)
+    expect(legacyUiProjection(result.data.model).objects.map(item => item.originalContent)).toEqual(['Mac idea', 'Phone idea'])
+    expect(result.data.model.canvas.map(item => item.id)).toEqual(['mac-node', 'phone-node'])
+    expect(result.data.settings.displayName).toBe('Phone')
+    expect(result.data.digest.enabled).toBe(false)
+    expect(result.preview.added).toEqual({ captures: 1, thoughts: 1, canvas: 1, events: 0 })
+  })
+
+  it('deduplicates identical records and stops on conflicting stable identities', () => {
+    const item = thought('Shared idea')
+    const account = accountData({ objects: [item], canvas: [] }, defaultSettings, { enabled: false })
+    const duplicate = structuredClone(account)
+    const result = mergeAccountData(account, duplicate, { settings: 'account', digest: 'account' })
+    expect(result.data.model.captures).toHaveLength(1)
+    expect(result.data.model.interpretations).toHaveLength(1)
+    const conflict = structuredClone(duplicate)
+    conflict.model.captures[0] = { ...conflict.model.captures[0], originalContent: 'Changed elsewhere' }
+    expect(() => mergeAccountData(account, conflict, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: capture identity')
+  })
+
+  it('previews before writing and rejects a stale account revision', async () => {
+    const db = database()
+    const account = accountData({ objects: [thought('Account')], canvas: [] }, defaultSettings, { enabled: false })
+    const device = accountData({ objects: [thought('Device')], canvas: [] }, defaultSettings, { enabled: false })
+    const original = await db.adapter.write('a', account, null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(device, { settings: 'account', digest: 'account' })
+    expect(db.saved()?.revision).toBe(original.revision)
+    await db.adapter.write('a', { ...account, settings: { ...defaultSettings, displayName: 'Other device' } }, original.revision)
+    await expect(session.confirmMerge(plan)).rejects.toThrow('Merge was not saved')
+    expect(db.saved()?.data.settings.displayName).toBe('Other device')
+  })
+
+  it('confirms the exact preview and preserves Review and Bank items through roundtrip', async () => {
+    const db = database()
+    const mac = confirmObject({ ...thought('Mac bank item'), context: 'Business' }, 'idea')
+    const phone = { ...thought('Phone review item'), confidence: .5, status: 'review' as const }
+    await db.adapter.write('a', accountData({ objects: [mac], canvas: [] }, defaultSettings, { enabled: false }), null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(accountData({ objects: [phone], canvas: [] }, defaultSettings, { enabled: false }),
+      { settings: 'account', digest: 'device' })
+    const merged = await session.confirmMerge(plan)
+    expect(bankObjects(merged.state.objects).Business.map(item => item.originalContent)).toContain('Mac bank item')
+    expect(reviewObjects(merged.state.objects).map(item => item.originalContent)).toContain('Phone review item')
+    await expect(session.confirmMerge(plan)).rejects.toThrow('preview expired')
   })
 })

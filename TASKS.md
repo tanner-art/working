@@ -32,6 +32,42 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## IN_PROGRESS
 
+### TASK-044 - Guided Cross-Device Account Merge
+
+Status: IN_PROGRESS
+Owner: Orchestrator
+Reviewer: Pending independent review
+Depends On: TASK-042
+
+Scope:
+
+- add a user-initiated merge path for combining this device's preserved local data with an existing signed-in account snapshot
+- preview additions and conflicts before the user confirms any account write
+- preserve distinct captures, interpretations, semantic objects, relationships, calendar events, canvas elements and temporal history from both snapshots
+- deduplicate records only when their stable IDs and contents agree; conflicting reuse of an ID must stop the merge and leave both sources untouched
+- keep the local browser copy and downloadable exports intact as recovery paths
+- update the account through the existing revision guard so another device cannot be overwritten by a stale merge
+- add focused tests for disjoint data, exact duplicates, conflicting IDs, settings/digest choices, canvas/history preservation and stale-write failure
+
+Non-goals:
+
+- background or realtime synchronization
+- silently merging at sign-in or import
+- guessing whether differently identified thoughts describe the same real-world idea
+- deleting either device's local data or replacing an account without explicit confirmation
+
+Acceptance:
+
+- a user with different Mac and phone histories can preview and explicitly combine them into one account
+- distinct thoughts from both snapshots remain available in Review and Bank after roundtrip
+- exact duplicates are not doubled, ambiguous/conflicting identities fail closed, and no source snapshot is mutated
+- the confirmed merge uses the latest loaded account revision and preserves the existing stale-write protections
+- relevant tests, TypeScript, API typecheck, production build and diff check pass
+
+Build-in-public note: Threadline is adding a safe way to combine ideas captured on two devices. The merge will show what it can add, stop on identity conflicts, and keep both original device copies as recovery backups.
+
+Exact response to move forward: Independently review TASK-044's merge rules and UI, then run the two-export Mac-and-iPhone smoke flow before merge.
+
 ### TASK-042 - Signed-in Account Storage Backbone
 
 Status: REVIEW

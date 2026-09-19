@@ -1,7 +1,7 @@
 import { buildMorningDigest } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
-import { accountData, createAccountAdapter, createAccountSession, type AccountData, type AccountSession } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
 import { readDelivery, setDeliveryEnabled } from './digestDelivery'
 import { supabase, auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
 import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
@@ -48,9 +48,11 @@ function useAuthState() {
 const accountAdapter = createAccountAdapter(supabase, import.meta.env.VITE_SUPABASE_DATA_TABLE)
 const aiProviderStatus = providerStatus(readProviderConfig({ VITE_AI_INTERPRETATION_PROVIDER: import.meta.env.VITE_AI_INTERPRETATION_PROVIDER }))
 type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountData }
+type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
   const [cloud, setCloud] = useState<CloudWorkspace>()
+  const [preparedMerge, setPreparedMerge] = useState<PreparedMerge>()
   const [generation, setGeneration] = useState(0)
   const open = async (local?: AccountData) => {
     if (!accountAdapter || account.state.status !== 'signed-in') throw Error('Account storage is unconfigured. Set VITE_SUPABASE_DATA_TABLE and configure the account table with RLS.')
@@ -61,11 +63,29 @@ export function App() {
     const result = await session.open(local)
     setCloud({ session, ...result }); setGeneration(value => value + 1)
   }
-  return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open} />
+  const previewMerge = async (local: AccountData, choices: AccountMergeChoices) => {
+    if (!accountAdapter || account.state.status !== 'signed-in') throw Error('Account storage is unconfigured. Set VITE_SUPABASE_DATA_TABLE and configure the account table with RLS.')
+    const session = createAccountSession(accountAdapter, account.state.session.user.id, () => {
+      const current = auth.getState()
+      return current.status === 'signed-in' ? current.session.user.id : undefined
+    })
+    const plan = await session.previewMerge(local, choices)
+    setPreparedMerge({ session, plan })
+    return plan
+  }
+  const confirmMerge = async () => {
+    if (!preparedMerge) throw Error('Preview the merge again before confirming.')
+    const result = await preparedMerge.session.confirmMerge(preparedMerge.plan)
+    setPreparedMerge(undefined); setCloud({ session: preparedMerge.session, ...result }); setGeneration(value => value + 1)
+  }
+  return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open}
+    mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
-function ThreadlineApp({ account, cloud, onOpenAccount }: {
+function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {
   account: ReturnType<typeof useAuthState>; cloud?: CloudWorkspace; onOpenAccount: (local?: AccountData) => Promise<void>
+  mergePlan?: AccountMergePlan; onPreviewMerge: (local: AccountData, choices: AccountMergeChoices) => Promise<AccountMergePlan>
+  onConfirmMerge: () => Promise<void>; onCancelMerge: () => void
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
@@ -78,6 +98,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountMessage, setAccountMessage] = useState('')
   const [cloudStatus, setCloudStatus] = useState(cloud ? 'Account storage active.' : '')
+  const [mergeChoices, setMergeChoices] = useState<AccountMergeChoices>({ settings: 'account', digest: 'account' })
   const accountValid = !cloud || (account.state.status === 'signed-in' && account.state.session.user.id === cloud.session.userId)
   const [installHelp, setInstallHelp] = useState(() => shouldShowMobileInstall(
     { getItem: key => localStorage.getItem(key) },
@@ -113,7 +134,10 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
   // returned CanvasHistory, in every handler below, so they never drift apart — see
   // the adaptation note in src/canvasHistory.ts.
   const [canvasHistory, setCanvasHistory] = useState<CanvasHistory>(() => emptyCanvasHistory(initial.state.canvas))
-  const update = (fn: (current: AppState) => AppState) => setState(current => fn(current))
+  const update = (fn: (current: AppState) => AppState) => {
+    if (mergePlan) onCancelMerge()
+    setState(current => fn(current))
+  }
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
   const persist = async (retry = false) => {
@@ -143,6 +167,22 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
     } catch (error) { setAccountMessage((error as Error).message) }
     finally { setAccountBusy(false) }
   }
+  const previewMerge = async () => {
+    if (capturePending.current || accountBusy || cloudStatus === 'Saving account changes…') return
+    setAccountBusy(true); setAccountMessage('')
+    try {
+      if (cloud || preferences.error || saveError) throw Error('Resolve local save/settings errors before merging data.')
+      await onPreviewMerge(accountData(state, preferences.value, readDelivery(localStorage)), mergeChoices)
+    } catch (error) { setAccountMessage((error as Error).message) }
+    finally { setAccountBusy(false) }
+  }
+  const confirmMerge = async () => {
+    if (!mergePlan || accountBusy || !window.confirm('Combine the previewed account and device data? Both device-local copies remain untouched.')) return
+    setAccountBusy(true); setAccountMessage('')
+    try { await onConfirmMerge() }
+    catch (error) { setAccountMessage((error as Error).message) }
+    finally { setAccountBusy(false) }
+  }
   const dataControls = <section className="settings-card"><h2>Data</h2>
     <p>{dataOwnershipLabel(account.state, !!cloud)}</p>
     <p role="status">{cloudStatus}</p>
@@ -151,6 +191,13 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
       <p>Copying creates account data only if the account is empty. Loading opens account data in this tab and preserves the device’s local copy. Updates on other devices appear when you load again; concurrent saves are rejected.</p>
       {!cloud && <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy || cloudStatus === 'Saving account changes…'} onClick={() => void openAccount(true)}>Copy this device’s local data into my account</button>}
       <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy || cloudStatus === 'Saving account changes…'} onClick={() => void openAccount(false)}>Load account data on this device</button>
+      {!cloud && <div className="merge-account"><h3>Combine this device with my account</h3>
+        <p>Preview a safe union before saving. Exact duplicates are kept once; conflicting identities stop without changing either copy.</p>
+        <label>Profile settings after merge<select value={mergeChoices.settings} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, settings: event.target.value as AccountMergeChoices['settings'] })) }}><option value="account">Keep account settings</option><option value="device">Use this device’s settings</option></select></label>
+        <label>Digest preference after merge<select value={mergeChoices.digest} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, digest: event.target.value as AccountMergeChoices['digest'] })) }}><option value="account">Keep account preference</option><option value="device">Use this device’s preference</option></select></label>
+        <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy} onClick={() => void previewMerge()}>Preview combined data</button>
+        {mergePlan && <div className="merge-preview" role="status"><p><strong>Ready to add from this device:</strong> {mergePlan.preview.added.thoughts} thoughts, {mergePlan.preview.added.canvas} canvas blocks, {mergePlan.preview.added.events} calendar events.</p><p>{mergePlan.preview.duplicates} identical records will stay single. Nothing has been written yet.</p><div className="settings-actions"><button className="secondary" onClick={onCancelMerge}>Cancel preview</button><button className="primary" disabled={accountBusy || captureBusy} onClick={() => void confirmMerge()}>Confirm and save combined data</button></div></div>}
+      </div>}
     </>}
     {cloud && <><p>Digest preference is saved with your account. Account mode currently offers the digest on demand; scheduled notices remain local-mode only.</p><label><input type="checkbox" checked={digest!.enabled} onChange={event => setDigest(setDeliveryEnabled(digest!, event.target.checked, new Date()))} />Enable 7 AM in-app digest preference</label><button className="secondary" onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) window.location.reload() }}>Return to this device’s local data</button></>}
     {accountMessage && <p role="alert">{accountMessage}</p>}
