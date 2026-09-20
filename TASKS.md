@@ -34,9 +34,9 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ### TASK-044 - Guided Cross-Device Account Merge
 
-Status: IN_PROGRESS
+Status: DONE
 Owner: Orchestrator
-Reviewer: Pending independent review
+Reviewer: Independent review approved after two safety corrections
 Depends On: TASK-042
 
 Scope:
@@ -66,7 +66,12 @@ Acceptance:
 
 Build-in-public note: Threadline is adding a safe way to combine ideas captured on two devices. The merge will show what it can add, stop on identity conflicts, and keep both original device copies as recovery backups.
 
-Exact response to move forward: Independently review TASK-044's merge rules and UI, then run the two-export Mac-and-iPhone smoke flow before merge.
+Exact response to move forward: On the hosted build, export both Mac and iPhone data, preview the guided merge, confirm the displayed counts, and verify thoughts from both devices appear in Review and Bank.
+
+Delivery: merged to main via PR #67 at commit 1b0ae04 after independent approval. The final
+implementation passed 360 tests, TypeScript, API typecheck, the production build and diff check.
+It rejects a merge if account data changes, if local data changes while the preview loads, or
+if local thoughts/settings/digest change after preview and before confirmation.
 
 ### TASK-045 - Pin AI Interpretation to Haiku
 
