@@ -7,6 +7,8 @@ export interface ThoughtObject {
   id: string
   kind: ObjectKind
   originalContent: string
+  /** Current reviewed rendering. The immutable source remains originalContent. */
+  currentContent?: string
   source: SourceType
   createdAt: string
   context?: string
@@ -46,6 +48,8 @@ export interface HistoryEvent {
   event: string
   confirmation?: ConfirmationGesture
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
+  reviewRevision?: { from: string; to: string }
+  sourceCorrection?: { correctionId: string; from: string; to: string }
 }
 /** Executable meaning still awaiting a dedicated confirmation gesture. */
 export interface ProposedAction { summary: string }
@@ -141,6 +145,7 @@ export interface PersistedState {
   temporalHistory?: TemporalDecision[]
   schemaVersion: 2
   captures: CaptureRecord[]
+  sourceCorrections?: SourceCorrection[]
   interpretations: Interpretation[]
   semanticObjects: SemanticObject[]
   calendarEvents: CalendarEvent[]
@@ -149,6 +154,13 @@ export interface PersistedState {
   legacyUiIds: string[]
   canvas: CanvasElement[]
   canvasViewport?: CanvasViewport
+}
+export interface SourceCorrection {
+  readonly id: string
+  readonly captureId: string
+  readonly correctedAt: string
+  readonly correctedContent: string
+  readonly previousId?: string
 }
 
 /** A snapshot of exactly one proposed temporal fact; never obligation evidence. */
