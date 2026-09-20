@@ -78,6 +78,22 @@ Future implementation should separate capture provenance from semantic meaning, 
 
 Persistence must support stable references, preserved source revisions, and consistent updates to accepted meaning and its derivations. These requirements do not select a database, graph database, backend, or framework. This documentation change does not migrate data or modify application behavior.
 
+## Implementation module boundaries
+
+Additions should be modular at the smallest useful product boundary. A module should own one
+coherent responsibility, expose a narrow typed contract, and be replaceable without requiring
+unrelated views or domain rules to change. Domain rules must remain usable without React;
+provider and persistence integrations must stay behind adapters; views should coordinate user
+interaction without becoming the source of business rules or stored truth.
+
+Prefer extending an existing owner module over creating a second implementation of the same
+concept. A new module is justified when it isolates a distinct capability or external boundary,
+not merely to split a short file. Cross-module changes should pass stable identities and domain
+values rather than reaching into another module's internal state. Focused tests should cover
+each public contract, its important failure behavior, and the safety fallback for external
+services. The app shell may compose modules, but feature-specific workflows should not
+accumulate in `App.tsx`.
+
 ## Open product decisions
 
 - Which explicit language or interaction counts as confirmation of an Action or Commitment, and which non-consequential interpretations may be accepted automatically?

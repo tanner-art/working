@@ -6,6 +6,14 @@ Agents execute assigned tasks. They do not redefine product scope, architecture,
 ## Scope Lock
 An agent may only modify code necessary to complete its assigned task.
 
+## Modular Changes
+New behavior should enter through a small module with one clear responsibility and a narrow
+typed interface. Keep data access, domain rules, provider calls, and presentation separate
+when the boundary is meaningful. Do not bury feature-specific workflows in `App.tsx`, create
+parallel sources of truth, or perform broad refactors to claim modularity. Reuse an existing
+boundary when it already owns the behavior; otherwise identify the new module and its contract
+in the task. Test the contract and important failure behavior at that boundary.
+
 An agent must NOT:
 - expand its own scope
 - implement newly discovered features
@@ -46,6 +54,7 @@ Before declaring a task complete:
 - run lint if configured
 - run build
 - inspect git diff
+- confirm new feature logic is placed behind an appropriate module boundary
 - report files changed
 - report known limitations
 - report newly discovered work separately
