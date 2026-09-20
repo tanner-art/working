@@ -89,6 +89,9 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     relationships: relationships.merged,
     legacyUiIds,
     canvas: canvas.merged,
+    // The existing account canvas remains the destination of a merge.
+    ...((account.model.canvasViewport ?? device.model.canvasViewport) === undefined ? {} :
+      { canvasViewport: structuredClone(account.model.canvasViewport ?? device.model.canvasViewport!) }),
     ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
   }
   const data = validateData({

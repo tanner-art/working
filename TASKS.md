@@ -30,6 +30,27 @@ For the next 24-hour push, tasks should be framed around making the hosted mobil
 
 Build-in-public rule: when a task changes visible behavior, its issue/PR should include one plain-language user-facing note that can be reused for a public progress update, plus the usual validation and `Exact response to move forward`. Keep the note honest: describe what users can do now, what is still limited, and the next visible improvement.
 
+## REVIEW — September 20 pipeline
+
+### TASK-056 - Existing Canvas Reliability Foundation
+
+Status: REVIEW
+Owner: Agent A
+Reviewer: Independent review requested in PR
+Scope authority: September 20 product-pipeline assignment (task absent from starting branch).
+
+Repair existing single-canvas persistence and restoration before Canvas Bank: typed repository
+boundary, text/node/position/shape/connection and viewport durability, safe navigation/exit,
+compact mobile controls, lossless existing-data migration, and fail-closed storage behavior.
+No Canvas Bank, architecture changes, durable revisions, backend changes, or main merge.
+
+Delivery and exact independent review request: [TASK-056_DELIVERY.md](docs/TASK-056_DELIVERY.md).
+Validation: `pnpm check` (376 tests, app/API typechecks and build), `git diff --check`, desktop and
+390-pixel Chromium flow checks, injected quota retry and corrupt-storage preservation.
+Commit: see TASK-056 PR head (reported in delivery handoff).
+Build-in-public note: Canvas now remembers typed text and pan/zoom when you return, with more
+room to work on mobile. Multiple canvases remain a later step.
+
 ## IN_PROGRESS
 
 ### TASK-044 - Guided Cross-Device Account Merge
