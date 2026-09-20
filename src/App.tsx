@@ -8,6 +8,7 @@ import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_I
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { Canvas } from './Canvas'
 import { useCanvasWorkspace } from './useCanvasWorkspace'
+import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
 import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
@@ -92,6 +93,8 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   const latestPreferences = useRef(preferences)
   latestPreferences.current = preferences
   const [digest, setDigest] = useState(() => cloud?.data.digest)
+  const latestDigest = useRef(digest)
+  latestDigest.current = digest
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountMessage, setAccountMessage] = useState('')
   const [cloudStatus, setCloudStatus] = useState(cloud ? 'Account storage active.' : '')
@@ -134,31 +137,51 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   const canvas = useCanvasWorkspace(state, update, view === 'canvas')
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
-  const persist = async (retry = false) => {
-    if (initial.error || clearing.current) return
-    if (!cloud) { setSaveError(saveState(state)); return }
+  const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)
+  const [canvasTextSaveQueue] = useState(() => createCanvasTextSaveQueue(retry => persistRef.current(retry)))
+  const persist = async (retry = false): Promise<boolean> => {
+    if (initial.error || clearing.current) return false
+    if (!cloud) { const error = saveState(latestState.current); setSaveError(error); return !error }
     const sequence = ++saveSequence.current
     setCloudStatus('Saving account changes…')
     try {
-      await cloud.session.save(cloud.session.snapshot(state, preferences.value, digest!), retry)
-      if (sequence !== saveSequence.current) return
-      setSaveError(undefined); setCloudStatus('Saved to account. Load account data on your other device to see this version.')
-    } catch (error) { if (sequence !== saveSequence.current) return; setSaveError((error as Error).message); setCloudStatus('Account changes are not saved.') }
+      await cloud.session.save(cloud.session.snapshot(latestState.current, latestPreferences.current.value, latestDigest.current!), retry)
+      if (sequence === saveSequence.current) {
+        setSaveError(undefined)
+        setCloudStatus(canvasTextSaveQueue.hasUnsent() ? 'Account changes waiting to save…' : 'Saved to account. Load account data on your other device to see this version.')
+      }
+      return true
+    } catch (error) {
+      if (sequence === saveSequence.current) { setSaveError((error as Error).message); setCloudStatus('Account changes are not saved.') }
+      return false
+    }
   }
+  persistRef.current = persist
   useEffect(() => { if (!cloud) void persist() }, [state, initial.error])
   useEffect(() => {
     if (!cloud) return
     if (firstAccountSave.current) { firstAccountSave.current = false; return }
+    if (canvasTextSaveQueue.consumeStateUpdate()) return
     void persist()
   }, [state, preferences.value, digest, initial.error])
+  useEffect(() => { if (view !== 'canvas') canvasTextSaveQueue.flush() }, [view, canvasTextSaveQueue])
+  useEffect(() => () => canvasTextSaveQueue.dispose(), [canvasTextSaveQueue])
   useWorkspaceExitGuard(() => {
     if (initial.error || clearing.current) return false
-    if (cloud) return !!saveError || cloudStatus === 'Saving account changes…'
+    if (cloud) {
+      canvasTextSaveQueue.flush()
+      return canvasTextSaveQueue.hasPending() || !!saveError || cloudStatus === 'Saving account changes…'
+    }
     const error = saveState(latestState.current)
     setSaveError(error)
     return !!error
   })
   const openAccount = async (copy: boolean) => {
+    if (cloud && canvasTextSaveQueue.hasPending()) {
+      canvasTextSaveQueue.flush()
+      setAccountMessage('Wait for account changes to finish saving before loading account data.')
+      return
+    }
     if (capturePending.current || accountBusy || cloudStatus === 'Saving account changes…') return
     if (!copy && !window.confirm('Load the latest account data into this open tab? Local saved data stays untouched. Download an export first if this tab has unsaved account edits.')) return
     setAccountBusy(true); setAccountMessage('')
@@ -275,7 +298,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
       </section>}
       {installMessage && <p className="storage-alert" role="status">{installMessage}</p>}
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
-      {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => void persist(true)}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
+      {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => canvasTextSaveQueue.hasPending() ? canvasTextSaveQueue.retry() : void persist(true)}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       <>
         {cloud ? <AccountDigest state={state} visible={view === 'today' || view === 'digest'} /> : view === 'today' ? <details className="digest-entry compact-disclosure">
           <summary>Morning Digest<span className="disclosure-caret" aria-hidden="true" /></summary>
@@ -293,7 +316,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
-      {view === 'canvas' && <Canvas elements={state.canvas} viewport={state.canvasViewport ?? DEFAULT_CANVAS_VIEWPORT} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={canvas.editText} onFinishText={canvas.finishText} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={() => { canvas.finishText(); setView('today') }} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />}
+      {view === 'canvas' && <Canvas elements={state.canvas} viewport={state.canvasViewport ?? DEFAULT_CANVAS_VIEWPORT} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={() => { canvas.finishText(); canvasTextSaveQueue.flush(); setView('today') }} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />}
     </section>
     {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
   </main></>
