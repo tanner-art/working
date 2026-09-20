@@ -1,6 +1,6 @@
 # TASK-056 — Existing Canvas Reliability Foundation
 
-Status: REVIEW. Owner: Agent A. Independent review pending; do not merge on author validation alone.
+Status: REVIEW. Owner: Agent A. Initial independent review requested account text-save batching; focused rereview pending. Do not merge on author validation alone.
 
 ## Delivered behavior and boundary
 
@@ -19,7 +19,8 @@ workspace. The existing local store and account session remain the atomic persis
 including their error reporting, evidence preservation, and concurrency guards. No competing
 canvas storage key or database was introduced.
 
-Text changes persist immediately through the existing workspace save lifecycle. One focus/edit
+Text changes reach the in-memory workspace immediately. Device saves run on each change; account
+text saves coalesce after a short pause and flush on blur, canvas exit, or page hide. One focus/edit
 session remains one undo step. Completed pointer gestures commit once; cancelled/incomplete
 pointer previews are discarded. Viewport changes do not enter content undo history. Undo/redo
 remains session-only under D-010 and survives app-view navigation, not reload.
@@ -43,13 +44,14 @@ remains session-only under D-010 and survives app-view navigation, not reload.
 
 ## Validation
 
-- `pnpm check`: 376 tests, application TypeScript, production build, API TypeScript.
+- `pnpm check`: 381 tests, application TypeScript, production build, API TypeScript.
 - `git diff --check`; author diff inspection; React best-practices review.
 - No lint script is configured. Existing build warning: bundle exceeds 500 kB.
 - Focused tests cover v1/v2 migration, all canvas edit families, non-empty semantic evidence,
   text-before-blur persistence, undo grouping/no-op handling, viewport restoration, corrupt
   viewport, quota/retry/export, stale-tab/external corruption, isolated snapshots, and account
-  snapshot/save/reload/merge preservation.
+  snapshot/save/reload/merge preservation. Account save tests verify 80 typed characters make one
+  update, retain the latest text on reload, and preserve pending text across a failed save.
 - Isolated Chromium browser: real keyboard text persisted while textarea remained focused and
   survived reload; pan/zoom restored across Back to Today and reload; no page errors.
 - 390×844 viewport: 390-pixel document width, 0-pixel unselected properties row, approximately
@@ -70,7 +72,9 @@ independent review. Account behavior is covered by the existing adapter/session 
   validation, repository adapter, editing/session lifetime, shortcuts, exit guard, history notes.
 - `src/domain.ts`, `src/migration.ts`, `src/store.ts`, `src/accountStorage.ts`: optional viewport
   persistence and backward-compatible local/account projection/merge.
-- `src/canvasRepository.test.ts`, `src/accountStorage.test.ts`: focused reliability tests.
+- `src/canvasRepository.test.ts`, `src/accountStorage.test.ts`,
+  `src/canvasTextSaveQueue.test.ts`: focused reliability tests.
+- `src/canvasTextSaveQueue.ts`: batches account text writes and retains pending work for retry.
 - `TASKS.md`, this delivery note: bounded task record and review handoff.
 
 ## Exact review request
