@@ -21,7 +21,10 @@ const ALLOWED_SOURCES = new Set(['text', 'voice', 'canvas'])
 const RESOLVED_KINDS = new Set(['idea', 'project', 'commitment', 'person', 'reference', 'objective'])
 const MAX_CONTENT_LENGTH = 4000
 const PROVIDER_TIMEOUT_MS = 15_000
-const DEFAULT_MODEL = 'claude-sonnet-5'
+// Product cost boundary: all Threadline interpretation traffic uses Haiku. This is
+// intentionally not environment-overridable, so a dashboard setting cannot silently
+// move routine captures onto a larger, more expensive model.
+export const AI_INTERPRETATION_MODEL = 'claude-haiku-4-5-20251001'
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -148,10 +151,8 @@ export default async function handler(request: Request): Promise<Response> {
   // client bundle; see docs/AI_INTERPRETATION.md for the deployment contract.
   const apiKey = process.env.AI_INTERPRETATION_API_KEY
   if (!apiKey) return json(503, { error: 'not_configured', message: 'AI_INTERPRETATION_API_KEY is not set.' })
-  const model = process.env.AI_INTERPRETATION_MODEL?.trim() || DEFAULT_MODEL
-
   try {
-    const proposal = await requestProviderInterpretation(capture, apiKey, model)
+    const proposal = await requestProviderInterpretation(capture, apiKey, AI_INTERPRETATION_MODEL)
     return json(200, proposal)
   } catch (error) {
     return json(502, { error: 'provider_error', message: error instanceof Error ? error.message : 'Unknown provider error.' })
