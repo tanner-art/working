@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { migrateLegacyState, legacyUiProjection, reconcileLegacyUi } from './migration'
 import { correctOriginal, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
-import { confirmedActions, confirmObject, reviewObjects } from './objectWorkflow'
+import { confirmedActions, confirmObject, hasConfirmation, reviewObjects } from './objectWorkflow'
 import { isPersistedState } from './migration'
 import type { AppState, ThoughtObject } from './domain'
 
@@ -109,6 +109,34 @@ describe('review text revisions', () => {
     expect(revisionNeedsReconfirmation(confirmed.objects[0])).toBe(true)
     expect(revisionNeedsReconfirmation(revised)).toBe(false)
     expect(revisionReviewNotice(revised)).toBeUndefined()
+  })
+
+  it.each(['action', 'commitment'] as const)('does not resurrect a %s confirmation after A→B→A, including after reload', kind => {
+    const proposed = legacyUiProjection(migrateLegacyState({ objects: [{ ...thought, kind }], canvas: [] }))
+    const confirmed = { ...proposed, objects: proposed.objects.map(o => confirmObject(o)) }
+    expect(hasConfirmation(confirmed.objects[0])).toBe(true)
+    let state = reviseInterpretation(confirmed, 'one', 'Second reading', '2026-09-20T01:00:00.000Z')
+    state = reviseInterpretation(state, 'one', 'First reading', '2026-09-20T02:00:00.000Z')
+    const [returned] = state.objects
+    expect(returned.interpretation.summary).toBe('First reading')
+    expect(returned.status).toBe('review')
+    expect(hasConfirmation(returned)).toBe(false)
+    expect(confirmedActions(state.objects)).toEqual([])
+    // The original confirmation event stays in history for audit.
+    expect(returned.history.map(h => h.event)).toEqual(['Captured', `Confirmed as ${kind}`, 'Revised interpretation', 'Revised interpretation'])
+    expect(returned.history[1].confirmation?.summary).toBe('First reading')
+
+    const loaded = legacyUiProjection(JSON.parse(JSON.stringify(reconcileLegacyUi(state))))
+    expect(loaded.objects[0].status).toBe('review')
+    expect(hasConfirmation(loaded.objects[0])).toBe(false)
+    expect(loaded.objects[0].history).toEqual(returned.history)
+
+    const reconfirmed = confirmObject(loaded.objects[0])
+    expect(hasConfirmation(reconfirmed)).toBe(true)
+    expect(reconfirmed.history.at(-1)?.event).toBe(`Confirmed as ${kind}`)
+    expect(reconfirmed.history).toHaveLength(returned.history.length + 1)
+    const reloaded = legacyUiProjection(JSON.parse(JSON.stringify(reconcileLegacyUi({ ...loaded, objects: [reconfirmed] }))))
+    expect(hasConfirmation(reloaded.objects[0])).toBe(true)
   })
 
   it('describes each status transition accurately', () => {

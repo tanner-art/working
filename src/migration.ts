@@ -9,7 +9,8 @@ const persistedConfirmations = new WeakMap<HistoryEvent, ConfirmationGesture>()
 
 export function hasConfirmation(object: ThoughtObject): boolean {
   for (const entry of object.history.slice().reverse()) {
-    if (entry.reviewDecision || entry.event.startsWith('Changed type') || entry.event === 'Marked review' || entry.event === 'Marked inbox' || entry.event.includes('status to review') || entry.event.includes('status to inbox') || entry.event.startsWith('Edited type')) return false
+    // A revision invalidates earlier summary-specific confirmations; the old event stays for audit.
+    if (entry.reviewRevision || entry.reviewDecision || entry.event.startsWith('Changed type') || entry.event === 'Marked review' || entry.event === 'Marked inbox' || entry.event.includes('status to review') || entry.event.includes('status to inbox') || entry.event.startsWith('Edited type')) return false
     const confirmation = entry.confirmation ?? persistedConfirmations.get(entry)
     if (confirmation) return confirmation.objectId === object.id &&
       confirmation.transition === object.kind && confirmation.summary === object.interpretation.summary &&
