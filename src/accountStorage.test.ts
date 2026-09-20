@@ -210,13 +210,14 @@ describe('guided account merge', () => {
     expect(mergeAccountData(base, other, { settings: 'account', digest: 'account' }).data.model.sourceCorrections).toBeUndefined()
   })
 
-  it('stops when the same correction identity carries different content', () => {
+  it('stops the merge when audited correction histories conflict for the same correction identity', () => {
     const base = legacyUiProjection(accountData({ objects: [thought('orginal')], canvas: [] }, defaultSettings, { enabled: false }).model)
     vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
     const a = accountData(correctOriginal(base, base.objects[0].id, 'original', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
-    const b = structuredClone(a)
-    b.model.sourceCorrections![0] = { ...b.model.sourceCorrections![0], correctedContent: 'different' }
-    expect(() => mergeAccountData(a, b, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: source correction identity')
+    const b = accountData(correctOriginal(base, base.objects[0].id, 'different', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    expect(a.model.sourceCorrections![0].id).toBe(b.model.sourceCorrections![0].id)
+    expect(a.model.sourceCorrections![0].correctedContent).not.toBe(b.model.sourceCorrections![0].correctedContent)
+    expect(() => mergeAccountData(a, b, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: interpretation identity')
   })
 
   it('previews before writing and rejects a stale account revision', async () => {
