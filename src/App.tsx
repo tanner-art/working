@@ -1,7 +1,7 @@
 import { buildMorningDigest } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
-import { accountData, createAccountAdapter, createAccountSession, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
 import { readDelivery, setDeliveryEnabled } from './digestDelivery'
 import { supabase, auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
 import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
@@ -89,11 +89,15 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
+  const latestState = useRef(state)
+  latestState.current = state
   const [saveError, setSaveError] = useState<string | undefined>()
   const [preferences, setPreferences] = useState(() => {
     try { return { value: cloud?.data.settings ?? readSettings(localStorage), error: '' } }
     catch { return { value: { ...defaultSettings }, error: 'Local settings could not be read. Editing settings is paused; stored settings are untouched.' } }
   })
+  const latestPreferences = useRef(preferences)
+  latestPreferences.current = preferences
   const [digest, setDigest] = useState(() => cloud?.data.digest)
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountMessage, setAccountMessage] = useState('')
@@ -172,8 +176,11 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
     setAccountBusy(true); setAccountMessage('')
     try {
       if (cloud || preferences.error || saveError) throw Error('Resolve local save/settings errors before merging data.')
-      await onPreviewMerge(accountData(state, preferences.value, readDelivery(localStorage)), mergeChoices)
-    } catch (error) { setAccountMessage((error as Error).message) }
+      const local = accountData(state, preferences.value, readDelivery(localStorage))
+      await guardAccountMergePreview(local,
+        snapshot => onPreviewMerge(snapshot, mergeChoices),
+        () => accountData(latestState.current, latestPreferences.current.value, readDelivery(localStorage)))
+    } catch (error) { onCancelMerge(); setAccountMessage((error as Error).message) }
     finally { setAccountBusy(false) }
   }
   const confirmMerge = async () => {

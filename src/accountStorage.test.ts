@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { accountData, createAccountAdapter, createAccountSession, loadFailure, mergeAccountData, saveFailure, validateData, type AccountAdapter, type AccountRow } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, loadFailure, mergeAccountData, saveFailure, validateData, type AccountAdapter, type AccountMergePlan, type AccountRow } from './accountStorage'
 import { defaultSettings } from './settings'
 import { loadStateResult, makeObject, saveState } from './store'
 import { legacyUiProjection } from './migration'
@@ -205,6 +205,19 @@ describe('guided account merge', () => {
     await db.adapter.write('a', { ...account, settings: { ...defaultSettings, displayName: 'Other device' } }, original.revision)
     await expect(session.confirmMerge(plan)).rejects.toThrow('Merge was not saved')
     expect(db.saved()?.data.settings.displayName).toBe('Other device')
+  })
+
+  it('rejects an in-flight preview when this device changes before the account read completes', async () => {
+    const initial = accountData({ objects: [thought('Before preview')], canvas: [] }, defaultSettings, { enabled: false })
+    let current = structuredClone(initial)
+    let finish!: (plan: AccountMergePlan) => void
+    const prepared = new Promise<AccountMergePlan>(resolve => { finish = resolve })
+    const pending = guardAccountMergePreview(initial, () => prepared, () => current)
+    current = accountData({ objects: [thought('Captured while loading')], canvas: [] }, defaultSettings, { enabled: false })
+    finish({ userId: 'a', revision: 'r1', data: initial, preview: {
+      added: { captures: 0, thoughts: 0, canvas: 0, events: 0 }, duplicates: 0, settings: 'account', digest: 'account',
+    } })
+    await expect(pending).rejects.toThrow('this device changed while account data was loading')
   })
 
   it('confirms the exact preview and preserves Review and Bank items through roundtrip', async () => {

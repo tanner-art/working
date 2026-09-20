@@ -38,6 +38,18 @@ export function validateData(value: unknown): AccountData {
   readDelivery({ getItem: () => JSON.stringify(data.digest) })
   return structuredClone(data)
 }
+export async function guardAccountMergePreview(
+  local: AccountData,
+  prepare: (snapshot: AccountData) => Promise<AccountMergePlan>,
+  current: () => AccountData,
+): Promise<AccountMergePlan> {
+  const fingerprint = JSON.stringify(validateData(local))
+  const plan = await prepare(local)
+  if (JSON.stringify(validateData(current())) !== fingerprint) {
+    throw Error('Merge preview expired because this device changed while account data was loading. Preview again; both sources are untouched.')
+  }
+  return plan
+}
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
 function mergeRecords<T extends { id: string }>(account: T[], device: T[], label: string) {
   const merged = structuredClone(account)
