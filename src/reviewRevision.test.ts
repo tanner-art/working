@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { migrateLegacyState, legacyUiProjection, reconcileLegacyUi } from './migration'
-import { correctOriginal, reviseInterpretation, reviewTextSnapshot } from './reviewRevision'
+import { correctOriginal, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
+import { confirmedActions, confirmObject, reviewObjects } from './objectWorkflow'
 import { isPersistedState } from './migration'
 import type { AppState, ThoughtObject } from './domain'
 
@@ -84,6 +85,41 @@ describe('review text revisions', () => {
     const state = fixture()
     expect(state.model?.sourceCorrections).toBeUndefined()
     expect(reviewTextSnapshot(state, 'one')).toMatchObject({ currentText: 'orginal wording', corrections: [], revisions: [] })
+  })
+
+  const cases = (['action', 'commitment'] as const).flatMap(kind => (['confirmed', 'complete', 'archived'] as const).map(status => [kind, status] as const))
+  it.each(cases)('returns a revised %s %s to Review immediately and after reload (D-009)', (kind, status) => {
+    const proposed = legacyUiProjection(migrateLegacyState({ objects: [{ ...thought, kind }], canvas: [] }))
+    const confirmed = { ...proposed, objects: proposed.objects.map(o => ({ ...confirmObject(o), status })) }
+    expect(confirmedActions(confirmed.objects)).toHaveLength(kind === 'action' && status === 'confirmed' ? 1 : 0)
+    expect(revisionReviewNotice(confirmed.objects[0])).toContain(`Revising this ${status} ${kind} returns it to Review`)
+    const state = reviseInterpretation(confirmed, 'one', 'Better reading', '2026-09-20T01:00:00.000Z')
+    const [revised] = state.objects
+    expect(revised.status).toBe('review')
+    expect(reviewObjects(state.objects).map(o => o.id)).toEqual(['one'])
+    expect(confirmedActions(state.objects)).toEqual([])
+    expect(revised.history.map(h => h.event)).toEqual(['Captured', `Confirmed as ${kind}`, 'Revised interpretation'])
+    expect(revised.history[1].confirmation?.summary).toBe('First reading')
+    expect(revised.originalContent).toBe('orginal wording')
+    const loaded = legacyUiProjection(JSON.parse(JSON.stringify(reconcileLegacyUi(state))))
+    expect(loaded.objects[0].status).toBe('review')
+    expect(reviewObjects(loaded.objects).map(o => o.id)).toEqual(['one'])
+    expect(confirmedActions(loaded.objects)).toEqual([])
+    expect(loaded.objects[0].history).toEqual(revised.history)
+    expect(revisionNeedsReconfirmation(confirmed.objects[0])).toBe(true)
+    expect(revisionNeedsReconfirmation(revised)).toBe(false)
+    expect(revisionReviewNotice(revised)).toBeUndefined()
+  })
+
+  it('describes each status transition accurately', () => {
+    const base = { ...thought, kind: 'action' as const }
+    expect(revisionReviewNotice({ ...base, status: 'confirmed' })).toContain('leaves your confirmed list')
+    expect(revisionReviewNotice({ ...base, status: 'complete' })).toContain('no longer marked complete')
+    expect(revisionReviewNotice({ ...base, status: 'archived' })).toContain('leaves the archive')
+  })
+
+  it('leaves non-consequential objects untouched by the re-confirmation rule', () => {
+    expect(revisionNeedsReconfirmation({ ...thought, status: 'confirmed' })).toBe(false)
   })
 
   it('refuses reconciliation of interpretation changes that are not recorded as revisions', () => {
