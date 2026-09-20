@@ -38,11 +38,26 @@ export function reviewTextSnapshot(state: AppState, objectId: string): ReviewTex
   }
 }
 
+/** Every status that carries a live confirmation: the persisted projection drops it when the summary changes. */
+export const revisionNeedsReconfirmation = (object: ThoughtObject) =>
+  (object.status === 'confirmed' || object.status === 'complete' || object.status === 'archived') &&
+  (object.kind === 'action' || object.kind === 'commitment')
+
+export const revisionReviewNotice = (object: ThoughtObject) => {
+  if (!revisionNeedsReconfirmation(object)) return undefined
+  const lead = `Revising this ${object.status} ${object.kind} returns it to Review`
+  if (object.status === 'complete') return `${lead}. It is no longer marked complete until you confirm the new wording; its history is kept.`
+  if (object.status === 'archived') return `${lead}. It leaves the archive until you confirm the new wording; its history is kept.`
+  return `${lead}. It leaves your confirmed list until you confirm the new wording.`
+}
+
 export function reviseInterpretation(state: AppState, objectId: string, summary: string, at = new Date().toISOString()): AppState {
   const object = textCapture(state, objectId)
   const next = summary.trim()
   if (!next || next === object.interpretation.summary) throw new Error('Revision must provide different non-empty text.')
-  const changed: ThoughtObject = { ...object, interpretation: { ...object.interpretation, summary: next },
+  // D-009: a confirmation authorizes one summary, so revising a confirmed, complete or archived consequential object returns it to Review now, not on reload.
+  const status = revisionNeedsReconfirmation(object) ? 'review' : object.status
+  const changed: ThoughtObject = { ...object, status, interpretation: { ...object.interpretation, summary: next },
     history: [...object.history, { at, event: 'Revised interpretation', reviewRevision: { from: object.interpretation.summary, to: next } }] }
   return updateOne(state, changed)
 }
