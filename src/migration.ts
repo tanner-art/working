@@ -150,7 +150,13 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
     if (old && (!equal(item.history.slice(0, old.history.length), old.history) || item.confidence !== old.confidence)) return fail()
-    if (old && !equal(item.interpretation, old.interpretation)) {
+    if (old) {
+      // Only the summary may change, and only through recorded revisions; other interpretation fields are frozen.
+      const { summary: _next, ...nextRest } = item.interpretation
+      const { summary: _prior, ...priorRest } = old.interpretation
+      if (!equal(nextRest, priorRest)) return fail()
+    }
+    if (old && item.interpretation.summary !== old.interpretation.summary) {
       // Every summary change since the saved baseline must be an unbroken chain of recorded revisions.
       let summary = old.interpretation.summary
       for (const { reviewRevision } of item.history.slice(old.history.length)) {
@@ -210,6 +216,27 @@ function validSourceCorrections(m: PersistedState): boolean {
   return true
 }
 
+/** Each correction needs a matching, ordered `sourceCorrection` audit event in its capture's latest
+ * interpretation history (append-only across versions), and no event may exist without its correction. */
+function validCorrectionAudit(m: PersistedState): boolean {
+  const corrections = m.sourceCorrections ?? []
+  for (const capture of m.captures) {
+    const reading = m.interpretations.filter(i => i.captureIds?.[0] === capture.id).at(-1)
+    const events = (reading?.legacy.history ?? []).filter(h => h.sourceCorrection)
+    const chain = corrections.filter(c => c.captureId === capture.id)
+    if (events.length !== chain.length) return false
+    let text = capture.originalContent
+    for (const [index, correction] of chain.entries()) {
+      const event = events[index]
+      const audit = event.sourceCorrection!
+      if (audit.correctionId !== correction.id || event.at !== correction.correctedAt ||
+        audit.from !== text || audit.to !== correction.correctedContent) return false
+      text = correction.correctedContent
+    }
+  }
+  return true
+}
+
 /** Validate full entity data and cross-record invariants before exposing it to legacy screens. */
 export function isPersistedState(value: unknown): value is PersistedState {
   try {
@@ -225,6 +252,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
       typeof c.createdAt === 'string' && ['text', 'voice', 'canvas'].includes(c.source) &&
       (c.context === undefined || typeof c.context === 'string'))) return false
     if (m.sourceCorrections !== undefined && !validSourceCorrections(m)) return false
+    if (!validCorrectionAudit(m)) return false
     // Reconstruct supported adapter versions to verify semantic derivations and history links.
     const rebuilt: PersistedState = { schemaVersion: 2, captures: copy(m.captures), interpretations: [],
       semanticObjects: [], calendarEvents: [], relationships: [], legacyUiIds: copy(m.legacyUiIds), canvas: copy(m.canvas) }
