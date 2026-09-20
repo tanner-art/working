@@ -30,6 +30,194 @@ For the next 24-hour push, tasks should be framed around making the hosted mobil
 
 Build-in-public rule: when a task changes visible behavior, its issue/PR should include one plain-language user-facing note that can be reused for a public progress update, plus the usual validation and `Exact response to move forward`. Keep the note honest: describe what users can do now, what is still limited, and the next visible improvement.
 
+## Product Development Pipeline — September 20, 2026
+
+Canonical direction: [docs/PRODUCT_DEVELOPMENT_BRIEF.md](docs/PRODUCT_DEVELOPMENT_BRIEF.md).
+Execute in dependency order. Each task must identify its owner module and public typed contract;
+do not add feature-specific workflows directly to the app shell.
+
+### TASK-046 - Review Revision and Source-Correction History
+
+Status: READY
+Priority: P0
+Depends On: TASK-002, TASK-003
+
+Create a revision-history module that preserves the immutable capture, records revisions of the
+current thought, and distinguishes “Revise” from an audited “Correct original” action. Review
+must expose current text, source text and history without allowing either edit path to silently
+erase provenance. Ship the smallest data migration and UI needed for text captures first.
+
+Acceptance: a user can revise a Review item, correct a typo/transcription error through a
+separate confirmed action, reload the app, and inspect every version and its source relationship.
+
+### TASK-047 - Persistent Canvas Bank and Editor Sessions
+
+Status: BLOCKED
+Priority: P0
+Phase: 2
+Depends On: TASK-056 and completion of the Phase 1 gate (TASK-046, TASK-048)
+
+Introduce persistent canvas identities and a Canvas Bank. Opening Canvas shows the bank; create
+opens a blank named canvas; selecting opens an editor; exit returns to the bank. Persist title,
+elements, connections and viewport through a canvas repository contract without breaking
+existing single-canvas data.
+
+Acceptance: multiple canvases survive reload and tab changes, restore their saved viewport, and
+never lose edits when leaving the editor.
+
+### TASK-048 - Mobile Canvas Viewport and Gesture State Machine
+
+Status: BLOCKED
+Priority: P0
+Phase: 1
+Depends On: TASK-056
+
+Add a camera/viewport module and explicit touch-state machine for tap selection, empty-canvas
+deselect, long-press edit, hold-and-drag movement, pinch zoom and two-finger pan. Make the hold
+threshold configurable for testing. Add Fit to Content and Reset View; remove fixed workspace
+boundaries and prevent controls from covering content. Tap selects connections; long press opens
+connection editing. Resize handles appear only after a block enters edit mode, and dragging
+suppresses edit options until the gesture ends.
+
+Acceptance: gestures do not ambiguously trigger edit and move, viewport state persists, and the
+core flow is usable at iPhone width with focused gesture tests.
+
+### TASK-049 - Calendar Day/Week Planning Interface
+
+Status: BLOCKED
+Priority: P0
+Phase: 2
+Depends On: TASK-019, TASK-020 and completion of the Phase 1 gate (TASK-046, TASK-048)
+
+Build day/week selectors over one calendar view model. Day is a scrollable hourly timeline; week
+positions seven days of items by time. Add date navigation, Today, and direct create/edit/move/
+complete actions through the shared commitment/event modules. Selecting a commitment opens its
+details. Keep Morning Digest separate.
+
+Acceptance: calendar changes persist and appear in every relevant view without creating a second
+commitment store.
+
+### TASK-050 - Shared Content Identity, Capture Log and Universal Search
+
+Status: BACKLOG
+Priority: P1
+Depends On: TASK-046, TASK-047, TASK-049
+
+Define an extensible searchable content-reference contract across captures, revisions, semantic
+objects, canvases and calendar items; TASK-058 extends that contract for documents after the
+document model exists. Add a permanent chronological capture log sorted by recency and universal
+search across original/revised thought text, descriptions, canvas text, topics, commitments and
+dates. Results identify content type and navigate to the source. Date-aware results can open the
+relevant Calendar day. Index canvas-origin captures and navigate results back to their source
+canvas/node.
+
+Acceptance: reviewed captures remain in the log; recency/type/date filters work; a date query can
+surface matching content and open that day; canvas internal text and canvas-origin captures are
+searchable. The contract accepts later content-type adapters without changing existing indexes.
+
+### TASK-051 - Related-Capture and Document Merge Suggestions
+
+Status: BACKLOG
+Priority: P1
+Depends On: TASK-050, TASK-058, TASK-045
+
+Add a review-only AI suggestion module for related captures and document merges. Similarity,
+time proximity and authorized context may support a suggestion; time alone is insufficient.
+Acceptance creates or updates a real persistent document through TASK-058, links every source,
+never deletes sources, and records dismissal/correction as explicit feedback.
+
+### TASK-052 - Bulk Review Operations
+
+Status: BACKLOG
+Priority: P1
+Depends On: TASK-046, TASK-050, TASK-058
+
+Add selection mode for archive/delete with recovery, folder/topic assignment, document merge,
+canvas copy/move and mark-reviewed actions. Confirm destructive operations and preserve source
+provenance.
+
+### TASK-053 - Preserved Voice Analysis
+
+Status: BACKLOG
+Priority: P2
+Depends On: TASK-050, TASK-051
+
+Preserve raw audio, transcript, extracted ideas/commitments and their shared source identity.
+One recording may yield several distinct ideas, commitments and questions while every result
+links to the same accessible raw audio. Voice capture remains deferred until the text capture/
+review/account loop is stable.
+
+### TASK-054 - Advanced Canvas Tools and Presentation Frames
+
+Status: BACKLOG
+Priority: P2/P3
+Depends On: TASK-047, TASK-048
+
+Deliver organic branches, freehand strokes, reversible recognition, independent connection
+anchors/curves, lasso operations and presentation frames as separate modules after mobile canvas
+interaction is stable. Preserve original stroke data so recognition can be undone. Store anchors
+relative to node geometry; prevent an arrow destination from entering its source shape; support
+movable curve control points. Presentation frames store absolute camera coordinates and referenced
+nodes, support fixed and follow-content modes, and return frames to Review when referenced nodes
+are deleted.
+
+### TASK-055 - Personal Rituals and Private Insights
+
+Status: BACKLOG
+Priority: P3
+Depends On: TASK-049, TASK-050
+
+Add dismissible morning orientation, evening Review and weekly reflection, followed by statistics
+computed only from real user data: thought count, average character count, commitments created,
+completion rate and average completion time. Missing a ritual has no penalty or accumulating
+failure state. External sources and cross-user comparisons require separate opt-in privacy tasks.
+
+### TASK-056 - Existing Canvas Reliability Foundation
+
+Status: READY
+Priority: P0
+Phase: 1
+Depends On: TASK-021, TASK-022, TASK-023, TASK-024
+
+Repair the existing single-canvas experience before introducing Canvas Bank. Persist meaningful
+edits and viewport state, restore them after reload/tab changes, provide a clear exit/navigation
+contract, reduce toolbar dead space, and isolate canvas persistence behind a repository contract.
+
+Acceptance: existing canvas data migrates without loss; nodes, text, positions, connections,
+shapes and viewport restore after reload; failure does not silently overwrite the last good state.
+
+### TASK-057 - Canvas Block “Add as Capture” Provenance Bridge
+
+Status: BLOCKED
+Priority: P0
+Phase: 2
+Depends On: TASK-047 and the minimal stable canvas/node source-reference contract delivered with it
+
+Add “Add as Capture” to the long-press block editor. The original node remains unchanged. The new
+capture stores stable source canvas and node references and opens through the normal Review flow.
+
+Acceptance: capture and account roundtrip retain the visual source reference, and opening that
+reference from the capture or Review navigates back to the correct canvas/node without duplicating
+or mutating it. Search indexing lands with TASK-050; capture creation and provenance ship in Phase
+2 without depending on Phase 3 search.
+
+### TASK-058 - Persistent Documents and Source Links
+
+Status: BACKLOG
+Priority: P1
+Phase: 3
+Depends On: TASK-046, TASK-050
+
+Add a document model, repository and focused editor with title, body, stable ID and ordered source
+capture references. Documents are accessible from Organize, Review suggestions and search. Editing
+a document never changes source captures; deleting or removing a source link requires explicit
+handling and does not erase the capture.
+
+Acceptance: a document survives local/account roundtrip, opens by stable ID, remains searchable by
+title/body, shows all linked sources, and preserves them when the document changes.
+TASK-058 supplies the document search adapter and tests title/body indexing and navigation against
+the extensible TASK-050 contract.
+
 ## IN_PROGRESS
 
 ### TASK-044 - Guided Cross-Device Account Merge
