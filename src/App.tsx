@@ -73,9 +73,9 @@ export function App() {
     setPreparedMerge({ session, plan })
     return plan
   }
-  const confirmMerge = async () => {
+  const confirmMerge = async (currentLocal: AccountData) => {
     if (!preparedMerge) throw Error('Preview the merge again before confirming.')
-    const result = await preparedMerge.session.confirmMerge(preparedMerge.plan)
+    const result = await preparedMerge.session.confirmMerge(preparedMerge.plan, currentLocal)
     setPreparedMerge(undefined); setCloud({ session: preparedMerge.session, ...result }); setGeneration(value => value + 1)
   }
   return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open}
@@ -85,7 +85,7 @@ export function App() {
 function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {
   account: ReturnType<typeof useAuthState>; cloud?: CloudWorkspace; onOpenAccount: (local?: AccountData) => Promise<void>
   mergePlan?: AccountMergePlan; onPreviewMerge: (local: AccountData, choices: AccountMergeChoices) => Promise<AccountMergePlan>
-  onConfirmMerge: () => Promise<void>; onCancelMerge: () => void
+  onConfirmMerge: (currentLocal: AccountData) => Promise<void>; onCancelMerge: () => void
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
@@ -186,7 +186,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   const confirmMerge = async () => {
     if (!mergePlan || accountBusy || !window.confirm('Combine the previewed account and device data? Both device-local copies remain untouched.')) return
     setAccountBusy(true); setAccountMessage('')
-    try { await onConfirmMerge() }
+    try { await onConfirmMerge(accountData(state, preferences.value, readDelivery(localStorage))) }
     catch (error) { setAccountMessage((error as Error).message) }
     finally { setAccountBusy(false) }
   }
@@ -321,9 +321,10 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
         </details> : <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />}
       </>
       {view === 'settings' && <SettingsPage accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+        onCancelMerge()
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
-      }} onResetSettings={() => setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
+      }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}

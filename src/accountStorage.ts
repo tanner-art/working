@@ -18,6 +18,7 @@ export interface AccountMergePreview {
 export interface AccountMergePlan {
   userId: string
   revision: string
+  localFingerprint: string
   data: AccountData
   preview: AccountMergePreview
 }
@@ -38,14 +39,15 @@ export function validateData(value: unknown): AccountData {
   readDelivery({ getItem: () => JSON.stringify(data.digest) })
   return structuredClone(data)
 }
+const accountFingerprint = (value: AccountData) => JSON.stringify(validateData(value))
 export async function guardAccountMergePreview(
   local: AccountData,
   prepare: (snapshot: AccountData) => Promise<AccountMergePlan>,
   current: () => AccountData,
 ): Promise<AccountMergePlan> {
-  const fingerprint = JSON.stringify(validateData(local))
+  const fingerprint = accountFingerprint(local)
   const plan = await prepare(local)
-  if (JSON.stringify(validateData(current())) !== fingerprint) {
+  if (accountFingerprint(current()) !== fingerprint) {
     throw Error('Merge preview expired because this device changed while account data was loading. Preview again; both sources are untouched.')
   }
   return plan
@@ -169,7 +171,7 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
         check()
         if (!current) throw Error('No account data yet. Copy this device’s local data first.')
         const merged = mergeAccountData(current.data, local, choices)
-        pendingMerge = { userId, revision: current.revision, ...merged }
+        pendingMerge = { userId, revision: current.revision, localFingerprint: accountFingerprint(local), ...merged }
         return structuredClone(pendingMerge)
       } catch (error) {
         pendingMerge = undefined
@@ -177,9 +179,13 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
         throw Error(loadFailure)
       }
     },
-    async confirmMerge(plan: AccountMergePlan) {
+    async confirmMerge(plan: AccountMergePlan, currentLocal?: AccountData) {
       check()
       if (!pendingMerge || !equal(pendingMerge, plan) || plan.userId !== userId) throw Error('Merge preview expired. Preview the latest account data again; both sources are untouched.')
+      if (currentLocal && accountFingerprint(currentLocal) !== plan.localFingerprint) {
+        pendingMerge = undefined
+        throw Error('Merge preview expired because this device changed. Preview again; both sources are untouched.')
+      }
       try {
         const result = await adapter.write(userId, plan.data, plan.revision)
         check()

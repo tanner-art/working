@@ -214,10 +214,22 @@ describe('guided account merge', () => {
     const prepared = new Promise<AccountMergePlan>(resolve => { finish = resolve })
     const pending = guardAccountMergePreview(initial, () => prepared, () => current)
     current = accountData({ objects: [thought('Captured while loading')], canvas: [] }, defaultSettings, { enabled: false })
-    finish({ userId: 'a', revision: 'r1', data: initial, preview: {
+    finish({ userId: 'a', revision: 'r1', localFingerprint: JSON.stringify(initial), data: initial, preview: {
       added: { captures: 0, thoughts: 0, canvas: 0, events: 0 }, duplicates: 0, settings: 'account', digest: 'account',
     } })
     await expect(pending).rejects.toThrow('this device changed while account data was loading')
+  })
+
+  it('rejects confirmation when this device settings change after preview', async () => {
+    const db = database()
+    const account = accountData({ objects: [thought('Account')], canvas: [] }, defaultSettings, { enabled: false })
+    const device = accountData({ objects: [thought('Device')], canvas: [] }, defaultSettings, { enabled: false })
+    await db.adapter.write('a', account, null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(device, { settings: 'device', digest: 'account' })
+    const editedDevice = { ...device, settings: { ...device.settings, displayName: 'Edited after preview' } }
+    await expect(session.confirmMerge(plan, editedDevice)).rejects.toThrow('this device changed')
+    expect(db.saved()?.data.settings.displayName).toBe(account.settings.displayName)
   })
 
   it('confirms the exact preview and preserves Review and Bank items through roundtrip', async () => {
