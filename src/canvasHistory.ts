@@ -12,8 +12,8 @@ import type { CanvasElement } from './domain'
 // One narrow integration adaptation versus the archived module: `present` here is a
 // second, in-memory copy of the current canvas, not the sole source of truth — D-010
 // requires AppState.canvas to remain the single localStorage-backed current-canvas
-// value. App.tsx writes AppState.canvas and this history's `present` together, from
-// the same returned CanvasHistory, in the same handler, so the two can never drift.
+// value. canvasSession writes the current elements through CanvasRepository after every edit;
+// the repository preserves the rest of the aggregate workspace.
 export const CANVAS_HISTORY_LIMIT = 25
 
 export interface CanvasHistory {

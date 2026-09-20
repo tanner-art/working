@@ -239,3 +239,25 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .bank-section > p { font-size: 13px; line-height: 1.6; color: #637069; }
 .bank-folder { margin-top: 10px; overflow-wrap: anywhere; }
 .bank-folder .clickable-row { width: 100%; }
+
+/* TASK-056: only selected content needs a properties row. */
+.canvas-properties { height: auto; min-height: 0; max-height: 112px; padding: 0; }
+.canvas-properties.has-selection { padding: 8px 18px; }
+.canvas-exit { min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: #46564d; font: inherit; font-size: 12px; cursor: pointer; }
+.canvas-save-status { margin: 6px 0 0; font-size: 11px; color: #52634f; }
+.canvas-head > div:first-child { min-width: 170px; }
+@media (max-width: 720px) {
+  .canvas-head { gap: 4px; padding: 4px 12px 6px; }
+  .canvas-head h1 { font-size: 22px; }
+  .canvas-properties.has-selection { padding: 6px 12px; flex-wrap: nowrap; overflow-x: auto; }
+  .canvas-properties > * { flex-shrink: 0; }
+  .canvas-note { padding: 6px 12px; }
+}
+.canvas-page { grid-template-columns: minmax(0, 1fr); }
+.canvas-head, .canvas-tools { min-width: 0; }
+.canvas-head > div:first-child { flex-shrink: 0; }
+@media (max-width: 720px) {
+  .app-shell:has(.canvas-page) { grid-template-columns: minmax(0, 1fr); }
+  .app-shell:has(.canvas-page) .sidebar { min-width: 0; }
+  .canvas-head { width: 100%; }
+}

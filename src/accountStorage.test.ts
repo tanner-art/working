@@ -246,3 +246,26 @@ describe('guided account merge', () => {
     await expect(session.confirmMerge(plan)).rejects.toThrow('preview expired')
   })
 })
+
+describe('TASK-056 account canvas viewport compatibility', () => {
+  it('preserves viewport and elements through queued saves and account reload', async () => {
+    const db = database()
+    const session = createAccountSession(db.adapter, 'canvas-user', () => 'canvas-user')
+    const initial = await session.open(payload())
+    const state = { ...initial.state, canvas: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }], canvasViewport: { x: -55, y: 91, scale: 1.45 } }
+    await session.save(session.snapshot(state, defaultSettings, { enabled: false }))
+    const reloaded = await session.open()
+    expect(reloaded.state.canvas).toEqual(state.canvas)
+    expect(reloaded.state.canvasViewport).toEqual(state.canvasViewport)
+  })
+  it('keeps the destination account viewport, with device fallback for old account snapshots', () => {
+    const account = payload(), device = payload()
+    device.model.canvasViewport = { x: -40, y: 80, scale: .7 }
+    const choices = { settings: 'account' as const, digest: 'account' as const }
+    expect(mergeAccountData(account, device, choices).data.model.canvasViewport).toEqual(device.model.canvasViewport)
+    account.model.canvasViewport = { x: 15, y: 25, scale: 1.3 }
+    const merged = mergeAccountData(account, device, choices).data.model
+    expect(merged.canvasViewport).toEqual(account.model.canvasViewport)
+    expect(device.model.canvasViewport).toEqual({ x: -40, y: 80, scale: .7 })
+  })
+})

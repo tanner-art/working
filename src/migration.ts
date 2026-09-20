@@ -1,5 +1,6 @@
 import { validTemporalHistory } from './temporalConfirmation'
 import type { AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
+import { isCanvasViewport } from './canvasDocument'
 import { isAppState } from './store'
 
 // Compatibility authority stays inside migration. Validation uses detached copies;
@@ -127,13 +128,17 @@ function projectModel(model: PersistedState): AppState {
     if (reading.confirmation) registerCompatibility(item, reading.confirmation)
     return item
   })
-  return { objects, canvas: copy(model.canvas), model: copy(model) }
+  return { objects, canvas: copy(model.canvas), ...(model.canvasViewport === undefined ? {} : { canvasViewport: copy(model.canvasViewport) }), model: copy(model) }
 }
 
 /** Append evidence versions on UI changes; source edits and destructive removals fail closed. */
 export function reconcileLegacyUi(state: AppState): PersistedState {
   if (!isAppState(state)) return fail()
-  if (!state.model) return migrateLegacyState({ objects: state.objects, canvas: state.canvas })
+  if (!state.model) {
+    const model = migrateLegacyState({ objects: state.objects, canvas: state.canvas })
+    if (state.canvasViewport !== undefined) model.canvasViewport = copy(state.canvasViewport)
+    return model
+  }
   if (!isPersistedState(state.model)) return fail()
   const model = copy(state.model)
   if (!unique(state.objects.map(o => o.id)) || !unique(state.canvas.map(e => e.id)) ||
@@ -156,6 +161,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   }
   model.legacyUiIds = state.objects.map(o => o.id)
   model.canvas = copy(state.canvas)
+  if (state.canvasViewport !== undefined) model.canvasViewport = copy(state.canvasViewport)
   if (state.temporalHistory !== undefined) {
     const previousHistory = model.temporalHistory ?? []
     if (!equal(state.temporalHistory.slice(0, previousHistory.length), previousHistory)) return fail()
@@ -170,7 +176,8 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'temporalHistory'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'temporalHistory'].includes(key))) return false
+    if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
       m.relationships, m.legacyUiIds, m.canvas].every(Array.isArray)) return false
     if (![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents, m.relationships, m.canvas]

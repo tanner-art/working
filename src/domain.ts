@@ -67,8 +67,10 @@ export interface CanvasElement {
   connectionPattern?: 'solid' | 'dashed' | 'dotted'
   connectionWeight?: 'light' | 'regular' | 'bold'
 }
+export interface CanvasViewport { x: number; y: number; scale: number }
+
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
-export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState; temporalHistory?: TemporalDecision[] }
+export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; model?: PersistedState; temporalHistory?: TemporalDecision[] }
 
 export const objectLabels: Record<ObjectKind, string> = {
   idea: 'Idea', action: 'Action', reminder: 'Reminder', project: 'Project', commitment: 'Commitment', person: 'Person', reference: 'Reference', objective: 'Objective'
@@ -146,6 +148,7 @@ export interface PersistedState {
   /** Active UI identities include unresolved proposals without semantic objects. */
   legacyUiIds: string[]
   canvas: CanvasElement[]
+  canvasViewport?: CanvasViewport
 }
 
 /** A snapshot of exactly one proposed temporal fact; never obligation evidence. */
