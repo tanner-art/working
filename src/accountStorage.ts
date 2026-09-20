@@ -73,6 +73,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   const device = validateData(deviceValue)
   const captures = mergeRecords(account.model.captures, device.model.captures, 'capture')
   const interpretations = mergeRecords(account.model.interpretations, device.model.interpretations, 'interpretation')
+  const sourceCorrections = mergeRecords(account.model.sourceCorrections ?? [], device.model.sourceCorrections ?? [], 'source correction')
   const semanticObjects = mergeRecords(account.model.semanticObjects, device.model.semanticObjects, 'semantic object')
   const calendarEvents = mergeRecords(account.model.calendarEvents, device.model.calendarEvents, 'calendar event')
   const relationships = mergeRecords(account.model.relationships, device.model.relationships, 'relationship')
@@ -83,6 +84,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   const model: PersistedState = {
     schemaVersion: 2,
     captures: captures.merged,
+    ...(sourceCorrections.merged.length ? { sourceCorrections: sourceCorrections.merged } : {}),
     interpretations: interpretations.merged,
     semanticObjects: semanticObjects.merged,
     calendarEvents: calendarEvents.merged,
@@ -108,7 +110,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
         canvas: canvas.added,
         events: calendarEvents.added,
       },
-      duplicates: captures.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvas.duplicates + temporalHistory.duplicates,
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvas.duplicates + temporalHistory.duplicates,
       settings: choices.settings,
       digest: choices.digest,
     },

@@ -28,7 +28,7 @@ function latest(model: PersistedState, id: string): Interpretation {
 }
 
 function evidence(item: ThoughtObject): Interpretation['legacy'] {
-  const { originalContent: _content, source: _source, createdAt: _created, ...rest } = item
+  const { originalContent: _content, currentContent: _current, source: _source, createdAt: _created, ...rest } = item
   return copy(rest)
 }
 
@@ -121,7 +121,9 @@ function projectModel(model: PersistedState): AppState {
     const reading = latest(model, id)
     const capture = model.captures.find(c => c.id === reading.captureIds[0]) ?? fail()
     const semantic = model.semanticObjects.find(o => o.id === id)
-    const item: ThoughtObject = { ...copy(reading.legacy), originalContent: capture.originalContent, source: capture.source,
+    const correction = (model.sourceCorrections ?? []).filter(value => value.captureId === capture.id).at(-1)
+    const item: ThoughtObject = { ...copy(reading.legacy), originalContent: capture.originalContent,
+      ...(correction ? { currentContent: correction.correctedContent } : {}), source: capture.source,
       createdAt: capture.createdAt, status: semantic?.status ??
         (reading.legacy.kind !== 'action' && reading.legacy.kind !== 'commitment' &&
           (reading.legacy.status === 'archived' || reading.legacy.status === 'complete') ? reading.legacy.status : 'review' as const) }
@@ -147,8 +149,17 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   for (const item of state.objects) {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
-    if (old && (!equal(item.history.slice(0, old.history.length), old.history) ||
-      !equal(item.interpretation, old.interpretation) || item.confidence !== old.confidence)) return fail()
+    if (old && (!equal(item.history.slice(0, old.history.length), old.history) || item.confidence !== old.confidence)) return fail()
+    if (old && !equal(item.interpretation, old.interpretation)) {
+      // Every summary change since the saved baseline must be an unbroken chain of recorded revisions.
+      let summary = old.interpretation.summary
+      for (const { reviewRevision } of item.history.slice(old.history.length)) {
+        if (!reviewRevision) continue
+        if (reviewRevision.from !== summary) return fail()
+        summary = reviewRevision.to
+      }
+      if (summary !== item.interpretation.summary) return fail()
+    }
     const additions = old ? item.history.slice(old.history.length) : item.history
     if (additions.some(h => h.event.startsWith('Confirmed as ') && !h.confirmation)) return fail()
     // A capture can be reviewed while its first save is pending/failed. Retain a
@@ -158,6 +169,16 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       append(model, { ...item, status: 'review', history: item.history.slice(0, firstGesture) })
       append(model, item, latest(model, item.id))
     } else append(model, item, old ? latest(model, item.id) : undefined, old ? latest(model, item.id).confirmation : undefined)
+    // Source corrections are derived from their audit events so one history entry is the only writer.
+    for (const { at, sourceCorrection } of additions) {
+      if (!sourceCorrection) continue
+      const captureId = latest(model, item.id).captureIds[0]
+      const chain = (model.sourceCorrections ?? []).filter(c => c.captureId === captureId)
+      const current = chain.at(-1)?.correctedContent ?? model.captures.find(c => c.id === captureId)?.originalContent
+      if (sourceCorrection.from !== current || !sourceCorrection.to.trim()) return fail()
+      model.sourceCorrections = [...(model.sourceCorrections ?? []), { id: sourceCorrection.correctionId, captureId, correctedAt: at,
+        correctedContent: sourceCorrection.to, ...(chain.length ? { previousId: chain.at(-1)!.id } : {}) }]
+    }
   }
   model.legacyUiIds = state.objects.map(o => o.id)
   model.canvas = copy(state.canvas)
@@ -171,12 +192,30 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   return model
 }
 
+/** Corrections are an append-only, per-capture chain over text captures: the first has no
+ * previousId and each later one names the immediately preceding correction of that capture. */
+function validSourceCorrections(m: PersistedState): boolean {
+  const corrections = m.sourceCorrections
+  if (!Array.isArray(corrections) || !unique(corrections.map(c => c?.id))) return false
+  const tails = new Map<string, string>()
+  for (const c of corrections) {
+    if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !c.id || typeof c.captureId !== 'string' ||
+      typeof c.correctedContent !== 'string' || !c.correctedContent.trim() || typeof c.correctedAt !== 'string' ||
+      !Number.isFinite(Date.parse(c.correctedAt)) || (c.previousId !== undefined && typeof c.previousId !== 'string')) return false
+    if (Object.keys(c).some(key => !['id', 'captureId', 'correctedAt', 'correctedContent', 'previousId'].includes(key))) return false
+    if (m.captures.find(capture => capture.id === c.captureId)?.source !== 'text') return false
+    if (tails.get(c.captureId) !== c.previousId) return false
+    tails.set(c.captureId, c.id)
+  }
+  return true
+}
+
 /** Validate full entity data and cross-record invariants before exposing it to legacy screens. */
 export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'temporalHistory'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'temporalHistory'].includes(key))) return false
     if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
       m.relationships, m.legacyUiIds, m.canvas].every(Array.isArray)) return false
@@ -185,6 +224,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
     if (!m.captures.every(c => c.evidence === 'text-only' && typeof c.originalContent === 'string' &&
       typeof c.createdAt === 'string' && ['text', 'voice', 'canvas'].includes(c.source) &&
       (c.context === undefined || typeof c.context === 'string'))) return false
+    if (m.sourceCorrections !== undefined && !validSourceCorrections(m)) return false
     // Reconstruct supported adapter versions to verify semantic derivations and history links.
     const rebuilt: PersistedState = { schemaVersion: 2, captures: copy(m.captures), interpretations: [],
       semanticObjects: [], calendarEvents: [], relationships: [], legacyUiIds: copy(m.legacyUiIds), canvas: copy(m.canvas) }

@@ -4,6 +4,7 @@ import { accountData, createAccountAdapter, createAccountSession, guardAccountMe
 import { defaultSettings } from './settings'
 import { loadStateResult, makeObject, saveState } from './store'
 import { legacyUiProjection } from './migration'
+import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
@@ -192,6 +193,30 @@ describe('guided account merge', () => {
     const conflict = structuredClone(duplicate)
     conflict.model.captures[0] = { ...conflict.model.captures[0], originalContent: 'Changed elsewhere' }
     expect(() => mergeAccountData(account, conflict, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: capture identity')
+  })
+
+  it('carries source corrections through merge and deduplicates identical copies', () => {
+    const one = thought('orginal')
+    const base = accountData({ objects: [one], canvas: [] }, defaultSettings, { enabled: false })
+    vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
+    const withFix = accountData(correctOriginal(legacyUiProjection(base.model), one.id, 'original', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    const other = accountData({ objects: [thought('Phone idea')], canvas: [] }, defaultSettings, { enabled: false })
+    const merged = mergeAccountData(withFix, other, { settings: 'account', digest: 'account' })
+    expect(merged.data.model.sourceCorrections).toHaveLength(1)
+    expect(merged.data.model.captures).toHaveLength(2)
+    const again = mergeAccountData(merged.data, withFix, { settings: 'account', digest: 'account' })
+    expect(again.data.model.sourceCorrections).toHaveLength(1)
+    expect(again.preview.duplicates).toBeGreaterThan(0)
+    expect(mergeAccountData(base, other, { settings: 'account', digest: 'account' }).data.model.sourceCorrections).toBeUndefined()
+  })
+
+  it('stops when the same correction identity carries different content', () => {
+    const base = legacyUiProjection(accountData({ objects: [thought('orginal')], canvas: [] }, defaultSettings, { enabled: false }).model)
+    vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
+    const a = accountData(correctOriginal(base, base.objects[0].id, 'original', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    const b = structuredClone(a)
+    b.model.sourceCorrections![0] = { ...b.model.sourceCorrections![0], correctedContent: 'different' }
+    expect(() => mergeAccountData(a, b, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: source correction identity')
   })
 
   it('previews before writing and rejects a stale account revision', async () => {

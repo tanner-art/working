@@ -86,6 +86,7 @@ function isThoughtObject(value: unknown): value is ThoughtObject {
   return typeof item.id === 'string' &&
     objectKinds.includes(item.kind as ObjectKind) &&
     typeof item.originalContent === 'string' &&
+    (item.currentContent === undefined || typeof item.currentContent === 'string') &&
     sourceTypes.includes(item.source as SourceType) &&
     typeof item.createdAt === 'string' &&
     isInterpretation(item.interpretation) &&

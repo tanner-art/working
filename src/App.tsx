@@ -20,6 +20,7 @@ import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
 import { bankFolders, bankObjects, reviewObjects, canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
+import { correctOriginal, reviseInterpretation, reviewTextSnapshot } from './reviewRevision'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -318,7 +319,10 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
       {view === 'canvas' && <Canvas elements={state.canvas} viewport={state.canvasViewport ?? DEFAULT_CANVAS_VIEWPORT} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={() => { canvas.finishText(); canvasTextSaveQueue.flush(); setView('today') }} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />}
     </section>
-    {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
+    {selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+      onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
+      onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
+      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
   </main></>
 }
 
@@ -473,9 +477,12 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtObject; onClose: () => void; onSave: (object: ThoughtObject) => void; onReverse: () => void }) {
+function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
+  const [revision, setRevision] = useState(object.interpretation.summary)
+  const [correction, setCorrection] = useState(history.currentText)
   useEffect(() => setDraft(object), [object])
+  useEffect(() => { setRevision(object.interpretation.summary); setCorrection(history.currentText) }, [object, history.currentText])
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
   const field = (key: keyof ThoughtObject, value: unknown) => setDraft(current => ({ ...current, [key]: value }))
   const metadata = (key: keyof ThoughtObject['metadata'], value: unknown) => setDraft(current => ({ ...current, metadata: { ...current.metadata, [key]: value || undefined } as ThoughtObject['metadata'] }))
@@ -489,8 +496,9 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
     <aside className="object-panel" onMouseDown={event => event.stopPropagation()}>
       <header><div><p className="eyebrow">Object workbench</p><h2>Shape this thought</h2></div><button className="close-button" onClick={onClose} aria-label="Close object details">×</button></header>
       <div className="panel-scroll">
-        <section className="raw-thought"><p className="section-label">Original capture</p><p>{object.originalContent}</p><small>{object.source} · {new Date(object.createdAt).toLocaleString()}</small></section>
+        <section className="raw-thought"><p className="section-label">Current text</p><p>{history.currentText}</p><small>{object.source} · {new Date(object.createdAt).toLocaleString()}</small><details><summary>Immutable source</summary><p>{history.immutableSource}</p></details></section>
         <section className="interpretation"><p className="section-label">AI proposal</p><strong>{object.interpretation.summary}</strong><small>{Math.round(object.confidence * 100)}% confident · {object.interpretation.rationale}</small></section>
+        {object.source === 'text' && <section><label>Revise interpretation<input value={revision} onChange={event => setRevision(event.target.value)} /></label><button className="secondary" disabled={!revision.trim() || revision.trim() === object.interpretation.summary} onClick={() => onRevise(revision)}>Revise</button><details><summary>Correct original rendering</summary><p>The captured source stays preserved. This creates an audited correction.</p><label>Corrected text<textarea value={correction} onChange={event => setCorrection(event.target.value)} /></label><button className="secondary" disabled={!correction.trim() || correction.trim() === history.currentText} onClick={() => { if (window.confirm('Keep the immutable source and record this correction?')) onCorrect(correction) }}>Confirm correction</button></details></section>}
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
           <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
@@ -501,6 +509,7 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
           <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
         </div>
         <details><summary>Interpretation history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
+        {(history.revisions.length > 0 || history.corrections.length > 0) && <details><summary>Text history ({history.revisions.length + history.corrections.length})</summary><ol>{history.revisions.map(item => <li key={item.at}>Revised “{item.from}” to “{item.to}”</li>)}{history.corrections.map(item => <li key={item.id}>Corrected rendering to “{item.correctedContent}” <time>{item.correctedAt}</time></li>)}</ol></details>}
         {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={() => { onReverse(); onClose() }}>Reverse confirmation</button></>}
       </div>
       <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'archived')); onClose() }}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'complete')); onClose() }}>Complete</button><button className="primary" onClick={() => { onSave(draft); onClose() }}>Save changes</button></footer>
