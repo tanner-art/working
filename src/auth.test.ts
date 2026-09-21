@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { accountLabel, createAuthBoundary, dataOwnershipLabel, readAuthConfig, sessionState, type AuthClient, type AuthSession } from './auth'
+import { accountLabel, createAuthBoundary, createSupabaseAuthClient, dataOwnershipLabel, readAuthConfig, sessionState, type AuthClient, type AuthSession } from './auth'
+import type { SupabaseClient } from '@supabase/supabase-js'
 const config = readAuthConfig({ VITE_SUPABASE_URL: 'https://example.supabase.co', VITE_SUPABASE_ANON_KEY: 'public-key' })
 const session = { user: { id: 'user-1', email: 'person@example.com' } }
 function provider() {
   let listener: (session: AuthSession | null) => void = () => {}
   const unsubscribe = vi.fn()
   const client: AuthClient = {
-    getSession: vi.fn(async () => null), sendEmailLink: vi.fn(async () => {}), signOut: vi.fn(async () => {}),
+    getSession: vi.fn(async () => null), sendEmailLink: vi.fn(async () => {}), verifyEmailCode: vi.fn(async () => session), signOut: vi.fn(async () => {}),
     onSessionChange: vi.fn(callback => { listener = callback; return unsubscribe }),
   }
   return { client, unsubscribe, emit: (value: AuthSession | null) => listener(value) }
@@ -51,6 +52,7 @@ describe('guarded account actions', () => {
     auth.connect(); await auth.act('login', 'person@example.com'); await auth.act('logout')
     expect(client.getSession).not.toHaveBeenCalled()
     expect(client.sendEmailLink).not.toHaveBeenCalled()
+    expect(client.verifyEmailCode).not.toHaveBeenCalled()
     const loading = createAuthBoundary(config, client)
     await loading.act('login', 'person@example.com')
     expect(client.sendEmailLink).not.toHaveBeenCalled()
@@ -64,10 +66,39 @@ describe('guarded account actions', () => {
     const first = auth.act('login', ' person@example.com ')
     await auth.act('login', 'person@example.com'); await first
     expect(client.sendEmailLink).toHaveBeenCalledExactlyOnceWith('person@example.com')
-    expect(auth.getState()).toMatchObject({ status: 'signed-out', message: expect.stringContaining('not signed in yet') })
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('six-digit code') })
     emit(session); expect(auth.getState()).toEqual(sessionState(session))
     await auth.act('logout'); expect(client.signOut).toHaveBeenCalledOnce()
     expect(auth.getState().status).toBe('signed-out'); disconnect()
+  })
+  it('validates and verifies a six-digit email code while remaining signed out on failure', async () => {
+    const { client } = provider()
+    const auth = createAuthBoundary(config, client)
+    const disconnect = auth.connect(); await flush()
+    await auth.act('login', 'person@example.com')
+    await auth.act('verify-code', 'person@example.com', '123')
+    expect(client.verifyEmailCode).not.toHaveBeenCalled()
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('six-digit') })
+
+    client.verifyEmailCode = vi.fn(async () => { throw Error('private provider detail') })
+    await auth.act('verify-code', 'person@example.com', '123456')
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('invalid or expired') })
+    expect(JSON.stringify(auth.getState())).not.toContain('private provider detail')
+
+    client.verifyEmailCode = vi.fn(async () => session)
+    await auth.act('verify-code', 'person@example.com', '654321')
+    expect(client.verifyEmailCode).toHaveBeenCalledExactlyOnceWith('person@example.com', '654321')
+    expect(auth.getState()).toEqual(sessionState(session))
+    disconnect()
+  })
+  it('fails closed when the provider verifies a code without returning a session', async () => {
+    const { client } = provider()
+    client.verifyEmailCode = vi.fn(async () => null)
+    const auth = createAuthBoundary(config, client)
+    const disconnect = auth.connect(); await flush()
+    await auth.act('verify-code', 'person@example.com', '123456')
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('could not be verified') })
+    disconnect()
   })
   it('ignores stale initial results and unsubscribes on disconnect', async () => {
     const { client, emit, unsubscribe } = provider()
@@ -90,6 +121,22 @@ describe('guarded account actions', () => {
     expect(JSON.stringify(auth.getState())).not.toContain('private provider detail')
     disconnect(); disconnect = auth.connect(); await flush()
     expect(auth.getState().status).toBe('signed-out'); disconnect()
+  })
+})
+
+describe('Supabase email auth adapter', () => {
+  it('preserves the browser link and verifies an in-app email code', async () => {
+    const signInWithOtp = vi.fn(async () => ({ error: null }))
+    const verifyOtp = vi.fn(async () => ({ data: { session: { user: { id: 'user-1', email: 'person@example.com' } } }, error: null }))
+    const provider = {
+      auth: { signInWithOtp, verifyOtp },
+    } as unknown as SupabaseClient
+    const client = createSupabaseAuthClient(config as Extract<typeof config, { status: 'configured' }>, 'https://app.example.com', provider)
+
+    await client.sendEmailLink('person@example.com')
+    expect(signInWithOtp).toHaveBeenCalledExactlyOnceWith({ email: 'person@example.com', options: { emailRedirectTo: 'https://app.example.com' } })
+    await expect(client.verifyEmailCode('person@example.com', '123456')).resolves.toEqual(session)
+    expect(verifyOtp).toHaveBeenCalledExactlyOnceWith({ email: 'person@example.com', token: '123456', type: 'email' })
   })
 })
 

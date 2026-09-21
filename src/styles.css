@@ -143,6 +143,10 @@
 .settings-card button { min-height: 44px; white-space: normal; }
 .settings-card :focus-visible { outline: 3px solid #507737; outline-offset: 3px; }
 .settings-card button:disabled { opacity: .5; cursor: default; }
+.account-login, .account-code { display: grid; gap: 12px; }
+.account-code { margin-top: 18px; padding-top: 18px; border-top: 1px solid #d9ddd5; }
+.account-code p { margin: 0; color: #46564d; }
+.account-code input { font-family: 'DM Mono', monospace; font-size: 18px; letter-spacing: .18em; }
 .clear-confirmation { display: grid; gap: 16px; padding: 16px; border: 1px solid #b77969; border-radius: 8px; }
 .secondary.danger-button { color: #873a28; border-color: #b77969; }
 .primary.danger-button { background: #873a28; }
