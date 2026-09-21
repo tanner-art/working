@@ -6,6 +6,16 @@ export interface ReviewTextSnapshot {
   currentText: string
   revisions: { at: string; from: string; to: string }[]
   corrections: SourceCorrection[]
+  progression: ReviewProgressionEntry[]
+}
+
+export interface ReviewProgressionEntry {
+  id: string
+  at: string
+  kind: 'capture' | 'correction' | 'interpretation'
+  label: string
+  text: string
+  previousText?: string
 }
 
 const find = (state: AppState, objectId: string): ThoughtObject => {
@@ -30,11 +40,22 @@ export function reviewTextSnapshot(state: AppState, objectId: string): ReviewTex
   const object = find(state, objectId)
   const model = reconcileLegacyUi(state)
   const captureId = `capture:${objectId}`
+  const revisions = object.history.flatMap((entry, index) => entry.reviewRevision ? [{ id: `interpretation-${index}`, at: entry.at, ...entry.reviewRevision }] : [])
+  const corrections = (model.sourceCorrections ?? []).filter(value => value.captureId === captureId)
+  const progression: ReviewProgressionEntry[] = [
+    { id: captureId, at: object.createdAt, kind: 'capture' as const, label: 'Original capture', text: object.originalContent },
+    ...corrections.map(value => ({ id: value.id, at: value.correctedAt, kind: 'correction' as const,
+      label: 'Thought text revised', text: value.correctedContent,
+      previousText: object.history.find(entry => entry.sourceCorrection?.correctionId === value.id)?.sourceCorrection?.from })),
+    ...revisions.map(value => ({ id: value.id, at: value.at, kind: 'interpretation' as const,
+      label: 'Organized meaning revised', text: value.to, previousText: value.from })),
+  ].sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
   return {
     immutableSource: object.originalContent,
     currentText: object.currentContent ?? object.originalContent,
-    revisions: object.history.flatMap(entry => entry.reviewRevision ? [{ at: entry.at, ...entry.reviewRevision }] : []),
-    corrections: (model.sourceCorrections ?? []).filter(value => value.captureId === captureId),
+    revisions: revisions.map(({ at, from, to }) => ({ at, from, to })),
+    corrections,
+    progression,
   }
 }
 

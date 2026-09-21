@@ -23,6 +23,16 @@ describe('review text revisions', () => {
     expect(reviewTextSnapshot(state, 'one').revisions).toEqual([{ at: '2026-09-20T01:00:00.000Z', from: 'First reading', to: 'Better reading' }])
   })
 
+  it('presents the immutable capture and text or meaning revisions as one chronological progression', () => {
+    let state = reviseInterpretation(fixture(), 'one', 'Better reading', '2026-09-20T02:00:00.000Z')
+    state = correctOriginal(state, 'one', 'Original wording', true, '2026-09-20T01:00:00.000Z')
+    expect(reviewTextSnapshot(state, 'one').progression).toEqual([
+      { id: 'capture:one', at: '2026-09-20T00:00:00.000Z', kind: 'capture', label: 'Original capture', text: 'orginal wording' },
+      { id: 'correction-1', at: '2026-09-20T01:00:00.000Z', kind: 'correction', label: 'Thought text revised', text: 'Original wording', previousText: 'orginal wording' },
+      { id: 'interpretation-1', at: '2026-09-20T02:00:00.000Z', kind: 'interpretation', label: 'Organized meaning revised', text: 'Better reading', previousText: 'First reading' },
+    ])
+  })
+
   it('requires confirmation and records an overlay without rewriting source evidence', () => {
     expect(() => correctOriginal(fixture(), 'one', 'Original wording', false)).toThrow('explicit confirmation')
     const state = correctOriginal(fixture(), 'one', 'Original wording', true, '2026-09-20T02:00:00.000Z')
