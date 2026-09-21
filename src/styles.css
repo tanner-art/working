@@ -259,6 +259,8 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .thought-progression time { color: #74817a; font: 9px 'DM Mono'; }
 .thought-progression li > p { margin: 7px 0 0; color: #33433a; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
 .thought-progression li details { margin-top: 7px; color: #6b786f; font-size: 11px; }
+.thought-progression li details > summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+.source-edit-note { padding: 10px 12px; border-radius: 7px; background: #f2f5ef; color: #4e6257 !important; }
 @media (max-width: 720px) {
   .review-actions > * { flex: 1 1 130px; }
   .review-actions select { width: 100%; }

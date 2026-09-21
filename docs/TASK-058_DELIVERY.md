@@ -1,6 +1,7 @@
 # TASK-058 — Review Thought Editing and Version History
 
-Status: REVIEW. Owner: Codex. Independent review required before merge.
+Status: REVIEW. Owner: Codex. Claude review changes addressed; independent re-review required
+before merge.
 
 ## Goal
 
@@ -13,9 +14,15 @@ capture immutable and making later text and meaning revisions readable as one pr
   reviewed text.
 - The thought panel exposes separate editors for the current thought text and its organized
   meaning. Saving either appends to the existing audited correction/revision chain.
+- Text captures support audited text corrections. Voice and canvas captures keep their raw
+  source unchanged while still allowing audited organized-meaning revisions; the panel states
+  that boundary rather than presenting an unsupported source-text editor.
 - The original capture remains unchanged and visible in a chronological version history.
 - Revising a confirmed Action or Commitment continues to return it to Review under D-009.
 - Controls remain usable at a 390-pixel mobile viewport and on desktop.
+- The workbench is an accessible modal: focus moves into it and returns to the opener, Escape,
+  backdrop, close, reverse, archive, complete, and save paths protect unsaved drafts, and the
+  background is unavailable while the dialog is open.
 - Focused tests, full `pnpm check`, and `git diff --check` pass.
 
 ## Boundaries
@@ -33,9 +40,13 @@ CHANGES_REQUESTED with concrete findings. Do not merge.
 
 ## Validation
 
-- `pnpm check`: 407 tests, application TypeScript, production build, and API TypeScript passed.
+- Focused revision tests: 22 passed.
+- `pnpm check`: 410 tests, application TypeScript, production build, and API TypeScript passed.
 - `git diff --check` passed; no lint script is configured.
 - Local browser inspection showed the two editors and open version history on desktop. At a
   390×844 viewport, the 375-pixel panel stayed within the viewport; both save controls were
   290×44 pixels.
+- Claude's first review requested honest handling for non-text sources, close-path draft guards,
+  modal focus/background behavior, Escape handling, and a 44-pixel previous-version disclosure.
+  Those findings are addressed in the follow-up commit; re-review remains required.
 - Existing non-blocking production bundle warning remains (main chunk exceeds 500 kB).

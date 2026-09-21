@@ -72,8 +72,11 @@ export const revisionReviewNotice = (object: ThoughtObject) => {
   return `${lead}. It leaves your confirmed list until you confirm the new wording.`
 }
 
+export const hasUnsavedReviewDrafts = (object: ThoughtObject, currentText: string, correction: string, revision: string) =>
+  (object.source === 'text' && correction.trim() !== currentText) || revision.trim() !== object.interpretation.summary
+
 export function reviseInterpretation(state: AppState, objectId: string, summary: string, at = new Date().toISOString()): AppState {
-  const object = textCapture(state, objectId)
+  const object = find(state, objectId)
   const next = summary.trim()
   if (!next || next === object.interpretation.summary) throw new Error('Revision must provide different non-empty text.')
   // D-009: a confirmation authorizes one summary, so revising a confirmed, complete or archived consequential object returns it to Review now, not on reload.
