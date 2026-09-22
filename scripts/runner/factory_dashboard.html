@@ -384,7 +384,7 @@
     workers.forEach(function (a) {
       var usedCell = typeof a.used_percent === 'number' ? el('span', { text: a.used_percent + '%' }) : unknown('not recorded');
       tbody.appendChild(el('tr', {}, [
-        el('td', { text: a.worker || 'Unknown' }),
+        el('td', { text: (a.worker || 'Unknown') + ' / ' + (a.account || 'Unknown') }),
         el('td', { text: a.provider || 'Unknown' }),
         el('td', { text: a.model || 'Unknown' }),
         el('td', {}, [usedCell]),

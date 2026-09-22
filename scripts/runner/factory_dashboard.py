@@ -51,21 +51,23 @@ Serves a single-page dashboard (factory_dashboard.html) plus a JSON API
                                        timeline, never by merging events from
                                        different agents into one sequence.
   - <state>/usage.json             -- provider usage snapshot written by
-                                       usage_policy.py, keyed by worker,
-                                       optionally wrapped in a "workers"
-                                       object:
+                                       usage_policy.py, keyed by worker and
+                                       account, optionally wrapped in a
+                                       "workers" object:
                                          {"workers": {
-                                           "codex-a": {"provider": "openai",
-                                             "model": "gpt-5-codex",
-                                             "used_percent": 42.5,
-                                             "observed_at": "<ISO 8601>",
-                                             "reset_at": "<ISO 8601, optional>"}
+                                           "codex-a": {"primary":
+                                             {"provider": "openai",
+                                              "model": "gpt-5-codex",
+                                              "used_percent": 42.5,
+                                              "observed_at": "<ISO 8601>",
+                                              "reset_at": "<ISO 8601, optional>"}}
                                          }}
-                                       The "workers" wrapper is optional; a
-                                       bare {"<worker>": {...}, ...} object is
-                                       also accepted. This dashboard only
-                                       displays whatever is recorded here; it
-                                       never queries any provider API itself.
+                                       The wrapper is optional. For local
+                                       migration, the older flat worker-to-record
+                                       shape is also accepted as account
+                                       "default". This dashboard only displays
+                                       what is recorded here; it never queries
+                                       any provider API itself.
 
 Never reads or displays credentials, tokens, or per-attempt log file
 contents (state/issue-N-<attempt>.log may contain source code). Only the
@@ -80,6 +82,7 @@ needed, rather than inventing a value.
 """
 import argparse
 import json
+import math
 import pathlib
 import re
 import sys
@@ -101,6 +104,7 @@ DEFAULT_UTILIZATION_TARGET_WORKERS = fstatus.DEFAULT_UTILIZATION_TARGET_WORKERS
 DEFAULT_SLOWDOWN_THRESHOLD_PCT = 70.0
 DEFAULT_STOP_THRESHOLD_PCT = 80.0
 MAX_STOP_THRESHOLD_PCT = 80.0
+DEFAULT_USAGE_STALE_AFTER_SECONDS = 3600.0
 
 ACTIVE_STATUSES = {'starting', 'agent', 'validation'}
 REVIEW_STATUS = 'review'
@@ -212,6 +216,7 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
     configured = config.get('usage_policy')
     slowdown = DEFAULT_SLOWDOWN_THRESHOLD_PCT
     stop = DEFAULT_STOP_THRESHOLD_PCT
+    stale_after = DEFAULT_USAGE_STALE_AFTER_SECONDS
     if isinstance(configured, dict):
         # usage_policy.py writes these canonical names. The dashboard accepts
         # its original names for existing local configs, but canonical values
@@ -222,6 +227,9 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
         v = configured.get('stop_percent', configured.get('stop_threshold_pct'))
         if isinstance(v, (int, float)):
             stop = float(v)
+        v = configured.get('stale_after_seconds')
+        if isinstance(v, (int, float)):
+            stale_after = float(v)
     if isinstance(slowdown_override, (int, float)):
         slowdown = float(slowdown_override)
     if isinstance(stop_override, (int, float)):
@@ -237,12 +245,17 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
         'stop_threshold_pct': stop,
         'stop_threshold_clamped_to_max': clamped,
         'max_stop_threshold_pct': MAX_STOP_THRESHOLD_PCT,
+        'stale_after_seconds': stale_after,
     }
 
 
-def classify_usage_state(percent_used, policy):
+def classify_usage_state(percent_used, policy, observed_at_seconds=None, now=None):
     if not isinstance(percent_used, (int, float)):
         return 'unknown'
+    if observed_at_seconds is not None and now is not None:
+        stale_after = policy.get('stale_after_seconds', DEFAULT_USAGE_STALE_AFTER_SECONDS)
+        if not isinstance(stale_after, (int, float)) or now < observed_at_seconds or now - observed_at_seconds > stale_after:
+            return 'unknown'
     stop = policy.get('stop_percent', policy.get('stop_threshold_pct', DEFAULT_STOP_THRESHOLD_PCT))
     slowdown = policy.get('slowdown_percent', policy.get('slowdown_threshold_pct', DEFAULT_SLOWDOWN_THRESHOLD_PCT))
     if percent_used >= stop:
@@ -268,7 +281,7 @@ def _parse_iso(value):
     return dt.timestamp()
 
 
-def load_usage(state_dir, policy):
+def load_usage(state_dir, policy, now=None):
     path = state_dir / 'usage.json'
     data, error = fstatus.read_json_safe(path)
     if error == 'missing':
@@ -277,10 +290,11 @@ def load_usage(state_dir, policy):
             'note': (
                 'usage.json not found in the state directory. This dashboard cannot '
                 'query provider usage itself; create usage.json with '
-                '{"<worker>": {"provider": "...", "model": "...", '
+                '{"<worker>": {"<account>": {"provider": "...", '
+                '"model": "...", '
                 '"used_percent": <0-100>, "observed_at": "<ISO 8601>", '
-                '"reset_at": "<ISO 8601, optional>"}, ...} (optionally wrapped in '
-                '{"workers": {...}}) to show real usage.'
+                '"reset_at": "<ISO 8601, optional>"}}} (optionally wrapped '
+                'in {"workers": {...}}) to show real usage.'
             ),
         }
     if error:
@@ -297,29 +311,44 @@ def load_usage(state_dir, policy):
             'error': "corrupt: usage.json must be an object keyed by worker (optionally wrapped in {\"workers\": {...}})",
             'workers': [], 'corrupt_workers': 0, 'note': None,
         }
+    observed_now = time.time() if now is None else now
     result = []
     corrupt = 0
-    for worker_key, entry in raw_workers.items():
-        if not isinstance(worker_key, str) or not worker_key or not isinstance(entry, dict):
+    for worker_key, raw_accounts in raw_workers.items():
+        if not isinstance(worker_key, str) or not worker_key or not isinstance(raw_accounts, dict):
             corrupt += 1
             continue
-        used_percent = entry.get('used_percent')
-        if not isinstance(used_percent, (int, float)) or isinstance(used_percent, bool):
-            used_percent = None
-        observed_at = entry.get('observed_at') if isinstance(entry.get('observed_at'), str) else None
-        reset_at = entry.get('reset_at') if isinstance(entry.get('reset_at'), str) else None
-        result.append({
-            'worker': safe_display_identifier(worker_key, fallback='unknown-worker'),
-            'provider': safe_display_identifier(entry.get('provider')),
-            'model': safe_display_identifier(entry.get('model')),
-            'used_percent': used_percent,
-            'observed_at': observed_at,
-            'observed_at_seconds': _parse_iso(observed_at),
-            'reset_at': reset_at,
-            'reset_at_seconds': _parse_iso(reset_at),
-            'state': classify_usage_state(used_percent, policy),
-        })
-    result.sort(key=lambda w: w['worker'])
+        # usage_policy.py's canonical shape is worker -> account -> record.
+        # Keep accepting the original flat worker -> record shape as the
+        # worker's default account during local migration.
+        record_keys = ('provider', 'model', 'used_percent', 'observed_at', 'reset_at')
+        is_flat_record = any(key in raw_accounts and not isinstance(raw_accounts[key], dict)
+                             for key in record_keys)
+        accounts = {'default': raw_accounts} if is_flat_record else raw_accounts
+        for account_key, entry in accounts.items():
+            if not isinstance(account_key, str) or not account_key or not isinstance(entry, dict):
+                corrupt += 1
+                continue
+            used_percent = entry.get('used_percent')
+            if not isinstance(used_percent, (int, float)) or isinstance(used_percent, bool) or not math.isfinite(float(used_percent)):
+                used_percent = None
+            observed_at = entry.get('observed_at') if isinstance(entry.get('observed_at'), str) else None
+            observed_at_seconds = _parse_iso(observed_at)
+            reset_at = entry.get('reset_at') if isinstance(entry.get('reset_at'), str) else None
+            reset_at_seconds = _parse_iso(reset_at)
+            result.append({
+                'worker': safe_display_identifier(worker_key, fallback='unknown-worker'),
+                'account': safe_display_identifier(account_key, fallback='unknown-account'),
+                'provider': safe_display_identifier(entry.get('provider')),
+                'model': safe_display_identifier(entry.get('model')),
+                'used_percent': used_percent,
+                'observed_at': fstatus.iso(observed_at_seconds) if observed_at_seconds is not None else None,
+                'observed_at_seconds': observed_at_seconds,
+                'reset_at': fstatus.iso(reset_at_seconds) if reset_at_seconds is not None else None,
+                'reset_at_seconds': reset_at_seconds,
+                'state': classify_usage_state(used_percent, policy, observed_at_seconds, observed_now),
+            })
+    result.sort(key=lambda w: (w['worker'], w['account']))
     return {'found': True, 'error': None, 'workers': result, 'corrupt_workers': corrupt, 'note': None}
 
 
@@ -845,7 +874,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     events = events_result['events']
 
     policy = usage_policy(config, slowdown_threshold_pct, stop_threshold_pct)
-    usage = load_usage(state_dir, policy)
+    usage = load_usage(state_dir, policy, now=now)
 
     agent_defs = agent_definitions(config)
     total_workers = len(agent_defs) if agent_defs else fstatus.DEFAULT_UTILIZATION_TOTAL_WORKERS

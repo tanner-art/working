@@ -22,7 +22,7 @@ class RedactionTests(unittest.TestCase):
         markup = fd.HTML_PATH.read_text(encoding='utf-8')
         self.assertIn('usage.workers', markup)
         self.assertNotIn('usage.accounts', markup)
-        for field in ('a.worker', 'a.used_percent', 'a.observed_at'):
+        for field in ('a.worker', 'a.account', 'a.used_percent', 'a.observed_at'):
             self.assertIn(field, markup)
 
     def test_report_redacts_config_and_state_paths(self):
@@ -146,6 +146,39 @@ class RedactionTests(unittest.TestCase):
             dumped = json.dumps(report)
             self.assertNotIn('sk-leak-me-not', dumped)
             self.assertNotIn('secret', dumped)
+
+    def test_canonical_nested_usage_preserves_worker_and_account_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'workers': {
+                'codex-a': {
+                    'primary': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10,
+                                'observed_at': '1970-01-01T00:16:20Z'},
+                    'fallback': {'provider': 'openai', 'model': 'gpt-5-mini', 'used_percent': 75,
+                                 'observed_at': '1970-01-01T00:16:10Z'},
+                },
+            }})
+            workers = fd.build_report('cfg.json', {'state': str(state), 'usage_policy': {'stale_after_seconds': 600}}, now=1000.0)['usage']['workers']
+            self.assertEqual([(item['worker'], item['account']) for item in workers],
+                             [('codex-a', 'fallback'), ('codex-a', 'primary')])
+            self.assertEqual([item['state'] for item in workers], ['slow', 'green'])
+
+    def test_stale_or_future_usage_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'workers': {
+                'codex-a': {
+                    'stale': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10,
+                              'observed_at': '1970-01-01T00:00:00Z'},
+                    'future': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10,
+                               'observed_at': '1970-01-01T00:30:00Z'},
+                },
+            }})
+            workers = fd.build_report('cfg.json', {'state': str(state), 'usage_policy': {'stale_after_seconds': 600}}, now=1000.0)['usage']['workers']
+            self.assertEqual({item['account']: item['state'] for item in workers},
+                             {'stale': 'unknown', 'future': 'unknown'})
 
 
 class MissingOrCorruptDataTests(unittest.TestCase):
@@ -450,9 +483,9 @@ class ProducerIntegrationTests(unittest.TestCase):
             state.mkdir()
             write_json(state / 'usage.json', {
                 'codex-a': {'provider': 'openai', 'model': 'gpt-5-codex',
-                            'used_percent': 70.0, 'observed_at': '2026-01-01T00:00:00Z'},
+                            'used_percent': 70.0, 'observed_at': '1970-01-01T00:16:00Z'},
                 'codex-b': {'provider': 'openai', 'model': 'gpt-5-codex',
-                            'used_percent': 80.0, 'observed_at': '2026-01-01T00:00:00Z'},
+                            'used_percent': 80.0, 'observed_at': '1970-01-01T00:16:00Z'},
             })
             report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
             workers = {w['worker']: w for w in report['usage']['workers']}
