@@ -14,11 +14,11 @@ pattern and a six-character limit. Threadline remains signed out when a code is 
 expired, rejected, or accepted without a session. Provider errors are not shown to the user.
 This task does not read, migrate, clear or otherwise change local or account data.
 
-## Required Supabase email-template update
+## Supabase email template
 
-After this code is independently reviewed, update the **Magic Link** email template in the
-existing Threadline Supabase project to include both `{{ .Token }}` and
-`{{ .ConfirmationURL }}`. Use this exact body:
+The **Magic Link** email template in the existing Threadline Supabase project was updated on
+2026-09-22 to include both `{{ .Token }}` and `{{ .ConfirmationURL }}`. Its saved body was
+verified in the dashboard and contains:
 
 ```html
 <h2>Sign in to Threadline</h2>
@@ -29,9 +29,8 @@ existing Threadline Supabase project to include both `{{ .Token }}` and
 <p>If you did not request this email, you can ignore it.</p>
 ```
 
-Do not replace the template before the reviewed application change is ready for a Preview;
-the current production UI does not yet offer code entry. Do not place a real address, project
-identifier, browser key, service-role key or provider response in the template or repository.
+No real address, project identifier, browser key, service-role key or provider response is
+stored in this repository.
 
 ## Validation
 
@@ -40,10 +39,12 @@ identifier, browser key, service-role key or provider response in the template o
 - `pnpm check` passed with 409 tests across 22 files, app and API TypeScript checks, and the
   production build. `git diff --check` passed. The existing nonblocking bundle-size warning
   remains.
-- Mobile/desktop browser smoke testing and independent review remain required before merge.
-- Preview validation requires a real email: request one message, confirm that it contains both
-  choices, enter its code in the installed PWA, verify the PWA reports signed in, then sign out.
-  Confirm separately that the link still signs in to the browser.
+- Independent review approved the change. PR #70 merged into `main` on 2026-09-22; CI and
+  Vercel checks passed. The production URL now serves the code-entry interface.
+- Real installed-iPhone validation remains: request one message, confirm that it contains both
+  choices, enter its code in the installed PWA, verify that PWA reports signed in, then sign out.
+  Confirm separately that the link still signs in to the browser. Do not uninstall the PWA or
+  clear browser data during this test.
 
 ## Scope and limitations
 
@@ -52,8 +53,7 @@ identifier, browser key, service-role key or provider response in the template o
 - Email delivery, code expiry and rate limits remain controlled by Supabase.
 - A browser link cannot reliably transfer its session into an iOS home-screen PWA; code entry
   is the supported installed-app path.
-- The Supabase template change and real-device validation remain dashboard/deployment actions
-  after code review. No production configuration or app deployment is included here.
+- The Supabase template and app deployment are complete; real-device validation remains.
 
 ## Build-in-public note
 
@@ -61,8 +61,7 @@ Threadline's installed phone app can now sign in with a six-digit code from the 
 still supports browser sign-in. Account data remains untouched until the user explicitly
 chooses the existing account-storage controls.
 
-## Exact response to move forward
+## Next release check
 
-Independently review TASK-057, run the complete check, then update the Supabase Magic Link
-template with the reviewed dual code/link body and validate both paths on a Preview before
-production promotion.
+Validate both sign-in paths on the installed iPhone and browser with a real email. No code or
+login secret needs to be shared with the development team.

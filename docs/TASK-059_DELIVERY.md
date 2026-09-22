@@ -1,5 +1,8 @@
 # TASK-059 — Canvas Bank v1
 
+Status: merged into `main` in PR #72 on 2026-09-22. The integration with PR #71 preserved
+both Canvas navigation and the Review modal background guard. CI and Vercel checks passed.
+
 ## Result
 
 The Canvas navigation item is now **Bank**. It opens a Canvas Bank list instead of immediately
@@ -43,6 +46,9 @@ have distinct names.
 - Independent orchestration review checked lossless migration, guarded account merge, per-canvas
   sessions, and save behavior. After the title autosave follow-up, 405 tests, app/API typechecks,
   and the production build passed again.
+- The integration check against the combined PR #70–72 code passed 412 tests across 23 files,
+  app/API typechecks, and production build. The primary production URL was smoke tested after
+  merge for Bank navigation, the migrated canvas card, and Review editing.
 
 ## Limitations and follow-up work
 

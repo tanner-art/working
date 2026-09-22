@@ -1,7 +1,7 @@
 # TASK-058 — Review Thought Editing and Version History
 
-Status: REVIEW. Owner: Codex. Claude review changes addressed; independent re-review required
-before merge.
+Status: merged into `main` in PR #71 on 2026-09-22. Claude's first review findings were
+addressed and independently checked before release; CI and Vercel checks passed.
 
 ## Goal
 
@@ -48,5 +48,5 @@ CHANGES_REQUESTED with concrete findings. Do not merge.
   290×44 pixels.
 - Claude's first review requested honest handling for non-text sources, close-path draft guards,
   modal focus/background behavior, Escape handling, and a 44-pixel previous-version disclosure.
-  Those findings are addressed in the follow-up commit; re-review remains required.
+  Those findings were addressed in the follow-up commit and independently checked.
 - Existing non-blocking production bundle warning remains (main chunk exceeds 500 kB).
