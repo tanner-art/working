@@ -141,7 +141,7 @@ describe('explicit account session', () => {
     const idea = makeObject({ kind: 'idea', originalContent: 'Original idea', source: 'text', confidence: .9, interpretation: { summary: 'Idea', rationale: 'Explicit', suggestedKind: 'idea' } })
     const proposal = makeObject({ kind: 'action', originalContent: 'Maybe do this', source: 'text', confidence: .5, interpretation: { summary: 'Proposal', rationale: 'Uncertain', suggestedKind: 'action' } })
     const confirmed = confirmObject({ ...idea, context: 'Business' }, 'idea')
-    const data = accountData({ objects: [confirmed, proposal], canvas: [{ id: 'node', type: 'text', text: 'Canvas evidence', x: 1, y: 2 }] }, { ...defaultSettings, displayName: 'Me', startPage: 'canvas' }, { enabled: true, confirmedAt: '2026-09-15T07:00:00Z' })
+    const data = accountData({ objects: [confirmed, proposal], canvas: [{ id: 'node', type: 'text', text: 'Canvas evidence', x: 1, y: 2, nodeVariant: 'bulleted-list' }] }, { ...defaultSettings, displayName: 'Me', startPage: 'canvas' }, { enabled: true, confirmedAt: '2026-09-15T07:00:00Z' })
     const db = database(); await db.adapter.write('a', data, null)
     const loaded = (await createAccountSession(db.adapter, 'a', () => 'a').open())
     expect(loaded.data).toEqual(data)
@@ -149,6 +149,7 @@ describe('explicit account session', () => {
     expect(bankObjects(loaded.state.objects).Business.map(o => o.id)).toContain(confirmed.id)
     expect(bankObjects(loaded.state.objects)).toEqual(bankObjects(legacyUiProjection(data.model).objects))
     expect(loaded.state.canvas).toEqual(data.model.canvas)
+    expect(loaded.state.canvas[0]).toMatchObject({ text: 'Canvas evidence', nodeVariant: 'bulleted-list' })
   })
   it('blocks writes and stale load completion after logout/account switching', async () => {
     const db = database(); let user: string | undefined = 'a'

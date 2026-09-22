@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CanvasElement, CanvasViewport } from './domain'
-import { newCanvasElement } from './canvasDocument'
+import { newCanvasElement, toggleCanvasNodeVariant } from './canvasDocument'
 import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
@@ -129,6 +129,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const groups = canvasGroups(elements)
   const selectedElement = selected ? positioned(selected) : undefined
   const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
+  const showBulletedText = (item: CanvasElement) => item.nodeVariant === 'bulleted-list'
+    ? (item.text ?? '').split('\n').map(line => line ? `• ${line}` : '').join('\n')
+    : item.text ?? ''
+  const readBulletedText = (item: CanvasElement, text: string) => item.nodeVariant === 'bulleted-list'
+    ? text.split('\n').map(line => line.startsWith('• ') ? line.slice(2) : line).join('\n')
+    : text
   const branchSelected = () => {
     if (!selectedElement || selectedElement.type === 'arrow') return
     const branch = branchCanvasChild(elements, selectedElement.id)
@@ -160,6 +166,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
     </select></label>
     <button disabled={!selectedElement || selectedElement.type === 'arrow'} onClick={branchSelected}>Branch child</button>
+    <button disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
     <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
     <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
     <button disabled={!selected} onClick={removeSelected}>Delete</button>
@@ -204,7 +211,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </span>
     <span>
     </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea value={item.text ?? ''} aria-label="Block text" onFocus={() => { if (selected !== item.id) setEditMode(false); setSelected(item.id) }} onChange={event => onText(item.id, event.target.value)} onBlur={onFinishText} onPointerDown={event => event.stopPropagation()} />
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (selected !== item.id) setEditMode(false); setSelected(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => event.stopPropagation()} />
     {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
     </div> })}</div>
     </div>
