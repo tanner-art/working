@@ -18,6 +18,67 @@ def write_lines(path, lines):
 
 
 class RedactionTests(unittest.TestCase):
+    def test_report_redacts_config_and_state_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'private-host-state'
+            state.mkdir()
+            report = fd.build_report('/Users/alice/private/config.json', {'state': str(state)}, now=1000.0)
+            dumped = json.dumps(report)
+            self.assertIsNone(report['config_path'])
+            self.assertIsNone(report['state_dir'])
+            self.assertNotIn('/Users/alice/private/config.json', dumped)
+            self.assertNotIn(str(state), dumped)
+
+    def test_report_sanitizes_issue_and_worker_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'issue-1.json', {
+                'issue': 1, 'status': 'failed', 'agent': 'codex-a', 'time': 900.0,
+                'error': 'pnpm failed at /Users/alice/repo; token https://host.internal/x?secret=yes',
+            })
+            report = fd.build_report('cfg.json', {'state': str(state), 'agents': {'codex-a': {}}}, now=1000.0)
+            dumped = json.dumps(report)
+            self.assertEqual(report['issues'][0]['error'], 'validation failed')
+            self.assertEqual(report['workers'][0]['last_failure']['error'], 'validation failed')
+            self.assertNotIn('/Users/alice/repo', dumped)
+            self.assertNotIn('host.internal', dumped)
+            self.assertNotIn('secret=yes', dumped)
+
+    def test_only_canonical_https_github_pr_urls_are_retained(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'issue-1.json', {
+                'issue': 1, 'status': 'review', 'pr': 'https://github.com/acme/app/pull/7?token=secret#top',
+            })
+            write_json(state / 'issue-2.json', {
+                'issue': 2, 'status': 'review', 'pr': 'https://evil.example/acme/app/pull/8',
+            })
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertEqual(report['issues'][0]['pr'], 'https://github.com/acme/app/pull/7')
+            self.assertIsNone(report['issues'][1]['pr'])
+            self.assertNotIn('token=secret', json.dumps(report))
+
+    def test_path_like_display_identifiers_become_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            config = {'state': str(state), 'agents': {
+                '/Users/alice/worker': {
+                    'provider': '/opt/provider', 'model': 'gpt-5-codex', 'label': '/private/label'
+                }
+            }}
+            report = fd.build_report('cfg.json', config, now=1000.0)
+            self.assertEqual(report['workers'], [])
+            write_json(state / 'usage.json', {
+                '/Users/alice/worker': {'provider': '/opt/provider', 'model': '/private/model', 'used_percent': 10}
+            })
+            usage = fd.load_usage(state, fd.usage_policy({}))
+            self.assertEqual(usage['workers'][0]['worker'], 'unknown-worker')
+            self.assertIsNone(usage['workers'][0]['provider'])
+            self.assertIsNone(usage['workers'][0]['model'])
+
     def test_report_never_includes_agent_command_or_env(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'state'
@@ -499,7 +560,7 @@ class WorkerStateTests(unittest.TestCase):
         workers = fd.build_worker_views(agent_defs, records, events=[], heartbeat={}, now=600.0)
         self.assertEqual(workers[0]['state'], 'idle')
         self.assertEqual(workers[0]['last_failure']['issue'], 3)
-        self.assertEqual(workers[0]['last_failure']['error'], 'pnpm check failed (1); see log')
+        self.assertEqual(workers[0]['last_failure']['error'], 'validation failed')
 
     def test_worker_with_no_activity_is_idle_with_reason(self):
         agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}
@@ -655,6 +716,8 @@ class HttpRouteTests(unittest.TestCase):
                     'longest_blocked_duration', 'usage', 'capacity_note'):
             self.assertIn(key, parsed)
         self.assertEqual(parsed['workers'][0]['provider'], 'anthropic')
+        self.assertIsNone(parsed['config_path'])
+        self.assertIsNone(parsed['state_dir'])
 
     def test_unknown_route_is_404(self):
         status, content_type, body = self._get('/does-not-exist')

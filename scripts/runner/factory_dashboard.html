@@ -395,7 +395,7 @@
 
   function render(report) {
     document.getElementById('generated-at').textContent = 'Generated ' + report.generated_at
-      + ' — state dir: ' + report.state_dir + (report.state_dir_found ? '' : ' (NOT FOUND)');
+      + ' — state directory ' + (report.state_dir_found ? 'configured' : 'not found');
     renderHeartbeat(report.heartbeat);
     renderWorkers(report.workers);
     document.getElementById('workers-note').textContent =

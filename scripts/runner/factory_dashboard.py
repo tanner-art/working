@@ -81,6 +81,7 @@ needed, rather than inventing a value.
 import argparse
 import json
 import pathlib
+import re
 import sys
 import time
 import urllib.parse
@@ -116,6 +117,48 @@ QUEUE_ENTRY_FIELDS = frozenset(('number', 'title', 'agent', 'readiness', 'status
 _ALLOWED_AGENT_FIELDS = ('provider', 'model', 'label')
 
 HTML_PATH = pathlib.Path(__file__).resolve().parent / 'factory_dashboard.html'
+_SAFE_PR_HOST = 'github.com'
+_PATH_LIKE = re.compile(r'(^~(?:/|\\)|^[A-Za-z]:[\\/]|^/|[\\])')
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def safe_display_identifier(value, *, fallback=None):
+    """Keep ordinary labels while rejecting path-like or control-bearing data."""
+    if not isinstance(value, str):
+        return fallback
+    value = value.strip()
+    if not value or len(value) > 120 or _CONTROL_CHARS.search(value) or _PATH_LIKE.search(value):
+        return fallback
+    return value
+
+
+def safe_pr_url(value):
+    """Return only canonical HTTPS GitHub PR URLs, without query/fragment data."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+    except ValueError:
+        return None
+    if parsed.scheme != 'https' or parsed.hostname != _SAFE_PR_HOST or parsed.username or parsed.password:
+        return None
+    if not re.fullmatch(r'/[^/]+/[^/]+/pull/[1-9][0-9]*(?:/[^/]*)?', parsed.path):
+        return None
+    return f'https://{_SAFE_PR_HOST}{parsed.path}'
+
+
+def safe_public_error(value):
+    """Expose a coarse failure reason without returning raw subprocess telemetry."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    lower = value.lower()
+    if 'timeout' in lower or 'timed out' in lower:
+        return 'agent timed out'
+    if 'auth' in lower or 'credential' in lower or 'login' in lower:
+        return 'authentication failed'
+    if 'pnpm' in lower or 'npm' in lower or 'yarn' in lower or 'validation' in lower:
+        return 'validation failed'
+    return 'operation failed'
 
 
 def format_duration(seconds):
@@ -147,15 +190,16 @@ def agent_definitions(config):
     if not isinstance(agents, dict):
         return result
     for key, value in agents.items():
-        if not isinstance(key, str) or not key:
+        safe_key = safe_display_identifier(key)
+        if safe_key is None:
             continue
-        entry = {'key': key, 'provider': None, 'model': None, 'label': None}
+        entry = {'key': safe_key, 'provider': None, 'model': None, 'label': None}
         if isinstance(value, dict):
             for field in _ALLOWED_AGENT_FIELDS:
                 v = value.get(field)
                 if isinstance(v, str) and v:
-                    entry[field] = v
-        result[key] = entry
+                    entry[field] = safe_display_identifier(v)
+        result[safe_key] = entry
     return result
 
 
@@ -265,9 +309,9 @@ def load_usage(state_dir, policy):
         observed_at = entry.get('observed_at') if isinstance(entry.get('observed_at'), str) else None
         reset_at = entry.get('reset_at') if isinstance(entry.get('reset_at'), str) else None
         result.append({
-            'worker': worker_key,
-            'provider': entry.get('provider') if isinstance(entry.get('provider'), str) else None,
-            'model': entry.get('model') if isinstance(entry.get('model'), str) else None,
+            'worker': safe_display_identifier(worker_key, fallback='unknown-worker'),
+            'provider': safe_display_identifier(entry.get('provider')),
+            'model': safe_display_identifier(entry.get('model')),
             'used_percent': used_percent,
             'observed_at': observed_at,
             'observed_at_seconds': _parse_iso(observed_at),
@@ -305,11 +349,11 @@ def load_issue_records(state_dir):
             'issue': issue_number,
             'status': status if isinstance(status, str) and status else 'unknown',
             'time': rec_time if isinstance(rec_time, (int, float)) else None,
-            'agent': data.get('agent') if isinstance(data.get('agent'), str) else None,
-            'branch': data.get('branch') if isinstance(data.get('branch'), str) else None,
+            'agent': safe_display_identifier(data.get('agent')),
+            'branch': safe_display_identifier(data.get('branch')),
             'commit': data.get('commit') if isinstance(data.get('commit'), str) else None,
-            'pr': data.get('pr') if isinstance(data.get('pr'), str) else None,
-            'error': data.get('error') if isinstance(data.get('error'), str) else None,
+            'pr': safe_pr_url(data.get('pr')),
+            'error': safe_public_error(data.get('error')),
             'diff_stat': diff_stat,
         }
     return records, corrupt
@@ -635,7 +679,7 @@ def completion_metadata(record):
         'issue': record['issue'],
         'time_iso': fstatus.iso(record['time']),
         'commit': record.get('commit'),
-        'pr': record.get('pr'),
+        'pr': safe_pr_url(record.get('pr')),
         'validation_result': validation_result(record),
     }
 
@@ -656,8 +700,8 @@ def build_issue_views(records, events, now):
             'agent': record['agent'],
             'branch': record['branch'],
             'commit': record['commit'],
-            'pr': record['pr'],
-            'error': record['error'],
+            'pr': safe_pr_url(record['pr']),
+            'error': safe_public_error(record['error']),
             'started_at_iso': fstatus.iso(record['time']),
             'completed_at_iso': completed_at,
             'elapsed_seconds': elapsed,
@@ -744,7 +788,7 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
                 if latest_record is not None and latest_record['status'] == FAILED_STATUS:
                     worker['last_failure'] = {
                         'issue': latest_record['issue'],
-                        'error': latest_record['error'],
+                        'error': safe_public_error(latest_record['error']),
                         'time_iso': fstatus.iso(record_time),
                     }
             else:
@@ -773,7 +817,7 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
                 worker['state'] = 'idle'
                 worker['last_failure'] = {
                     'issue': latest_record['issue'],
-                    'error': latest_record['error'],
+                    'error': safe_public_error(latest_record['error']),
                     'time_iso': fstatus.iso(record_time),
                 }
             else:
@@ -815,8 +859,9 @@ def build_report(config_path, config, state_dir_override=None, now=None,
 
     return {
         'generated_at': fstatus.iso(now),
-        'config_path': str(config_path),
-        'state_dir': str(state_dir),
+        # Keep the keys for API compatibility without disclosing host paths.
+        'config_path': None,
+        'state_dir': None,
         'state_dir_found': state_dir.is_dir(),
         'heartbeat': heartbeat,
         'workers': workers,
