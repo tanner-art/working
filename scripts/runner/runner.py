@@ -385,6 +385,15 @@ def build_agent_environment(base_env, configured_env, path):
     return allowed
 
 
+def run_repository_validation(state, pnpm, worktree, env, log, run_command=None):
+    """Run the expensive repository check in one cross-lane validation slot."""
+    if run_command is None:
+        run_command = run
+    with file_lock(pathlib.Path(state) / 'validation.lock'):
+        return run_command([pnpm, 'check'], cwd=worktree, env=env,
+                           timeout=600, log=log)
+
+
 def refresh_queue_snapshot(state, fetch_open_issues):
     """Best-effort, metadata-only queue staging that cannot affect dispatch."""
     try:
@@ -608,7 +617,7 @@ Assigned instructions:
                          base=base, worktree_path=str(wt),
                          validation_result='pending',
                          elapsed_seconds=time.time() - started_at)
-            run([pnpm,'check'],cwd=wt,env=env,timeout=600,log=log)
+            run_repository_validation(state, pnpm, wt, env, log)
             verify_changes()
             g('diff','--check',cwd=wt)
             g('add','--',*body['paths'],cwd=wt)

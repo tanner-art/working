@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from runner import (build_agent_environment, preserve_interrupted_attempt,
-                    publish_completion_telemetry, refresh_queue_snapshot, select,
-                    usage_policy_enabled)
+                    publish_completion_telemetry, refresh_queue_snapshot,
+                    run_repository_validation, select, usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -36,6 +36,69 @@ class QueueTests(unittest.TestCase):
                                'USER': 'launch-owner'})
 
 class ProcessTests(unittest.TestCase):
+    def test_shared_validation_gate_serializes_checks_but_not_agent_stages(self):
+        import pathlib, tempfile, threading, time
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            state.mkdir()
+            agent_barrier = threading.Barrier(2)
+            counter_lock = threading.Lock()
+            counts = {'agent': 0, 'agent_peak': 0,
+                      'validation': 0, 'validation_peak': 0}
+            failures = []
+
+            def validate(args, **kwargs):
+                self.assertEqual(args, ['pnpm', 'check'])
+                with counter_lock:
+                    counts['validation'] += 1
+                    counts['validation_peak'] = max(
+                        counts['validation_peak'], counts['validation'])
+                time.sleep(0.04)
+                with counter_lock:
+                    counts['validation'] -= 1
+
+            def lane(name):
+                try:
+                    with counter_lock:
+                        counts['agent'] += 1
+                        counts['agent_peak'] = max(counts['agent_peak'],
+                                                   counts['agent'])
+                    agent_barrier.wait(timeout=1)
+                    time.sleep(0.02)
+                    with counter_lock:
+                        counts['agent'] -= 1
+                    run_repository_validation(
+                        state, 'pnpm', pathlib.Path(directory) / name,
+                        {'PATH': '/bin'}, state / f'{name}.log', validate)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            threads = [threading.Thread(target=lane, args=(name,))
+                       for name in ('codex-a', 'claude')]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertEqual(counts['agent_peak'], 2)
+            self.assertEqual(counts['validation_peak'], 1)
+
+    def test_validation_gate_releases_lock_after_check_failure(self):
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory)
+            def fail(*args, **kwargs):
+                raise RuntimeError('validation failed')
+            with self.assertRaisesRegex(RuntimeError, 'validation failed'):
+                run_repository_validation(state, 'pnpm', state, {},
+                                          state / 'first.log', fail)
+            calls = []
+            run_repository_validation(
+                state, 'pnpm', state, {}, state / 'second.log',
+                lambda args, **kwargs: calls.append(args))
+            self.assertEqual(calls, [['pnpm', 'check']])
+
     def test_timeout_preserves_output(self):
         import tempfile,pathlib,sys
         from runner import run
