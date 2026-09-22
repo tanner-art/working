@@ -39,7 +39,8 @@ describe('TASK-002 migration', () => {
     expect(decoded.captures[0]).toMatchObject({ originalContent: original.objects[0].originalContent, evidence: 'text-only' })
     expect(decoded.semanticObjects[0]).not.toHaveProperty('originalContent')
     expect(decoded.relationships[0]).toMatchObject({ sourceId: 'original', targetId: 'missing-old-object', scope: 'semantic' })
-    expect(reconcileLegacyUi(legacyUiProjection(decoded))).toEqual(decoded)
+    const projected = legacyUiProjection(decoded)
+    expect(reconcileLegacyUi(projected)).toEqual({ ...decoded, canvasBank: projected.canvasBank })
     expect(original).toEqual(before)
   })
 
@@ -132,7 +133,8 @@ describe('TASK-002 migration', () => {
       const model = migrateLegacyState(legacy([thought({ kind, status })]))
       expect(model.interpretations[0].legacy.status).toBe(status)
       expect(legacyUiProjection(model).objects[0].status).toBe('review')
-      expect(reconcileLegacyUi(legacyUiProjection(model))).toEqual(model)
+      const projected = legacyUiProjection(model)
+      expect(reconcileLegacyUi(projected)).toEqual({ ...model, canvasBank: projected.canvasBank })
     }
   })
 

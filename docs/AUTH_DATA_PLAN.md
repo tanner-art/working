@@ -156,7 +156,7 @@ Import creates an account row only when none exists; it never replaces an existi
 Load validates the complete account document before opening it in memory. Neither action
 writes or deletes the device’s local thoughts, profile or digest preferences.
 
-After activation, thoughts, Review decisions, Bank context folders, canvas, settings and
+After activation, thoughts, Review decisions, Thought folders, the Canvas Bank, settings and
 digest preference save together. The payload preserves the existing schema-v2 model and
 its AppState projection, including raw captures and interpretation history. Review and Bank
 remain projections of that same model, not separate cloud records. Exports include prior
@@ -165,6 +165,13 @@ a stale device cannot silently replace newer account changes. Errors stop automa
 and offer retry/export. Loading again is explicit, with a warning to export unsaved work.
 Account changes pause the workspace rather than putting account content into local storage.
 Returning to local data or reloading leaves the account copy intact and restores local mode.
+
+TASK-059 keeps all current canvas documents inside this same revision-guarded JSON payload. A
+same-id title or element conflict stops account merge; view-position-only differences keep the
+destination account viewport. This is safe for the initial Bank slice but rewrites the complete row
+on each save. Storage size must be measured before duplicate, rich thumbnail, or high-volume canvas
+features ship; splitting canvas documents into separately revisioned rows is a follow-up if measured
+growth requires it.
 
 ### Deployment contract (generic; no project identifiers or credentials)
 

@@ -31,7 +31,7 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     expect(state).toEqual(before)
     expect(saveState(state)).toBeUndefined()
     expect(setItem.mock.calls[1][0]).toBe(key)
-    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(migrateLegacyState(before))
+    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(serializeState(before))
   })
 
   it('loads saved work again after a transient read failure clears', () => {
@@ -82,7 +82,7 @@ describe('TASK-024 shape persistence', () => {
     const reloaded = loadStateResult()
     expect(reloaded.error).toBeUndefined()
     expect(reloaded.state.canvas).toEqual(canvas)
-    expect(reloaded.state.model).toEqual(loaded.state.model)
+    expect(reloaded.state.model).toEqual({ ...loaded.state.model, canvasBank: loaded.state.canvasBank })
     expect(reloaded.state.model?.semanticObjects).toEqual([])
     expect(reloaded.state.canvas[1]).not.toHaveProperty('shape')
   })
