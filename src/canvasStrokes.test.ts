@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canvasStrokeIntersectsLasso, canvasStrokeLength, isCanvasPointInLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, projectCanvasStroke, smoothCanvasStrokePoints } from './canvasStrokes'
+import { applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, canvasStrokeLength, createCanvasStrokeSmoothingRefinement, isCanvasPointInLasso, isCanvasStrokeRefinement, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, projectCanvasStroke, smoothCanvasStrokePoints } from './canvasStrokes'
 
 describe('canvas stroke foundation', () => {
   it('copies finite, ordered canvas-space samples without resampling them', () => {
@@ -46,6 +46,31 @@ describe('canvas stroke foundation', () => {
   it('refuses malformed source data and unknown refinement algorithms', () => {
     expect(smoothCanvasStrokePoints([{ x: 0, y: 0 }, { x: NaN, y: 1 }])).toBeNull()
     expect(projectCanvasStroke([{ x: 0, y: 0 }, { x: 1, y: 1 }], { kind: 'smoothed', algorithm: 'unknown-v1' as 'moving-average-v1' })).toBeNull()
+  })
+
+  it('creates only JSON-safe smoothing metadata that leaves source samples unchanged', () => {
+    const raw = [{ x: 0, y: 0 }, { x: 5, y: 11 }, { x: 10, y: 0 }]
+    const refinement = createCanvasStrokeSmoothingRefinement('stroke-1', raw, '2026-09-22T12:00:00.000Z')
+    expect(refinement).toEqual({
+      sourceId: 'stroke-1', gesture: 'explicit-smoothing', appliedAt: '2026-09-22T12:00:00.000Z',
+      algorithm: 'moving-average-v1', version: 1, result: { kind: 'smoothed', algorithm: 'moving-average-v1' },
+    })
+    expect(JSON.parse(JSON.stringify(refinement))).toEqual(refinement)
+    expect(isCanvasStrokeRefinement(refinement)).toBe(true)
+    expect(raw).toEqual([{ x: 0, y: 0 }, { x: 5, y: 11 }, { x: 10, y: 0 }])
+    expect(createCanvasStrokeSmoothingRefinement('', raw, '2026-09-22T12:00:00.000Z')).toBeNull()
+    expect(createCanvasStrokeSmoothingRefinement('stroke-1', raw, 'not-a-date')).toBeNull()
+    expect(isCanvasStrokeRefinement({ ...refinement!, version: 2 })).toBe(false)
+  })
+
+  it('applies one reversible smoothing projection without accepting a stale second preview', () => {
+    const stroke = { id: 'stroke-1', rawPoints: [{ x: 0, y: 0 }, { x: 5, y: 11 }, { x: 10, y: 0 }] }
+    const smoothed = applyCanvasStrokeSmoothing(stroke, '2026-09-22T12:00:00.000Z')!
+    expect(smoothed.rawPoints).toEqual(stroke.rawPoints)
+    expect(smoothed.rawPoints).toBe(stroke.rawPoints)
+    expect(smoothed.projection).toEqual({ kind: 'smoothed', algorithm: 'moving-average-v1' })
+    expect(smoothed.refinements).toHaveLength(1)
+    expect(applyCanvasStrokeSmoothing(smoothed, '2026-09-22T12:01:00.000Z')).toBeNull()
   })
 
   it('selects strokes contained in, crossing, or touching a closed lasso', () => {

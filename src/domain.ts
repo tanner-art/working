@@ -1,5 +1,5 @@
-import type { CanvasStrokePoint } from './canvasStrokes'
-export type { CanvasStrokePoint } from './canvasStrokes'
+import type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
+export type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
 
 /** Legacy UI vocabulary only. Persisted SemanticKind deliberately excludes reminders. */
 export type ObjectKind = 'idea' | 'action' | 'reminder' | 'project' | 'commitment' | 'person' | 'reference' | 'objective'
@@ -86,6 +86,10 @@ export interface CanvasElement {
   curveHandle?: CanvasCurveHandle
   /** Present only on a freehand mark. These are the authoritative raw samples. */
   rawPoints?: CanvasStrokePoint[]
+  /** Active local presentation; omitted means the preserved raw stroke is shown. */
+  projection?: CanvasStrokeProjection
+  /** Accepted local refinements; rawPoints remain authoritative and unchanged. */
+  refinements?: CanvasStrokeRefinement[]
 }
 export interface CanvasViewport { x: number; y: number; scale: number }
 export interface CanvasRecord {
