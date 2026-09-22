@@ -142,7 +142,8 @@ class LaunchdInstallerTests(unittest.TestCase):
             def run(args, **kwargs):
                 calls.append(args)
                 if args[1] == 'print':
-                    return subprocess.CompletedProcess(args, 1)
+                    loaded = args[-1].endswith('.codex-a')
+                    return subprocess.CompletedProcess(args, 0 if loaded else 1)
                 if args[1] == 'bootstrap' and 'runner.codex-b' in args[-1]:
                     raise subprocess.CalledProcessError(1, args)
                 return subprocess.CompletedProcess(args, 0)
@@ -151,7 +152,9 @@ class LaunchdInstallerTests(unittest.TestCase):
                                   replace_current=True, state=state, home=home, run=run, uid=1)
             for label, original in originals.items():
                 self.assertEqual(installer.label_path(label, home).read_bytes(), original)
-            self.assertTrue(any(call[1] == 'bootstrap' and call[-1].endswith('.codex-a.plist') for call in calls))
+            restored_bootstraps = [call[-1] for call in calls if call[1] == 'bootstrap']
+            self.assertEqual(sum(path.endswith('.codex-a.plist') for path in restored_bootstraps), 2)
+            self.assertFalse(any(path.endswith('.claude.plist') for path in restored_bootstraps))
 
     def test_replace_flags_are_mutually_exclusive(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -181,7 +184,8 @@ class LaunchdInstallerTests(unittest.TestCase):
             def run(args, **kwargs):
                 calls.append(args)
                 if args[1] == 'print':
-                    return subprocess.CompletedProcess(args, 1)
+                    loaded = args[-1].endswith('life.threadline.runner')
+                    return subprocess.CompletedProcess(args, 0 if loaded else 1)
                 if args[1] == 'bootstrap' and 'runner.codex-b' in args[-1]:
                     raise subprocess.CalledProcessError(1, args)
                 return subprocess.CompletedProcess(args, 0)

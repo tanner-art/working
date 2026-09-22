@@ -127,9 +127,11 @@ def install(plan, *, mode, replace_mode, state, replace_current=False, home=None
     old_mode = 'lanes' if mode == 'serial' else 'serial'
     old_labels = labels_for_mode(old_mode)
     target_loaded = [label for label in target_labels if is_loaded(label, uid, run)]
+    old_loaded = [label for label in old_labels if is_loaded(label, uid, run)]
     target_conflicts = [label for label, destination in destinations.items() if destination.exists() or label in target_loaded]
     old_paths = {label: label_path(label, home) for label in old_labels}
     old_conflicts = [label for label, destination in old_paths.items() if destination.exists() or is_loaded(label, uid, run)]
+    loaded_before = set(target_loaded) | set(old_loaded)
     if target_conflicts and not replace_current:
         raise ValueError('existing service preserved: ' + ', '.join(target_conflicts))
     if replace_current and not target_conflicts:
@@ -191,6 +193,8 @@ def install(plan, *, mode, replace_mode, state, replace_current=False, home=None
         for label, backup in backups.items():
             destination = backup_destinations[label]
             shutil.copy2(backup, destination)
+            if label not in loaded_before:
+                continue
             try:
                 run(['launchctl', 'bootstrap', f'gui/{uid}', str(destination)], check=True)
                 restored.append(label)
