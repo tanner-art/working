@@ -365,10 +365,10 @@ function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry:
     {state.status === 'unconfigured' && <button className="secondary" disabled>Log in with email — unavailable</button>}
     {state.status === 'signed-out' && <form className="account-login" onSubmit={event => { event.preventDefault(); setEmail(email.trim()); setCode(''); void auth.act('login', email) }}>
       <label>Email address<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /></label>
-      <button className="primary">Email me a sign-in link</button>
+      <button className="primary">Email me a sign-in code and link</button>
     </form>}
-    {state.status === 'signed-out' && state.emailCodeSent && <form className="account-code" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}>
-      <p>Using the home-screen app? Enter the code from the same email here so this app signs in directly.</p>
+    {state.status === 'signed-out' && <form className="account-code" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}>
+      <p>Already have a code? Enter the email address above and the six-digit code here to sign in to this app, even if you requested the email in a browser.</p>
       <label>Six-digit code<input type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
       <button className="primary">Sign in with code</button>
     </form>}
