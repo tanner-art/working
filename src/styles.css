@@ -363,7 +363,9 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .canvas-tools::-webkit-scrollbar { display: none; }
 .canvas-strokes { position: absolute; width: 2000px; height: 1400px; overflow: visible; pointer-events: none; }
 .canvas-stroke { fill: none; stroke: #344d41; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.canvas-stroke.selected { stroke: #507737; stroke-width: 5; filter: drop-shadow(0 0 2px #99c667); }
 .canvas-stroke-preview { opacity: .65; }
+.canvas-lasso-preview { fill: #99c66722; stroke: #507737; stroke-width: 2; stroke-dasharray: 7 5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 @media (max-width: 720px) {
   .canvas-tools { min-height: 44px; }
   .canvas-properties.edit-mode { max-height: 104px; }
