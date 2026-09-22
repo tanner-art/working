@@ -1,6 +1,6 @@
 import type { CanvasCurveHandle, CanvasElement, CanvasPerimeterAnchor } from './domain'
 
-export type CanvasShape = Exclude<CanvasElement['type'], 'arrow'> | NonNullable<CanvasElement['shape']>
+export type CanvasShape = Exclude<CanvasElement['type'], 'arrow' | 'freehand'> | NonNullable<CanvasElement['shape']>
 export const canvasShapeLabels: Record<CanvasShape, string> = { text: 'Text block', rectangle: 'Rectangle', 'rounded-rectangle': 'Rounded rectangle', ellipse: 'Ellipse', diamond: 'Diamond', container: 'Group container' }
 export const canvasNodeShape = (node: CanvasElement): CanvasShape => node.type === 'container' ? 'container' : node.shape ?? 'text'
 export type ConnectionPath = NonNullable<CanvasElement['connectionPath']>
