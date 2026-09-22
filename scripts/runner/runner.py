@@ -47,7 +47,7 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
 
 
 def save(path, data):
-    temp = path.with_suffix('.tmp')
+    temp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
     temp.write_text(json.dumps(data, indent=2)+'\n')
     temp.replace(path)
 
@@ -64,6 +64,83 @@ def file_lock(path, blocking=True):
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)
         handle.close()
+
+
+EVENT_FIELDS = {
+    'timestamp', 'issue', 'task_id', 'title', 'agent', 'status', 'base',
+    'worktree_path', 'commit', 'pr', 'validation_result', 'elapsed_seconds',
+    'files_changed', 'additions', 'deletions',
+}
+
+
+def append_event(state, *, issue, task_id=None, title=None, agent=None,
+                 status, base=None, worktree_path=None, commit=None, pr=None,
+                 validation_result=None, elapsed_seconds=None,
+                 files_changed=None, additions=None, deletions=None,
+                 timestamp=None):
+    """Append one safe, single-line event while holding a short process lock."""
+    event = {
+        'timestamp': time.time() if timestamp is None else timestamp,
+        'issue': issue,
+        'task_id': task_id,
+        'title': title,
+        'agent': agent,
+        'status': status,
+        'base': base,
+        'worktree_path': worktree_path,
+        'commit': commit,
+        'pr': pr,
+        'validation_result': validation_result,
+        'elapsed_seconds': elapsed_seconds,
+        'files_changed': files_changed,
+        'additions': additions,
+        'deletions': deletions,
+    }
+    event = {key: value for key, value in event.items()
+             if key in EVENT_FIELDS and value is not None}
+    with file_lock(state / 'events.lock'):
+        with (state / 'events.jsonl').open('a') as output:
+            output.write(json.dumps(event, separators=(',', ':')) + '\n')
+            output.flush()
+            os.fsync(output.fileno())
+    return event
+
+
+def write_heartbeat(state, *, status, issue=None, task_id=None,
+                    start_time=None, agent=None, worker=None):
+    """Atomically publish one lane's current safe status."""
+    name = 'heartbeat.json' if not agent else f'heartbeat-{agent}.json'
+    data = {
+        'time': time.time(),
+        'status': status,
+        'issue': issue,
+        'task': task_id,
+        'start_time': start_time,
+    }
+    if worker is not None:
+        data['worker'] = worker
+    save(state / name, data)
+    return data
+
+
+def aggregate_numstat(lines):
+    """Aggregate git --numstat lines; binary files count but add zero lines."""
+    files_changed = additions = deletions = 0
+    for line in lines.splitlines() if isinstance(lines, str) else lines:
+        fields = line.rstrip('\n').split('\t', 2)
+        if len(fields) < 3:
+            continue
+        files_changed += 1
+        try:
+            additions += int(fields[0])
+        except ValueError:
+            pass
+        try:
+            deletions += int(fields[1])
+        except ValueError:
+            pass
+    return {'files_changed': files_changed, 'additions': additions,
+            'deletions': deletions}
 
 
 def paths_overlap(left, right):
@@ -179,9 +256,14 @@ def main():
         lock = open(state/'runner.lock','a')
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: return
-    save(state/'heartbeat.json',{'time':time.time(),'pid':os.getpid(),'status':'polling'})
+    worker = 'serial' if not args.agent else None
+    heartbeat_agent = args.agent
+    write_heartbeat(state, status='polling', agent=heartbeat_agent,
+                    worker=worker)
     for issue in sorted(issues,key=lambda i:i['number']):
         n=issue['number']; record=state/f'issue-{n}.json'; data=None
+        body={}; agent=None
+        started_at = None
         try:
             agent,body=select(issue,c['allowed_authors'])
             if args.agent and agent != args.agent: continue
@@ -196,6 +278,12 @@ def main():
                 print(json.dumps({'issue':n,'status':'deferred','reason':'overlapping active paths'}))
                 continue
             if data is None: continue
+            started_at = data['time']
+            write_heartbeat(state, status='starting', issue=n,
+                            task_id=body['task'], start_time=started_at,
+                            agent=heartbeat_agent, worker=worker)
+            append_event(state, issue=n, task_id=body['task'],
+                         title=issue.get('title'), agent=agent, status='starting')
             # Fetch and worktree-add touch shared Git metadata; serialize only these operations.
             with file_lock(state / 'git.lock'):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
@@ -225,6 +313,13 @@ Assigned instructions:
 {body['instructions']}
 '''
             data['status']='agent';save(record,data)
+            write_heartbeat(state, status='agent', issue=n,
+                            task_id=body['task'], start_time=started_at,
+                            agent=heartbeat_agent, worker=worker)
+            append_event(state, issue=n, task_id=body['task'],
+                         title=issue.get('title'), agent=agent, status='agent',
+                         base=base, worktree_path=str(wt),
+                         elapsed_seconds=time.time() - started_at)
             run(config['command'],cwd=wt,env=agentenv,timeout=c.get('agent_timeout',1800),log=log,input=prompt)
             def verify_changes():
                 if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
@@ -235,6 +330,14 @@ Assigned instructions:
                 if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
             verify_changes()
             data['status']='validation';save(record,data)
+            write_heartbeat(state, status='validation', issue=n,
+                            task_id=body['task'], start_time=started_at,
+                            agent=heartbeat_agent, worker=worker)
+            append_event(state, issue=n, task_id=body['task'],
+                         title=issue.get('title'), agent=agent, status='validation',
+                         base=base, worktree_path=str(wt),
+                         validation_result='pending',
+                         elapsed_seconds=time.time() - started_at)
             run([pnpm,'check'],cwd=wt,env=env,timeout=600,log=log)
             verify_changes()
             g('diff','--check',cwd=wt)
@@ -247,22 +350,42 @@ Assigned instructions:
             if not committed or any(p not in body['paths'] for p in committed) or g('status','--porcelain',cwd=wt):
                 raise ValueError('Unexpected committed paths or dirty state; not pushed')
             g('show','--format=','--check','HEAD',cwd=wt)
+            stats = aggregate_numstat(g('diff-tree','--no-commit-id','--numstat','-r',
+                                        'HEAD',cwd=wt))
             save(record,data)
             g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
             data['status']='review';save(record,data)
+            write_heartbeat(state, status='review', issue=n,
+                            task_id=body['task'], start_time=started_at,
+                            agent=heartbeat_agent, worker=worker)
+            append_event(state, issue=n, task_id=body['task'],
+                         title=issue.get('title'), agent=agent, status='review',
+                         base=base, worktree_path=str(wt), commit=data['commit'],
+                         pr=data['pr'], validation_result='passed',
+                         elapsed_seconds=time.time() - started_at, **stats)
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:running','--add-label','runner:review')
             print(json.dumps(data));break
         except Exception as e:
             if data is None:
                 data={'issue':n, 'status':'failed', 'time':time.time()}
             data.update(status='failed',error=str(e),time=time.time());save(record,data)
+            if started_at is not None:
+                write_heartbeat(state, status='failed', issue=n,
+                                task_id=body.get('task'), start_time=started_at,
+                                agent=heartbeat_agent, worker=worker)
+            append_event(state, issue=n, task_id=body.get('task'),
+                         title=issue.get('title'), agent=agent,
+                         status='failed', base=data.get('base'),
+                         worktree_path=data.get('worktree'),
+                         validation_result='failed' if started_at is not None else None,
+                         elapsed_seconds=(time.time() - started_at if started_at is not None else None))
             try: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--remove-label','runner:running','--add-label','runner:failed')
             except Exception: pass
             print(json.dumps(data),file=sys.stderr)
             break
-    save(state/'heartbeat.json',{'time':time.time(),'pid':os.getpid(),'status':'idle'})
+    write_heartbeat(state, status='idle', worker=worker, agent=heartbeat_agent)
     if args.agent:
         lane_lock.__exit__(None, None, None)
     else:
