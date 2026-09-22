@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local GitHub issue runner. Never merges or cleans worktrees."""
-import argparse, contextlib, fcntl, json, os, pathlib, re, signal, subprocess, sys, time
+import argparse, contextlib, fcntl, json, os, pathlib, pwd, re, signal, subprocess, sys, time
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 from queue_snapshot import write_queue_snapshot
 
@@ -378,6 +378,10 @@ def build_agent_environment(base_env, configured_env, path):
     allowed = {key: base_env[key] for key in ('HOME', 'TMPDIR') if key in base_env}
     allowed.update(configured_env)
     allowed['PATH'] = path
+    # USER is identity, not agent configuration. Resolve it from the process
+    # owner so neither an inherited nor configured value can impersonate a
+    # different local account while satisfying CLIs that require USER.
+    allowed['USER'] = pwd.getpwuid(os.getuid()).pw_name
     return allowed
 
 

@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from runner import (build_agent_environment, preserve_interrupted_attempt,
                     publish_completion_telemetry, refresh_queue_snapshot, select,
                     usage_policy_enabled)
@@ -23,12 +25,15 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(usage_policy_enabled({'usage_file': 'usage.json'}))
 
     def test_agent_environment_is_allowlisted(self):
-        env = build_agent_environment(
-            {'PATH': 'old', 'HOME': '/home', 'TMPDIR': '/tmp',
-             'OPENAI_API_KEY': 'inherited-secret'},
-            {'CODEX_HOME': '/agent-home'}, '/runner/bin')
+        with patch('runner.os.getuid', return_value=501), \
+                patch('runner.pwd.getpwuid', return_value=SimpleNamespace(pw_name='launch-owner')):
+            env = build_agent_environment(
+                {'PATH': 'old', 'HOME': '/home', 'TMPDIR': '/tmp',
+                 'USER': 'inherited-impostor', 'OPENAI_API_KEY': 'inherited-secret'},
+                {'CODEX_HOME': '/agent-home', 'USER': 'configured-impostor'}, '/runner/bin')
         self.assertEqual(env, {'PATH': '/runner/bin', 'HOME': '/home',
-                               'TMPDIR': '/tmp', 'CODEX_HOME': '/agent-home'})
+                               'TMPDIR': '/tmp', 'CODEX_HOME': '/agent-home',
+                               'USER': 'launch-owner'})
 
 class ProcessTests(unittest.TestCase):
     def test_timeout_preserves_output(self):
