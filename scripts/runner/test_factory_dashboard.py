@@ -81,6 +81,34 @@ class RedactionTests(unittest.TestCase):
 
 
 class MissingOrCorruptDataTests(unittest.TestCase):
+    def test_sanitized_queue_snapshot_supplies_staged_counts_and_age(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'queue.json', {'entries': [
+                {'number': 1, 'title': 'Ready', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': '1970-01-01T00:00:10Z', 'body': 'ignored'},
+                {'number': 2, 'title': 'Review', 'agent': 'codex-b', 'readiness': False, 'status': 'review', 'created_at': '1970-01-01T00:00:20Z'},
+                {'number': 3, 'title': 'Bad', 'status': 'running', 'created_at': 'bad'},
+            ]})
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)
+            queue = report['queue']
+            self.assertEqual(queue['source'], 'queue.json')
+            self.assertEqual(queue['staged_count'], 3)
+            self.assertEqual(queue['ready_count'], 1)
+            self.assertEqual(queue['review_count'], 1)
+            self.assertEqual(queue['queue_age_seconds'], 90.0)
+
+    def test_corrupt_queue_snapshot_falls_back_to_issue_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            (state / 'queue.json').write_text('{bad json')
+            write_json(state / 'issue-4.json', {'issue': 4, 'status': 'ready', 'time': 90.0})
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)
+            self.assertEqual(report['queue']['source'], 'issue-records')
+            self.assertIn('corrupt', report['queue']['snapshot_error'])
+            self.assertEqual(report['queue']['ready_count'], 1)
+
     def test_everything_missing_degrades_to_unknown(self):
         report = fd.build_report('cfg.json', {'state': '/nonexistent/state/dir'}, now=1000.0)
         self.assertFalse(report['state_dir_found'])
@@ -370,6 +398,28 @@ class DiffStatTests(unittest.TestCase):
         stat, reason = fd._diff_stat_for_issue(record, events=[])
         self.assertIsNone(stat)
         self.assertIn('issue #9', reason)
+
+
+class CompletionTimingTests(unittest.TestCase):
+    def test_review_issue_has_fixed_completion_time_without_running_elapsed(self):
+        record = {'issue': 2, 'status': 'review', 'time': 500.0, 'agent': 'claude',
+                  'branch': None, 'commit': 'abc123', 'pr': 'https://example.invalid/pr/2',
+                  'error': None, 'diff_stat': None}
+        issue = fd.build_issue_views({2: record}, events=[], now=10_000.0)[0]
+        self.assertIsNone(issue['elapsed_seconds'])
+        self.assertIsNone(issue['elapsed_human'])
+        self.assertEqual(issue['completed_at_iso'], '1970-01-01T00:08:20+00:00')
+
+    def test_review_worker_preserves_completion_metadata_without_elapsed_accrual(self):
+        agent_defs = {'claude': {'key': 'claude', 'provider': None, 'model': None, 'label': None}}
+        records = {2: {'issue': 2, 'status': 'review', 'time': 500.0, 'agent': 'claude',
+                       'branch': None, 'commit': 'abc123', 'pr': 'https://example.invalid/pr/2',
+                       'error': None, 'diff_stat': None}}
+        worker = fd.build_worker_views(agent_defs, records, events=[], heartbeat={}, now=10_000.0)[0]
+        self.assertEqual(worker['state'], 'review')
+        self.assertIsNone(worker['elapsed_seconds'])
+        self.assertEqual(worker['last_completion']['issue'], 2)
+        self.assertEqual(worker['last_completion']['commit'], 'abc123')
 
 
 class WorkerStateTests(unittest.TestCase):

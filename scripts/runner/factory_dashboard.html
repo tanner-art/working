@@ -156,7 +156,7 @@
       <table id="issues-table">
         <thead>
           <tr>
-            <th>#</th><th>Status</th><th>Validation</th><th>Agent</th><th>Elapsed</th>
+            <th>#</th><th>Status</th><th>Validation</th><th>Agent</th><th>Runtime</th>
             <th>Diff stat</th><th>Commit</th><th>PR</th>
           </tr>
         </thead>
@@ -259,8 +259,12 @@
         el('div', { class: 'note', text: providerModel }),
         el('div', {}, [badge(w.state, w.state)])
       ];
-      if (w.state === 'active' || w.state === 'review' || w.state === 'blocked') {
+      if (w.state === 'active' || w.state === 'blocked') {
         body.push(el('div', { text: 'Issue #' + w.current_issue + ' — ' + (w.elapsed_human || 'elapsed unknown') }));
+      } else if (w.state === 'review') {
+        var completion = w.last_completion;
+        body.push(el('div', { text: 'Issue #' + w.current_issue + ' — awaiting review' }));
+        if (completion && completion.time_iso) body.push(el('div', { class: 'note', text: 'Completed at ' + completion.time_iso }));
       } else if (w.last_failure) {
         body.push(el('div', { text: 'Last failure: issue #' + w.last_failure.issue + ' at ' + w.last_failure.time_iso }));
         if (w.last_failure.error) body.push(el('div', { class: 'note', text: w.last_failure.error }));
@@ -275,9 +279,13 @@
     var kpis = document.getElementById('queue-kpis');
     clearChildren(kpis);
     [
+      ['Staged', queue.staged_count],
+      ['Ready', queue.ready_count],
+      ['Running', queue.running_count],
       ['Tracked issues', queue.total_records],
       ['Awaiting review', queue.review_count],
       ['Failed', queue.failure_count],
+      ['Queue age', queue.queue_age_human || 'Unknown'],
       ['Corrupt records', queue.corrupt_records]
     ].forEach(function (pair) {
       kpis.appendChild(el('div', { class: 'kpi' }, [
@@ -320,10 +328,10 @@
       var prCell = issue.pr ? el('a', { href: issue.pr, target: '_blank', rel: 'noopener', text: 'PR' }) : unknown('no PR yet');
       tbody.appendChild(el('tr', {}, [
         el('td', { text: '#' + issue.issue }),
-        el('td', { text: issue.status }),
+        el('td', { text: issue.status === 'review' ? 'awaiting review' : issue.status }),
         el('td', {}, [badge(issue.validation_result, issue.validation_result)]),
         el('td', { text: issue.agent || 'unassigned' }),
-        el('td', { text: issue.elapsed_human || '—' }),
+        el('td', { text: issue.status === 'review' ? '—' : (issue.elapsed_human || '—') }),
         el('td', {}, [diffCell]),
         el('td', {}, [commitCell]),
         el('td', {}, [prCell])

@@ -312,6 +312,66 @@ def load_issue_records(state_dir):
     return records, corrupt
 
 
+def load_queue_snapshot(state_dir):
+    path = state_dir / 'queue.json'
+    data, error = fstatus.read_json_safe(path)
+    if error == 'missing':
+        return {'found': False, 'error': None, 'entries': []}
+    if error or not isinstance(data, dict) or not isinstance(data.get('entries'), list):
+        return {'found': True, 'error': error or 'corrupt: queue.json entries must be a list', 'entries': []}
+    entries = []
+    for item in data['entries']:
+        if not isinstance(item, dict):
+            continue
+        number = item.get('number')
+        status = item.get('status')
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not isinstance(status, str):
+            continue
+        created_at = item.get('created_at') if isinstance(item.get('created_at'), str) else None
+        entries.append({
+            'number': number,
+            'title': item.get('title') if isinstance(item.get('title'), str) else None,
+            'agent': item.get('agent') if isinstance(item.get('agent'), str) else None,
+            'readiness': item.get('readiness') is True,
+            'status': status,
+            'created_at': created_at,
+        })
+    return {'found': True, 'error': None, 'entries': entries}
+
+
+def queue_view(snapshot, issue_summary, records, now):
+    if snapshot['found'] and snapshot['error'] is None:
+        entries = snapshot['entries']
+        by_status = {}
+        for entry in entries:
+            by_status[entry['status']] = by_status.get(entry['status'], 0) + 1
+        created = [_parse_iso(entry['created_at']) for entry in entries]
+        created = [value for value in created if value is not None]
+        oldest = min(created) if created else None
+        age = max(0.0, now - oldest) if oldest is not None else None
+        return {
+            'source': 'queue.json', 'by_status': by_status, 'by_agent': {},
+            'total_records': len(entries), 'corrupt_records': 0,
+            'staged_count': len(entries), 'ready_count': by_status.get('ready', 0),
+            'running_count': by_status.get('running', 0), 'review_count': by_status.get('review', 0),
+            'failure_count': by_status.get('failed', 0), 'queue_age_seconds': age,
+            'queue_age_human': format_duration(age), 'snapshot_error': None,
+            'note': 'Counts and queue age come from the sanitized queue.json snapshot.',
+        }
+    times = [record['time'] for record in records.values() if record['time'] is not None]
+    oldest = min(times) if times else None
+    age = max(0.0, now - oldest) if oldest is not None else None
+    return {
+        'source': 'issue-records', 'by_status': issue_summary['by_status'], 'by_agent': issue_summary['by_agent'],
+        'total_records': issue_summary['total_records'], 'corrupt_records': issue_summary['corrupt_records'],
+        'staged_count': issue_summary['total_records'], 'ready_count': issue_summary['by_status'].get('ready', 0),
+        'running_count': issue_summary['by_status'].get('running', 0), 'review_count': issue_summary['by_status'].get(REVIEW_STATUS, 0),
+        'failure_count': issue_summary['by_status'].get(FAILED_STATUS, 0), 'queue_age_seconds': age,
+        'queue_age_human': format_duration(age), 'snapshot_error': snapshot['error'],
+        'note': 'queue.json unavailable; counts and queue age reflect only locally touched issue records.',
+    }
+
+
 def _safe_diff_stat(value):
     if not isinstance(value, dict):
         return None
@@ -551,13 +611,27 @@ def validation_result(record):
     return 'unknown'
 
 
+def completion_metadata(record):
+    if record.get('status') != REVIEW_STATUS:
+        return None
+    return {
+        'issue': record['issue'],
+        'time_iso': fstatus.iso(record['time']),
+        'commit': record.get('commit'),
+        'pr': record.get('pr'),
+        'validation_result': validation_result(record),
+    }
+
+
 def build_issue_views(records, events, now):
     views = []
     for issue_number in sorted(records):
         record = records[issue_number]
         elapsed = None
-        if record['time'] is not None:
-            elapsed = max(0.0, now - record['time'])
+        if record['status'] in ACTIVE_STATUSES or record['status'] in BLOCKED_STATUSES:
+            if record['time'] is not None:
+                elapsed = max(0.0, now - record['time'])
+        completed_at = fstatus.iso(record['time']) if record['status'] == REVIEW_STATUS else None
         diff_stat, diff_stat_reason = _diff_stat_for_issue(record, events)
         views.append({
             'issue': record['issue'],
@@ -568,6 +642,7 @@ def build_issue_views(records, events, now):
             'pr': record['pr'],
             'error': record['error'],
             'started_at_iso': fstatus.iso(record['time']),
+            'completed_at_iso': completed_at,
             'elapsed_seconds': elapsed,
             'elapsed_human': format_duration(elapsed),
             'validation_result': validation_result(record),
@@ -616,6 +691,7 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
             'elapsed_seconds': None,
             'elapsed_human': None,
             'last_failure': None,
+            'last_completion': None,
             'reason': 'no recorded activity for this worker yet' if latest_record is None and latest_event is None else None,
         }
 
@@ -644,8 +720,8 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
             elif status == REVIEW_STATUS:
                 worker['state'] = 'review'
                 worker['current_issue'] = current_issue
-                worker['elapsed_seconds'] = elapsed
-                worker['elapsed_human'] = format_duration(elapsed)
+                if latest_record is not None and latest_record['status'] == REVIEW_STATUS:
+                    worker['last_completion'] = completion_metadata(latest_record)
             elif status == FAILED_STATUS:
                 worker['state'] = 'idle'
                 if latest_record is not None and latest_record['status'] == FAILED_STATUS:
@@ -675,8 +751,7 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
             elif latest_record['status'] == REVIEW_STATUS:
                 worker['state'] = 'review'
                 worker['current_issue'] = latest_record['issue']
-                worker['elapsed_seconds'] = max(0.0, now - record_time)
-                worker['elapsed_human'] = format_duration(worker['elapsed_seconds'])
+                worker['last_completion'] = completion_metadata(latest_record)
             elif latest_record['status'] == FAILED_STATUS:
                 worker['state'] = 'idle'
                 worker['last_failure'] = {
@@ -703,6 +778,8 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     # (single source of truth); load_issue_records re-scans the same files only to
     # surface the full per-issue fields the dashboard displays.
     records, _records_corrupt = load_issue_records(state_dir)
+    queue_snapshot = load_queue_snapshot(state_dir)
+    queue = queue_view(queue_snapshot, issue_summary, records, now)
     events_result = load_events(state_dir)
     events = events_result['events']
 
@@ -719,9 +796,6 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     worker_heartbeats = {key: load_worker_heartbeat(state_dir, key) for key in agent_defs}
     workers = build_worker_views(agent_defs, records, events, worker_heartbeats, now)
 
-    review_count = issue_summary['by_status'].get(REVIEW_STATUS, 0)
-    failure_count = issue_summary['by_status'].get(FAILED_STATUS, 0)
-
     return {
         'generated_at': fstatus.iso(now),
         'config_path': str(config_path),
@@ -729,19 +803,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
         'state_dir_found': state_dir.is_dir(),
         'heartbeat': heartbeat,
         'workers': workers,
-        'queue': {
-            'by_status': issue_summary['by_status'],
-            'by_agent': issue_summary['by_agent'],
-            'total_records': issue_summary['total_records'],
-            'corrupt_records': issue_summary['corrupt_records'],
-            'review_count': review_count,
-            'failure_count': failure_count,
-            'note': (
-                'Counts reflect only issue-N.json records this runner has written locally. '
-                'This dashboard has no GitHub/network access and cannot report live queue '
-                'depth beyond what the runner has already touched.'
-            ),
-        },
+        'queue': queue,
         'issues': issues,
         'completed': [i for i in issues if i['status'] == REVIEW_STATUS],
         'utilization': {
