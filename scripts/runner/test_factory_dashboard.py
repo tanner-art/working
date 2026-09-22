@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import pathlib
 import tempfile
 import threading
@@ -206,6 +207,7 @@ class MissingOrCorruptDataTests(unittest.TestCase):
                 {'number': 2, 'title': 'Review', 'agent': 'codex-b', 'readiness': False, 'status': 'review', 'created_at': '1970-01-01T00:00:20Z', 'dependencies': {'items': [4], 'count': 1}},
                 {'number': 3, 'title': 'Running', 'agent': 'claude', 'readiness': False, 'status': 'running', 'created_at': None, 'dependencies': {'items': [], 'count': 0}},
             ]})
+            os.utime(state / 'queue.json', (95.0, 95.0))
             report = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)
             queue = report['queue']
             self.assertEqual(queue['source'], 'queue.json')
@@ -213,6 +215,16 @@ class MissingOrCorruptDataTests(unittest.TestCase):
             self.assertEqual(queue['ready_count'], 1)
             self.assertEqual(queue['review_count'], 1)
             self.assertEqual(queue['queue_age_seconds'], 90.0)
+            self.assertEqual(queue['oldest_open_item_age_seconds'], 90.0)
+            self.assertEqual(queue['snapshot_age_seconds'], 5.0)
+            self.assertEqual(queue['oldest_open_item_age_human'], '1m 30s')
+            self.assertEqual(queue['snapshot_age_human'], '5s')
+
+    def test_queue_markup_distinguishes_item_age_from_snapshot_freshness(self):
+        markup = fd.HTML_PATH.read_text(encoding='utf-8')
+        self.assertIn('Oldest open item', markup)
+        self.assertIn('Snapshot freshness', markup)
+        self.assertNotIn("['Queue age'", markup)
 
     def test_unassignable_ready_snapshot_entry_does_not_count_as_ready(self):
         with tempfile.TemporaryDirectory() as d:
@@ -622,6 +634,73 @@ class WorkerStateTests(unittest.TestCase):
         workers = fd.build_worker_views(agent_defs, records={}, events=[], heartbeat={}, now=1000.0)
         self.assertEqual(workers[0]['state'], 'idle')
         self.assertIsNotNone(workers[0]['reason'])
+
+    def test_effective_fallback_model_is_used_when_usage_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {
+                'orchestrator': {'primary': {
+                    'provider': 'openai', 'model': 'account-total', 'used_percent': 14,
+                    'observed_at': '1970-01-01T00:16:35Z',
+                }},
+            })
+            config = {
+                'state': str(state),
+                'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80,
+                                 'stale_after_seconds': 3600, 'unknown_behavior': 'slow'},
+                'agents': {'codex-a': {
+                    'provider': 'openai', 'account': 'openai-a',
+                    'model': 'terra', 'fallback_model': 'luna',
+                    'command': ['codex-terra'], 'fallback_command': ['codex-luna'],
+                }},
+            }
+            worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
+            self.assertEqual(worker['model'], 'terra')
+            self.assertEqual(worker['effective_model'], 'luna')
+            self.assertEqual(worker['usage_state'], 'unknown')
+            self.assertEqual(worker['dispatch_decision'], 'fallback')
+            self.assertTrue(worker['low_cost_only'])
+
+    def test_effective_primary_model_is_used_for_fresh_green_usage(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'codex-a': {'openai-a': {
+                'provider': 'openai', 'model': 'account-total', 'used_percent': 14,
+                'observed_at': '1970-01-01T00:16:35Z',
+            }}})
+            config = {
+                'state': str(state),
+                'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80,
+                                 'stale_after_seconds': 3600, 'unknown_behavior': 'slow'},
+                'agents': {'codex-a': {
+                    'provider': 'openai', 'account': 'openai-a',
+                    'model': 'terra', 'fallback_model': 'luna',
+                    'command': ['codex-terra'], 'fallback_command': ['codex-luna'],
+                }},
+            }
+            worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
+            self.assertEqual(worker['effective_model'], 'terra')
+            self.assertEqual(worker['usage_state'], 'green')
+            self.assertEqual(worker['dispatch_decision'], 'allow')
+
+    def test_running_heartbeat_model_overrides_current_policy_projection(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': 'openai',
+                                  'model': 'terra', 'label': None}}
+        heartbeat = {'codex-a': {
+            'found': True, 'error': None, 'status': 'agent', 'issue': 4,
+            'time': 900.0, 'start_time': 800.0, 'effective_model': 'luna',
+            'usage_state': 'unknown',
+        }}
+        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'green',
+                                 'dispatch_decision': 'allow', 'low_cost_only': False}}
+        worker = fd.build_worker_views(
+            agent_defs, records={}, events=[], heartbeat=heartbeat, now=1000.0,
+            dispatch_models=projected,
+        )[0]
+        self.assertEqual(worker['effective_model'], 'luna')
+        self.assertEqual(worker['usage_state'], 'unknown')
 
     def test_blocked_state_from_events_overrides_stale_issue_record(self):
         agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}

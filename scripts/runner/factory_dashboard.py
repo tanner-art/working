@@ -92,6 +92,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import factory_status as fstatus
+from usage_policy import (UsagePolicyError, agent_settings as runner_agent_settings,
+                          dispatch_decision, validate_usage)
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8787
@@ -392,16 +394,22 @@ def load_issue_records(state_dir):
 
 def load_queue_snapshot(state_dir):
     path = state_dir / 'queue.json'
+    try:
+        snapshot_time = path.stat().st_mtime
+    except OSError:
+        snapshot_time = None
     data, error = fstatus.read_json_safe(path)
     if error == 'missing':
-        return {'found': False, 'error': None, 'entries': []}
+        return {'found': False, 'error': None, 'entries': [], 'updated_at_seconds': None}
     if error or not isinstance(data, dict) or set(data) != {'entries'} or not isinstance(data.get('entries'), list):
-        return {'found': True, 'error': error or 'corrupt: queue.json entries must be a list', 'entries': []}
+        return {'found': True, 'error': error or 'corrupt: queue.json entries must be a list',
+                'entries': [], 'updated_at_seconds': snapshot_time}
     entries = []
     numbers = set()
     for item in data['entries']:
         if not isinstance(item, dict) or set(item) != QUEUE_ENTRY_FIELDS:
-            return {'found': True, 'error': 'corrupt: queue.json entry has an invalid schema', 'entries': []}
+            return {'found': True, 'error': 'corrupt: queue.json entry has an invalid schema',
+                    'entries': [], 'updated_at_seconds': snapshot_time}
         number = item.get('number')
         status = item.get('status')
         title = item.get('title')
@@ -418,7 +426,8 @@ def load_queue_snapshot(state_dir):
                 dependencies['items'] != sorted(set(dependencies['items'])) or dependencies['count'] != len(dependencies['items']) or
                 readiness != (status == 'ready' and agent is not None) or number in numbers or
                 (created_at is not None and _parse_iso(created_at) is None)):
-            return {'found': True, 'error': 'corrupt: queue.json entry has invalid canonical values', 'entries': []}
+            return {'found': True, 'error': 'corrupt: queue.json entry has invalid canonical values',
+                    'entries': [], 'updated_at_seconds': snapshot_time}
         numbers.add(number)
         entries.append({
             'number': number,
@@ -428,7 +437,8 @@ def load_queue_snapshot(state_dir):
             'status': status,
             'created_at': created_at,
         })
-    return {'found': True, 'error': None, 'entries': entries}
+    return {'found': True, 'error': None, 'entries': entries,
+            'updated_at_seconds': snapshot_time}
 
 
 def queue_view(snapshot, issue_summary, records, now):
@@ -441,14 +451,22 @@ def queue_view(snapshot, issue_summary, records, now):
         created = [value for value in created if value is not None]
         oldest = min(created) if created else None
         age = max(0.0, now - oldest) if oldest is not None else None
+        snapshot_age = max(0.0, now - snapshot['updated_at_seconds']) \
+            if snapshot['updated_at_seconds'] is not None else None
         return {
             'source': 'queue.json', 'by_status': by_status, 'by_agent': {},
             'total_records': len(entries), 'corrupt_records': 0,
             'staged_count': len(entries), 'ready_count': sum(entry['readiness'] is True for entry in entries),
             'running_count': by_status.get('running', 0), 'review_count': by_status.get('review', 0),
             'failure_count': by_status.get('failed', 0), 'queue_age_seconds': age,
-            'queue_age_human': format_duration(age), 'snapshot_error': None,
-            'note': 'Counts and queue age come from the sanitized queue.json snapshot.',
+            'queue_age_human': format_duration(age),
+            'oldest_open_item_age_seconds': age,
+            'oldest_open_item_age_human': format_duration(age),
+            'snapshot_age_seconds': snapshot_age,
+            'snapshot_age_human': format_duration(snapshot_age),
+            'snapshot_error': None,
+            'note': ('Counts and oldest open item age come from the sanitized queue.json snapshot; '
+                     'snapshot freshness is the age of that local file.'),
         }
     times = [record['time'] for record in records.values() if record['time'] is not None]
     oldest = min(times) if times else None
@@ -459,8 +477,12 @@ def queue_view(snapshot, issue_summary, records, now):
         'staged_count': issue_summary['total_records'], 'ready_count': issue_summary['by_status'].get('ready', 0),
         'running_count': issue_summary['by_status'].get('running', 0), 'review_count': issue_summary['by_status'].get(REVIEW_STATUS, 0),
         'failure_count': issue_summary['by_status'].get(FAILED_STATUS, 0), 'queue_age_seconds': age,
-        'queue_age_human': format_duration(age), 'snapshot_error': snapshot['error'],
-        'note': 'queue.json unavailable; counts and queue age reflect only locally touched issue records.',
+        'queue_age_human': format_duration(age),
+        'oldest_open_item_age_seconds': None, 'oldest_open_item_age_human': None,
+        'snapshot_age_seconds': None, 'snapshot_age_human': None,
+        'snapshot_error': snapshot['error'],
+        'note': ('queue.json unavailable; counts reflect only locally touched issue records. '
+                 'Oldest open item age and snapshot freshness are unknown.'),
     }
 
 
@@ -488,10 +510,12 @@ def load_worker_heartbeat(state_dir, key):
     data, error = fstatus.read_json_safe(path)
     if error == 'missing':
         return {'found': False, 'error': None, 'time': None, 'status': None,
-                'issue': None, 'task': None, 'start_time': None}
+                'issue': None, 'task': None, 'start_time': None,
+                'usage_state': None, 'effective_model': None}
     if error or not isinstance(data, dict):
         return {'found': True, 'error': error or 'corrupt: not a JSON object', 'time': None,
-                'status': None, 'issue': None, 'task': None, 'start_time': None}
+                'status': None, 'issue': None, 'task': None, 'start_time': None,
+                'usage_state': None, 'effective_model': None}
     ts = data.get('time')
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):
         ts = None
@@ -511,6 +535,8 @@ def load_worker_heartbeat(state_dir, key):
         'issue': issue_num,
         'task': task if isinstance(task, str) and task else None,
         'start_time': float(start_time) if start_time is not None else None,
+        'usage_state': safe_display_identifier(data.get('usage_state')),
+        'effective_model': safe_display_identifier(data.get('effective_model')),
     }
 
 
@@ -744,7 +770,60 @@ def build_issue_views(records, events, now):
     return views
 
 
-def build_worker_views(agent_defs, records, events, heartbeat, now):
+def effective_dispatch_models(config, state_dir, now):
+    """Return runner-equivalent model decisions without exposing commands."""
+    usage_enabled = any(key in config for key in ('usage_policy', 'usage', 'usage_file'))
+    agents = config.get('agents')
+    if not isinstance(agents, dict):
+        return {}
+
+    usage_data = None
+    usage_error = None
+    if usage_enabled:
+        usage_path = pathlib.Path(config.get('usage_file', state_dir / 'usage.json'))
+        if not usage_path.is_absolute():
+            usage_path = pathlib.Path(config.get('repo', '.')) / usage_path
+        raw, usage_error = fstatus.read_json_safe(usage_path)
+        if usage_error is None:
+            try:
+                usage_data = validate_usage(raw)
+            except UsagePolicyError:
+                usage_error = 'invalid'
+
+    result = {}
+    decision_now = datetime.fromtimestamp(now, tz=timezone.utc)
+    for key in agents:
+        safe_key = safe_display_identifier(key)
+        if safe_key is None:
+            continue
+        try:
+            settings = runner_agent_settings(config, key)
+            if not usage_enabled:
+                command_available = settings['command'] is not None
+                decision = {
+                    'state': 'green',
+                    'decision': 'allow' if command_available else 'defer',
+                    'effective_model': settings['model'] if command_available else None,
+                    'low_cost_only': False,
+                }
+            elif usage_error is not None:
+                decision = {'state': 'unknown', 'decision': 'defer',
+                            'effective_model': None, 'low_cost_only': True}
+            else:
+                decision = dispatch_decision(config, usage_data, key, settings['account'], decision_now)
+        except (KeyError, UsagePolicyError, ValueError, TypeError):
+            decision = {'state': 'unknown', 'decision': 'defer',
+                        'effective_model': None, 'low_cost_only': True}
+        result[safe_key] = {
+            'effective_model': safe_display_identifier(decision.get('effective_model')),
+            'usage_state': safe_display_identifier(decision.get('state'), fallback='unknown'),
+            'dispatch_decision': safe_display_identifier(decision.get('decision'), fallback='defer'),
+            'low_cost_only': bool(decision.get('low_cost_only')),
+        }
+    return result
+
+
+def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_models=None):
     """Build the per-worker view.
 
     `heartbeat` is a dict of {agent_key: load_worker_heartbeat(...) result}.
@@ -756,6 +835,7 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
     """
     heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
     workers = []
+    dispatch_models = dispatch_models if isinstance(dispatch_models, dict) else {}
     for key in sorted(agent_defs):
         definition = agent_defs[key]
         latest_record = None
@@ -773,10 +853,15 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
 
         record_time = latest_record['time'] if latest_record else None
         event_time = latest_event['time'] if latest_event else None
+        dispatch = dispatch_models.get(key, {})
         worker = {
             'key': key,
             'provider': definition['provider'],
             'model': definition['model'],
+            'effective_model': dispatch.get('effective_model'),
+            'usage_state': dispatch.get('usage_state', 'unknown'),
+            'dispatch_decision': dispatch.get('dispatch_decision', 'defer'),
+            'low_cost_only': bool(dispatch.get('low_cost_only')),
             'label': definition['label'],
             'state': 'idle',
             'current_issue': None,
@@ -799,6 +884,10 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
             elif hb.get('time') is not None:
                 elapsed = max(0.0, now - hb['time'])
             worker['reason'] = None
+            if hb.get('effective_model') is not None:
+                worker['effective_model'] = hb['effective_model']
+            if hb.get('usage_state') is not None:
+                worker['usage_state'] = hb['usage_state']
             if status in BLOCKED_STATUSES:
                 worker['state'] = 'blocked'
                 worker['current_issue'] = current_issue
@@ -905,7 +994,9 @@ def build_report(config_path, config, state_dir_override=None, now=None,
 
     issues = build_issue_views(records, events, now)
     worker_heartbeats = {key: load_worker_heartbeat(state_dir, key) for key in agent_defs}
-    workers = build_worker_views(agent_defs, records, events, worker_heartbeats, now)
+    dispatch_models = effective_dispatch_models(config, state_dir, now)
+    workers = build_worker_views(agent_defs, records, events, worker_heartbeats, now, dispatch_models)
+    capacity = fstatus.capacity_status(state_dir, config, stale_after_seconds, now)
 
     return {
         'generated_at': fstatus.iso(now),
@@ -943,7 +1034,8 @@ def build_report(config_path, config, state_dir_override=None, now=None,
             'note': usage['note'],
             'workers': usage['workers'],
         },
-        'capacity_note': fstatus.CAPACITY_NOTE,
+        'capacity': capacity,
+        'capacity_note': capacity['note'],
     }
 
 

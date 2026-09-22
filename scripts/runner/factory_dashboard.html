@@ -253,10 +253,12 @@
     }
     workers.forEach(function (w) {
       var title = w.label || w.key;
-      var providerModel = (w.provider || 'Unknown provider') + ' / ' + (w.model || 'Unknown model');
+      var providerModel = (w.provider || 'Unknown provider') + ' / '
+        + (w.effective_model || 'No model selected');
       var body = [
         el('h3', { text: title }),
-        el('div', { class: 'note', text: providerModel }),
+        el('div', { class: 'note', text: providerModel + ' — ' + (w.dispatch_decision || 'unknown')
+          + ' (' + (w.usage_state || 'unknown') + ')' }),
         el('div', {}, [badge(w.state, w.state)])
       ];
       if (w.state === 'active' || w.state === 'blocked') {
@@ -285,7 +287,8 @@
       ['Tracked issues', queue.total_records],
       ['Awaiting review', queue.review_count],
       ['Failed', queue.failure_count],
-      ['Queue age', queue.queue_age_human || 'Unknown'],
+      ['Oldest open item', queue.oldest_open_item_age_human || 'Unknown'],
+      ['Snapshot freshness', queue.snapshot_age_human || 'Unknown'],
       ['Corrupt records', queue.corrupt_records]
     ].forEach(function (pair) {
       kpis.appendChild(el('div', { class: 'kpi' }, [
@@ -399,8 +402,7 @@
       + ' — state directory ' + (report.state_dir_found ? 'configured' : 'not found');
     renderHeartbeat(report.heartbeat);
     renderWorkers(report.workers);
-    document.getElementById('workers-note').textContent =
-      'Live parallel capacity is 1 task at a time; see capacity note below.';
+    document.getElementById('workers-note').textContent = report.capacity_note;
     renderQueue(report.queue);
     renderIssues(report.issues);
     renderUtilization(report.utilization, report.longest_blocked_duration);

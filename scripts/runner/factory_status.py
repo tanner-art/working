@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only local factory health/capacity report for the serial GitHub queue runner.
+"""Read-only local factory health/capacity report for the GitHub queue runner.
 
 Reads only the runner's own state directory (heartbeat.json, issue-N.json
 records) as described in scripts/runner/README.md. Never reads or prints
@@ -23,16 +23,7 @@ DEFAULT_UTILIZATION_TOTAL_WORKERS = 3
 
 ISSUE_RECORD_RE = re.compile(r'^issue-(\d+)\.json$')
 
-CAPACITY_NOTE = (
-    "The runner (scripts/runner/runner.py) is serial: it processes at most one "
-    "queue issue per poll and exits after the first success or failure, and its "
-    "non-blocking lock makes a second concurrent invocation exit immediately "
-    "rather than running in parallel. Nominal worker/agent slots configured "
-    "under 'agents' (e.g. codex-a, codex-b, claude) describe which agent "
-    "identities are permitted to be dispatched, not concurrent execution "
-    "capacity. Live parallel capacity is 1 task at a time regardless of how "
-    "many agent slots are configured."
-)
+AGENT_KEY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
 
 
 def iso(ts):
@@ -66,7 +57,10 @@ def load_config(config_path):
 
 
 def heartbeat_status(state_dir, stale_after_seconds, now):
-    path = state_dir / 'heartbeat.json'
+    return _heartbeat_file_status(state_dir / 'heartbeat.json', stale_after_seconds, now)
+
+
+def _heartbeat_file_status(path, stale_after_seconds, now):
     data, error = read_json_safe(path)
     if error == 'missing':
         return {'found': False, 'error': None, 'time': None, 'age_seconds': None,
@@ -90,6 +84,51 @@ def heartbeat_status(state_dir, stale_after_seconds, now):
         'status': status if isinstance(status, str) else None,
         'stale': age > stale_after_seconds,
         'stale_threshold_seconds': stale_after_seconds,
+    }
+
+
+def capacity_status(state_dir, config, stale_after_seconds, now):
+    """Infer live execution mode only from fresh runtime heartbeats."""
+    agents = config.get('agents')
+    keys = sorted(key for key in agents if isinstance(key, str) and AGENT_KEY_RE.fullmatch(key)) \
+        if isinstance(agents, dict) else []
+    lane_heartbeats = {
+        key: _heartbeat_file_status(state_dir / f'heartbeat-{key}.json', stale_after_seconds, now)
+        for key in keys
+    }
+    fresh_lanes = [key for key, status in lane_heartbeats.items()
+                   if status['found'] and not status['error'] and status['stale'] is False]
+    serial = heartbeat_status(state_dir, stale_after_seconds, now)
+    serial_is_fresh = serial['found'] and not serial['error'] and serial['stale'] is False
+    newest_lane_time = max((lane_heartbeats[key]['time'] for key in fresh_lanes), default=None)
+    # During a mode switch the old heartbeat files remain on disk briefly.
+    # The newest fresh producer is authoritative, avoiding a transient false
+    # lane report after serial mode is restored (or vice versa).
+    if fresh_lanes and (not serial_is_fresh or newest_lane_time >= serial['time']):
+        configured = len(keys)
+        observed = len(fresh_lanes)
+        return {
+            'mode': 'lanes', 'max_parallel_tasks': configured,
+            'fresh_lane_count': observed, 'configured_lane_count': configured,
+            'note': (
+                f'Concurrent lane mode is active: {observed} of {configured} configured '
+                f'worker lanes have fresh heartbeats. Configured parallel capacity is '
+                f'up to {configured} tasks at a time, one per lane.'
+            ),
+        }
+
+    if serial_is_fresh:
+        return {
+            'mode': 'serial', 'max_parallel_tasks': 1,
+            'fresh_lane_count': 0, 'configured_lane_count': len(keys),
+            'note': 'serial mode is active: live parallel capacity is 1 task at a time.',
+        }
+
+    return {
+        'mode': 'unknown', 'max_parallel_tasks': None,
+        'fresh_lane_count': 0, 'configured_lane_count': len(keys),
+        'note': ('Live execution mode is unknown because no fresh serial or per-lane '
+                 'heartbeat is available.'),
     }
 
 
@@ -139,6 +178,7 @@ def build_report(config_path, config, now=None, stale_after_seconds=DEFAULT_STAL
                   utilization_target_workers=DEFAULT_UTILIZATION_TARGET_WORKERS):
     now = time.time() if now is None else now
     state_dir = pathlib.Path(config['state'])
+    capacity = capacity_status(state_dir, config, stale_after_seconds, now)
     report = {
         'generated_at': iso(now),
         'config_path': str(config_path),
@@ -147,7 +187,8 @@ def build_report(config_path, config, now=None, stale_after_seconds=DEFAULT_STAL
         'heartbeat': heartbeat_status(state_dir, stale_after_seconds, now),
         'issues': issue_record_summary(state_dir),
         'utilization': utilization_section(config, utilization_window_days, utilization_target_workers),
-        'capacity_note': CAPACITY_NOTE,
+        'capacity': capacity,
+        'capacity_note': capacity['note'],
     }
     return report
 

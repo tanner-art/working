@@ -159,7 +159,47 @@ class BuildReportTests(unittest.TestCase):
             self.assertFalse(report['heartbeat']['stale'])
             self.assertEqual(report['issues']['total_records'], 1)
             self.assertIn('serial', report['capacity_note'])
+            self.assertEqual(report['capacity']['mode'], 'serial')
+            self.assertEqual(report['capacity']['max_parallel_tasks'], 1)
             self.assertEqual(report['utilization']['observed_utilization'], 'unknown')
+
+    def test_fresh_lane_heartbeats_report_parallel_capacity(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'heartbeat.json', {'time': 500.0, 'status': 'idle'})
+            for agent in ('codex-a', 'codex-b', 'claude'):
+                write_json(state / f'heartbeat-{agent}.json', {'time': 1000.0, 'status': 'idle'})
+            config = {'state': str(state), 'agents': {
+                'codex-a': {}, 'codex-b': {}, 'claude': {},
+            }}
+            report = fs.build_report('cfg.json', config, now=1010.0)
+            self.assertEqual(report['capacity']['mode'], 'lanes')
+            self.assertEqual(report['capacity']['fresh_lane_count'], 3)
+            self.assertEqual(report['capacity']['max_parallel_tasks'], 3)
+            self.assertIn('up to 3 tasks', report['capacity_note'])
+
+    def test_stale_heartbeats_do_not_invent_live_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'heartbeat.json', {'time': 1.0, 'status': 'idle'})
+            write_json(state / 'heartbeat-codex-a.json', {'time': 2.0, 'status': 'idle'})
+            config = {'state': str(state), 'agents': {'codex-a': {}}}
+            report = fs.build_report('cfg.json', config, now=1000.0)
+            self.assertEqual(report['capacity']['mode'], 'unknown')
+            self.assertIsNone(report['capacity']['max_parallel_tasks'])
+
+    def test_newer_serial_heartbeat_wins_during_mode_switch(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'heartbeat-codex-a.json', {'time': 990.0, 'status': 'idle'})
+            write_json(state / 'heartbeat.json', {'time': 1000.0, 'status': 'idle'})
+            config = {'state': str(state), 'agents': {'codex-a': {}}}
+            report = fs.build_report('cfg.json', config, now=1010.0)
+            self.assertEqual(report['capacity']['mode'], 'serial')
+            self.assertEqual(report['capacity']['max_parallel_tasks'], 1)
 
     def test_report_over_missing_state_dir_does_not_raise(self):
         with tempfile.TemporaryDirectory() as d:
