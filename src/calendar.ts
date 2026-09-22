@@ -29,6 +29,7 @@ export interface CalendarTimeGrid {
   days: CalendarDayCell[]
   unscheduledCommitments: SemanticObject[]
 }
+export type CalendarViewMode = 'month' | 'week' | 'day'
 
 /**
  * Seam for D-009 temporal-confirmation provenance. A scheduled status and parseable timestamp are
@@ -67,6 +68,15 @@ export function addDays(key: string, delta: number): string {
 export function weekStart(key: string): string {
   const date = parseLocalDateKey(key)
   return addDays(key, -date.getDay())
+}
+
+/** One local-date anchor drives all views, keeping navigation deterministic across boundaries. */
+export function navigateCalendarDate(key: string, view: CalendarViewMode, direction: -1 | 1): string {
+  if (view !== 'month') return addDays(key, direction * (view === 'week' ? 7 : 1))
+  const date = parseLocalDateKey(key)
+  const next = addMonths(date.getFullYear(), date.getMonth(), direction)
+  const day = Math.min(date.getDate(), new Date(next.year, next.month + 1, 0).getDate())
+  return localDateKey(new Date(next.year, next.month, day))
 }
 
 export function dayAriaLabel(cell: CalendarDayCell): string {

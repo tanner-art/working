@@ -81,10 +81,10 @@
 .detail-links { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .empty-inline { color: #74817a; font-size: 12px; margin: 0; }
 .time-grid-wrap { overflow-x: auto; border-top: 1px solid #dedfd8; }
-.time-grid-head { min-width: 660px; display: grid; grid-template-columns: 62px repeat(var(--day-count, 1), minmax(120px, 1fr)); position: sticky; top: 0; z-index: 2; background: #fffefa; border-bottom: 1px solid #dedfd8; }
+.time-grid-head { min-width: 478px; display: grid; grid-template-columns: 44px repeat(var(--day-count, 1), minmax(62px, 1fr)); position: sticky; top: 0; z-index: 2; background: #fffefa; border-bottom: 1px solid #dedfd8; }
 .time-grid-head span { padding: 9px 8px; text-align: center; color: #66746d; font: 10px 'DM Mono'; }
 .time-grid-head .is-today { color: #fff; background: #1d2d27; }
-.time-grid { --day-count: 1; min-width: 660px; display: grid; grid-template-columns: 62px repeat(var(--day-count), minmax(120px, 1fr)); height: 1248px; position: relative; }
+.time-grid { --day-count: 1; min-width: 478px; display: grid; grid-template-columns: 44px repeat(var(--day-count), minmax(62px, 1fr)); height: 1248px; position: relative; }
 .time-labels { display: grid; grid-template-rows: repeat(24, 52px); color: #77847d; font: 10px/1 'DM Mono'; text-align: right; }
 .time-labels span { padding: 0 8px 0 0; transform: translateY(-5px); }
 .time-column { position: relative; border-left: 1px solid #e3e5df; background: #fffefa; }
@@ -97,6 +97,7 @@
 .time-proposed { position: absolute; z-index: 1; top: 3px; left: 5px; right: 5px; padding: 4px 6px; overflow: hidden; border: 1px dashed #c9ab6b; border-radius: 4px; background: #fbf6e9; color: #5a4620; font-size: 10px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .current-time { position: absolute; z-index: 2; left: 0; right: 0; height: 2px; background: #c45845; pointer-events: none; }
 .current-time::before { content: ''; position: absolute; left: -3px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #c45845; }
+.time-grid-wrap.one-day .time-grid-head, .time-grid-wrap.one-day .time-grid { min-width: 100%; }
 
 @media (max-width: 720px) {
   .calendar-cell { min-height: 54px; padding: 4px; }
@@ -109,6 +110,12 @@
   .calendar-modes { margin-left: auto; }
   .calendar-commitment-form { grid-template-columns: 1fr; }
   .calendar-commitment-form button { width: 100%; }
+  .time-grid-head, .time-grid { min-width: 390px; }
+  .time-grid-head { grid-template-columns: 38px repeat(var(--day-count, 1), minmax(50px, 1fr)); }
+  .time-grid { grid-template-columns: 38px repeat(var(--day-count), minmax(50px, 1fr)); }
+  .time-grid-head span { padding-inline: 3px; font-size: 9px; }
+  .time-labels span { padding-right: 4px; }
+  .time-event { left: 2px; right: 2px; padding: 4px; }
 }
 /* TASK-021: explicit bounds keep text and connector geometry in agreement. */
 .canvas-page { grid-template-rows: auto auto auto minmax(0, 1fr); }
