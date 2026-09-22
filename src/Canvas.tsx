@@ -92,7 +92,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const distance = (a: PointerSample, b: PointerSample) => Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
   const dismissRefinementPreview = () => setRefinementCandidateId(null)
-  const clearInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null); gesture.current = idleGestureState() }
+  const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
+  const clearInteraction = () => { clearTransientInteraction(); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
   const applyGestureEffect = (effect: GestureEffect) => {
     if (effect.type === 'select') { setSelected(effect.id); setEditMode(false); return }
@@ -113,7 +114,10 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-pinch') { pinchStart.current = { viewport, midpoint: midpoint(effect.first, effect.second), distance: distance(effect.first, effect.second) }; return }
     if (effect.type === 'preview-pinch') { const start = pinchStart.current; if (!start) return; const currentMidpoint = midpoint(effect.first, effect.second), nextScale = start.viewport.scale * distance(effect.first, effect.second) / start.distance; const anchored = zoomCanvasViewport(start.viewport, start.midpoint, nextScale); setPinchPreview({ ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }); return }
     if (effect.type === 'commit-pinch') { if (pinchPreview) onViewport(pinchPreview); setPinchPreview(null); pinchStart.current = null; return }
-    if (effect.type === 'cancel') { clearInteraction() }
+    // The reducer has already installed its next state before effects run. In the
+    // second-pointer path that state is pinch-zooming, so cleanup must not replace
+    // it with idle before begin-pinch and preview-pinch can run.
+    if (effect.type === 'cancel') { clearTransientInteraction() }
   }
   const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => { const result = reduceCanvasGesture(gesture.current, action); gesture.current = result.state; result.effects.forEach(applyGestureEffect) }
   const worldPoint = (event: React.PointerEvent) => {
