@@ -64,8 +64,10 @@ describe('canvasGestures', () => {
     let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
     result = step(result.state, { type: 'pointer-down', sample: node(2, 100, 30), target: canvas })
     expect(result.state.mode).toBe('pinch-zooming')
-    expect(result.effects).toContainEqual({ type: 'begin-pinch', first: node(), second: node(2, 100, 30) })
-    expect(result.effects).toContainEqual({ type: 'cancel' })
+    expect(result.effects).toEqual([
+      { type: 'cancel' },
+      { type: 'begin-pinch', first: node(), second: node(2, 100, 30) },
+    ])
     result = step(result.state, { type: 'pointer-move', sample: node(2, 110, 30) })
     expect(result.effects[0].type).toBe('preview-pinch')
     result = step(result.state, { type: 'pointer-up', pointerId: 2 })

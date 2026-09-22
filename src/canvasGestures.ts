@@ -67,7 +67,7 @@ export function reduceCanvasGesture(state: GestureState, action: GestureAction):
     const pointers = { ...state.pointers, [action.sample.pointerId]: action.sample }
     if (Object.keys(pointers).length > 1) {
       const [first, second] = pinchPair(pointers)
-      return { state: { ...state, mode: 'pinch-zooming', pointers, menuOpened: false }, effects: [{ type: 'begin-pinch', first, second }, ...(state.mode === 'idle' ? [] : [{ type: 'cancel' as const }])] }
+      return { state: { ...state, mode: 'pinch-zooming', pointers, menuOpened: false }, effects: [...(state.mode === 'idle' ? [] : [{ type: 'cancel' as const }]), { type: 'begin-pinch', first, second }] }
     }
     if (action.target.kind === 'resize') {
       if (state.mode !== 'edit-menu' && !state.menuOpened) return { state, effects: [] }
