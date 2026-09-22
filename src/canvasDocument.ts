@@ -1,5 +1,5 @@
 import type { CanvasElement, CanvasViewport } from './domain'
-import { isCanvasStrokeProjection, isCanvasStrokeRefinement, normalizeCanvasStrokePoints } from './canvasStrokes'
+import { isActiveCanvasStrokeRefinement, isCanvasStrokeProjection, isCanvasStrokeRefinement, isCanvasStrokeShapeProjectionForRaw, normalizeCanvasStrokePoints } from './canvasStrokes'
 
 export interface CanvasDocument { elements: CanvasElement[]; viewport: CanvasViewport }
 export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { x: 0, y: 0, scale: 1 }
@@ -36,6 +36,12 @@ const isPerimeterAnchor = (value: unknown): boolean => Boolean(value) && typeof 
 const isCurveHandle = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
   Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
   Math.abs((value as { x: number }).x) <= 1.5 && Math.abs((value as { y: number }).y) <= 1.5
+const hasValidFreehandRefinement = (item: Partial<CanvasElement>) => {
+  if (item.projection === undefined || item.refinements === undefined) return item.projection === undefined && item.refinements === undefined
+  return item.refinements.every(refinement => refinement.sourceId === item.id) &&
+    isActiveCanvasStrokeRefinement(item.refinements.at(-1), item.projection) &&
+    (item.projection.kind !== 'shape' || isCanvasStrokeShapeProjectionForRaw(item.rawPoints, item.projection))
+}
 function isCanvasElement(value: unknown): value is CanvasElement {
   if (!value || typeof value !== 'object') return false
   const item = value as Partial<CanvasElement>
@@ -61,10 +67,9 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.projection === undefined || isCanvasStrokeProjection(item.projection)) &&
     (item.refinements === undefined || (Array.isArray(item.refinements) && item.refinements.length > 0 && item.refinements.every(isCanvasStrokeRefinement))) &&
     (item.type === 'freehand' || (item.rawPoints === undefined && item.projection === undefined && item.refinements === undefined)) &&
-    (item.type !== 'freehand' || (Object.keys(value).every(key => freehandKeys.has(key)) && item.rawPoints !== undefined && item.shape === undefined && item.text === undefined && item.width === undefined && item.height === undefined && item.fromId === undefined && item.toId === undefined && item.groupId === undefined && item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined &&
-      (item.projection === undefined && item.refinements === undefined ||
-        (item.projection?.kind === 'smoothed' && item.refinements !== undefined && item.refinements.every(refinement => refinement.sourceId === item.id) &&
-          item.refinements.at(-1)?.result.kind === 'smoothed' && item.refinements.at(-1)?.result.algorithm === item.projection.algorithm && item.refinements.at(-1)?.result.iterations === item.projection.iterations)))) &&
+    (item.type !== 'freehand' || (
+      Object.keys(value).every(key => freehandKeys.has(key)) && item.rawPoints !== undefined && item.shape === undefined && item.text === undefined && item.width === undefined && item.height === undefined && item.fromId === undefined && item.toId === undefined && item.groupId === undefined && item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined &&
+      hasValidFreehandRefinement(item))) &&
     (item.type === 'arrow' || item.type === 'freehand' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string' &&
       (item.curveHandle === undefined || item.connectionPath === 'curved')))

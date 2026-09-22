@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, canvasStrokeLength, createCanvasStrokeSmoothingRefinement, isCanvasPointInLasso, isCanvasStrokeRefinement, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, projectCanvasStroke, smoothCanvasStrokePoints } from './canvasStrokes'
+import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, canvasStrokeLength, createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement, isCanvasPointInLasso, isCanvasStrokeRefinement, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, smoothCanvasStrokePoints } from './canvasStrokes'
 
 describe('canvas stroke foundation', () => {
   it('copies finite, ordered canvas-space samples without resampling them', () => {
@@ -71,6 +71,25 @@ describe('canvas stroke foundation', () => {
     expect(smoothed.projection).toEqual({ kind: 'smoothed', algorithm: 'moving-average-v1' })
     expect(smoothed.refinements).toHaveLength(1)
     expect(applyCanvasStrokeSmoothing(smoothed, '2026-09-22T12:01:00.000Z')).toBeNull()
+  })
+
+  it('offers and applies a recognized shape projection without changing raw points', () => {
+    const raw = [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 40, y: 0 }]
+    const preview = previewCanvasStrokeShape(raw)
+    expect(preview).toMatchObject({ kind: 'shape', shape: 'line', geometry: { start: { x: 0, y: 0 }, end: { x: 40, y: 0 } } })
+    const refinement = createCanvasStrokeShapeRefinement('stroke-1', raw, '2026-09-22T12:00:00.000Z')!
+    expect(refinement).toMatchObject({ gesture: 'explicit-shape-conversion', sourceId: 'stroke-1', result: preview })
+    expect(isCanvasStrokeRefinement(refinement)).toBe(true)
+    const shaped = applyCanvasStrokeShape({ id: 'stroke-1', rawPoints: raw }, '2026-09-22T12:00:00.000Z')!
+    expect(shaped.rawPoints).toBe(raw)
+    expect(projectCanvasStroke(shaped.rawPoints, shaped.projection)).toEqual([{ x: 0, y: 0 }, { x: 40, y: 0 }])
+    expect(applyCanvasStrokeShape(shaped, '2026-09-22T12:01:00.000Z')).toBeNull()
+  })
+
+  it('omits shape conversion when the smoothed stroke has no confident match', () => {
+    const raw = [{ x: 0, y: 0 }, { x: 12, y: 18 }, { x: 24, y: -12 }, { x: 36, y: 18 }, { x: 48, y: 0 }]
+    expect(previewCanvasStrokeShape(raw)).toBeNull()
+    expect(createCanvasStrokeShapeRefinement('stroke-1', raw, '2026-09-22T12:00:00.000Z')).toBeNull()
   })
 
   it('selects strokes contained in, crossing, or touching a closed lasso', () => {
