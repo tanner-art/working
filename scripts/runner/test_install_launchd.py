@@ -1,8 +1,11 @@
+import os
 import pathlib
 import plistlib
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import install_launchd as installer
 
@@ -52,6 +55,21 @@ class LaunchdInstallerTests(unittest.TestCase):
             dumped = plistlib.dumps(dashboard).decode()
             self.assertNotIn('do-not-copy', dumped)
             self.assertNotIn('agent codex-a', dumped)
+
+    def test_service_environment_uses_current_uid_identity_without_copying_process_user(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'USER': 'untrusted-process-user'}), \
+                patch.object(installer.os, 'getuid', return_value=501), \
+                patch.object(installer.pwd, 'getpwuid', return_value=SimpleNamespace(pw_name='launch-owner')):
+            plan = self.plan(pathlib.Path(directory) / 'state', mode='lanes')
+            for _, data in plan:
+                environment = data['EnvironmentVariables']
+                self.assertEqual(environment, {
+                    'PATH': '/usr/bin:/bin',
+                    'HOME': str(pathlib.Path.home()),
+                    'USER': 'launch-owner',
+                })
+                self.assertNotIn('untrusted-process-user', plistlib.dumps(data).decode())
 
     def test_live_removes_dry_run_only_from_runners(self):
         with tempfile.TemporaryDirectory() as directory:

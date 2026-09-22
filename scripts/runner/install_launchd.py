@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import plistlib
+import pwd
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,15 @@ import time
 SERIAL_LABEL = 'life.threadline.runner'
 LANE_AGENTS = ('codex-a', 'codex-b', 'claude')
 DASHBOARD_LABEL = 'life.threadline.factory-dashboard'
+
+
+def service_environment(path):
+    """Return the minimal, non-secret identity environment for LaunchAgents."""
+    return {
+        'PATH': path,
+        'HOME': str(pathlib.Path.home()),
+        'USER': pwd.getpwuid(os.getuid()).pw_name,
+    }
 
 
 def launch_agents_dir(home=None):
@@ -44,7 +54,7 @@ def validate_port(port):
 def runner_data(label, args, root, state, path, stdout, stderr):
     return {
         'Label': label, 'ProgramArguments': args, 'WorkingDirectory': str(root.parent.parent),
-        'EnvironmentVariables': {'PATH': path, 'HOME': str(pathlib.Path.home())},
+        'EnvironmentVariables': service_environment(path),
         'RunAtLoad': True, 'StartInterval': 60, 'ProcessType': 'Background',
         'StandardOutPath': str(state / stdout), 'StandardErrorPath': str(state / stderr),
     }
@@ -55,7 +65,7 @@ def dashboard_data(config, root, state, path, port):
         'Label': DASHBOARD_LABEL,
         'ProgramArguments': [sys.executable, str(root / 'factory_dashboard.py'), '--config', str(config), '--host', '127.0.0.1', '--port', str(port)],
         'WorkingDirectory': str(root.parent.parent),
-        'EnvironmentVariables': {'PATH': path, 'HOME': str(pathlib.Path.home())},
+        'EnvironmentVariables': service_environment(path),
         'RunAtLoad': True, 'ProcessType': 'Background',
         'StandardOutPath': str(state / 'launchd-dashboard.log'),
         'StandardErrorPath': str(state / 'launchd-dashboard-error.log'),
