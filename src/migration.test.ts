@@ -6,6 +6,7 @@ import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLega
 import { confirmObject, confirmedActions, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, saveState } from './store'
 import { createInterpretedObject } from './captureInterpretation'
+import { correctOriginal, reviseInterpretation } from './reviewRevision'
 
 const key = 'thoughtflow-state-v1'
 const thought = (patch: Partial<ThoughtObject> = {}): ThoughtObject => ({
@@ -38,7 +39,8 @@ describe('TASK-002 migration', () => {
     expect(decoded.captures[0]).toMatchObject({ originalContent: original.objects[0].originalContent, evidence: 'text-only' })
     expect(decoded.semanticObjects[0]).not.toHaveProperty('originalContent')
     expect(decoded.relationships[0]).toMatchObject({ sourceId: 'original', targetId: 'missing-old-object', scope: 'semantic' })
-    expect(reconcileLegacyUi(legacyUiProjection(decoded))).toEqual(decoded)
+    const projected = legacyUiProjection(decoded)
+    expect(reconcileLegacyUi(projected)).toEqual({ ...decoded, canvasBank: projected.canvasBank })
     expect(original).toEqual(before)
   })
 
@@ -131,7 +133,8 @@ describe('TASK-002 migration', () => {
       const model = migrateLegacyState(legacy([thought({ kind, status })]))
       expect(model.interpretations[0].legacy.status).toBe(status)
       expect(legacyUiProjection(model).objects[0].status).toBe('review')
-      expect(reconcileLegacyUi(legacyUiProjection(model))).toEqual(model)
+      const projected = legacyUiProjection(model)
+      expect(reconcileLegacyUi(projected)).toEqual({ ...model, canvasBank: projected.canvasBank })
     }
   })
 
@@ -471,5 +474,63 @@ describe('TASK-003 dedicated confirmation', () => {
     expect(loaded.error).toBeUndefined()
     expect(confirmedActions(loaded.state.objects)).toEqual([])
     expect(loaded.state.model!.interpretations).toHaveLength(4)
+  })
+})
+
+describe('TASK-046 review-revision hardening', () => {
+  const textThought = () => thought({ id: 'one', source: 'text', originalContent: 'orginal wording' })
+  const base = () => legacyUiProjection(migrateLegacyState({ objects: [textThought()], canvas: [] }))
+  const twice = () => correctOriginal(correctOriginal(base(), 'one', 'Original wording', true, '2026-09-20T02:00:00.000Z'),
+    'one', 'Original wording.', true, '2026-09-20T03:00:00.000Z')
+  const saved = (state: AppState) => JSON.parse(JSON.stringify(reconcileLegacyUi(state)))
+  const events = (model: any) => model.interpretations.at(-1).legacy.history.filter((h: any) => h.sourceCorrection)
+  const tampered = (state: AppState, change: (model: any) => void) => {
+    const model = saved(state)
+    change(model)
+    return isPersistedState(model)
+  }
+
+  it('requires a matching audit event for every persisted correction', () => {
+    const state = twice()
+    expect(isPersistedState(saved(state))).toBe(true)
+    const drop = (index: number) => (model: any) => {
+      const history = model.interpretations.at(-1).legacy.history
+      history.splice(history.indexOf(events(model)[index]), 1)
+    }
+    expect(tampered(state, drop(0))).toBe(false)
+    expect(tampered(state, drop(1))).toBe(false)
+    expect(tampered(state, model => { model.interpretations.at(-1).legacy.history = model.interpretations.at(-1).legacy.history.filter((h: any) => !h.sourceCorrection) })).toBe(false)
+  })
+
+  it('rejects altered or out-of-order audit events', () => {
+    const state = twice()
+    const alter = (key: 'correctionId' | 'from' | 'to', value: string) => (model: any) => { events(model)[1].sourceCorrection[key] = value }
+    expect(tampered(state, alter('correctionId', 'other'))).toBe(false)
+    expect(tampered(state, alter('from', 'Something else'))).toBe(false)
+    expect(tampered(state, alter('to', 'Different text'))).toBe(false)
+    expect(tampered(state, model => { events(model)[1].at = '2026-09-20T09:00:00.000Z' })).toBe(false)
+    expect(tampered(state, model => {
+      const [first, second] = events(model)
+      const history = model.interpretations.at(-1).legacy.history
+      const [i, j] = [history.indexOf(first), history.indexOf(second)]
+      history[i] = second
+      history[j] = first
+    })).toBe(false)
+    expect(tampered(state, model => { model.sourceCorrections.reverse() })).toBe(false)
+  })
+
+  it('rejects an audit event that has no persisted correction, and keeps correction-free data valid', () => {
+    expect(tampered(twice(), model => { model.sourceCorrections.pop() })).toBe(false)
+    expect(isPersistedState(saved(base()))).toBe(true)
+    expect(saved(base()).sourceCorrections).toBeUndefined()
+  })
+
+  it('accepts a valid summary revision but rejects it paired with unrelated interpretation edits', () => {
+    const revised = reviseInterpretation(base(), 'one', 'Better reading', '2026-09-20T01:00:00.000Z')
+    expect(reconcileLegacyUi(revised).interpretations.at(-1)?.summary).toBe('Better reading')
+    for (const change of [{ rationale: 'Rewritten reasoning' }, { suggestedKind: 'action' as const }, { suggestedDate: '2026-10-01' }]) {
+      const paired = { ...revised, objects: revised.objects.map(o => ({ ...o, interpretation: { ...o.interpretation, ...change } })) }
+      expect(() => reconcileLegacyUi(paired)).toThrow()
+    }
   })
 })

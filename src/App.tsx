@@ -1,13 +1,18 @@
 import { buildMorningDigest } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
-import { accountData, createAccountAdapter, createAccountSession, type AccountData, type AccountSession } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
 import { readDelivery, setDeliveryEnabled } from './digestDelivery'
 import { supabase, auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
 import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
-import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
-import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
+import { Canvas } from './Canvas'
+import { CanvasBank } from './CanvasBankView'
+import { useCanvasWorkspace } from './useCanvasWorkspace'
+import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
+import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
+import { addCanvas, canvasBankForState, createCanvasRecord, renameCanvas } from './canvasBank'
+import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
@@ -16,20 +21,12 @@ import type { AppState, CanvasElement, ObjectKind, SemanticRelationship, Thought
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
 import { bankFolders, bankObjects, reviewObjects, canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
-import { loadStateResult, makeObject, newCanvasElement, saveState, serializeState } from './store'
-import type { CanvasHistory } from './canvasHistory'
-import {
-  canRedoCanvas,
-  canUndoCanvas,
-  commitCanvas as commitCanvasHistory,
-  emptyCanvasHistory,
-  redoCanvas as redoCanvasHistory,
-  undoCanvas as undoCanvasHistory,
-} from './canvasHistory'
+import { loadStateResult, makeObject, saveState, serializeState } from './store'
+import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -48,9 +45,11 @@ function useAuthState() {
 const accountAdapter = createAccountAdapter(supabase, import.meta.env.VITE_SUPABASE_DATA_TABLE)
 const aiProviderStatus = providerStatus(readProviderConfig({ VITE_AI_INTERPRETATION_PROVIDER: import.meta.env.VITE_AI_INTERPRETATION_PROVIDER }))
 type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountData }
+type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
   const [cloud, setCloud] = useState<CloudWorkspace>()
+  const [preparedMerge, setPreparedMerge] = useState<PreparedMerge>()
   const [generation, setGeneration] = useState(0)
   const open = async (local?: AccountData) => {
     if (!accountAdapter || account.state.status !== 'signed-in') throw Error('Account storage is unconfigured. Set VITE_SUPABASE_DATA_TABLE and configure the account table with RLS.')
@@ -61,23 +60,48 @@ export function App() {
     const result = await session.open(local)
     setCloud({ session, ...result }); setGeneration(value => value + 1)
   }
-  return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open} />
+  const previewMerge = async (local: AccountData, choices: AccountMergeChoices) => {
+    if (!accountAdapter || account.state.status !== 'signed-in') throw Error('Account storage is unconfigured. Set VITE_SUPABASE_DATA_TABLE and configure the account table with RLS.')
+    const session = createAccountSession(accountAdapter, account.state.session.user.id, () => {
+      const current = auth.getState()
+      return current.status === 'signed-in' ? current.session.user.id : undefined
+    })
+    const plan = await session.previewMerge(local, choices)
+    setPreparedMerge({ session, plan })
+    return plan
+  }
+  const confirmMerge = async (currentLocal: AccountData) => {
+    if (!preparedMerge) throw Error('Preview the merge again before confirming.')
+    const result = await preparedMerge.session.confirmMerge(preparedMerge.plan, currentLocal)
+    setPreparedMerge(undefined); setCloud({ session: preparedMerge.session, ...result }); setGeneration(value => value + 1)
+  }
+  return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open}
+    mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
-function ThreadlineApp({ account, cloud, onOpenAccount }: {
+function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {
   account: ReturnType<typeof useAuthState>; cloud?: CloudWorkspace; onOpenAccount: (local?: AccountData) => Promise<void>
+  mergePlan?: AccountMergePlan; onPreviewMerge: (local: AccountData, choices: AccountMergeChoices) => Promise<AccountMergePlan>
+  onConfirmMerge: (currentLocal: AccountData) => Promise<void>; onCancelMerge: () => void
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
+  const latestState = useRef(state)
+  latestState.current = state
   const [saveError, setSaveError] = useState<string | undefined>()
   const [preferences, setPreferences] = useState(() => {
     try { return { value: cloud?.data.settings ?? readSettings(localStorage), error: '' } }
     catch { return { value: { ...defaultSettings }, error: 'Local settings could not be read. Editing settings is paused; stored settings are untouched.' } }
   })
+  const latestPreferences = useRef(preferences)
+  latestPreferences.current = preferences
   const [digest, setDigest] = useState(() => cloud?.data.digest)
+  const latestDigest = useRef(digest)
+  latestDigest.current = digest
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountMessage, setAccountMessage] = useState('')
   const [cloudStatus, setCloudStatus] = useState(cloud ? 'Account storage active.' : '')
+  const [mergeChoices, setMergeChoices] = useState<AccountMergeChoices>({ settings: 'account', digest: 'account' })
   const accountValid = !cloud || (account.state.status === 'signed-in' && account.state.session.user.id === cloud.session.userId)
   const [installHelp, setInstallHelp] = useState(() => shouldShowMobileInstall(
     { getItem: key => localStorage.getItem(key) },
@@ -107,33 +131,63 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
-  // Session-only canvas undo/redo stack, kept at the App level (not inside Canvas) so
-  // switching views does not discard it. See docs/DECISIONS.md D-010 (resolves OD-002).
-  // `canvasHistory.present` and `state.canvas` are written together, from the same
-  // returned CanvasHistory, in every handler below, so they never drift apart — see
-  // the adaptation note in src/canvasHistory.ts.
-  const [canvasHistory, setCanvasHistory] = useState<CanvasHistory>(() => emptyCanvasHistory(initial.state.canvas))
-  const update = (fn: (current: AppState) => AppState) => setState(current => fn(current))
+  const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
+  const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
+  const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
+  const update = (fn: (current: AppState) => AppState) => {
+    if (mergePlan) onCancelMerge()
+    const next = fn(latestState.current)
+    latestState.current = next
+    setState(next)
+  }
+  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null)
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
-  const persist = async (retry = false) => {
-    if (initial.error || clearing.current) return
-    if (!cloud) { setSaveError(saveState(state)); return }
+  const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)
+  const [canvasTextSaveQueue] = useState(() => createCanvasTextSaveQueue(retry => persistRef.current(retry)))
+  const persist = async (retry = false): Promise<boolean> => {
+    if (initial.error || clearing.current) return false
+    if (!cloud) { const error = saveState(latestState.current); setSaveError(error); return !error }
     const sequence = ++saveSequence.current
     setCloudStatus('Saving account changes…')
     try {
-      await cloud.session.save(cloud.session.snapshot(state, preferences.value, digest!), retry)
-      if (sequence !== saveSequence.current) return
-      setSaveError(undefined); setCloudStatus('Saved to account. Load account data on your other device to see this version.')
-    } catch (error) { if (sequence !== saveSequence.current) return; setSaveError((error as Error).message); setCloudStatus('Account changes are not saved.') }
+      await cloud.session.save(cloud.session.snapshot(latestState.current, latestPreferences.current.value, latestDigest.current!), retry)
+      if (sequence === saveSequence.current) {
+        setSaveError(undefined)
+        setCloudStatus(canvasTextSaveQueue.hasUnsent() ? 'Account changes waiting to save…' : 'Saved to account. Load account data on your other device to see this version.')
+      }
+      return true
+    } catch (error) {
+      if (sequence === saveSequence.current) { setSaveError((error as Error).message); setCloudStatus('Account changes are not saved.') }
+      return false
+    }
   }
+  persistRef.current = persist
   useEffect(() => { if (!cloud) void persist() }, [state, initial.error])
   useEffect(() => {
     if (!cloud) return
     if (firstAccountSave.current) { firstAccountSave.current = false; return }
+    if (canvasTextSaveQueue.consumeStateUpdate()) return
     void persist()
   }, [state, preferences.value, digest, initial.error])
+  useEffect(() => { if (view !== 'canvas' || openCanvasId === null) canvasTextSaveQueue.flush() }, [view, openCanvasId, canvasTextSaveQueue])
+  useEffect(() => () => canvasTextSaveQueue.dispose(), [canvasTextSaveQueue])
+  useWorkspaceExitGuard(() => {
+    if (initial.error || clearing.current) return false
+    if (cloud) {
+      canvasTextSaveQueue.flush()
+      return canvasTextSaveQueue.hasPending() || !!saveError || cloudStatus === 'Saving account changes…'
+    }
+    const error = saveState(latestState.current)
+    setSaveError(error)
+    return !!error
+  })
   const openAccount = async (copy: boolean) => {
+    if (cloud && canvasTextSaveQueue.hasPending()) {
+      canvasTextSaveQueue.flush()
+      setAccountMessage('Wait for account changes to finish saving before loading account data.')
+      return
+    }
     if (capturePending.current || accountBusy || cloudStatus === 'Saving account changes…') return
     if (!copy && !window.confirm('Load the latest account data into this open tab? Local saved data stays untouched. Download an export first if this tab has unsaved account edits.')) return
     setAccountBusy(true); setAccountMessage('')
@@ -141,6 +195,25 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
       if (copy && (cloud || preferences.error || saveError)) throw Error('Resolve local save/settings errors before copying data.')
       await onOpenAccount(copy ? accountData(state, preferences.value, readDelivery(localStorage)) : undefined)
     } catch (error) { setAccountMessage((error as Error).message) }
+    finally { setAccountBusy(false) }
+  }
+  const previewMerge = async () => {
+    if (capturePending.current || accountBusy || cloudStatus === 'Saving account changes…') return
+    setAccountBusy(true); setAccountMessage('')
+    try {
+      if (cloud || preferences.error || saveError) throw Error('Resolve local save/settings errors before merging data.')
+      const local = accountData(state, preferences.value, readDelivery(localStorage))
+      await guardAccountMergePreview(local,
+        snapshot => onPreviewMerge(snapshot, mergeChoices),
+        () => accountData(latestState.current, latestPreferences.current.value, readDelivery(localStorage)))
+    } catch (error) { onCancelMerge(); setAccountMessage((error as Error).message) }
+    finally { setAccountBusy(false) }
+  }
+  const confirmMerge = async () => {
+    if (!mergePlan || accountBusy || !window.confirm('Combine the previewed account and device data? Both device-local copies remain untouched.')) return
+    setAccountBusy(true); setAccountMessage('')
+    try { await onConfirmMerge(accountData(state, preferences.value, readDelivery(localStorage))) }
+    catch (error) { setAccountMessage((error as Error).message) }
     finally { setAccountBusy(false) }
   }
   const dataControls = <section className="settings-card"><h2>Data</h2>
@@ -151,45 +224,17 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
       <p>Copying creates account data only if the account is empty. Loading opens account data in this tab and preserves the device’s local copy. Updates on other devices appear when you load again; concurrent saves are rejected.</p>
       {!cloud && <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy || cloudStatus === 'Saving account changes…'} onClick={() => void openAccount(true)}>Copy this device’s local data into my account</button>}
       <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy || cloudStatus === 'Saving account changes…'} onClick={() => void openAccount(false)}>Load account data on this device</button>
+      {!cloud && <div className="merge-account"><h3>Combine this device with my account</h3>
+        <p>Preview a safe union before saving. Exact duplicates are kept once; conflicting identities stop without changing either copy.</p>
+        <label>Profile settings after merge<select value={mergeChoices.settings} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, settings: event.target.value as AccountMergeChoices['settings'] })) }}><option value="account">Keep account settings</option><option value="device">Use this device’s settings</option></select></label>
+        <label>Digest preference after merge<select value={mergeChoices.digest} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, digest: event.target.value as AccountMergeChoices['digest'] })) }}><option value="account">Keep account preference</option><option value="device">Use this device’s preference</option></select></label>
+        <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy} onClick={() => void previewMerge()}>Preview combined data</button>
+        {mergePlan && <div className="merge-preview" role="status"><p><strong>Ready to add from this device:</strong> {mergePlan.preview.added.thoughts} thoughts, {mergePlan.preview.added.canvases} canvases, {mergePlan.preview.added.events} calendar events.</p><p>{mergePlan.preview.duplicates} identical records will stay single. Nothing has been written yet.</p><div className="settings-actions"><button className="secondary" onClick={onCancelMerge}>Cancel preview</button><button className="primary" disabled={accountBusy || captureBusy} onClick={() => void confirmMerge()}>Confirm and save combined data</button></div></div>}
+      </div>}
     </>}
     {cloud && <><p>Digest preference is saved with your account. Account mode currently offers the digest on demand; scheduled notices remain local-mode only.</p><label><input type="checkbox" checked={digest!.enabled} onChange={event => setDigest(setDeliveryEnabled(digest!, event.target.checked, new Date()))} />Enable 7 AM in-app digest preference</label><button className="secondary" onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) window.location.reload() }}>Return to this device’s local data</button></>}
     {accountMessage && <p role="alert">{accountMessage}</p>}
   </section>
-  const commitCanvas = (next: CanvasElement[]) => {
-    const nextHistory = commitCanvasHistory(canvasHistory, next)
-    setCanvasHistory(nextHistory)
-    update(current => ({ ...current, canvas: nextHistory.present }))
-  }
-  const undoCanvas = () => {
-    const nextHistory = undoCanvasHistory(canvasHistory)
-    if (nextHistory === canvasHistory) return
-    setCanvasHistory(nextHistory)
-    update(current => ({ ...current, canvas: nextHistory.present }))
-  }
-  const redoCanvas = () => {
-    const nextHistory = redoCanvasHistory(canvasHistory)
-    if (nextHistory === canvasHistory) return
-    setCanvasHistory(nextHistory)
-    update(current => ({ ...current, canvas: nextHistory.present }))
-  }
-  useEffect(() => {
-    if (view !== 'canvas') return
-    const isEditableTarget = (target: EventTarget | null) => {
-      const element = target as HTMLElement | null
-      return element?.tagName === 'INPUT' || element?.tagName === 'TEXTAREA' || Boolean(element?.isContentEditable)
-    }
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) return // never hijack native text-field undo
-      const isModifier = event.metaKey || event.ctrlKey
-      if (!isModifier) return
-      const key = event.key.toLowerCase()
-      if (key === 'z' && event.shiftKey) { event.preventDefault(); redoCanvas() }
-      else if (key === 'z') { event.preventDefault(); undoCanvas() }
-      else if (key === 'y') { event.preventDefault(); redoCanvas() }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [view, canvasHistory])
   const downloadBackup = () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify({ ...state, model: cloud ? cloud.session.snapshot(state, preferences.value, digest!).model : serializeState(state) }, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
@@ -240,11 +285,35 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
     setSelectedObjectId(item.id)
   }
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
+  const canvasBank = canvasBankForState(state)
+  const openCanvas = openCanvasId ? canvasBank.canvases.find(item => item.id === openCanvasId) : undefined
+  const createCanvas = () => {
+    const record = createCanvasRecord()
+    update(current => addCanvas(current, record))
+    setBankFocusTarget('create')
+    setFocusCanvasTitle(true)
+    setOpenCanvasId(record.id)
+  }
+  const openSavedCanvas = (id: string) => {
+    setBankFocusTarget(id)
+    setFocusCanvasTitle(false)
+    setOpenCanvasId(id)
+  }
+  const exitCanvas = () => {
+    canvas?.finishText()
+    canvasTextSaveQueue.flush()
+    setOpenCanvasId(null)
+  }
+  const navigate = (next: View) => {
+    if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+    if (next === 'canvas') setBankFocusTarget(null)
+    setView(next)
+  }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
-  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => setView('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
+  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -259,7 +328,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
       </section>}
       {installMessage && <p className="storage-alert" role="status">{installMessage}</p>}
       {captureError && <div className="storage-alert" role="alert">{captureError}</div>}
-      {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => void persist(true)}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
+      {saveError && <div className="storage-alert" role="alert"><p>{saveError}</p><button className="secondary" onClick={() => canvasTextSaveQueue.hasPending() ? canvasTextSaveQueue.retry() : void persist(true)}>Retry saving</button><button className="secondary" onClick={downloadBackup}>Download backup</button></div>}
       <>
         {cloud ? <AccountDigest state={state} visible={view === 'today' || view === 'digest'} /> : view === 'today' ? <details className="digest-entry compact-disclosure">
           <summary>Morning Digest<span className="disclosure-caret" aria-hidden="true" /></summary>
@@ -267,31 +336,41 @@ function ThreadlineApp({ account, cloud, onOpenAccount }: {
         </details> : <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />}
       </>
       {view === 'settings' && <SettingsPage accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+        onCancelMerge()
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
-      }} onResetSettings={() => setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' })} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
+      }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects} onChangeKind={changeKind} onConfirm={revise} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
-      {view === 'canvas' && <Canvas elements={state.canvas} onCommit={commitCanvas} canUndo={canUndoCanvas(canvasHistory)} canRedo={canRedoCanvas(canvasHistory)} onUndo={undoCanvas} onRedo={redoCanvas} onCaptureObject={captureCanvasObject} />}
+      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-    {selectedObject && <ObjectPanel object={selectedObject} onClose={() => setSelectedObjectId(null)} onSave={saveObject} onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
-  </main></>
+  </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+      onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
+      onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
+      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
+  </>
 }
 
 function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
+  const [code, setCode] = useState('')
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
     {'message' in state && state.message && <p role={state.status === 'error' ? 'alert' : 'status'}>{state.message}</p>}
     {state.status === 'unconfigured' && <button className="secondary" disabled>Log in with email — unavailable</button>}
-    {state.status === 'signed-out' && <form onSubmit={event => { event.preventDefault(); void auth.act('login', email) }}>
+    {state.status === 'signed-out' && <form className="account-login" onSubmit={event => { event.preventDefault(); setEmail(email.trim()); setCode(''); void auth.act('login', email) }}>
       <label>Email address<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /></label>
       <button className="primary">Email me a sign-in link</button>
+    </form>}
+    {state.status === 'signed-out' && state.emailCodeSent && <form className="account-code" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}>
+      <p>Using the home-screen app? Enter the code from the same email here so this app signs in directly.</p>
+      <label>Six-digit code<input type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
+      <button className="primary">Sign in with code</button>
     </form>}
     {state.status === 'loading' && <button className="secondary" disabled>Please wait…</button>}
     {state.status === 'signed-in' && <button className="secondary" onClick={() => { void auth.act('logout') }}>Log out</button>}
@@ -349,7 +428,7 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
       <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage(accountActive ? 'Settings updated. Account save status is shown in Data.' : 'Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
         <fieldset disabled={!!error}><label>Display name / profile label<input maxLength={80} autoComplete="nickname" value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })} placeholder="Personal space" /></label>
-          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas</option></select></label>
+          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas Bank</option></select></label>
           <button className="primary" type="submit">Save settings</button></fieldset>
       </form><p role="status">{message}</p>
     </section>
@@ -415,11 +494,11 @@ function Review({ objects, onChangeKind, onConfirm, onReject, onOpen }: { object
   const folders = bankObjects(objects)
   return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
-    <div className="source-line"><span>Raw capture</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.originalContent}</blockquote>
+    <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p>{item.kind === 'commitment' && <small>Confirms the obligation only.</small>}{item.kind === 'reminder' && <small>Choose an object type before confirming.</small>}</div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <div className="review-actions"><select aria-label="Object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Edit</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm</button></div>}
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <div className="review-actions"><select aria-label="Object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary edit-thought-button" onClick={() => onOpen(item.id)}>Edit thought</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm</button></div>}
   </article>)}</div>}</details>
-    <section className="bank-section" aria-labelledby="bank-heading"><h2 id="bank-heading">Bank</h2>
+    <section className="bank-section" aria-labelledby="bank-heading"><h2 id="bank-heading">Thought folders</h2>
       <p>Filed thoughts grouped by context: Personal or Home, Business or Work. Other contexts stay Unfiled. Use Edit → Context or project to change the grouping.</p>
       {bankFolders.map(folder => <details className="compact-disclosure bank-folder" key={folder}>
         <summary>{folder} <span>{folders[folder].length}</span><span className="disclosure-caret" aria-hidden="true" /></summary>
@@ -433,10 +512,47 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtObject; onClose: () => void; onSave: (object: ThoughtObject) => void; onReverse: () => void }) {
+function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
+  const [revision, setRevision] = useState(object.interpretation.summary)
+  const [correction, setCorrection] = useState(history.currentText)
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   useEffect(() => setDraft(object), [object])
+  useEffect(() => setRevision(object.interpretation.summary), [object.id, object.interpretation.summary])
+  useEffect(() => setCorrection(history.currentText), [object.id, history.currentText])
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
+  const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
+  const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
+  const confirmDiscard = (includeFields: boolean) => {
+    if (!(hasUnsavedThoughtDrafts || (includeFields && hasUnsavedFieldEdits))) return true
+    return window.confirm('Discard the unsaved changes in this panel? Saved versions and the original capture will stay available.')
+  }
+  const closePanel = () => { if (confirmDiscard(true)) onClose() }
+  const saveAndClose = (updated: ThoughtObject) => {
+    if (!confirmDiscard(false)) return
+    onSave(updated)
+    onClose()
+  }
+  const reverseAndClose = () => {
+    if (!confirmDiscard(true)) return
+    onReverse()
+    onClose()
+  }
+  useEffect(() => {
+    closeButton.current?.focus()
+    const opener = returnFocus.current
+    return () => opener?.focus()
+  }, [])
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closePanel()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  })
   const field = (key: keyof ThoughtObject, value: unknown) => setDraft(current => ({ ...current, [key]: value }))
   const metadata = (key: keyof ThoughtObject['metadata'], value: unknown) => setDraft(current => ({ ...current, metadata: { ...current.metadata, [key]: value || undefined } as ThoughtObject['metadata'] }))
   const scoreSelect = (key: 'urgency' | 'strategicImportance' | 'roi') => <select value={draft.metadata[key] ?? ''} onChange={event => metadata(key, event.target.value ? Number(event.target.value) as 1 | 2 | 3 | 4 | 5 : undefined)}>
@@ -445,12 +561,23 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
   const folderValue = draft.context === 'Personal' || draft.context === 'Business' ? draft.context : ''
   const proposedTime = draft.interpretation.suggestedDate?.match(/(?:^| )(\d{2}:\d{2})(?:$| )/)?.[1] ?? ''
   const setProposedTime = (time: string) => setDraft(current => ({ ...current, interpretation: { ...current.interpretation, suggestedDate: [current.metadata.deadline, time].filter(Boolean).join(' ') || undefined } }))
-  return <div className="panel-backdrop" onMouseDown={onClose}>
-    <aside className="object-panel" onMouseDown={event => event.stopPropagation()}>
-      <header><div><p className="eyebrow">Object workbench</p><h2>Shape this thought</h2></div><button className="close-button" onClick={onClose} aria-label="Close object details">×</button></header>
+  const sourceEditNote = object.source === 'voice'
+    ? 'The recorded voice source stays unchanged. You can revise its organized meaning below.'
+    : 'The captured canvas expression stays unchanged. You can revise its organized meaning below.'
+  return <div className="panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closePanel() }}>
+    <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="object-panel-title">
+      <header><div><p className="eyebrow">Object workbench</p><h2 id="object-panel-title">Shape this thought</h2></div><button ref={closeButton} className="close-button" onClick={closePanel} aria-label="Close object details">×</button></header>
       <div className="panel-scroll">
-        <section className="raw-thought"><p className="section-label">Original capture</p><p>{object.originalContent}</p><small>{object.source} · {new Date(object.createdAt).toLocaleString()}</small></section>
+        <section className="raw-thought"><p className="section-label">Current thought</p><p>{history.currentText}</p><small>{object.source} · first captured {new Date(object.createdAt).toLocaleString()}</small>{history.currentText !== history.immutableSource && <p className="preserved-note">The first capture is preserved in version history.</p>}</section>
         <section className="interpretation"><p className="section-label">AI proposal</p><strong>{object.interpretation.summary}</strong><small>{Math.round(object.confidence * 100)}% confident · {object.interpretation.rationale}</small></section>
+        <section className="thought-editors" aria-labelledby="thought-editing-heading"><div><p className="section-label">Edit without losing history</p><h3 id="thought-editing-heading">Revise this thought</h3><p>Each save adds a version. The original capture always stays available below.</p></div>
+          {hasUnsavedFieldEdits && <p role="status">Save your object field changes before revising the thought text or organized meaning.</p>}
+          {object.source === 'text' ? <><label>Thought text<textarea value={correction} onChange={event => setCorrection(event.target.value)} /></label>
+          <button className="secondary" disabled={hasUnsavedFieldEdits || !correction.trim() || correction.trim() === history.currentText} onClick={() => { if (window.confirm('Save this as the current thought text while keeping the original capture?')) onCorrect(correction) }}>Save text version</button></> : <p className="source-edit-note" role="note">{sourceEditNote}</p>}
+          <label>Organized meaning<textarea value={revision} onChange={event => setRevision(event.target.value)} /></label>
+          {revisionNeedsReconfirmation(object) && <p role="note">{revisionReviewNotice(object)}</p>}
+          <button className="secondary" disabled={hasUnsavedFieldEdits || !revision.trim() || revision.trim() === object.interpretation.summary} onClick={() => onRevise(revision)}>Save meaning version</button>
+        </section>
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
           <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
@@ -460,155 +587,13 @@ function ObjectPanel({ object, onClose, onSave, onReverse }: { object: ThoughtOb
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
           <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
         </div>
-        <details><summary>Interpretation history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
-        {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={() => { onReverse(); onClose() }}>Reverse confirmation</button></>}
+        <details className="thought-progression" open><summary>Version history ({history.progression.length})</summary><ol>{history.progression.slice().reverse().map(entry => <li key={entry.id}><div><strong>{entry.label}</strong><time>{new Date(entry.at).toLocaleString()}</time></div><p>{entry.text}</p>{entry.previousText && <details><summary>Previous version</summary><p>{entry.previousText}</p></details>}</li>)}</ol></details>
+        <details><summary>Decision history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
+        {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>Reverse confirmation</button></>}
       </div>
-      <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'archived')); onClose() }}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => { onSave(setObjectStatus(draft, 'complete')); onClose() }}>Complete</button><button className="primary" onClick={() => { onSave(draft); onClose() }}>Save changes</button></footer>
+      <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>
     </aside>
   </div>
-}
-function Canvas({ elements, onCommit, canUndo, canRedo, onUndo, onRedo, onCaptureObject }: { elements: CanvasElement[]; onCommit: (elements: CanvasElement[]) => void; canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void; onCaptureObject: (element: CanvasElement) => void }) {
-  const [pan, setPan] = useState({ x: 0, y: 0 }); const [scale, setScale] = useState(1); const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
-  // Undo/redo (and delete) can remove the currently selected or connect-from node out
-  // from under this component without it ever unmounting. Clear any reference to an id
-  // that no longer exists so a stale connect-from can never produce a dangling arrow.
-  useEffect(() => {
-    const ids = new Set(elements.map(item => item.id))
-    setSelected(current => (current && !ids.has(current)) ? null : current)
-    setConnectFrom(current => (current && !ids.has(current)) ? null : current)
-  }, [elements])
-  // Live drag/text-edit state stays local to Canvas so every pointer move or keystroke
-  // does not push an undo step; only the final, committed result is sent to onCommit,
-  // which groups a whole drag or text edit into exactly one undo step.
-  const [resizePreview, setResizePreview] = useState<CanvasElement | null>(null)
-  const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
-  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
-  const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
-  const positioned = (id?: string) => {
-    const item = elements.find(value => value.id === id)
-    if (!item) return undefined
-    if (resizePreview?.id === id) return resizePreview
-    const dragged = dragOffset ? elements.find(value => value.id === dragOffset.id) : undefined
-    return dragOffset && (dragOffset.id === id || (dragged?.type === 'container' && item.groupId === dragged.id))
-      ? { ...item, x: item.x + dragOffset.dx, y: item.y + dragOffset.dy } : item
-  }
-  const add = (shape: CanvasShape) => {
-    // Placement must account for both pan and zoom: a screen-space offset has to be
-    // converted into world space by dividing by scale, or nodes land in the wrong spot
-    // whenever the canvas is zoomed.
-    const worldX = ((window.innerWidth < 720 ? 32 : 260) - pan.x) / scale
-    const worldY = (160 - pan.y) / scale
-    const base = newCanvasElement(shape === 'container' ? 'container' : 'text', worldX, worldY)
-    const next = convertCanvasNode([base], base.id, shape)[0]
-    onCommit([...elements, next])
-    setSelected(next.id)
-  }
-  const down = (event: React.PointerEvent, item?: CanvasElement, resize = false) => { if (event.button !== 0 || drag.current) return; if (item) setSelected(item.id); const point = { pointerId: event.pointerId, resize: resize ? item : undefined, startX: event.clientX, startY: event.clientY, dx: 0, dy: 0, moved: false }; drag.current = item ? { ...point, id: item.id, originalX: item.x, originalY: item.y } : { ...point, pan: true, originalPan: pan }; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
-  const move = (event: React.PointerEvent) => {
-    if (!drag.current || drag.current.pointerId !== event.pointerId) return
-    const dx = (event.clientX - drag.current.startX) / scale
-    const dy = (event.clientY - drag.current.startY) / scale
-    drag.current.dx = dx; drag.current.dy = dy
-    if (dx !== 0 || dy !== 0) drag.current.moved = true
-    if (drag.current.resize) {
-      const node = drag.current.resize, size = canvasSize(node)
-      setResizePreview(resizeCanvasNode([node], node.id, size.width + dx, size.height + dy)[0])
-    } else if (drag.current.pan) setPan({ x: drag.current.originalPan!.x + dx * scale, y: drag.current.originalPan!.y + dy * scale })
-    else if (drag.current.id) setDragOffset({ id: drag.current.id, dx, dy })
-  }
-  const cancel = () => { drag.current = null; setDragOffset(null); setResizePreview(null) }
-  const end = (event: React.PointerEvent) => {
-    if (drag.current?.pointerId !== event.pointerId) return
-    const current = drag.current
-    drag.current = null
-    if (current && !current.pan && current.id && current.moved) {
-      const size = current.resize && canvasSize(current.resize)
-      const next = size ? resizeCanvasNode(elements, current.id, size.width + current.dx, size.height + current.dy) : moveCanvasNode(elements, current.id, current.originalX! + current.dx, current.originalY! + current.dy)
-      onCommit(next)
-    }
-    setDragOffset(null)
-    setResizePreview(null)
-  }
-  const clickNode = (event: React.MouseEvent, id: string) => {
-    event.stopPropagation()
-    // Validate the connect-from endpoint still exists (not just non-null) so a stale
-    // reference left over from an undo/redo/delete can never produce a dangling arrow.
-    const connectFromValid = connectFrom !== null && elements.some(item => item.id === connectFrom)
-    if (connectFromValid && connectFrom !== id) {
-      onCommit([...elements, { id: crypto.randomUUID(), type: 'arrow', x: 0, y: 0, fromId: connectFrom, toId: id }])
-      setConnectFrom(null)
-    } else {
-      setSelected(id)
-    }
-  }
-  const arrows = elements.filter(item => item.type === 'arrow')
-  const groups = canvasGroups(elements)
-  const selectedElement = selected ? positioned(selected) : undefined
-  const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
-  const removeSelected = () => { if (!selected) return; onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null) }
-  const commitText = (item: CanvasElement) => {
-    if (editing && editing.id === item.id && editing.text !== item.text) onCommit(elements.map(value => value.id === item.id ? { ...value, text: editing.text } : value))
-    setEditing(null)
-  }
-  return <div className="canvas-page">
-    <div className="canvas-head">
-    <div>
-    <p className="eyebrow">Spatial formulation</p>
-    <h1>Untitled canvas</h1>
-    </div>
-    <div className="canvas-tools">
-    <button onClick={() => add('text')}>+ Text</button>
-    <button onClick={() => add('container')}>+ Group</button>
-    <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
-    <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
-    </select></label>
-    <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
-    <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
-    <button disabled={!selected} onClick={removeSelected}>Delete</button>
-    <span/>
-    <button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button>
-    <button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button>
-    <span/>
-    <button onClick={() => setScale(value => Math.max(.55, value - .15))}>−</button>
-    <span>{Math.round(scale * 100)}%</span>
-    <button onClick={() => setScale(value => Math.min(1.6, value + .15))}>＋</button>
-    </div>
-    </div>
-    <div className="canvas-properties">{selectedElement && selectedElement.type !== 'arrow' && <>
-    <label>Shape <select aria-label="Block shape" value={canvasNodeShape(selectedElement)} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
-    {Object.entries(canvasShapeLabels).map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
-    </select>
-    </label>{selectedElement.type === 'text' && <label>Move with group <select aria-label="Move with group" value={selectedElement.groupId ?? ''} onChange={event => onCommit(setCanvasGroup(elements, selectedElement.id, event.target.value || undefined))}>
-    <option value="">None</option>{groups.map(group => <option key={group.id} value={group.id}>{group.text?.trim() || 'Untitled group'}</option>)}
-    </select></label>}{selectedElement.type === 'container' && <button className="secondary" onClick={() => onCommit(attachBlocksInside(elements, selectedElement.id))}>Attach blocks inside</button>}{(['width', 'height'] as const).map(axis => <label key={axis}>{axis === 'width' ? 'Width' : 'Height'}<input key={`${selectedElement.id}-${canvasSize(selectedElement)[axis]}`} aria-label={`Block ${axis}`} type="number" min={axis === 'width' ? CANVAS_SIZE.minWidth : CANVAS_SIZE.minHeight} max={axis === 'width' ? CANVAS_SIZE.maxWidth : CANVAS_SIZE.maxHeight} defaultValue={canvasSize(selectedElement)[axis]} onBlur={event => { const size = canvasSize(selectedElement); const value = event.target.value === '' ? size[axis] : event.target.valueAsNumber; onCommit(resizeCanvasNode(elements, selectedElement.id, axis === 'width' ? value : size.width, axis === 'height' ? value : size.height)); event.target.value = String(canvasSize({ ...selectedElement, [axis]: value })[axis]) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
-    </label>)}</>}{selectedElement?.type === 'arrow' && <>
-    <label>Line <select aria-label="Connection path" value={selectedElement.connectionPath ?? 'straight'} onChange={event => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionPath: event.target.value as ConnectionPath }))}><option value="straight">Straight</option><option value="curved">Curved arc</option></select></label>
-    <label>Pattern <select aria-label="Connection pattern" value={selectedElement.connectionPattern ?? 'solid'} onChange={event => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionPattern: event.target.value as ConnectionPattern }))}><option value="solid">Solid</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option></select></label>
-    <label>Weight <select aria-label="Connection weight" value={selectedElement.connectionWeight ?? 'regular'} onChange={event => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionWeight: event.target.value as ConnectionWeight }))}><option value="light">Light</option><option value="regular">Regular</option><option value="bold">Bold</option></select></label>
-    </>}<span>{selectedElement?.type === 'arrow' ? 'Connection styling is saved with the canvas and can be undone.' : selectedElement ? 'Group membership stays attached when a group moves. Resizing does not remove members.' : 'Select a block or connection to change its appearance.'}</span>
-    </div>
-    <div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
-    <div className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => setSelected(null)}>
-    <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="arrows">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, arrow.connectionPath); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(arrow)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); setSelected(arrow.id) }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(arrow.id) } }}/></g> })}<defs>
-    <marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
-    <path d="M0,0 L0,6 L7,3 z" />
-    </marker>
-    </defs>
-    </svg>{elements.filter(item => item.type !== 'arrow').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown) }} onClick={event => clickNode(event, item.id)}>
-    {(item.shape === 'ellipse' || item.shape === 'diamond') && <svg className="canvas-shape-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{item.shape === 'ellipse' ? <ellipse cx="50" cy="50" rx="50" ry="50" /> : <polygon points="50,0 100,50 50,100 0,50" />}</svg>}
-    <div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}>
-    <span>
-    </span>
-    <span>
-    </span>
-    <span>
-    </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea value={editing && editing.id === item.id ? editing.text : (item.text ?? '')} aria-label="Block text" onFocus={() => { setSelected(item.id); setEditing({ id: item.id, text: item.text ?? '' }) }} onChange={event => setEditing({ id: item.id, text: event.target.value })} onBlur={() => commitText(item)} onPointerDown={event => event.stopPropagation()} />
-    <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>
-    </div> })}</div>
-    </div>
-    </div>
 }
 function Empty({ text }: { text: string }) { return <div className="empty">{text}</div> }
 

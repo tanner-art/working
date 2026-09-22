@@ -4,9 +4,26 @@ import type { AppState, PersistedState } from './domain'
 import { isPersistedState, legacyUiProjection, reconcileLegacyUi } from './migration'
 import { readSettings, type LocalSettings } from './settings'
 import { readDelivery, type DigestDelivery } from './digestDelivery'
+import { bankFromLegacy } from './canvasBank'
+import { mergeCanvasBanks } from './canvasBankMerge'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
+export type AccountMergeSource = 'account' | 'device'
+export interface AccountMergeChoices { settings: AccountMergeSource; digest: AccountMergeSource }
+export interface AccountMergePreview {
+  added: { captures: number; thoughts: number; canvases: number; events: number }
+  duplicates: number
+  settings: AccountMergeSource
+  digest: AccountMergeSource
+}
+export interface AccountMergePlan {
+  userId: string
+  revision: string
+  localFingerprint: string
+  data: AccountData
+  preview: AccountMergePreview
+}
 export interface AccountAdapter {
   read(userId: string): Promise<AccountRow | null>
   write(userId: string, data: AccountData, revision: string | null): Promise<AccountRow>
@@ -23,6 +40,86 @@ export function validateData(value: unknown): AccountData {
   readSettings({ getItem: () => JSON.stringify(data.settings) })
   readDelivery({ getItem: () => JSON.stringify(data.digest) })
   return structuredClone(data)
+}
+const accountFingerprint = (value: AccountData) => JSON.stringify(validateData(value))
+export async function guardAccountMergePreview(
+  local: AccountData,
+  prepare: (snapshot: AccountData) => Promise<AccountMergePlan>,
+  current: () => AccountData,
+): Promise<AccountMergePlan> {
+  const fingerprint = accountFingerprint(local)
+  const plan = await prepare(local)
+  if (accountFingerprint(current()) !== fingerprint) {
+    throw Error('Merge preview expired because this device changed while account data was loading. Preview again; both sources are untouched.')
+  }
+  return plan
+}
+const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
+function mergeRecords<T extends { id: string }>(account: T[], device: T[], label: string) {
+  const merged = structuredClone(account)
+  let added = 0
+  let duplicates = 0
+  for (const record of device) {
+    const existing = merged.find(item => item.id === record.id)
+    if (!existing) { merged.push(structuredClone(record)); added++; continue }
+    if (!equal(existing, record)) throw Error(`Merge stopped: ${label} identity ${record.id} has different contents on each device. Both sources are untouched.`)
+    duplicates++
+  }
+  return { merged, added, duplicates }
+}
+
+/** Pure, fail-closed union. Stable identities are deduplicated only when their complete
+ * records agree; Threadline never guesses that differently identified thoughts are equal. */
+export function mergeAccountData(accountValue: AccountData, deviceValue: AccountData, choices: AccountMergeChoices): { data: AccountData; preview: AccountMergePreview } {
+  const account = validateData(accountValue)
+  const device = validateData(deviceValue)
+  const captures = mergeRecords(account.model.captures, device.model.captures, 'capture')
+  const interpretations = mergeRecords(account.model.interpretations, device.model.interpretations, 'interpretation')
+  const sourceCorrections = mergeRecords(account.model.sourceCorrections ?? [], device.model.sourceCorrections ?? [], 'source correction')
+  const semanticObjects = mergeRecords(account.model.semanticObjects, device.model.semanticObjects, 'semantic object')
+  const calendarEvents = mergeRecords(account.model.calendarEvents, device.model.calendarEvents, 'calendar event')
+  const relationships = mergeRecords(account.model.relationships, device.model.relationships, 'relationship')
+  const canvasBank = mergeCanvasBanks(
+    account.model.canvasBank ?? bankFromLegacy(account.model.canvas, account.model.canvasViewport),
+    device.model.canvasBank ?? bankFromLegacy(device.model.canvas, device.model.canvasViewport),
+  )
+  const temporalHistory = mergeRecords(account.model.temporalHistory ?? [], device.model.temporalHistory ?? [], 'temporal decision')
+  const legacyUiIds = [...account.model.legacyUiIds]
+  for (const id of device.model.legacyUiIds) if (!legacyUiIds.includes(id)) legacyUiIds.push(id)
+  const model: PersistedState = {
+    schemaVersion: 2,
+    captures: captures.merged,
+    ...(sourceCorrections.merged.length ? { sourceCorrections: sourceCorrections.merged } : {}),
+    interpretations: interpretations.merged,
+    semanticObjects: semanticObjects.merged,
+    calendarEvents: calendarEvents.merged,
+    relationships: relationships.merged,
+    legacyUiIds,
+    // Frozen compatibility mirror: account remains the destination and new edits use canvasBank.
+    canvas: structuredClone(account.model.canvas),
+    ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
+    canvasBank: canvasBank.merged,
+    ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
+  }
+  const data = validateData({
+    model,
+    settings: choices.settings === 'account' ? account.settings : device.settings,
+    digest: choices.digest === 'account' ? account.digest : device.digest,
+  })
+  return {
+    data,
+    preview: {
+      added: {
+        captures: captures.added,
+        thoughts: device.model.legacyUiIds.filter(id => !account.model.legacyUiIds.includes(id)).length,
+        canvases: canvasBank.added,
+        events: calendarEvents.added,
+      },
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates,
+      settings: choices.settings,
+      digest: choices.digest,
+    },
+  }
 }
 export function createAccountAdapter(client: SupabaseClient | undefined, table: string | undefined): AccountAdapter | undefined {
   if (!client || !table || !/^[a-z][a-z0-9_]*$/.test(table)) return undefined
@@ -56,6 +153,7 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
   let model: PersistedState | undefined
   let active = false
   let failed = false
+  let pendingMerge: AccountMergePlan | undefined
   let queue = Promise.resolve()
   const check = () => { if (currentUser() !== userId) throw Error('Account session changed. Export unsaved work, then return to local data.') }
   return {
@@ -74,6 +172,38 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('No account data')) throw error
         throw Error(local ? 'Local copy was not imported. The account may already contain data, or storage is unavailable. Load account data instead; local data is untouched.' : loadFailure)
+      }
+    },
+    async previewMerge(local: AccountData, choices: AccountMergeChoices): Promise<AccountMergePlan> {
+      check()
+      try {
+        const current = await adapter.read(userId)
+        check()
+        if (!current) throw Error('No account data yet. Copy this device’s local data first.')
+        const merged = mergeAccountData(current.data, local, choices)
+        pendingMerge = { userId, revision: current.revision, localFingerprint: accountFingerprint(local), ...merged }
+        return structuredClone(pendingMerge)
+      } catch (error) {
+        pendingMerge = undefined
+        if (error instanceof Error && (error.message.startsWith('No account data') || error.message.startsWith('Merge stopped:'))) throw error
+        throw Error(loadFailure)
+      }
+    },
+    async confirmMerge(plan: AccountMergePlan, currentLocal?: AccountData) {
+      check()
+      if (!pendingMerge || !equal(pendingMerge, plan) || plan.userId !== userId) throw Error('Merge preview expired. Preview the latest account data again; both sources are untouched.')
+      if (currentLocal && accountFingerprint(currentLocal) !== plan.localFingerprint) {
+        pendingMerge = undefined
+        throw Error('Merge preview expired because this device changed. Preview again; both sources are untouched.')
+      }
+      try {
+        const result = await adapter.write(userId, plan.data, plan.revision)
+        check()
+        revision = result.revision; model = result.data.model; active = true; failed = false; pendingMerge = undefined
+        return { state: legacyUiProjection(result.data.model), data: result.data }
+      } catch {
+        pendingMerge = undefined
+        throw Error('Merge was not saved because the account changed or storage is unavailable. Preview again; both sources are untouched.')
       }
     },
     save(data: AccountData, retry = false) {

@@ -2,6 +2,7 @@ import { updateObject } from './objectWorkflow'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppState, CanvasElement } from './domain'
 import { migrateLegacyState } from './migration'
+import { correctOriginal, reviewTextSnapshot, reviseInterpretation } from './reviewRevision'
 import { loadStateResult, saveState, serializeState, makeObject } from './store'
 
 const key = 'thoughtflow-state-v1'
@@ -30,7 +31,7 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
     expect(state).toEqual(before)
     expect(saveState(state)).toBeUndefined()
     expect(setItem.mock.calls[1][0]).toBe(key)
-    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(migrateLegacyState(before))
+    expect(JSON.parse(setItem.mock.calls[1][1])).toEqual(serializeState(before))
   })
 
   it('loads saved work again after a transient read failure clears', () => {
@@ -81,7 +82,7 @@ describe('TASK-024 shape persistence', () => {
     const reloaded = loadStateResult()
     expect(reloaded.error).toBeUndefined()
     expect(reloaded.state.canvas).toEqual(canvas)
-    expect(reloaded.state.model).toEqual(loaded.state.model)
+    expect(reloaded.state.model).toEqual({ ...loaded.state.model, canvasBank: loaded.state.canvasBank })
     expect(reloaded.state.model?.semanticObjects).toEqual([])
     expect(reloaded.state.canvas[1]).not.toHaveProperty('shape')
   })
@@ -119,5 +120,27 @@ describe('account import serialization', () => {
     expect(exported.captures).toEqual(JSON.parse(raw!).captures)
     expect(raw).toBe(before)
     expect(setItem).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('TASK-046 review revision persistence', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('reloads revisions and corrections through storage with source preserved', () => {
+    let raw = JSON.stringify({ objects: [makeObject({ kind: 'idea', originalContent: 'orginal', source: 'text', confidence: .9,
+      interpretation: { summary: 'First', rationale: 'r', suggestedKind: 'idea' } })], canvas: [] })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
+    const loaded = loadStateResult()
+    const id = loaded.state.objects[0].id
+    let state = reviseInterpretation(loaded.state, id, 'Second', '2026-09-20T01:00:00.000Z')
+    state = correctOriginal(state, id, 'original', true, '2026-09-20T02:00:00.000Z')
+    expect(saveState(state)).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.objects[0]).toMatchObject({ originalContent: 'orginal', currentContent: 'original' })
+    const snapshot = reviewTextSnapshot(reloaded.state, id)
+    expect(snapshot.revisions).toEqual([{ at: '2026-09-20T01:00:00.000Z', from: 'First', to: 'Second' }])
+    expect(snapshot.corrections).toHaveLength(1)
+    expect(reloaded.state.model?.interpretations).toHaveLength(2)
   })
 })

@@ -1,4 +1,7 @@
-import type { AppState, CanvasElement, HistoryEvent, LegacyInterpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject, PersistedState } from './domain'
+import type { AppState, HistoryEvent, LegacyInterpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject, PersistedState } from './domain'
+import { isCanvasElements, isCanvasViewport } from './canvasDocument'
+import { isCanvasBank } from './canvasBank'
+export { newCanvasElement } from './canvasDocument'
 import { migrateLegacyState, isPersistedState, legacyUiProjection, reconcileLegacyUi } from './migration'
 
 const sessions = new WeakMap<PersistedState, { model: PersistedState; raw: string | null }>()
@@ -9,7 +12,6 @@ const objectKinds: ObjectKind[] = ['idea', 'action', 'reminder', 'project', 'com
 const objectStatuses: ObjectStatus[] = ['inbox', 'review', 'confirmed', 'complete', 'archived']
 const sourceTypes: SourceType[] = ['text', 'voice', 'canvas']
 const relationshipTypes: Relationship['type'][] = ['belongs_to', 'relates_to', 'depends_on', 'supports']
-const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow']
 const effortValues: Required<ObjectMetadata>['effort'][] = ['small', 'medium', 'large']
 const attentionValues: Required<ObjectMetadata>['attentionLoad'][] = ['low', 'medium', 'high']
 
@@ -71,16 +73,13 @@ export function isAppState(value: unknown): value is AppState {
   return Array.isArray(candidate.objects) &&
     Array.isArray(candidate.canvas) &&
     candidate.objects.every(isThoughtObject) &&
-    candidate.canvas.every(isCanvasElement) &&
-    candidate.canvas.every(item => item.groupId === undefined ||
-      (item.type === 'text' && candidate.canvas!.some(group => group.id === item.groupId && group.type === 'container')))
+    isCanvasElements(candidate.canvas) &&
+    (candidate.canvasViewport === undefined || isCanvasViewport(candidate.canvasViewport)) &&
+    (candidate.canvasBank === undefined || isCanvasBank(candidate.canvasBank))
 }
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()
   return { id: uid(), createdAt: now, context: undefined, relationships: [], history: [{ at: now, event: 'Captured' }], status: partial.confidence < .8 || ['action', 'commitment', 'reminder'].includes(partial.kind) ? 'review' : 'confirmed', metadata: {}, ...partial }
-}
-export function newCanvasElement(type: CanvasElement['type'], x: number, y: number): CanvasElement {
-  return { id: uid(), type, x, y, width: type === 'container' ? 320 : 190, height: type === 'container' ? 210 : undefined, text: type === 'container' ? 'Untitled group' : 'New thought' }
 }
 
 function isThoughtObject(value: unknown): value is ThoughtObject {
@@ -89,6 +88,7 @@ function isThoughtObject(value: unknown): value is ThoughtObject {
   return typeof item.id === 'string' &&
     objectKinds.includes(item.kind as ObjectKind) &&
     typeof item.originalContent === 'string' &&
+    (item.currentContent === undefined || typeof item.currentContent === 'string') &&
     sourceTypes.includes(item.source as SourceType) &&
     typeof item.createdAt === 'string' &&
     isInterpretation(item.interpretation) &&
@@ -140,25 +140,4 @@ function isMetadata(value: unknown): value is ObjectMetadata {
 
 function optionalScore(value: unknown) {
   return value === undefined || ([1, 2, 3, 4, 5] as const).includes(value as 1 | 2 | 3 | 4 | 5)
-}
-
-function isCanvasElement(value: unknown): value is CanvasElement {
-  if (!value || typeof value !== 'object') return false
-  const item = value as Partial<CanvasElement>
-  return typeof item.id === 'string' &&
-    canvasTypes.includes(item.type as CanvasElement['type']) &&
-    Number.isFinite(item.x) &&
-    Number.isFinite(item.y) &&
-    (item.width === undefined || Number.isFinite(item.width)) &&
-    (item.height === undefined || Number.isFinite(item.height)) &&
-    (item.shape === undefined || (item.type === 'text' && ['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'].includes(item.shape))) &&
-    (item.text === undefined || typeof item.text === 'string') &&
-    (item.fromId === undefined || typeof item.fromId === 'string') &&
-    (item.toId === undefined || typeof item.toId === 'string') &&
-    (item.groupId === undefined || typeof item.groupId === 'string') &&
-    (item.connectionPath === undefined || ['straight', 'curved'].includes(item.connectionPath)) &&
-    (item.connectionPattern === undefined || ['solid', 'dashed', 'dotted'].includes(item.connectionPattern)) &&
-    (item.connectionWeight === undefined || ['light', 'regular', 'bold'].includes(item.connectionWeight)) &&
-    (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined)) &&
-    (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
 }

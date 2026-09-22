@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { accountData, createAccountAdapter, createAccountSession, loadFailure, saveFailure, validateData, type AccountAdapter, type AccountRow } from './accountStorage'
+import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, loadFailure, mergeAccountData, saveFailure, validateData, type AccountAdapter, type AccountMergePlan, type AccountRow } from './accountStorage'
 import { defaultSettings } from './settings'
 import { loadStateResult, makeObject, saveState } from './store'
 import { legacyUiProjection } from './migration'
+import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
+import { addCanvas, createCanvasRecord, LEGACY_CANVAS_ID } from './canvasBank'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -160,5 +162,144 @@ describe('explicit account session', () => {
     const pending = createAccountSession({ ...db.adapter, read: () => new Promise(done => { resolve = done }) }, 'a', () => user).open()
     user = undefined; resolve(db.saved()!)
     await expect(pending).rejects.toThrow(loadFailure)
+  })
+})
+
+describe('guided account merge', () => {
+  const thought = (content: string) => makeObject({ kind: 'idea', originalContent: content, source: 'text', confidence: .9,
+    interpretation: { summary: content, rationale: 'Explicit', suggestedKind: 'idea' } })
+
+  it('combines disjoint device histories without mutating either source', () => {
+    const macCanvas = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:mac'), title: 'Mac map', elements: [{ id: 'mac-node', type: 'text' as const, x: 1, y: 2 }] }
+    const phoneCanvas = { ...createCanvasRecord('2026-09-22T00:00:01.000Z', 'canvas:phone'), title: 'Phone map', elements: [{ id: 'phone-node', type: 'text' as const, x: 3, y: 4 }] }
+    const account = accountData({ objects: [thought('Mac idea')], canvas: [], canvasBank: { canvases: [macCanvas] } },
+      { ...defaultSettings, displayName: 'Mac' }, { enabled: false })
+    const device = accountData({ objects: [thought('Phone idea')], canvas: [], canvasBank: { canvases: [phoneCanvas] } },
+      { ...defaultSettings, displayName: 'Phone' }, { enabled: true, confirmedAt: '2026-09-19T07:00:00Z' })
+    const before = structuredClone({ account, device })
+    const result = mergeAccountData(account, device, { settings: 'device', digest: 'account' })
+    expect({ account, device }).toEqual(before)
+    expect(legacyUiProjection(result.data.model).objects.map(item => item.originalContent)).toEqual(['Mac idea', 'Phone idea'])
+    expect(result.data.model.canvas).toEqual([])
+    expect(result.data.model.canvasBank?.canvases.map(item => item.id)).toEqual(['canvas:mac', 'canvas:phone'])
+    expect(result.data.settings.displayName).toBe('Phone')
+    expect(result.data.digest.enabled).toBe(false)
+    expect(result.preview.added).toEqual({ captures: 1, thoughts: 1, canvases: 1, events: 0 })
+  })
+
+  it('deduplicates identical records and stops on conflicting stable identities', () => {
+    const item = thought('Shared idea')
+    const account = accountData({ objects: [item], canvas: [] }, defaultSettings, { enabled: false })
+    const duplicate = structuredClone(account)
+    const result = mergeAccountData(account, duplicate, { settings: 'account', digest: 'account' })
+    expect(result.data.model.captures).toHaveLength(1)
+    expect(result.data.model.interpretations).toHaveLength(1)
+    const conflict = structuredClone(duplicate)
+    conflict.model.captures[0] = { ...conflict.model.captures[0], originalContent: 'Changed elsewhere' }
+    expect(() => mergeAccountData(account, conflict, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: capture identity')
+  })
+
+  it('carries source corrections through merge and deduplicates identical copies', () => {
+    const one = thought('orginal')
+    const base = accountData({ objects: [one], canvas: [] }, defaultSettings, { enabled: false })
+    vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
+    const withFix = accountData(correctOriginal(legacyUiProjection(base.model), one.id, 'original', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    const other = accountData({ objects: [thought('Phone idea')], canvas: [] }, defaultSettings, { enabled: false })
+    const merged = mergeAccountData(withFix, other, { settings: 'account', digest: 'account' })
+    expect(merged.data.model.sourceCorrections).toHaveLength(1)
+    expect(merged.data.model.captures).toHaveLength(2)
+    const again = mergeAccountData(merged.data, withFix, { settings: 'account', digest: 'account' })
+    expect(again.data.model.sourceCorrections).toHaveLength(1)
+    expect(again.preview.duplicates).toBeGreaterThan(0)
+    expect(mergeAccountData(base, other, { settings: 'account', digest: 'account' }).data.model.sourceCorrections).toBeUndefined()
+  })
+
+  it('stops the merge when audited correction histories conflict for the same correction identity', () => {
+    const base = legacyUiProjection(accountData({ objects: [thought('orginal')], canvas: [] }, defaultSettings, { enabled: false }).model)
+    vi.stubGlobal('crypto', { randomUUID: () => 'fix-1' })
+    const a = accountData(correctOriginal(base, base.objects[0].id, 'original', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    const b = accountData(correctOriginal(base, base.objects[0].id, 'different', true, '2026-09-20T02:00:00.000Z'), defaultSettings, { enabled: false })
+    expect(a.model.sourceCorrections![0].id).toBe(b.model.sourceCorrections![0].id)
+    expect(a.model.sourceCorrections![0].correctedContent).not.toBe(b.model.sourceCorrections![0].correctedContent)
+    expect(() => mergeAccountData(a, b, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: interpretation identity')
+  })
+
+  it('previews before writing and rejects a stale account revision', async () => {
+    const db = database()
+    const account = accountData({ objects: [thought('Account')], canvas: [] }, defaultSettings, { enabled: false })
+    const device = accountData({ objects: [thought('Device')], canvas: [] }, defaultSettings, { enabled: false })
+    const original = await db.adapter.write('a', account, null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(device, { settings: 'account', digest: 'account' })
+    expect(db.saved()?.revision).toBe(original.revision)
+    await db.adapter.write('a', { ...account, settings: { ...defaultSettings, displayName: 'Other device' } }, original.revision)
+    await expect(session.confirmMerge(plan)).rejects.toThrow('Merge was not saved')
+    expect(db.saved()?.data.settings.displayName).toBe('Other device')
+  })
+
+  it('rejects an in-flight preview when this device changes before the account read completes', async () => {
+    const initial = accountData({ objects: [thought('Before preview')], canvas: [] }, defaultSettings, { enabled: false })
+    let current = structuredClone(initial)
+    let finish!: (plan: AccountMergePlan) => void
+    const prepared = new Promise<AccountMergePlan>(resolve => { finish = resolve })
+    const pending = guardAccountMergePreview(initial, () => prepared, () => current)
+    current = accountData({ objects: [thought('Captured while loading')], canvas: [] }, defaultSettings, { enabled: false })
+    finish({ userId: 'a', revision: 'r1', localFingerprint: JSON.stringify(initial), data: initial, preview: {
+      added: { captures: 0, thoughts: 0, canvases: 0, events: 0 }, duplicates: 0, settings: 'account', digest: 'account',
+    } })
+    await expect(pending).rejects.toThrow('this device changed while account data was loading')
+  })
+
+  it('rejects confirmation when this device settings change after preview', async () => {
+    const db = database()
+    const account = accountData({ objects: [thought('Account')], canvas: [] }, defaultSettings, { enabled: false })
+    const device = accountData({ objects: [thought('Device')], canvas: [] }, defaultSettings, { enabled: false })
+    await db.adapter.write('a', account, null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(device, { settings: 'device', digest: 'account' })
+    const editedDevice = { ...device, settings: { ...device.settings, displayName: 'Edited after preview' } }
+    await expect(session.confirmMerge(plan, editedDevice)).rejects.toThrow('this device changed')
+    expect(db.saved()?.data.settings.displayName).toBe(account.settings.displayName)
+  })
+
+  it('confirms the exact preview and preserves Review and Bank items through roundtrip', async () => {
+    const db = database()
+    const mac = confirmObject({ ...thought('Mac bank item'), context: 'Business' }, 'idea')
+    const phone = { ...thought('Phone review item'), confidence: .5, status: 'review' as const }
+    await db.adapter.write('a', accountData({ objects: [mac], canvas: [] }, defaultSettings, { enabled: false }), null)
+    const session = createAccountSession(db.adapter, 'a', () => 'a')
+    const plan = await session.previewMerge(accountData({ objects: [phone], canvas: [] }, defaultSettings, { enabled: false }),
+      { settings: 'account', digest: 'device' })
+    const merged = await session.confirmMerge(plan)
+    expect(bankObjects(merged.state.objects).Business.map(item => item.originalContent)).toContain('Mac bank item')
+    expect(reviewObjects(merged.state.objects).map(item => item.originalContent)).toContain('Phone review item')
+    await expect(session.confirmMerge(plan)).rejects.toThrow('preview expired')
+  })
+})
+
+describe('TASK-056 account canvas viewport compatibility', () => {
+  it('preserves viewport and elements through queued saves and account reload', async () => {
+    const db = database()
+    const session = createAccountSession(db.adapter, 'canvas-user', () => 'canvas-user')
+    const initial = await session.open(payload())
+    const record = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:work'), elements: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }], viewport: { x: -55, y: 91, scale: 1.45 } }
+    const state = addCanvas(initial.state, record)
+    await session.save(session.snapshot(state, defaultSettings, { enabled: false }))
+    const reloaded = await session.open()
+    expect(reloaded.state.canvasBank?.canvases.find(item => item.id === record.id)).toEqual(record)
+    expect(reloaded.state.canvas).toEqual([])
+  })
+  it('keeps the destination account viewport, with device fallback for old account snapshots', () => {
+    const account = payload(), device = payload()
+    delete account.model.canvasBank
+    delete device.model.canvasBank
+    device.model.canvasViewport = { x: -40, y: 80, scale: .7 }
+    const choices = { settings: 'account' as const, digest: 'account' as const }
+    expect(mergeAccountData(account, device, choices).data.model.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(device.model.canvasViewport)
+    account.model.canvasViewport = { x: 15, y: 25, scale: 1.3 }
+    const merged = mergeAccountData(account, device, choices).data.model
+    expect(merged.canvasViewport).toEqual(account.model.canvasViewport)
+    expect(merged.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(account.model.canvasViewport)
+    expect(device.model.canvasViewport).toEqual({ x: -40, y: 80, scale: .7 })
   })
 })

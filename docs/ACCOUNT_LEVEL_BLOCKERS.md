@@ -1,53 +1,25 @@
-# Threadline account-level blockers
+# Threadline account-level release checks
 
-Current state: the repo is clean and recent app work is merged. There are no known open implementation PRs. The remaining blockers are dashboard/account-level validation and secrets, not normal coding.
+Updated: 2026-09-22. The primary app is https://temporary-zippy-agate-50psn81.vercel.app/.
 
-## 1. Cross-device login and data sync
+## Installed app sign-in
 
-Already done:
+TASK-057 is merged into main. The existing paid Threadline Supabase project has the primary URL as its Site URL, and its Magic link or OTP email template now includes both the six-digit token and browser confirmation link. The saved template was reloaded and previewed. The stable app responded successfully after deployment.
 
-- Supabase has the Threadline account-data table expected by the app.
-- Row-level security is enabled and security advisors were clean.
-- Vercel has the required public env names for Supabase account storage.
-- The hosted app was redeployed and responded successfully.
+A real installed-iPhone test remains. Request an email in the home-screen app, enter the six-digit code in that app, confirm the session appears there, then sign out. Check the browser link separately. Do not uninstall the current app, clear local storage, or share credentials or codes. The code change did not move or delete local data.
 
-Still needed:
+## Account data and isolation
 
-- Confirm Supabase Auth Site URL and redirect URLs in the Supabase dashboard.
-- Run a real email magic-link login test.
-- Run a two-account, desktop-to-phone smoke test.
+The account-data table has a UUID owner key linked to Auth users, a UUID revision, a JSON-object payload check, enabled RLS, and owner-only INSERT, SELECT, and UPDATE policies. Read-only catalog checks found no anonymous table grants.
 
-Validation checklist:
+The authenticated role also has DELETE, TRUNCATE, REFERENCES, and TRIGGER table grants that the app does not need. No grant has been changed. Automatic approval review rejected revoking these in production because the existing authorization did not specifically include that permission change. Ask for exact scoped approval before removing only those four grants; retain SELECT, INSERT, and UPDATE.
 
-- Login returns to the hosted app.
-- Settings → Data can copy this device’s local thoughts into an empty signed-in account.
-- Phone can load the same account data and show the same Review queue and Bank folders.
-- Edits from one device save to account storage and can be explicitly loaded on the other.
-- A second account cannot read or update the first account’s row.
-- Sign-out/local mode keeps device data intact.
-- Stale revision and offline/RLS errors do not overwrite local data.
+After permission cleanup, validate with two real accounts and two devices: explicit local-to-account copy/load, changes in both directions, Account B unable to read or write Account A's row, stale revisions and offline errors leaving source data intact, sign-out returning to preserved local data, and successful recovery export. This cannot be certified from database metadata alone.
 
-Exact response to continue:
+## Provider-backed interpretation
 
-`Supabase auth redirect URLs are configured for the hosted app and localhost, and I am ready to run two-account desktop-to-phone validation.`
+The server endpoint and safe client fallback are on main, but provider attempts remain disabled. TASK-031 needs a server-only AI key, direct success and failure checks on /api/interpret, Preview-only evaluation, and explicit Production promotion. No key should appear in browser variables, source code, or this document.
 
-## 2. Real AI interpretation
+## Pilot versus broader launch
 
-Already done:
-
-- The provider-backed `/api/interpret` endpoint exists.
-- The client fails closed to built-in rules if the provider is missing or broken.
-- Settings shows whether Threadline is using built-in rules or provider attempts.
-- Tests cover ambiguous, consequential, low-confidence, malformed, and provider-failure cases.
-- Provider-backed interpretation is disabled by default.
-
-Still needed:
-
-- Add `AI_INTERPRETATION_API_KEY` only as a server-side Vercel environment variable.
-- Deploy.
-- Manually validate `/api/interpret` success and failure behavior.
-- Only then consider enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled` in Preview first.
-
-Exact response to continue:
-
-`Set AI_INTERPRETATION_API_KEY only as a server-side Vercel env var, deploy, validate /api/interpret success and failure cases manually, then consider enabling VITE_AI_INTERPRETATION_PROVIDER=enabled in Preview only.`
+The current Supabase built-in email service is rate-limited and the dashboard warns against broad production use. It is enough to test the sign-in flow; use a production email sender before inviting a larger group.

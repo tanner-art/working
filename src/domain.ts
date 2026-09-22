@@ -7,6 +7,8 @@ export interface ThoughtObject {
   id: string
   kind: ObjectKind
   originalContent: string
+  /** Current reviewed rendering. The immutable source remains originalContent. */
+  currentContent?: string
   source: SourceType
   createdAt: string
   context?: string
@@ -46,6 +48,8 @@ export interface HistoryEvent {
   event: string
   confirmation?: ConfirmationGesture
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
+  reviewRevision?: { from: string; to: string }
+  sourceCorrection?: { correctionId: string; from: string; to: string }
 }
 /** Executable meaning still awaiting a dedicated confirmation gesture. */
 export interface ProposedAction { summary: string }
@@ -67,8 +71,19 @@ export interface CanvasElement {
   connectionPattern?: 'solid' | 'dashed' | 'dotted'
   connectionWeight?: 'light' | 'regular' | 'bold'
 }
+export interface CanvasViewport { x: number; y: number; scale: number }
+export interface CanvasRecord {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  elements: CanvasElement[]
+  viewport: CanvasViewport
+}
+export interface CanvasBank { canvases: CanvasRecord[] }
+
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
-export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; model?: PersistedState; temporalHistory?: TemporalDecision[] }
+export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; canvasBank?: CanvasBank; model?: PersistedState; temporalHistory?: TemporalDecision[] }
 
 export const objectLabels: Record<ObjectKind, string> = {
   idea: 'Idea', action: 'Action', reminder: 'Reminder', project: 'Project', commitment: 'Commitment', person: 'Person', reference: 'Reference', objective: 'Objective'
@@ -139,6 +154,7 @@ export interface PersistedState {
   temporalHistory?: TemporalDecision[]
   schemaVersion: 2
   captures: CaptureRecord[]
+  sourceCorrections?: SourceCorrection[]
   interpretations: Interpretation[]
   semanticObjects: SemanticObject[]
   calendarEvents: CalendarEvent[]
@@ -146,6 +162,15 @@ export interface PersistedState {
   /** Active UI identities include unresolved proposals without semantic objects. */
   legacyUiIds: string[]
   canvas: CanvasElement[]
+  canvasViewport?: CanvasViewport
+  canvasBank?: CanvasBank
+}
+export interface SourceCorrection {
+  readonly id: string
+  readonly captureId: string
+  readonly correctedAt: string
+  readonly correctedContent: string
+  readonly previousId?: string
 }
 
 /** A snapshot of exactly one proposed temporal fact; never obligation evidence. */
