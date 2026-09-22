@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CanvasElement } from './domain'
 import { isCanvasElements, toggleCanvasNodeVariant } from './canvasDocument'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
-import { createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
+import { createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
 
 const textNode: CanvasElement = { id: 'note', type: 'text', x: 10, y: 20, text: 'First item\n\nThird item' }
 
@@ -51,5 +51,13 @@ describe('freehand canvas elements', () => {
     expect(isCanvasElements([{ ...smoothed, projection: undefined }])).toBe(false)
     expect(isCanvasElements([{ ...smoothed, refinements: [{ ...refinement, appliedAt: 'not-a-date' }] }])).toBe(false)
     expect(isCanvasElements([{ ...smoothed, type: 'text' }])).toBe(false)
+  })
+
+  it('round-trips a recognized shape projection only with matching refinement metadata', () => {
+    const refinement = createCanvasStrokeShapeRefinement(stroke.id, [{ x: 10, y: 20 }, { x: 22, y: 21 }], '2026-09-22T12:00:00.000Z')!
+    const shaped: CanvasElement = { ...stroke, rawPoints: [{ x: 10, y: 20 }, { x: 22, y: 21 }], projection: refinement.result, refinements: [refinement] }
+    expect(isCanvasElements([shaped])).toBe(true)
+    expect(isCanvasElements([{ ...shaped, projection: { ...refinement.result, geometry: { start: { x: 10, y: 20 }, end: { x: 18, y: 21 } } } }])).toBe(false)
+    expect(isCanvasElements([{ ...shaped, rawPoints: [{ x: 10, y: 20 }, { x: 30, y: 20 }, { x: 30, y: 40 }, { x: 10, y: 40 }, { x: 10, y: 20 }] }])).toBe(false)
   })
 })

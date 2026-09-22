@@ -6,7 +6,7 @@ import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConn
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
-import { applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, projectCanvasStroke } from './canvasStrokes'
+import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke } from './canvasStrokes'
 
 export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onViewport, onCommit, onText, onFinishText, canUndo, canRedo, onUndo, onRedo, onCaptureObject, onExit, saveStatus }: {
   title: string; autoFocusTitle: boolean; onTitle: (title: string) => void
@@ -282,6 +282,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const strokePath = (points: NonNullable<CanvasElement['rawPoints']>) => points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
   const renderedStrokePoints = (stroke: CanvasElement) => projectCanvasStroke(stroke.rawPoints, stroke.projection ?? { kind: 'raw' }) ?? stroke.rawPoints!
   const smoothingPreviewPoints = (stroke: CanvasElement) => projectCanvasStroke(stroke.rawPoints, { kind: 'smoothed', algorithm: 'moving-average-v1' })
+  const shapePreview = (stroke: CanvasElement) => previewCanvasStrokeShape(stroke.rawPoints)
+  const shapePreviewPoints = (stroke: CanvasElement) => { const projection = shapePreview(stroke); return projection && projectCanvasStroke(stroke.rawPoints, projection) }
   const selectedStroke = selectedStrokeIds.size === 1 ? strokes.find(stroke => selectedStrokeIds.has(stroke.id)) : undefined
   const canPreviewSmoothing = Boolean(selectedStroke && selectedStroke.projection === undefined && smoothingPreviewPoints(selectedStroke))
   const openSmoothingPreview = () => { if (canPreviewSmoothing && selectedStroke) setRefinementCandidateId(selectedStroke.id) }
@@ -291,6 +293,14 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const smoothed = applyCanvasStrokeSmoothing(stroke, new Date().toISOString())
     if (!smoothed) { dismissRefinementPreview(); return }
     onCommit(elements.map(item => item.id === stroke.id ? smoothed : item))
+    dismissRefinementPreview()
+  }
+  const acceptShape = () => {
+    const stroke = refinementCandidateId ? elements.find(item => item.id === refinementCandidateId && item.type === 'freehand') : undefined
+    if (!stroke || stroke.projection !== undefined) { dismissRefinementPreview(); return }
+    const shaped = applyCanvasStrokeShape(stroke, new Date().toISOString())
+    if (!shaped) { dismissRefinementPreview(); return }
+    onCommit(elements.map(item => item.id === stroke.id ? shaped : item))
     dismissRefinementPreview()
   }
   const renderedArrow = (arrow: CanvasElement) => connectionPreview?.id === arrow.id ? { ...arrow, ...connectionPreview.patch } : arrow
@@ -341,7 +351,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <button onClick={() => add('text')}>+ Text</button>
     <button className={tool === 'pen' ? 'selected-tool' : ''} aria-pressed={tool === 'pen'} onClick={() => { cancel(); setTool(current => current === 'pen' ? 'select' : 'pen'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Pen</button>
     <button className={tool === 'lasso' ? 'selected-tool' : ''} aria-pressed={tool === 'lasso'} onClick={() => { cancel(); setTool(current => current === 'lasso' ? 'select' : 'lasso'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Lasso</button>
-    <button disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview smoothing</button>
+    <button disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
     <button onClick={() => add('container')}>+ Group</button>
     <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
     <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
@@ -375,10 +385,10 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <label>Weight <select aria-label="Connection weight" value={selectedElement.connectionWeight ?? 'regular'} onChange={event => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionWeight: event.target.value as ConnectionWeight }))}><option value="light">Light</option><option value="regular">Regular</option><option value="bold">Bold</option></select></label>
     </>}
     </div>
-    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size === 1 ? 'One stroke selected · preview smoothing or circle another selection' : 'Lasso active · circle one stroke to preview smoothing · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
+    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size === 1 ? 'One stroke selected · preview refinement or circle another selection' : 'Lasso active · circle one stroke to preview refinement · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
+    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
     <svg className="arrows">{arrows.map(arrow => { const shown = renderedArrow(arrow), from = positioned(shown.fromId); const to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); setSelected(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
     <marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
     <path d="M0,0 L0,6 L7,3 z" />
@@ -403,10 +413,10 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     })}</div>
     </div>
     {refinementCandidateId && <section className="canvas-refinement-sheet" role="dialog" aria-modal="false" aria-labelledby="smoothing-preview-title">
-      <button className="canvas-refinement-dismiss" aria-label="Dismiss smoothing preview" onClick={dismissRefinementPreview}>×</button>
-      <p className="section-label">Local refinement preview</p><h2 id="smoothing-preview-title">Smooth this stroke?</h2>
-      <p>The highlighted line is a deterministic local smoothing preview. Its original raw points stay preserved.</p>
-      <div><button className="secondary" onClick={dismissRefinementPreview}>Keep original</button><button className="primary" onClick={acceptSmoothing}>Use smoothed stroke</button></div>
+      <button className="canvas-refinement-dismiss" aria-label="Dismiss refinement preview" onClick={dismissRefinementPreview}>×</button>
+      <p className="section-label">Local refinement preview</p><h2 id="smoothing-preview-title">Refine this stroke?</h2>
+      <p>The highlighted line is a deterministic local preview. Its original raw points stay preserved.</p>
+      <div><button className="secondary" onClick={dismissRefinementPreview}>Keep original</button><button className="primary" onClick={acceptSmoothing}>Use smoothed stroke</button>{(() => { const stroke = elements.find(item => item.id === refinementCandidateId && item.type === 'freehand'); const proposal = stroke && shapePreview(stroke); return proposal && <button className="primary" onClick={acceptShape}>Convert to {proposal.shape}</button> })()}</div>
     </section>}
     </div>
 }
