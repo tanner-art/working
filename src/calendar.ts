@@ -25,6 +25,11 @@ export interface CalendarMonth {
   unscheduledCommitments: SemanticObject[]
 }
 
+export interface CalendarTimeGrid {
+  days: CalendarDayCell[]
+  unscheduledCommitments: SemanticObject[]
+}
+
 /**
  * Seam for D-009 temporal-confirmation provenance. A scheduled status and parseable timestamp are
  * structural facts, not evidence of a separate scheduling-confirmation gesture, so the reusable
@@ -50,6 +55,18 @@ export function monthLabel(year: number, month: number): string {
 export function addMonths(year: number, month: number, delta: number): { year: number; month: number } {
   const total = year * 12 + month + delta
   return { year: Math.floor(total / 12), month: ((total % 12) + 12) % 12 }
+}
+
+/** Advance local calendar days rather than milliseconds so navigation remains stable across DST. */
+export function addDays(key: string, delta: number): string {
+  const date = parseLocalDateKey(key)
+  return localDateKey(new Date(date.getFullYear(), date.getMonth(), date.getDate() + delta))
+}
+
+/** Sunday-start week, matching the Month grid's labels and avoiding UTC date shifts. */
+export function weekStart(key: string): string {
+  const date = parseLocalDateKey(key)
+  return addDays(key, -date.getDay())
 }
 
 export function dayAriaLabel(cell: CalendarDayCell): string {
@@ -112,18 +129,69 @@ export function buildCalendarMonth(
 
   const dates = calendarGridDates(year, month)
   const weeks: CalendarDayCell[][] = []
-  for (let i = 0; i < dates.length; i += 7) {
-    weeks.push(dates.slice(i, i + 7).map(date => {
-      const key = localDateKey(date)
-      return {
-        date: key,
-        inCurrentMonth: date.getMonth() === month,
-        isToday: key === todayKey,
-        events: (eventsByDay.get(key) ?? []).slice().sort((a, b) =>
-          Date.parse(a.event.startsAt) - Date.parse(b.event.startsAt) || a.event.id.localeCompare(b.event.id)),
-        proposedDates: (proposedByDay.get(key) ?? []).slice().sort((a, b) => a.summary.localeCompare(b.summary))
-      }
-    }))
-  }
+  const cells = dates.map(date => cellForDate(date, month, todayKey, eventsByDay, proposedByDay))
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7))
   return { year, month, weeks, unscheduledCommitments: unscheduledCommitments.slice().sort((a, b) => a.id.localeCompare(b.id)) }
+}
+
+/** Builds consecutive local day cells for Week and Day without introducing event times. */
+export function buildCalendarTimeGrid(
+  model: PersistedState,
+  start: string,
+  days: number,
+  now: Date,
+  isEventDisplayReady: TemporalProvenanceCheck = defaultTemporalProvenanceCheck
+): CalendarTimeGrid {
+  if (!validDateKey(start) || !Number.isInteger(days) || days < 1) throw new Error('Calendar time grid requires a valid local start date and positive day count.')
+  const todayKey = localDateKey(now)
+  const readyEvents = model.calendarEvents.filter(isEventDisplayReady)
+  const eventsByDay = new Map<string, CalendarDayEvent[]>()
+  for (const event of readyEvents) {
+    const key = localDateKey(new Date(event.startsAt))
+    const linkedObjects = event.objectIds.map(id => model.semanticObjects.find(o => o.id === id)).filter((o): o is SemanticObject => Boolean(o))
+    const list = eventsByDay.get(key) ?? []
+    list.push({ event, linkedObjects })
+    eventsByDay.set(key, list)
+  }
+  const proposedByDay = proposedDatesByDay(model)
+  const linkedObjectIds = new Set(readyEvents.flatMap(e => e.objectIds))
+  const unscheduledCommitments = confirmedSemanticObjects(model).filter(o => o.kind === 'commitment' && !linkedObjectIds.has(o.id))
+  const startDate = parseLocalDateKey(start)
+  const cells = Array.from({ length: days }, (_, index) => {
+    const date = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + index)
+    return cellForDate(date, date.getMonth(), todayKey, eventsByDay, proposedByDay)
+  })
+  return { days: cells, unscheduledCommitments: unscheduledCommitments.slice().sort((a, b) => a.id.localeCompare(b.id)) }
+}
+
+function proposedDatesByDay(model: PersistedState): Map<string, ProposedDateMarker[]> {
+  const proposedByDay = new Map<string, ProposedDateMarker[]>()
+  for (const interpretation of currentInterpretations(model)) {
+    if (interpretation.reviewState === 'rejected') continue
+    const objectId = interpretation.legacy.id
+    if (model.semanticObjects.find(o => o.id === objectId)?.status === 'archived') continue
+    const raw = interpretation.legacy.metadata.deadline
+    if (!validDateKey(raw)) continue
+    const list = proposedByDay.get(raw) ?? []
+    list.push({ interpretationId: interpretation.id, objectId, kind: interpretation.legacy.kind, summary: interpretation.summary, date: raw })
+    proposedByDay.set(raw, list)
+  }
+  return proposedByDay
+}
+
+function cellForDate(
+  date: Date,
+  currentMonth: number,
+  todayKey: string,
+  eventsByDay: Map<string, CalendarDayEvent[]>,
+  proposedByDay: Map<string, ProposedDateMarker[]>
+): CalendarDayCell {
+  const key = localDateKey(date)
+  return {
+    date: key,
+    inCurrentMonth: date.getMonth() === currentMonth,
+    isToday: key === todayKey,
+    events: (eventsByDay.get(key) ?? []).slice().sort((a, b) => Date.parse(a.event.startsAt) - Date.parse(b.event.startsAt) || a.event.id.localeCompare(b.event.id)),
+    proposedDates: (proposedByDay.get(key) ?? []).slice().sort((a, b) => a.summary.localeCompare(b.summary))
+  }
 }
