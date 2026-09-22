@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Single-host, serial GitHub issue runner. Never merges or cleans worktrees."""
-import argparse, fcntl, json, os, pathlib, re, signal, subprocess, sys, time
+"""Local GitHub issue runner. Never merges or cleans worktrees."""
+import argparse, contextlib, fcntl, json, os, pathlib, re, signal, subprocess, sys, time
 
 
 def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
@@ -52,6 +52,70 @@ def save(path, data):
     temp.replace(path)
 
 
+@contextlib.contextmanager
+def file_lock(path, blocking=True):
+    """Lock a small coordination file, releasing it even on agent failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, 'a')
+    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(handle, flags)
+        yield handle
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def paths_overlap(left, right):
+    """Treat a file and a containing/contained path as overlapping."""
+    def parents(path):
+        clean = path.strip('/')
+        return {clean, *[clean.rsplit('/', i)[0] for i in range(1, clean.count('/') + 1)]}
+    return bool(set(left) & set(right)) or any(
+        a in parents(b) or b in parents(a) for a in left for b in right
+    )
+
+
+def active_paths(state):
+    paths = []
+    for record in state.glob('issue-*.json'):
+        try:
+            data = json.loads(record.read_text())
+        except (OSError, ValueError):
+            continue
+        if data.get('status') in {'starting', 'agent', 'validation'}:
+            paths.append(data.get('paths', []))
+    return paths
+
+
+def claim(state, issue, agent, body, retry=False):
+    """Atomically reserve an issue and its exact paths under the short claim lock."""
+    number = issue['number']
+    record = state / f'issue-{number}.json'
+    with file_lock(state / 'claims.lock'):
+        if record.exists():
+            current = json.loads(record.read_text())
+            if not (retry and current.get('status') == 'failed'):
+                return None
+        if any(paths_overlap(body['paths'], paths) for paths in active_paths(state)):
+            return 'deferred'
+        if record.exists():
+            # Keep the failed attempt auditable before explicit retry replaces its pointer.
+            save(state / f'issue-{number}-failed-{time.time_ns()}.json', current)
+            record.unlink()
+        data = {'issue': number, 'status': 'starting', 'time': time.time(),
+                'agent': agent, 'paths': list(body['paths'])}
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(record, flags, 0o600)
+        except FileExistsError:
+            return None
+        with os.fdopen(fd, 'w') as output:
+            json.dump(data, output, indent=2)
+            output.write('\n')
+        return data
+
+
 def select(issue, allowed):
     labels = {x['name'] for x in issue['labels']}
     agents = labels & {'agent:codex-a','agent:codex-b','agent:claude'}
@@ -78,6 +142,8 @@ def main():
     ap.add_argument('--config',required=True)
     ap.add_argument('--dry-run',action='store_true')
     ap.add_argument('--retry',type=int,help='Explicitly retry a preserved failed attempt with a new worktree')
+    ap.add_argument('--agent',choices=('codex-a','codex-b','claude'),
+                    help='Run one worker lane for this agent; lanes share state safely')
     args=ap.parse_args()
     c=json.loads(pathlib.Path(args.config).read_text())
     repo=pathlib.Path(c['repo']).resolve(); state=pathlib.Path(c['state']).resolve()
@@ -102,34 +168,49 @@ def main():
             except (ValueError,KeyError) as e: print(json.dumps({'issue':issue['number'],'skip':str(e)}))
         print(json.dumps({'dry_run':True,'queue_size':len(issues)}));return
     state.mkdir(parents=True,exist_ok=True)
-    lock=open(state/'runner.lock','a')
-    try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError: return
+    if args.agent:
+        try:
+            lane_lock = file_lock(state / f'agent-{args.agent}.lock', blocking=False)
+            lane_lock.__enter__()
+        except BlockingIOError:
+            return
+    else:
+        # Preserve the original serial behavior when no lane is selected.
+        lock = open(state/'runner.lock','a')
+        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: return
     save(state/'heartbeat.json',{'time':time.time(),'pid':os.getpid(),'status':'polling'})
     for issue in sorted(issues,key=lambda i:i['number']):
-        n=issue['number']; record=state/f'issue-{n}.json'
-        if record.exists() and not args.retry: continue
-        data={'issue':n,'status':'starting','time':time.time()}
+        n=issue['number']; record=state/f'issue-{n}.json'; data=None
         try:
             agent,body=select(issue,c['allowed_authors'])
+            if args.agent and agent != args.agent: continue
             if agent not in c['agents']: raise ValueError('Agent is not enabled')
             blocked = [dep for dep in body.get('depends_on',[])
                        if json.loads(github('issue','view',str(dep),'--repo',c['github'],'--json','state'))['state']!='CLOSED']
             if blocked:
                 print(json.dumps({'issue':n,'status':'waiting','dependencies':blocked}))
                 continue
-            # Keep canonical checkout clean; fetch only updates remote tracking refs.
-            if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
-            g('fetch','origin','main');base=g('rev-parse','origin/main')
+            data = claim(state, issue, agent, body, args.retry)
+            if data == 'deferred':
+                print(json.dumps({'issue':n,'status':'deferred','reason':'overlapping active paths'}))
+                continue
+            if data is None: continue
+            # Fetch and worktree-add touch shared Git metadata; serialize only these operations.
+            with file_lock(state / 'git.lock'):
+                if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
+                g('fetch','origin','main');base=g('rev-parse','origin/main')
             attempt=str(time.time_ns());branch=f'runner/{body["task"].lower()}-{n}-{attempt}'
             wt=pathlib.Path(c['worktrees'])/agent/f'issue-{n}-{attempt}'
             wt.parent.mkdir(parents=True,exist_ok=True)
             log=state/f'issue-{n}-{attempt}.log'
             data.update(agent=agent,base=base,branch=branch,worktree=str(wt),log=str(log))
+            record=state/f'issue-{n}.json'
             save(record,data)
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
             if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
-            g('worktree','add','-b',branch,str(wt),base)
+            with file_lock(state / 'git.lock'):
+                g('worktree','add','-b',branch,str(wt),base)
             run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]; agentenv=env.copy();agentenv.update(config.get('env',{}))
             for secret in ('GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY'):
@@ -174,11 +255,17 @@ Assigned instructions:
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:running','--add-label','runner:review')
             print(json.dumps(data));break
         except Exception as e:
+            if data is None:
+                data={'issue':n, 'status':'failed', 'time':time.time()}
             data.update(status='failed',error=str(e),time=time.time());save(record,data)
             try: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--remove-label','runner:running','--add-label','runner:failed')
             except Exception: pass
             print(json.dumps(data),file=sys.stderr)
             break
     save(state/'heartbeat.json',{'time':time.time(),'pid':os.getpid(),'status':'idle'})
+    if args.agent:
+        lane_lock.__exit__(None, None, None)
+    else:
+        lock.close()
 
 if __name__=='__main__': main()
