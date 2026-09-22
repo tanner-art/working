@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { CanvasElement } from './domain'
 import { isCanvasElements } from './canvasDocument'
-import { canvasConnectorPath, connectionEndpoints, connectionPathData, normalizeCurveHandle, normalizePerimeterAnchor, perimeterAnchorAtPoint, projectPerimeterAnchor, resizeCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors } from './canvasGeometry'
+import { canvasConnectorPath, connectionEndpoints, connectionPathData, didMoveCanvasConnectionHandle, normalizeCurveHandle, normalizePerimeterAnchor, perimeterAnchorAtPoint, projectPerimeterAnchor, resizeCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors } from './canvasGeometry'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
 
 const source: CanvasElement = { id: 'source', type: 'text', x: 20, y: 40, width: 240, height: 160 }
@@ -64,6 +64,18 @@ describe('editable canvas connection geometry', () => {
     expect(redoCanvas(redoCanvas(undoCanvas(undoCanvas(history)))).present).toEqual(curved)
     const overlapping = [{ ...source, width: 500 }, { ...target, x: 300 }, arrow]
     expect(updateCanvasConnectionAnchors(overlapping, arrow.id, { targetAnchor: { x: 0, y: .5 } })).toBe(overlapping)
+    const inwardSource = updateCanvasConnectionAnchors(elements, arrow.id, { sourceAnchor: { x: 0, y: .5 } })
+    expect(updateCanvasConnectionAnchors(inwardSource, arrow.id, { targetAnchor: { x: 0, y: .5 } })).toBe(inwardSource)
+  })
+
+  it('does not create an anchor or history entry for a pointer down/up that never moves', () => {
+    expect(didMoveCanvasConnectionHandle({ x: 100, y: 200 }, { x: 100, y: 200 })).toBe(false)
+    expect(didMoveCanvasConnectionHandle({ x: 100, y: 200 }, { x: 100.4, y: 200 })).toBe(false)
+    expect(didMoveCanvasConnectionHandle({ x: 100, y: 200 }, { x: 100.5, y: 200 })).toBe(true)
+    const noAnchor = updateCanvasConnectionAnchors(elements, arrow.id, { sourceAnchor: { x: .5, y: 1 } })
+    expect(noAnchor).toBe(elements)
+    const history = emptyCanvasHistory(elements)
+    expect(commitCanvas(history, noAnchor)).toBe(history)
   })
 
   it('derives a perimeter ray from a pointer and clears curve data when returned to straight', () => {

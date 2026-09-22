@@ -13,6 +13,12 @@ export const CURVE_HANDLE_LIMIT = 1.5
 export interface CanvasPoint { x: number; y: number }
 export interface CanvasConnectionEndpoints { x1: number; y1: number; x2: number; y2: number }
 
+/** Avoids recording a gesture when its pointer never moved beyond the handle hit slop. */
+export function didMoveCanvasConnectionHandle(start: CanvasPoint, current: CanvasPoint) {
+  return Number.isFinite(start.x) && Number.isFinite(start.y) && Number.isFinite(current.x) && Number.isFinite(current.y) &&
+    Math.hypot(current.x - start.x, current.y - start.y) >= .5
+}
+
 /** Returns a finite normalized anchor; finite out-of-range input is safely clamped. */
 export function normalizePerimeterAnchor(anchor: unknown): CanvasPerimeterAnchor | undefined {
   if (!anchor || typeof anchor !== 'object') return undefined
@@ -160,11 +166,25 @@ export function updateCanvasConnection(elements: CanvasElement[], id: string, pa
 
 function pointInsideNode(node: CanvasElement, point: CanvasPoint) {
   const { width, height } = canvasSize(node), centerX = node.x + width / 2, centerY = node.y + height / 2
-  const dx = (point.x - centerX) / (width / 2), dy = (point.y - centerY) / (height / 2)
+  const localX = point.x - centerX, localY = point.y - centerY
+  const dx = localX / (width / 2), dy = localY / (height / 2)
   const shape = canvasNodeShape(node)
   if (shape === 'ellipse') return dx * dx + dy * dy < 1 - 1e-6
   if (shape === 'diamond') return Math.abs(dx) + Math.abs(dy) < 1 - 1e-6
+  const radius = roundedRadius(node, width, height)
+  if (radius > 0 && Math.abs(localX) > width / 2 - radius && Math.abs(localY) > height / 2 - radius) {
+    return Math.hypot(Math.abs(localX) - (width / 2 - radius), Math.abs(localY) - (height / 2 - radius)) < radius - 1e-6
+  }
   return Math.abs(dx) < 1 - 1e-6 && Math.abs(dy) < 1 - 1e-6
+}
+
+/** A new target endpoint must leave the source boundary instead of immediately crossing it. */
+function targetLeavesSource(from: CanvasElement, endpoints: CanvasConnectionEndpoints) {
+  const dx = endpoints.x2 - endpoints.x1, dy = endpoints.y2 - endpoints.y1
+  const distance = Math.hypot(dx, dy)
+  if (distance < 1e-6) return false
+  const step = Math.min(.5, distance / 2) / distance
+  return !pointInsideNode(from, { x: endpoints.x1 + dx * step, y: endpoints.y1 + dy * step })
 }
 
 /** Updates one arrow without mutating the input array. Invalid endpoint updates are rejected. */
@@ -179,10 +199,19 @@ export function updateCanvasConnectionAnchors(elements: CanvasElement[], id: str
   const curveHandle = patch.curveHandle === undefined ? arrow.curveHandle : normalizeCurveHandle(patch.curveHandle)
   if ((patch.sourceAnchor !== undefined && !sourceAnchor) || (patch.targetAnchor !== undefined && !targetAnchor) || (patch.curveHandle !== undefined && !curveHandle)) return elements
   const endpoints = connectionEndpoints(from, to, { sourceAnchor, targetAnchor })
-  // Legacy fixed ports are retained even where a historical layout crosses a source
-  // box. Explicit endpoint movement cannot place the target boundary inside its source.
-  if ((patch.sourceAnchor !== undefined || patch.targetAnchor !== undefined) &&
-    pointInsideNode(from, { x: endpoints.x2, y: endpoints.y2 })) return elements
-  const next = { ...arrow, sourceAnchor, targetAnchor, curveHandle: arrow.connectionPath === 'curved' ? curveHandle : undefined }
+  // Legacy fixed ports are unchanged. A newly dragged target cannot be inside, or
+  // immediately route back through, its source shape. Moving the source remains
+  // available to repair historical top-to-bottom routes before moving the target.
+  if (patch.targetAnchor !== undefined &&
+    (pointInsideNode(from, { x: endpoints.x2, y: endpoints.y2 }) || !targetLeavesSource(from, endpoints))) return elements
+  const nextSourceAnchor = sourceAnchor && !(arrow.sourceAnchor === undefined && endpoints.x1 === connectionEndpoints(from, to, arrow).x1 && endpoints.y1 === connectionEndpoints(from, to, arrow).y1) ? sourceAnchor : undefined
+  const nextTargetAnchor = targetAnchor && !(arrow.targetAnchor === undefined && endpoints.x2 === connectionEndpoints(from, to, arrow).x2 && endpoints.y2 === connectionEndpoints(from, to, arrow).y2) ? targetAnchor : undefined
+  const nextCurveHandle = arrow.connectionPath === 'curved' ? curveHandle : undefined
+  if (sameAnchor(nextSourceAnchor, arrow.sourceAnchor) && sameAnchor(nextTargetAnchor, arrow.targetAnchor) && sameAnchor(nextCurveHandle, arrow.curveHandle)) return elements
+  const next = { ...arrow, sourceAnchor: nextSourceAnchor, targetAnchor: nextTargetAnchor, curveHandle: nextCurveHandle }
   return elements.map(item => item.id === id ? next : item)
+}
+
+function sameAnchor(a: CanvasPerimeterAnchor | CanvasCurveHandle | undefined, b: CanvasPerimeterAnchor | CanvasCurveHandle | undefined) {
+  return a?.x === b?.x && a?.y === b?.y
 }

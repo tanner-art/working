@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CanvasCurveHandle, CanvasElement, CanvasViewport } from './domain'
 import { newCanvasElement, toggleCanvasNodeVariant } from './canvasDocument'
 import { branchCanvasChild } from './canvasBranch'
-import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionEndpoints, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
+import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionEndpoints, didMoveCanvasConnectionHandle, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
@@ -54,7 +54,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const [resizePreview, setResizePreview] = useState<CanvasElement | null>(null)
   const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
   const [connectionPreview, setConnectionPreview] = useState<{ id: string; patch: Pick<CanvasElement, 'sourceAnchor' | 'targetAnchor' | 'curveHandle'> } | null>(null)
-  const connectionDrag = useRef<{ pointerId: number; id: string; kind: 'source' | 'target' | 'curve' } | null>(null)
+  const connectionDrag = useRef<{ pointerId: number; id: string; kind: 'source' | 'target' | 'curve'; start: { x: number; y: number } } | null>(null)
   const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
@@ -142,25 +142,30 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const beginConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>, arrow: CanvasElement, kind: 'source' | 'target' | 'curve') => {
     if (event.button !== 0) return
     event.preventDefault(); event.stopPropagation()
-    connectionDrag.current = { pointerId: event.pointerId, id: arrow.id, kind }
+    connectionDrag.current = { pointerId: event.pointerId, id: arrow.id, kind, start: worldPoint(event) }
     event.currentTarget.setPointerCapture(event.pointerId)
-    previewConnection(arrow, kind, worldPoint(event))
   }
   const moveConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
     const active = connectionDrag.current
     if (!active || active.pointerId !== event.pointerId) return
     event.preventDefault(); event.stopPropagation()
+    const point = worldPoint(event)
+    if (!didMoveCanvasConnectionHandle(active.start, point)) return
     const arrow = elements.find(item => item.id === active.id && item.type === 'arrow')
-    if (arrow) previewConnection(arrow, active.kind, worldPoint(event))
+    if (arrow) previewConnection(arrow, active.kind, point)
   }
   const finishConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>, commit: boolean) => {
     const active = connectionDrag.current
     if (!active || active.pointerId !== event.pointerId) return
     event.preventDefault(); event.stopPropagation()
     const arrow = elements.find(item => item.id === active.id && item.type === 'arrow')
-    if (commit && arrow) {
-      const patch = connectionPatchAtPoint(arrow, active.kind, worldPoint(event))
-      if (patch) onCommit(updateCanvasConnectionAnchors(elements, arrow.id, patch))
+    const point = worldPoint(event)
+    if (commit && arrow && didMoveCanvasConnectionHandle(active.start, point)) {
+      const patch = connectionPatchAtPoint(arrow, active.kind, point)
+      if (patch) {
+        const next = updateCanvasConnectionAnchors(elements, arrow.id, patch)
+        if (next !== elements) onCommit(next)
+      }
     }
     connectionDrag.current = null
     setConnectionPreview(null)
