@@ -238,11 +238,43 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .review-disclosure > .review-list, .review-disclosure > .empty { margin: 12px; }
 .review-card { position: relative; overflow-wrap: anywhere; }
 .review-card .source-line { padding-right: 28px; }
+.review-actions .edit-thought-button { border-color: #8fab79; color: #2f552f; }
 .review-dismiss { position: absolute; top: 8px; right: 8px; width: 44px; height: 44px; border: 0; background: transparent; color: #68786e; font-size: 24px; }
 .bank-section { margin-top: 28px; }
 .bank-section > p { font-size: 13px; line-height: 1.6; color: #637069; }
 .bank-folder { margin-top: 10px; overflow-wrap: anywhere; }
 .bank-folder .clickable-row { width: 100%; }
+
+/* TASK-058: make preserved Review revisions visible and usable on touch screens. */
+.thought-editors { display: grid; gap: 10px; padding: 16px; margin: 0 0 17px; border: 1px solid #d9ddd5; border-radius: 9px; background: #fffefa; }
+.thought-editors h3 { margin: 2px 0 0; font: 500 20px 'Playfair Display'; }
+.thought-editors p { margin: 0; color: #607168; font-size: 12px; line-height: 1.5; }
+.thought-editors label { display: grid; gap: 6px; color: #52645b; font: 10px 'DM Mono'; letter-spacing: .06em; text-transform: uppercase; }
+.thought-editors textarea { box-sizing: border-box; width: 100%; min-height: 82px; resize: vertical; padding: 11px; border: 1px solid #b9c5b5; border-radius: 7px; background: #fffefa; color: #26352e; font: 14px/1.5 Manrope; letter-spacing: normal; text-transform: none; }
+.thought-editors button { justify-self: start; min-height: 44px; }
+.preserved-note { color: #5f725f; font: 11px/1.45 'DM Mono' !important; }
+.thought-progression { margin: 18px 0; }
+.thought-progression > summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 700; }
+.thought-progression > ol { list-style: none; padding: 0 0 0 16px; margin: 4px 0 0 7px; border-left: 2px solid #d9e4d2; }
+.thought-progression > ol > li { position: relative; padding: 0 0 18px 16px; }
+.thought-progression > ol > li:before { content: ''; position: absolute; left: -22px; top: 5px; width: 10px; height: 10px; border: 2px solid #f8f8f3; border-radius: 50%; background: #7da267; }
+.thought-progression li > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.thought-progression strong { font-size: 12px; }
+.thought-progression time { color: #74817a; font: 9px 'DM Mono'; }
+.thought-progression li > p { margin: 7px 0 0; color: #33433a; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+.thought-progression li details { margin-top: 7px; color: #6b786f; font-size: 11px; }
+.thought-progression li details > summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+.source-edit-note { padding: 10px 12px; border-radius: 7px; background: #f2f5ef; color: #4e6257 !important; }
+@media (max-width: 720px) {
+  .review-actions > * { flex: 1 1 130px; }
+  .review-actions select { width: 100%; }
+  .object-panel header, .object-panel footer { padding: 16px 18px; }
+  .panel-scroll { padding: 18px 18px 28px; }
+  .object-panel footer { flex-wrap: wrap; }
+  .object-panel footer .primary { margin-left: 0; flex: 1 1 100%; order: -1; }
+  .thought-editors button { width: 100%; }
+  .thought-progression li > div { display: grid; gap: 3px; }
+}
 
 /* TASK-056: only selected content needs a properties row. */
 .canvas-properties { height: auto; min-height: 0; max-height: 112px; padding: 0; }

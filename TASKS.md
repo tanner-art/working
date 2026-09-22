@@ -32,6 +32,26 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## REVIEW — September 20 pipeline
 
+### TASK-058 - Review Thought Editing and Version History
+
+Status: REVIEW
+Owner: Codex
+Reviewer: Claude changes requested; fixes ready for independent re-review
+Scope authority: User-requested functional-design priority on September 21.
+
+Make Review thoughts clearly editable on mobile and desktop while preserving the immutable first
+capture and showing current text, organized meaning revisions, and correction history as one
+readable progression. Reuse the existing TASK-046 revision model. Do not change auth, Canvas,
+Calendar, architecture, confirmation rules, or merge `main`.
+
+Acceptance criteria and review handoff: [TASK-058_DELIVERY.md](docs/TASK-058_DELIVERY.md).
+Validation: `pnpm check` passed 410 tests, application/API TypeScript and production build;
+`git diff --check` passed. Local browser inspection verified both editors and the open version
+history on desktop. At 390×844, the panel fit at 375 pixels and both save controls measured
+290×44 pixels. The follow-up addresses Claude's non-text source behavior, draft-loss guards,
+modal focus/background/Escape behavior, and 44-pixel history disclosure findings. Independent
+re-review remains pending.
+
 ### TASK-056 - Existing Canvas Reliability Foundation
 
 Status: REVIEW

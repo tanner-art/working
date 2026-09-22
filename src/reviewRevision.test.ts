@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { migrateLegacyState, legacyUiProjection, reconcileLegacyUi } from './migration'
-import { correctOriginal, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
+import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { confirmedActions, confirmObject, hasConfirmation, reviewObjects } from './objectWorkflow'
 import { isPersistedState } from './migration'
 import type { AppState, ThoughtObject } from './domain'
@@ -23,6 +23,16 @@ describe('review text revisions', () => {
     expect(reviewTextSnapshot(state, 'one').revisions).toEqual([{ at: '2026-09-20T01:00:00.000Z', from: 'First reading', to: 'Better reading' }])
   })
 
+  it('presents the immutable capture and text or meaning revisions as one chronological progression', () => {
+    let state = reviseInterpretation(fixture(), 'one', 'Better reading', '2026-09-20T02:00:00.000Z')
+    state = correctOriginal(state, 'one', 'Original wording', true, '2026-09-20T01:00:00.000Z')
+    expect(reviewTextSnapshot(state, 'one').progression).toEqual([
+      { id: 'capture:one', at: '2026-09-20T00:00:00.000Z', kind: 'capture', label: 'Original capture', text: 'orginal wording' },
+      { id: 'correction-1', at: '2026-09-20T01:00:00.000Z', kind: 'correction', label: 'Thought text revised', text: 'Original wording', previousText: 'orginal wording' },
+      { id: 'interpretation-1', at: '2026-09-20T02:00:00.000Z', kind: 'interpretation', label: 'Organized meaning revised', text: 'Better reading', previousText: 'First reading' },
+    ])
+  })
+
   it('requires confirmation and records an overlay without rewriting source evidence', () => {
     expect(() => correctOriginal(fixture(), 'one', 'Original wording', false)).toThrow('explicit confirmation')
     const state = correctOriginal(fixture(), 'one', 'Original wording', true, '2026-09-20T02:00:00.000Z')
@@ -42,7 +52,7 @@ describe('review text revisions', () => {
     expect(reconcileLegacyUi(loaded).interpretations).toHaveLength(2)
   })
 
-  it('rejects empty, unchanged, unknown and non-text edits without changing state', () => {
+  it('rejects empty, unchanged and unknown edits without changing state', () => {
     const state = fixture()
     const before = structuredClone(state)
     expect(() => reviseInterpretation(state, 'one', '   ')).toThrow('different non-empty')
@@ -50,10 +60,21 @@ describe('review text revisions', () => {
     expect(() => reviseInterpretation(state, 'missing', 'x')).toThrow('existing capture')
     expect(() => correctOriginal(state, 'one', '  ', true)).toThrow('different non-empty')
     expect(() => correctOriginal(state, 'one', 'orginal wording', true)).toThrow('different non-empty')
-    const voice = legacyUiProjection(migrateLegacyState({ objects: [{ ...thought, source: 'voice' }], canvas: [] }))
-    expect(() => reviseInterpretation(voice, 'one', 'x')).toThrow('text capture')
-    expect(() => correctOriginal(voice, 'one', 'x', true)).toThrow('text capture')
     expect(state).toEqual(before)
+  })
+
+  it.each(['voice', 'canvas'] as const)('revises %s meaning while refusing to rewrite its raw source', source => {
+    const state = legacyUiProjection(migrateLegacyState({ objects: [{ ...thought, source }], canvas: [] }))
+    const revised = reviseInterpretation(state, 'one', 'A source-appropriate reading', '2026-09-20T01:00:00.000Z')
+    expect(revised.objects[0]).toMatchObject({ source, originalContent: 'orginal wording', interpretation: { summary: 'A source-appropriate reading' } })
+    expect(reviewTextSnapshot(revised, 'one').progression.at(-1)).toMatchObject({ kind: 'interpretation', previousText: 'First reading' })
+    expect(() => correctOriginal(state, 'one', 'x', true)).toThrow('text capture')
+  })
+
+  it('detects only drafts that the source-specific editor can lose', () => {
+    expect(hasUnsavedReviewDrafts(thought, 'orginal wording', 'Original wording', 'First reading')).toBe(true)
+    expect(hasUnsavedReviewDrafts(thought, 'orginal wording', 'orginal wording', 'Better reading')).toBe(true)
+    expect(hasUnsavedReviewDrafts({ ...thought, source: 'voice' }, 'orginal wording', 'hidden change', 'First reading')).toBe(false)
   })
 
   it('chains successive corrections and keeps each one inspectable', () => {
