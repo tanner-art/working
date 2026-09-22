@@ -1,3 +1,6 @@
+import type { CanvasStrokePoint } from './canvasStrokes'
+export type { CanvasStrokePoint } from './canvasStrokes'
+
 /** Legacy UI vocabulary only. Persisted SemanticKind deliberately excludes reminders. */
 export type ObjectKind = 'idea' | 'action' | 'reminder' | 'project' | 'commitment' | 'person' | 'reference' | 'objective'
 export type ObjectStatus = 'inbox' | 'review' | 'confirmed' | 'complete' | 'archived'
@@ -59,7 +62,7 @@ export interface CanvasPerimeterAnchor { x: number; y: number }
 export interface CanvasCurveHandle { x: number; y: number }
 export interface CanvasElement {
   id: string
-  type: 'text' | 'container' | 'arrow'
+  type: 'text' | 'container' | 'arrow' | 'freehand'
   /** Visual appearance of a text block; never semantic meaning or group nesting. */
   shape?: 'rectangle' | 'rounded-rectangle' | 'ellipse' | 'diamond'
   x: number
@@ -81,6 +84,8 @@ export interface CanvasElement {
   targetAnchor?: CanvasPerimeterAnchor
   /** Only used by curved connections; x/y are bounded normalized offsets. */
   curveHandle?: CanvasCurveHandle
+  /** Present only on a freehand mark. These are the authoritative raw samples. */
+  rawPoints?: CanvasStrokePoint[]
 }
 export interface CanvasViewport { x: number; y: number; scale: number }
 export interface CanvasRecord {

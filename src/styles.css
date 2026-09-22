@@ -361,6 +361,9 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .canvas-properties.edit-mode { background: #f0f4eb; border-top: 1px solid #d9e2d3; border-bottom: 1px solid #d9e2d3; }
 .canvas-tools { scrollbar-width: none; }
 .canvas-tools::-webkit-scrollbar { display: none; }
+.canvas-strokes { position: absolute; width: 2000px; height: 1400px; overflow: visible; pointer-events: none; }
+.canvas-stroke { fill: none; stroke: #344d41; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.canvas-stroke-preview { opacity: .65; }
 @media (max-width: 720px) {
   .canvas-tools { min-height: 44px; }
   .canvas-properties.edit-mode { max-height: 104px; }

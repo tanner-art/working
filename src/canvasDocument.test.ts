@@ -29,3 +29,16 @@ describe('canvas bulleted-list variant', () => {
     expect(isCanvasElements([{ id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'a', toId: 'b', nodeVariant: 'bulleted-list' }])).toBe(false)
   })
 })
+
+describe('freehand canvas elements', () => {
+  const stroke: CanvasElement = { id: 'stroke', type: 'freehand', x: 10, y: 20, rawPoints: [{ x: 10, y: 20 }, { x: 15, y: 24 }, { x: 22, y: 21 }] }
+
+  it('accepts only a raw, finite non-degenerate stroke payload', () => {
+    expect(isCanvasElements([stroke])).toBe(true)
+    expect(isCanvasElements([{ ...stroke, rawPoints: [{ x: 10, y: 20 }] }])).toBe(false)
+    expect(isCanvasElements([{ ...stroke, rawPoints: [{ x: 10, y: 20 }, { x: Infinity, y: 24 }] }])).toBe(false)
+    expect(isCanvasElements([{ ...stroke, rawPoints: [{ x: 10, y: 20 }, { x: 10, y: 20 }] }])).toBe(false)
+    expect(isCanvasElements([{ ...stroke, text: 'not a stroke' }])).toBe(false)
+    expect(isCanvasElements([{ ...stroke, pressure: .5 }])).toBe(false)
+  })
+})

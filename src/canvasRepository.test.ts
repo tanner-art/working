@@ -84,6 +84,18 @@ describe('Canvas Bank repository and editing lifecycle', () => {
     expect(open().session.canUndo).toBe(false)
   })
 
+  it('persists one completed raw pen stroke as one undoable canvas edit', () => {
+    storage({ objects: [], canvas: elements })
+    const workspace = open()
+    const stroke: CanvasElement = { id: 'stroke', type: 'freehand', x: -12, y: 44, rawPoints: [{ x: -12, y: 44 }, { x: -4, y: 50 }, { x: 9, y: 47 }] }
+    workspace.session.commit([...workspace.repository.read().elements, stroke])
+    expect(open().repository.read().elements.at(-1)).toEqual(stroke)
+    workspace.session.undo()
+    expect(workspace.repository.read().elements).toEqual(elements)
+    workspace.session.redo()
+    expect(workspace.repository.read().elements.at(-1)).toEqual(stroke)
+  })
+
   it('creates and renames permanent canvases with validated titles', () => {
     const initial: AppState = { objects: [], canvas: [], canvasBank: { canvases: [] } }
     const record = createCanvasRecord('2026-09-22T01:00:00.000Z', 'canvas:new')

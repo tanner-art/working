@@ -283,7 +283,7 @@ describe('TASK-056 account canvas viewport compatibility', () => {
     const db = database()
     const session = createAccountSession(db.adapter, 'canvas-user', () => 'canvas-user')
     const initial = await session.open(payload())
-    const record = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:work'), elements: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }], viewport: { x: -55, y: 91, scale: 1.45 } }
+    const record = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:work'), elements: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }, { id: 'stroke', type: 'freehand' as const, x: -10, y: 4, rawPoints: [{ x: -10, y: 4 }, { x: 12, y: 19 }] }], viewport: { x: -55, y: 91, scale: 1.45 } }
     const state = addCanvas(initial.state, record)
     await session.save(session.snapshot(state, defaultSettings, { enabled: false }))
     const reloaded = await session.open()

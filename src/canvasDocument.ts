@@ -1,4 +1,5 @@
 import type { CanvasElement, CanvasViewport } from './domain'
+import { normalizeCanvasStrokePoints } from './canvasStrokes'
 
 export interface CanvasDocument { elements: CanvasElement[]; viewport: CanvasViewport }
 export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { x: 0, y: 0, scale: 1 }
@@ -20,11 +21,12 @@ export function isCanvasElements(value: unknown): value is CanvasElement[] {
     // expression unchanged; arrows opting into editable perimeter geometry must have
     // two distinct, present node endpoints before their new fields are accepted.
     value.every(item => item.type !== 'arrow' || (!item.sourceAnchor && !item.targetAnchor && !item.curveHandle) ||
-      (item.fromId !== item.toId && value.some(endpoint => endpoint.id === item.fromId && endpoint.type !== 'arrow') &&
-        value.some(endpoint => endpoint.id === item.toId && endpoint.type !== 'arrow')))
+      (item.fromId !== item.toId && value.some(endpoint => endpoint.id === item.fromId && (endpoint.type === 'text' || endpoint.type === 'container')) &&
+        value.some(endpoint => endpoint.id === item.toId && (endpoint.type === 'text' || endpoint.type === 'container'))))
 }
 
-const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow']
+const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow', 'freehand']
+const freehandKeys = new Set(['id', 'type', 'x', 'y', 'rawPoints'])
 const isPerimeterAnchor = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
   Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
   (value as { x: number }).x >= 0 && (value as { x: number }).x <= 1 &&
@@ -55,7 +57,10 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.sourceAnchor === undefined || isPerimeterAnchor(item.sourceAnchor)) &&
     (item.targetAnchor === undefined || isPerimeterAnchor(item.targetAnchor)) &&
     (item.curveHandle === undefined || isCurveHandle(item.curveHandle)) &&
-    (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
+    (item.rawPoints === undefined || normalizeCanvasStrokePoints(item.rawPoints) !== null) &&
+    (item.type === 'freehand' || item.rawPoints === undefined) &&
+    (item.type !== 'freehand' || (Object.keys(value).every(key => freehandKeys.has(key)) && item.rawPoints !== undefined && item.shape === undefined && item.text === undefined && item.width === undefined && item.height === undefined && item.fromId === undefined && item.toId === undefined && item.groupId === undefined && item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
+    (item.type === 'arrow' || item.type === 'freehand' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string' &&
       (item.curveHandle === undefined || item.connectionPath === 'curved')))
 }
