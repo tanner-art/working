@@ -362,7 +362,7 @@
 
   function renderUsage(usage) {
     document.getElementById('usage-policy-line').textContent =
-      'Slowdown at ' + usage.policy.slowdown_threshold_pct + '%, stop at ' + usage.policy.stop_threshold_pct + '%'
+      'Slowdown at ' + usage.policy.slowdown_percent + '%, stop at ' + usage.policy.stop_percent + '%'
       + (usage.policy.stop_threshold_clamped_to_max ? ' (clamped to configured maximum of ' + usage.policy.max_stop_threshold_pct + '%)' : '');
     var tbody = document.querySelector('#usage-table tbody');
     clearChildren(tbody);

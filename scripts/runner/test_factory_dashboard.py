@@ -440,9 +440,24 @@ class UsagePolicyTests(unittest.TestCase):
         self.assertFalse(policy['stop_threshold_clamped_to_max'])
 
     def test_config_overrides_defaults(self):
-        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50, 'stop_threshold_pct': 60}})
+        policy = fd.usage_policy({'usage_policy': {'slowdown_percent': 50, 'stop_percent': 60}})
+        self.assertEqual(policy['slowdown_percent'], 50.0)
+        self.assertEqual(policy['stop_percent'], 60.0)
         self.assertEqual(policy['slowdown_threshold_pct'], 50.0)
         self.assertEqual(policy['stop_threshold_pct'], 60.0)
+
+    def test_canonical_thresholds_win_over_legacy_aliases(self):
+        policy = fd.usage_policy({'usage_policy': {
+            'slowdown_percent': 71, 'stop_percent': 79,
+            'slowdown_threshold_pct': 11, 'stop_threshold_pct': 12,
+        }})
+        self.assertEqual(policy['slowdown_percent'], 71.0)
+        self.assertEqual(policy['stop_percent'], 79.0)
+
+    def test_legacy_threshold_aliases_remain_supported(self):
+        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50, 'stop_threshold_pct': 60}})
+        self.assertEqual(policy['slowdown_percent'], 50.0)
+        self.assertEqual(policy['stop_percent'], 60.0)
 
     def test_stop_threshold_is_clamped_to_max_80(self):
         policy = fd.usage_policy({'usage_policy': {'stop_threshold_pct': 95}})

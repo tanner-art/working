@@ -157,14 +157,22 @@ def agent_definitions(config):
 
 
 def usage_policy(config, slowdown_override=None, stop_override=None):
+    """Read usage_policy.py's canonical percentages, with legacy aliases.
+
+    Only numeric threshold fields are consumed. This keeps arbitrary runner
+    configuration, including commands and credentials, out of the report.
+    """
     configured = config.get('usage_policy')
     slowdown = DEFAULT_SLOWDOWN_THRESHOLD_PCT
     stop = DEFAULT_STOP_THRESHOLD_PCT
     if isinstance(configured, dict):
-        v = configured.get('slowdown_threshold_pct')
+        # usage_policy.py writes these canonical names. The dashboard accepts
+        # its original names for existing local configs, but canonical values
+        # win when both are present.
+        v = configured.get('slowdown_percent', configured.get('slowdown_threshold_pct'))
         if isinstance(v, (int, float)):
             slowdown = float(v)
-        v = configured.get('stop_threshold_pct')
+        v = configured.get('stop_percent', configured.get('stop_threshold_pct'))
         if isinstance(v, (int, float)):
             stop = float(v)
     if isinstance(slowdown_override, (int, float)):
@@ -175,6 +183,9 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
     if clamped:
         stop = MAX_STOP_THRESHOLD_PCT
     return {
+        'slowdown_percent': slowdown,
+        'stop_percent': stop,
+        # Kept for the existing dashboard API and command-line integrations.
         'slowdown_threshold_pct': slowdown,
         'stop_threshold_pct': stop,
         'stop_threshold_clamped_to_max': clamped,
@@ -185,9 +196,11 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
 def classify_usage_state(percent_used, policy):
     if not isinstance(percent_used, (int, float)):
         return 'unknown'
-    if percent_used >= policy['stop_threshold_pct']:
+    stop = policy.get('stop_percent', policy.get('stop_threshold_pct', DEFAULT_STOP_THRESHOLD_PCT))
+    slowdown = policy.get('slowdown_percent', policy.get('slowdown_threshold_pct', DEFAULT_SLOWDOWN_THRESHOLD_PCT))
+    if percent_used >= stop:
         return 'stop'
-    if percent_used >= policy['slowdown_threshold_pct']:
+    if percent_used >= slowdown:
         return 'slow'
     return 'green'
 

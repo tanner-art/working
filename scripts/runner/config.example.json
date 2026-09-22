@@ -11,6 +11,10 @@
     "tanner-art"
   ],
   "agent_timeout": 1800,
+  "usage_policy": {
+    "slowdown_percent": 70,
+    "stop_percent": 80
+  },
   "agents": {
     "codex-a": {
       "command": [
