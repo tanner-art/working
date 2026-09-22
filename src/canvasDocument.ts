@@ -15,10 +15,25 @@ export function isCanvasElements(value: unknown): value is CanvasElement[] {
   return Array.isArray(value) && value.every(isCanvasElement) &&
     new Set(value.map(item => item.id)).size === value.length &&
     value.every(item => item.groupId === undefined ||
-      (item.type === 'text' && value.some(group => group.id === item.groupId && group.type === 'container')))
+      (item.type === 'text' && value.some(group => group.id === item.groupId && group.type === 'container'))) &&
+    // Older captures may contain a dangling visual arrow. Preserve that source
+    // expression unchanged; arrows opting into editable perimeter geometry must have
+    // two distinct, present node endpoints before their new fields are accepted.
+    value.every(item => item.type !== 'arrow' || (!item.sourceAnchor && !item.targetAnchor && !item.curveHandle) ||
+      (item.fromId !== item.toId && value.some(endpoint => endpoint.id === item.fromId && endpoint.type !== 'arrow') &&
+        value.some(endpoint => endpoint.id === item.toId && endpoint.type !== 'arrow')))
 }
 
 const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow']
+const isPerimeterAnchor = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
+  Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
+  (value as { x: number }).x >= 0 && (value as { x: number }).x <= 1 &&
+  (value as { y: number }).y >= 0 && (value as { y: number }).y <= 1
+// Curve offsets are measured in endpoint spans. Keeping them within 1.5 spans makes
+// extreme drags expressive without allowing unbounded persisted geometry.
+const isCurveHandle = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
+  Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
+  Math.abs((value as { x: number }).x) <= 1.5 && Math.abs((value as { y: number }).y) <= 1.5
 function isCanvasElement(value: unknown): value is CanvasElement {
   if (!value || typeof value !== 'object') return false
   const item = value as Partial<CanvasElement>
@@ -37,8 +52,12 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.connectionPath === undefined || ['straight', 'curved'].includes(item.connectionPath)) &&
     (item.connectionPattern === undefined || ['solid', 'dashed', 'dotted'].includes(item.connectionPattern)) &&
     (item.connectionWeight === undefined || ['light', 'regular', 'bold'].includes(item.connectionWeight)) &&
-    (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined)) &&
-    (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
+    (item.sourceAnchor === undefined || isPerimeterAnchor(item.sourceAnchor)) &&
+    (item.targetAnchor === undefined || isPerimeterAnchor(item.targetAnchor)) &&
+    (item.curveHandle === undefined || isCurveHandle(item.curveHandle)) &&
+    (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
+    (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string' &&
+      (item.curveHandle === undefined || item.connectionPath === 'curved')))
 }
 
 /** Toggle a canvas-only presentation choice without rewriting the node's text. */

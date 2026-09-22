@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CanvasElement, CanvasViewport } from './domain'
+import type { CanvasCurveHandle, CanvasElement, CanvasViewport } from './domain'
 import { newCanvasElement, toggleCanvasNodeVariant } from './canvasDocument'
 import { branchCanvasChild } from './canvasBranch'
-import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
+import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionEndpoints, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
@@ -53,6 +53,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   // Pointer previews are transient; only completed gestures become edits.
   const [resizePreview, setResizePreview] = useState<CanvasElement | null>(null)
   const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
+  const [connectionPreview, setConnectionPreview] = useState<{ id: string; patch: Pick<CanvasElement, 'sourceAnchor' | 'targetAnchor' | 'curveHandle'> } | null>(null)
+  const connectionDrag = useRef<{ pointerId: number; id: string; kind: 'source' | 'target' | 'curve' } | null>(null)
   const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
@@ -76,7 +78,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const midpoint = (a: PointerSample, b: PointerSample) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
   const distance = (a: PointerSample, b: PointerSample) => Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
-  const clearInteraction = () => { clearHold(); drag.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); gesture.current = idleGestureState() }
+  const clearInteraction = () => { clearHold(); drag.current = null; connectionDrag.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
   const applyGestureEffect = (effect: GestureEffect) => {
     if (effect.type === 'select') { setSelected(effect.id); setEditMode(false); return }
@@ -97,7 +99,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-pinch') { pinchStart.current = { viewport, midpoint: midpoint(effect.first, effect.second), distance: distance(effect.first, effect.second) }; return }
     if (effect.type === 'preview-pinch') { const start = pinchStart.current; if (!start) return; const currentMidpoint = midpoint(effect.first, effect.second), nextScale = start.viewport.scale * distance(effect.first, effect.second) / start.distance; const anchored = zoomCanvasViewport(start.viewport, start.midpoint, nextScale); setPinchPreview({ ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }); return }
     if (effect.type === 'commit-pinch') { if (pinchPreview) onViewport(pinchPreview); setPinchPreview(null); pinchStart.current = null; return }
-    if (effect.type === 'cancel') { clearHold(); drag.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null) }
+    if (effect.type === 'cancel') { clearHold(); drag.current = null; connectionDrag.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null) }
   }
   const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => { const result = reduceCanvasGesture(gesture.current, action); gesture.current = result.state; result.effects.forEach(applyGestureEffect) }
   const down = (event: React.PointerEvent, item?: CanvasElement, resize = false) => {
@@ -112,6 +114,80 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const move = (event: React.PointerEvent) => dispatchGesture({ type: 'pointer-move', sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY } })
   const cancel = () => { dispatchGesture({ type: 'reset' }); clearInteraction() }
   const end = (event: React.PointerEvent) => { clearHold(); dispatchGesture({ type: 'pointer-up', pointerId: event.pointerId }); if (gesture.current.mode === 'idle') { drag.current = null; setDragOffset(null); setPanPreview(null); setResizePreview(null) } }
+  const worldPoint = (event: React.PointerEvent) => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    return { x: (event.clientX - (rect?.left ?? 0) - pan.x) / scale, y: (event.clientY - (rect?.top ?? 0) - pan.y) / scale }
+  }
+  const connectionPatchAtPoint = (arrow: CanvasElement, kind: 'source' | 'target' | 'curve', point: { x: number; y: number }) => {
+    const from = positioned(arrow.fromId), to = positioned(arrow.toId)
+    if (!from || !to) return undefined
+    if (kind === 'source') {
+      const sourceAnchor = perimeterAnchorAtPoint(from, point)
+      return sourceAnchor ? { sourceAnchor } : undefined
+    }
+    if (kind === 'target') {
+      const targetAnchor = perimeterAnchorAtPoint(to, point)
+      return targetAnchor ? { targetAnchor } : undefined
+    }
+    const endpoints = connectionEndpoints(from, to, arrow)
+    const spanX = Math.max(Math.abs(endpoints.x2 - endpoints.x1), 1), spanY = Math.max(Math.abs(endpoints.y2 - endpoints.y1), 1)
+    return { curveHandle: normalizeCurveHandle({ x: (point.x - (endpoints.x1 + endpoints.x2) / 2) / spanX, y: (point.y - (endpoints.y1 + endpoints.y2) / 2) / spanY }) }
+  }
+  const previewConnection = (arrow: CanvasElement, kind: 'source' | 'target' | 'curve', point: { x: number; y: number }) => {
+    const patch = connectionPatchAtPoint(arrow, kind, point)
+    if (!patch) return
+    const next = updateCanvasConnectionAnchors(elements, arrow.id, patch)
+    if (next !== elements) setConnectionPreview({ id: arrow.id, patch })
+  }
+  const beginConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>, arrow: CanvasElement, kind: 'source' | 'target' | 'curve') => {
+    if (event.button !== 0) return
+    event.preventDefault(); event.stopPropagation()
+    connectionDrag.current = { pointerId: event.pointerId, id: arrow.id, kind }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    previewConnection(arrow, kind, worldPoint(event))
+  }
+  const moveConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const active = connectionDrag.current
+    if (!active || active.pointerId !== event.pointerId) return
+    event.preventDefault(); event.stopPropagation()
+    const arrow = elements.find(item => item.id === active.id && item.type === 'arrow')
+    if (arrow) previewConnection(arrow, active.kind, worldPoint(event))
+  }
+  const finishConnectionDrag = (event: React.PointerEvent<HTMLButtonElement>, commit: boolean) => {
+    const active = connectionDrag.current
+    if (!active || active.pointerId !== event.pointerId) return
+    event.preventDefault(); event.stopPropagation()
+    const arrow = elements.find(item => item.id === active.id && item.type === 'arrow')
+    if (commit && arrow) {
+      const patch = connectionPatchAtPoint(arrow, active.kind, worldPoint(event))
+      if (patch) onCommit(updateCanvasConnectionAnchors(elements, arrow.id, patch))
+    }
+    connectionDrag.current = null
+    setConnectionPreview(null)
+  }
+  const nudgeConnectionHandle = (arrow: CanvasElement, kind: 'source' | 'target' | 'curve', event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const delta = event.shiftKey ? .1 : .02
+    const dx = event.key === 'ArrowRight' ? delta : event.key === 'ArrowLeft' ? -delta : 0
+    const dy = event.key === 'ArrowDown' ? delta : event.key === 'ArrowUp' ? -delta : 0
+    if (!dx && !dy) return
+    event.preventDefault(); event.stopPropagation()
+    const from = positioned(arrow.fromId), to = positioned(arrow.toId)
+    if (!from || !to) return
+    let patch: Pick<CanvasElement, 'sourceAnchor' | 'targetAnchor' | 'curveHandle'>
+    if (kind === 'source') {
+      const endpoints = connectionEndpoints(from, to, arrow), base = arrow.sourceAnchor ?? perimeterAnchorAtPoint(from, { x: endpoints.x1, y: endpoints.y1 })
+      if (!base) return
+      patch = { sourceAnchor: { x: base.x + dx, y: base.y + dy } }
+    } else if (kind === 'target') {
+      const endpoints = connectionEndpoints(from, to, arrow), base = arrow.targetAnchor ?? perimeterAnchorAtPoint(to, { x: endpoints.x2, y: endpoints.y2 })
+      if (!base) return
+      patch = { targetAnchor: { x: base.x + dx, y: base.y + dy } }
+    } else {
+      const base: CanvasCurveHandle = arrow.curveHandle ?? { x: 0, y: 0 }
+      patch = { curveHandle: { x: base.x + dx, y: base.y + dy } }
+    }
+    onCommit(updateCanvasConnectionAnchors(elements, arrow.id, patch))
+  }
   const clickNode = (event: React.MouseEvent, id: string) => {
     event.stopPropagation()
     // Validate the connect-from endpoint still exists (not just non-null) so a stale
@@ -126,6 +202,17 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     }
   }
   const arrows = elements.filter(item => item.type === 'arrow')
+  const renderedArrow = (arrow: CanvasElement) => connectionPreview?.id === arrow.id ? { ...arrow, ...connectionPreview.patch } : arrow
+  const connectionHandlePositions = (arrow: CanvasElement) => {
+    const shown = renderedArrow(arrow), from = positioned(shown.fromId), to = positioned(shown.toId)
+    if (!from || !to) return undefined
+    const endpoints = connectionEndpoints(from, to, shown)
+    const spanX = Math.max(Math.abs(endpoints.x2 - endpoints.x1), 1), spanY = Math.max(Math.abs(endpoints.y2 - endpoints.y1), 1)
+    const curve = shown.curveHandle
+      ? { x: (endpoints.x1 + endpoints.x2) / 2 + shown.curveHandle.x * spanX, y: (endpoints.y1 + endpoints.y2) / 2 + shown.curveHandle.y * spanY }
+      : { x: (endpoints.x1 + endpoints.x2) / 2, y: (endpoints.y1 + endpoints.y2) / 2 }
+    return { source: { x: endpoints.x1, y: endpoints.y1 }, target: { x: endpoints.x2, y: endpoints.y2 }, curve }
+  }
   const groups = canvasGroups(elements)
   const selectedElement = selected ? positioned(selected) : undefined
   const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
@@ -197,7 +284,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { setSelected(null); setEditMode(false) }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="arrows">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, arrow.connectionPath); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(arrow)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); setEditMode(false); setSelected(arrow.id) }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
+    <svg className="arrows">{arrows.map(arrow => { const shown = renderedArrow(arrow), from = positioned(shown.fromId); const to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); setEditMode(false); setSelected(arrow.id) }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
     <marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
     <path d="M0,0 L0,6 L7,3 z" />
     </marker>
@@ -213,7 +300,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </span>
     </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (selected !== item.id) setEditMode(false); setSelected(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => event.stopPropagation()} />
     {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
-    </div> })}</div>
+    </div> })}{arrows.filter(arrow => selected === arrow.id).map(arrow => {
+      const positions = connectionHandlePositions(arrow)
+      if (!positions) return null
+      const handle = (kind: 'source' | 'target' | 'curve', point: { x: number; y: number }, label: string) => <button key={kind} type="button" className={`canvas-connection-handle ${kind}`} style={{ left: point.x, top: point.y }} aria-label={label} title={`${label}: drag or use arrow keys`} onClick={event => event.stopPropagation()} onPointerDown={event => beginConnectionDrag(event, arrow, kind)} onPointerMove={moveConnectionDrag} onPointerUp={event => finishConnectionDrag(event, true)} onPointerCancel={event => finishConnectionDrag(event, false)} onLostPointerCapture={event => finishConnectionDrag(event, false)} onKeyDown={event => nudgeConnectionHandle(arrow, kind, event)} />
+      return <div key={`${arrow.id}-handles`} className="canvas-connection-handles">{handle('source', positions.source, 'Move connection source anchor')}{handle('target', positions.target, 'Move connection target anchor')}{(renderedArrow(arrow).connectionPath === 'curved') && handle('curve', positions.curve, 'Move connection curve handle')}</div>
+    })}</div>
     </div>
     </div>
 }

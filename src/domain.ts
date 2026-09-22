@@ -53,6 +53,10 @@ export interface HistoryEvent {
 }
 /** Executable meaning still awaiting a dedicated confirmation gesture. */
 export interface ProposedAction { summary: string }
+/** A normalized ray hint on a canvas node's local perimeter. */
+export interface CanvasPerimeterAnchor { x: number; y: number }
+/** A normalized offset from the midpoint between a connection's endpoints. */
+export interface CanvasCurveHandle { x: number; y: number }
 export interface CanvasElement {
   id: string
   type: 'text' | 'container' | 'arrow'
@@ -72,6 +76,11 @@ export interface CanvasElement {
   connectionPath?: 'straight' | 'curved'
   connectionPattern?: 'solid' | 'dashed' | 'dotted'
   connectionWeight?: 'light' | 'regular' | 'bold'
+  /** Canvas-only perimeter hints; endpoint identities stay authoritative. */
+  sourceAnchor?: CanvasPerimeterAnchor
+  targetAnchor?: CanvasPerimeterAnchor
+  /** Only used by curved connections; x/y are bounded normalized offsets. */
+  curveHandle?: CanvasCurveHandle
 }
 export interface CanvasViewport { x: number; y: number; scale: number }
 export interface CanvasRecord {
