@@ -75,6 +75,18 @@ describe('canvasGestures', () => {
     expect(result.state.mode).toBe('idle')
   })
 
+  it('continues a pinch after its cancellation effect has cleaned up the prior tool gesture', () => {
+    let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: canvas })
+    result = step(result.state, { type: 'pointer-down', sample: node(2, 100, 30), target: canvas })
+    expect(result.effects).toContainEqual({ type: 'cancel' })
+    // Canvas installs this returned state before it clears transient previews for
+    // the cancel effect; that cleanup must not reset the reducer back to idle.
+    const stateAfterCleanup = result.state
+    expect(stateAfterCleanup.mode).toBe('pinch-zooming')
+    result = step(stateAfterCleanup, { type: 'pointer-move', sample: node(2, 112, 30) })
+    expect(result.effects).toContainEqual({ type: 'preview-pinch', first: node(), second: node(2, 112, 30) })
+  })
+
   it('resets on cancellation so stale pointers cannot commit', () => {
     let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
     result = step(result.state, { type: 'pointer-cancel', pointerId: 1 })

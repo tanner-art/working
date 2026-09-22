@@ -7,6 +7,7 @@ import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { moveCanvasNode } from './canvasGroups'
+import { createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
 
 const elements: CanvasElement[] = [
   { id: 'group', type: 'container', x: 0, y: 0, text: 'Original group' },
@@ -94,6 +95,23 @@ describe('Canvas Bank repository and editing lifecycle', () => {
     expect(workspace.repository.read().elements).toEqual(elements)
     workspace.session.redo()
     expect(workspace.repository.read().elements.at(-1)).toEqual(stroke)
+  })
+
+  it('persists accepted smoothing as one reversible projection edit without dropping raw points', () => {
+    storage({ objects: [], canvas: elements })
+    const workspace = open()
+    const stroke: CanvasElement = { id: 'stroke', type: 'freehand', x: -12, y: 44, rawPoints: [{ x: -12, y: 44 }, { x: -4, y: 59 }, { x: 9, y: 47 }] }
+    workspace.session.commit([...workspace.repository.read().elements, stroke])
+    const refinement = createCanvasStrokeSmoothingRefinement(stroke.id, stroke.rawPoints, '2026-09-22T12:00:00.000Z')!
+    const smoothed = workspace.repository.read().elements.map(item => item.id === stroke.id ? { ...item, projection: refinement.result, refinements: [refinement] } : item)
+    workspace.session.commit(smoothed)
+
+    const savedStroke = open().repository.read().elements.find(item => item.id === stroke.id)!
+    expect(savedStroke).toMatchObject({ rawPoints: stroke.rawPoints, projection: refinement.result, refinements: [refinement] })
+    workspace.session.undo()
+    expect(workspace.repository.read().elements.find(item => item.id === stroke.id)).toEqual(stroke)
+    workspace.session.redo()
+    expect(workspace.repository.read().elements.find(item => item.id === stroke.id)).toEqual(savedStroke)
   })
 
   it('creates and renames permanent canvases with validated titles', () => {

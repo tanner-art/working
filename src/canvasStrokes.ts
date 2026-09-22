@@ -10,11 +10,66 @@ export type CanvasStrokeProjection =
   | { kind: 'smoothed'; algorithm: 'moving-average-v1'; iterations?: 1 | 2 | 3 }
 
 export const STROKE_SMOOTHING_ALGORITHM = 'moving-average-v1' as const
+export const STROKE_SMOOTHING_VERSION = 1 as const
+
+/**
+ * An accepted local projection. The source stroke remains the element's
+ * `rawPoints`; this record explains the active, reversible presentation.
+ */
+export interface CanvasStrokeRefinement {
+  sourceId: string
+  gesture: 'explicit-smoothing'
+  appliedAt: string
+  algorithm: typeof STROKE_SMOOTHING_ALGORITHM
+  version: typeof STROKE_SMOOTHING_VERSION
+  result: Extract<CanvasStrokeProjection, { kind: 'smoothed' }>
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 
 const normalizeNumber = (value: number) => Object.is(value, -0) ? 0 : value
+
+export function isCanvasStrokeProjection(value: unknown): value is CanvasStrokeProjection {
+  if (!isRecord(value)) return false
+  if (value.kind === 'raw') return Object.keys(value).length === 1
+  return value.kind === 'smoothed' &&
+    Object.keys(value).every(key => ['kind', 'algorithm', 'iterations'].includes(key)) &&
+    value.algorithm === STROKE_SMOOTHING_ALGORITHM &&
+    (value.iterations === undefined || value.iterations === 1 || value.iterations === 2 || value.iterations === 3)
+}
+
+export function isCanvasStrokeRefinement(value: unknown): value is CanvasStrokeRefinement {
+  if (!isRecord(value) || !Object.keys(value).every(key => ['sourceId', 'gesture', 'appliedAt', 'algorithm', 'version', 'result'].includes(key))) return false
+  return typeof value.sourceId === 'string' && value.sourceId.length > 0 &&
+    value.gesture === 'explicit-smoothing' && typeof value.appliedAt === 'string' && Number.isFinite(Date.parse(value.appliedAt)) &&
+    value.algorithm === STROKE_SMOOTHING_ALGORITHM && value.version === STROKE_SMOOTHING_VERSION &&
+    isCanvasStrokeProjection(value.result) && value.result.kind === 'smoothed'
+}
+
+/** Creates validated, JSON-safe metadata for one user-accepted smoothing action. */
+export function createCanvasStrokeSmoothingRefinement(sourceId: unknown, rawPoints: unknown, appliedAt: unknown): CanvasStrokeRefinement | null {
+  if (typeof sourceId !== 'string' || !sourceId || typeof appliedAt !== 'string' || !Number.isFinite(Date.parse(appliedAt)) || !normalizeCanvasStrokePoints(rawPoints)) return null
+  return {
+    sourceId,
+    gesture: 'explicit-smoothing',
+    appliedAt,
+    algorithm: STROKE_SMOOTHING_ALGORITHM,
+    version: STROKE_SMOOTHING_VERSION,
+    result: { kind: 'smoothed', algorithm: STROKE_SMOOTHING_ALGORITHM },
+  }
+}
+
+/**
+ * Produces a new element-shaped value for one accepted refinement. It never
+ * edits or replaces raw points, and refuses to stack a stale second preview.
+ */
+export function applyCanvasStrokeSmoothing<T extends { id: string; rawPoints?: unknown; projection?: CanvasStrokeProjection; refinements?: CanvasStrokeRefinement[] }>(stroke: T, appliedAt: unknown): (T & { projection: Extract<CanvasStrokeProjection, { kind: 'smoothed' }>; refinements: CanvasStrokeRefinement[] }) | null {
+  if (stroke.projection !== undefined) return null
+  const refinement = createCanvasStrokeSmoothingRefinement(stroke.id, stroke.rawPoints, appliedAt)
+  if (!refinement) return null
+  return { ...stroke, projection: refinement.result, refinements: [...(stroke.refinements ?? []), refinement] }
+}
 
 /**
  * Validates and copies raw canvas-space samples without resampling or removing

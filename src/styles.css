@@ -365,9 +365,13 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .canvas-stroke { fill: none; stroke: #344d41; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .canvas-stroke.selected { stroke: #507737; stroke-width: 5; filter: drop-shadow(0 0 2px #99c667); }
 .canvas-stroke-preview { opacity: .65; }
+.canvas-smoothing-preview { stroke: #2d7a69; stroke-width: 4; filter: drop-shadow(0 0 3px #78c9b4); }
 .canvas-lasso-preview { fill: #99c66722; stroke: #507737; stroke-width: 2; stroke-dasharray: 7 5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.canvas-refinement-sheet { position: absolute; z-index: 6; right: 22px; bottom: 22px; width: min(340px, calc(100% - 44px)); padding: 18px; border: 1px solid #b7d9ce; border-radius: 12px; background: #fffefa; box-shadow: 0 12px 32px #23312838; color: #31453b; }
+.canvas-refinement-sheet h2 { margin: 4px 0 8px; font: 500 23px 'Playfair Display'; }.canvas-refinement-sheet p:not(.section-label) { margin: 0 28px 15px 0; color: #5d7167; font-size: 12px; line-height: 1.45; }.canvas-refinement-sheet > div { display: flex; gap: 8px; }.canvas-refinement-sheet .primary { border: 0; border-radius: 8px; padding: 11px 13px; background: #456b32; color: #fffefa; font: 700 12px Manrope; }.canvas-refinement-dismiss { position: absolute; top: 8px; right: 9px; border: 0; background: transparent; color: #617169; font-size: 22px; }
 @media (max-width: 720px) {
   .canvas-tools { min-height: 44px; }
   .canvas-properties.edit-mode { max-height: 104px; }
   .canvas-node:has(.canvas-resize-handle) { z-index: 3; }
+  .canvas-refinement-sheet { right: 12px; bottom: 12px; width: min(340px, calc(100% - 24px)); }
 }

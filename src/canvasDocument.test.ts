@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CanvasElement } from './domain'
 import { isCanvasElements, toggleCanvasNodeVariant } from './canvasDocument'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
+import { createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
 
 const textNode: CanvasElement = { id: 'note', type: 'text', x: 10, y: 20, text: 'First item\n\nThird item' }
 
@@ -40,5 +41,15 @@ describe('freehand canvas elements', () => {
     expect(isCanvasElements([{ ...stroke, rawPoints: [{ x: 10, y: 20 }, { x: 10, y: 20 }] }])).toBe(false)
     expect(isCanvasElements([{ ...stroke, text: 'not a stroke' }])).toBe(false)
     expect(isCanvasElements([{ ...stroke, pressure: .5 }])).toBe(false)
+  })
+
+  it('accepts a reversible smoothing projection only when it names the preserved source stroke', () => {
+    const refinement = createCanvasStrokeSmoothingRefinement(stroke.id, stroke.rawPoints, '2026-09-22T12:00:00.000Z')!
+    const smoothed: CanvasElement = { ...stroke, projection: refinement.result, refinements: [refinement] }
+    expect(isCanvasElements([smoothed])).toBe(true)
+    expect(isCanvasElements([{ ...smoothed, refinements: [{ ...refinement, sourceId: 'other-stroke' }] }])).toBe(false)
+    expect(isCanvasElements([{ ...smoothed, projection: undefined }])).toBe(false)
+    expect(isCanvasElements([{ ...smoothed, refinements: [{ ...refinement, appliedAt: 'not-a-date' }] }])).toBe(false)
+    expect(isCanvasElements([{ ...smoothed, type: 'text' }])).toBe(false)
   })
 })
