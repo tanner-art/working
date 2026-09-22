@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threadline Factory Dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --green: #2fb170;
+    --yellow: #d9a52c;
+    --red: #d9534f;
+    --blue: #4a86e8;
+    --gray: #5a6270;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.4;
+  }
+  header {
+    padding: 16px clamp(12px, 3vw, 32px);
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 16px;
+  }
+  header h1 { font-size: 1.25rem; margin: 0; }
+  header .meta { color: var(--muted); font-size: 0.85rem; }
+  main {
+    padding: clamp(12px, 3vw, 32px);
+    display: grid;
+    gap: 20px;
+    grid-template-columns: 1fr;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  section h2 {
+    margin: 0 0 12px 0;
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .note {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 8px;
+  }
+  .unknown { color: var(--muted); font-style: italic; }
+  .grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+  .card {
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 12px;
+    background: rgba(255,255,255,0.02);
+  }
+  .card h3 { margin: 0 0 6px 0; font-size: 0.95rem; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge-active { background: rgba(47,177,112,0.18); color: var(--green); }
+  .badge-review { background: rgba(74,134,232,0.18); color: var(--blue); }
+  .badge-blocked { background: rgba(217,165,44,0.18); color: var(--yellow); }
+  .badge-idle { background: rgba(90,98,112,0.25); color: var(--gray); }
+  .badge-unknown { background: rgba(90,98,112,0.15); color: var(--muted); }
+  .badge-passed { background: rgba(47,177,112,0.18); color: var(--green); }
+  .badge-failed { background: rgba(217,83,79,0.18); color: var(--red); }
+  .badge-running { background: rgba(74,134,232,0.18); color: var(--blue); }
+  .badge-pending { background: rgba(90,98,112,0.25); color: var(--gray); }
+  .badge-green { background: rgba(47,177,112,0.18); color: var(--green); }
+  .badge-slow { background: rgba(217,165,44,0.18); color: var(--yellow); }
+  .badge-stop { background: rgba(217,83,79,0.18); color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--panel-border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
+  .table-wrap { overflow-x: auto; }
+  a { color: var(--blue); }
+  code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
+  .kpis { display: flex; gap: 24px; flex-wrap: wrap; }
+  .kpi { min-width: 140px; }
+  .kpi .value { font-size: 1.4rem; font-weight: 700; }
+  .kpi .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; }
+  #error-banner {
+    display: none;
+    background: rgba(217,83,79,0.15);
+    color: var(--red);
+    border: 1px solid var(--red);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 0 clamp(12px, 3vw, 32px);
+  }
+  @media (max-width: 480px) {
+    .kpis { gap: 12px; }
+    section { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Threadline Factory Dashboard</h1>
+  <span class="meta" id="generated-at">loading…</span>
+  <span class="meta" id="stale-badge"></span>
+</header>
+<div id="error-banner"></div>
+<main>
+
+  <section id="section-heartbeat">
+    <h2>Runner Heartbeat</h2>
+    <div id="heartbeat-body"><span class="unknown">Loading…</span></div>
+  </section>
+
+  <section id="section-workers">
+    <h2>Workers (Provider / Model)</h2>
+    <div class="grid" id="workers-grid"></div>
+    <p class="note" id="workers-note"></p>
+  </section>
+
+  <section id="section-queue">
+    <h2>Queue</h2>
+    <div class="kpis" id="queue-kpis"></div>
+    <div class="table-wrap">
+      <table id="queue-status-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody></tbody></table>
+    </div>
+    <p class="note" id="queue-note"></p>
+  </section>
+
+  <section id="section-issues">
+    <h2>Issues (current + completed)</h2>
+    <div class="table-wrap">
+      <table id="issues-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Status</th><th>Validation</th><th>Agent</th><th>Elapsed</th>
+            <th>Diff stat</th><th>Commit</th><th>PR</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="section-utilization">
+    <h2>Utilization</h2>
+    <div class="kpis" id="utilization-kpis"></div>
+    <p class="note" id="utilization-note"></p>
+    <p class="note" id="capacity-note"></p>
+  </section>
+
+  <section id="section-usage">
+    <h2>Provider Usage Policy</h2>
+    <p class="note" id="usage-policy-line"></p>
+    <div class="table-wrap">
+      <table id="usage-table">
+        <thead><tr><th>Account</th><th>Provider</th><th>Model</th><th>Used</th><th>State</th><th>Updated</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="note" id="usage-note"></p>
+    <p class="note">This dashboard never queries provider APIs itself; it only displays what is recorded in usage.json.</p>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  var REFRESH_MS = 10000;
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      if (k === 'text') node.textContent = attrs[k];
+      else if (k === 'html') node.innerHTML = attrs[k];
+      else node.setAttribute(k, attrs[k]);
+    });
+    (children || []).forEach(function (c) { if (c) node.appendChild(c); });
+    return node;
+  }
+
+  function unknown(reason) {
+    return el('span', { class: 'unknown', text: reason ? ('Unknown — ' + reason) : 'Unknown' });
+  }
+
+  function pct(value) {
+    if (typeof value !== 'number' || isNaN(value)) return null;
+    return (value * 100).toFixed(1) + '%';
+  }
+
+  function badge(text, cls) {
+    return el('span', { class: 'badge badge-' + cls, text: text });
+  }
+
+  function clearChildren(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function renderHeartbeat(hb) {
+    var body = document.getElementById('heartbeat-body');
+    clearChildren(body);
+    var staleBadge = document.getElementById('stale-badge');
+    staleBadge.textContent = '';
+    if (!hb.found) {
+      body.appendChild(unknown('runner has not written heartbeat.json yet (no poll recorded)'));
+      return;
+    }
+    if (hb.error) {
+      body.appendChild(unknown('heartbeat.json ' + hb.error));
+      return;
+    }
+    var lines = el('div', {}, [
+      el('div', { text: 'Runner status: ' + (hb.status || 'unknown') }),
+      el('div', { text: 'Last heartbeat: ' + hb.time_iso + ' (' + hb.age_seconds.toFixed(1) + 's ago)' }),
+      el('div', { text: 'Stale threshold: ' + hb.stale_threshold_seconds + 's' })
+    ]);
+    body.appendChild(lines);
+    if (hb.stale) {
+      staleBadge.appendChild(badge('STALE', 'stop'));
+    }
+  }
+
+  function renderWorkers(workers) {
+    var grid = document.getElementById('workers-grid');
+    clearChildren(grid);
+    if (!workers.length) {
+      grid.appendChild(unknown('no agents are configured in the runner config'));
+      return;
+    }
+    workers.forEach(function (w) {
+      var title = w.label || w.key;
+      var providerModel = (w.provider || 'Unknown provider') + ' / ' + (w.model || 'Unknown model');
+      var body = [
+        el('h3', { text: title }),
+        el('div', { class: 'note', text: providerModel }),
+        el('div', {}, [badge(w.state, w.state)])
+      ];
+      if (w.state === 'active' || w.state === 'review' || w.state === 'blocked') {
+        body.push(el('div', { text: 'Issue #' + w.current_issue + ' — ' + (w.elapsed_human || 'elapsed unknown') }));
+      } else if (w.last_failure) {
+        body.push(el('div', { text: 'Last failure: issue #' + w.last_failure.issue + ' at ' + w.last_failure.time_iso }));
+        if (w.last_failure.error) body.push(el('div', { class: 'note', text: w.last_failure.error }));
+      } else if (w.reason) {
+        body.push(unknown(w.reason));
+      }
+      grid.appendChild(el('div', { class: 'card' }, body));
+    });
+  }
+
+  function renderQueue(queue) {
+    var kpis = document.getElementById('queue-kpis');
+    clearChildren(kpis);
+    [
+      ['Tracked issues', queue.total_records],
+      ['Awaiting review', queue.review_count],
+      ['Failed', queue.failure_count],
+      ['Corrupt records', queue.corrupt_records]
+    ].forEach(function (pair) {
+      kpis.appendChild(el('div', { class: 'kpi' }, [
+        el('div', { class: 'value', text: String(pair[1]) }),
+        el('div', { class: 'label', text: pair[0] })
+      ]));
+    });
+    var tbody = document.querySelector('#queue-status-table tbody');
+    clearChildren(tbody);
+    var statuses = Object.keys(queue.by_status || {}).sort();
+    if (!statuses.length) {
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '2' }, [unknown('no issue records found')])]));
+    }
+    statuses.forEach(function (status) {
+      tbody.appendChild(el('tr', {}, [
+        el('td', { text: status }),
+        el('td', { text: String(queue.by_status[status]) })
+      ]));
+    });
+    document.getElementById('queue-note').textContent = queue.note || '';
+  }
+
+  function renderIssues(issues) {
+    var tbody = document.querySelector('#issues-table tbody');
+    clearChildren(tbody);
+    if (!issues.length) {
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '8' }, [unknown('no issue records found')])]));
+      return;
+    }
+    issues.slice().reverse().forEach(function (issue) {
+      var diffCell;
+      if (issue.diff_stat) {
+        diffCell = el('span', { text: '+' + (issue.diff_stat.additions != null ? issue.diff_stat.additions : '?')
+          + ' / -' + (issue.diff_stat.deletions != null ? issue.diff_stat.deletions : '?')
+          + ' (' + (issue.diff_stat.files_changed != null ? issue.diff_stat.files_changed : '?') + ' files)' });
+      } else {
+        diffCell = unknown(issue.diff_stat_reason);
+      }
+      var commitCell = issue.commit ? el('code', { text: issue.commit.slice(0, 10) }) : unknown('not committed yet');
+      var prCell = issue.pr ? el('a', { href: issue.pr, target: '_blank', rel: 'noopener', text: 'PR' }) : unknown('no PR yet');
+      tbody.appendChild(el('tr', {}, [
+        el('td', { text: '#' + issue.issue }),
+        el('td', { text: issue.status }),
+        el('td', {}, [badge(issue.validation_result, issue.validation_result)]),
+        el('td', { text: issue.agent || 'unassigned' }),
+        el('td', { text: issue.elapsed_human || '—' }),
+        el('td', {}, [diffCell]),
+        el('td', {}, [commitCell]),
+        el('td', {}, [prCell])
+      ]));
+    });
+  }
+
+  function renderUtilization(util, longestBlocked) {
+    var kpis = document.getElementById('utilization-kpis');
+    clearChildren(kpis);
+    function kpi(label, result) {
+      var value = result && pct(result.value);
+      kpis.appendChild(el('div', { class: 'kpi' }, [
+        value ? el('div', { class: 'value', text: value }) : el('div', { class: 'value' }, [unknown(result && result.reason)]),
+        el('div', { class: 'label', text: label })
+      ]));
+    }
+    kpi('Total utilization', util.total);
+    kpi('Last ' + util.window_days + '-day utilization', util.nine_day);
+    kpis.appendChild(el('div', { class: 'kpi' }, [
+      el('div', { class: 'value', text: String(util.total_workers) }),
+      el('div', { class: 'label', text: 'Configured workers' })
+    ]));
+    var lb = document.getElementById('utilization-note');
+    if (longestBlocked.value != null) {
+      lb.textContent = 'Longest blocked duration: ' + Math.round(longestBlocked.value) + 's';
+    } else {
+      clearChildren(lb);
+      lb.appendChild(el('span', { text: 'Longest blocked duration: ' }));
+      lb.appendChild(unknown(longestBlocked.reason));
+    }
+    if (util.events_found && util.events_corrupt_lines) {
+      lb.appendChild(el('div', { class: 'note', text: util.events_corrupt_lines + ' corrupt line(s) in events.jsonl were skipped.' }));
+    }
+  }
+
+  function renderUsage(usage) {
+    document.getElementById('usage-policy-line').textContent =
+      'Slowdown at ' + usage.policy.slowdown_threshold_pct + '%, stop at ' + usage.policy.stop_threshold_pct + '%'
+      + (usage.policy.stop_threshold_clamped_to_max ? ' (clamped to configured maximum of ' + usage.policy.max_stop_threshold_pct + '%)' : '');
+    var tbody = document.querySelector('#usage-table tbody');
+    clearChildren(tbody);
+    var note = document.getElementById('usage-note');
+    note.textContent = usage.note || (usage.error ? ('usage.json ' + usage.error) : '');
+    if (!usage.accounts.length) {
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '6' }, [unknown('no accounts recorded in usage.json')])]));
+      return;
+    }
+    usage.accounts.forEach(function (a) {
+      var usedCell = typeof a.percent_used === 'number' ? el('span', { text: a.percent_used + '%' }) : unknown('not recorded');
+      tbody.appendChild(el('tr', {}, [
+        el('td', { text: a.account }),
+        el('td', { text: a.provider || 'Unknown' }),
+        el('td', { text: a.model || 'Unknown' }),
+        el('td', {}, [usedCell]),
+        el('td', {}, [badge(a.state, a.state)]),
+        el('td', { text: a.updated_at_iso || 'Unknown' })
+      ]));
+    });
+  }
+
+  function render(report) {
+    document.getElementById('generated-at').textContent = 'Generated ' + report.generated_at
+      + ' — state dir: ' + report.state_dir + (report.state_dir_found ? '' : ' (NOT FOUND)');
+    renderHeartbeat(report.heartbeat);
+    renderWorkers(report.workers);
+    document.getElementById('workers-note').textContent =
+      'Live parallel capacity is 1 task at a time; see capacity note below.';
+    renderQueue(report.queue);
+    renderIssues(report.issues);
+    renderUtilization(report.utilization, report.longest_blocked_duration);
+    document.getElementById('capacity-note').textContent = report.capacity_note;
+    renderUsage(report.usage);
+  }
+
+  function showError(message) {
+    var banner = document.getElementById('error-banner');
+    banner.style.display = 'block';
+    banner.textContent = message;
+  }
+
+  function hideError() {
+    document.getElementById('error-banner').style.display = 'none';
+  }
+
+  function refresh() {
+    fetch('/api/status', { cache: 'no-store' })
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('status endpoint returned ' + resp.status);
+        return resp.json();
+      })
+      .then(function (report) {
+        hideError();
+        render(report);
+      })
+      .catch(function (err) {
+        showError('Could not refresh dashboard: ' + err.message);
+      });
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

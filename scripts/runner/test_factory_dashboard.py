@@ -1,0 +1,561 @@
+import http.client
+import json
+import pathlib
+import tempfile
+import threading
+import time
+import unittest
+
+import factory_dashboard as fd
+
+
+def write_json(path, data):
+    path.write_text(json.dumps(data))
+
+
+def write_lines(path, lines):
+    path.write_text('\n'.join(json.dumps(line) if not isinstance(line, str) else line for line in lines) + '\n')
+
+
+class RedactionTests(unittest.TestCase):
+    def test_report_never_includes_agent_command_or_env(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            config = {
+                'state': str(state),
+                'repo': '/Users/someone/secret-repo-path',
+                'gh': '/usr/bin/gh',
+                'git': '/usr/bin/git',
+                'allowed_authors': ['someone'],
+                'agents': {
+                    'codex-a': {
+                        'provider': 'openai',
+                        'model': 'gpt-5-codex',
+                        'command': ['/opt/homebrew/bin/codex', '--secret-flag'],
+                        'env': {'CODEX_HOME': '/Users/someone/.codex-a', 'OPENAI_API_KEY': 'sk-should-not-leak'},
+                    }
+                },
+            }
+            report = fd.build_report('cfg.json', config, now=1000.0)
+            dumped = json.dumps(report)
+            for forbidden in ('secret-flag', 'sk-should-not-leak', 'CODEX_HOME', '/opt/homebrew/bin/codex',
+                               'secret-repo-path', '/usr/bin/gh', 'allowed_authors'):
+                self.assertNotIn(forbidden, dumped)
+            self.assertEqual(report['workers'][0]['provider'], 'openai')
+            self.assertEqual(report['workers'][0]['model'], 'gpt-5-codex')
+
+    def test_report_never_includes_log_file_contents_or_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            secret_marker = 'THIS_IS_LOG_CONTENT_MARKER'
+            (state / 'issue-1-999.log').write_text(secret_marker)
+            write_json(state / 'issue-1.json', {
+                'issue': 1, 'status': 'failed', 'agent': 'codex-b',
+                'log': str(state / 'issue-1-999.log'),
+                'worktree': '/Users/someone/worktrees/issue-1',
+            })
+            config = {'state': str(state)}
+            report = fd.build_report('cfg.json', config, now=1000.0)
+            dumped = json.dumps(report)
+            self.assertNotIn(secret_marker, dumped)
+            self.assertNotIn('worktrees/issue-1', dumped)
+
+    def test_report_never_includes_usage_json_extra_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {
+                'codex-a': {
+                    'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10,
+                    'observed_at': '2026-01-01T00:00:00Z',
+                    'api_key': 'sk-leak-me-not', 'secret': 'nope',
+                }
+            })
+            config = {'state': str(state)}
+            report = fd.build_report('cfg.json', config, now=1000.0)
+            dumped = json.dumps(report)
+            self.assertNotIn('sk-leak-me-not', dumped)
+            self.assertNotIn('secret', dumped)
+
+
+class MissingOrCorruptDataTests(unittest.TestCase):
+    def test_everything_missing_degrades_to_unknown(self):
+        report = fd.build_report('cfg.json', {'state': '/nonexistent/state/dir'}, now=1000.0)
+        self.assertFalse(report['state_dir_found'])
+        self.assertFalse(report['heartbeat']['found'])
+        self.assertEqual(report['queue']['total_records'], 0)
+        self.assertIsNone(report['utilization']['total']['value'])
+        self.assertIsNone(report['utilization']['nine_day']['value'])
+        self.assertIsNone(report['longest_blocked_duration']['value'])
+        self.assertFalse(report['usage']['found'])
+        self.assertIsNotNone(report['usage']['note'])
+        self.assertEqual(report['workers'], [])
+
+    def test_corrupt_heartbeat_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            (state / 'heartbeat.json').write_text('{not valid json')
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertTrue(report['heartbeat']['found'])
+            self.assertIn('corrupt', report['heartbeat']['error'])
+
+    def test_corrupt_issue_record_counted_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            (state / 'issue-1.json').write_text('{not valid json')
+            write_json(state / 'issue-2.json', {'issue': 2, 'status': 'review', 'agent': 'claude'})
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertEqual(report['queue']['corrupt_records'], 1)
+            self.assertEqual(len(report['issues']), 1)
+
+    def test_corrupt_events_line_is_skipped_and_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            (state / 'events.jsonl').write_text(
+                '{"timestamp": 1000.0, "status": "agent", "agent": "codex-a"}\n'
+                'not json at all\n'
+                '{"timestamp": "not-a-number", "status": "agent"}\n'
+                '{"status": "agent"}\n'
+            )
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1010.0)
+            self.assertTrue(report['utilization']['events_found'])
+            self.assertEqual(report['utilization']['events_corrupt_lines'], 3)
+
+    def test_missing_events_jsonl_explains_what_is_needed(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertFalse(report['utilization']['events_found'])
+            self.assertIn('events.jsonl', report['utilization']['total']['reason'])
+            self.assertIn('events.jsonl', report['longest_blocked_duration']['reason'])
+
+    def test_corrupt_usage_json_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            (state / 'usage.json').write_text('{not valid json')
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertTrue(report['usage']['found'])
+            self.assertIn('corrupt', report['usage']['error'])
+
+    def test_usage_json_bad_account_entries_are_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {
+                'codex-a': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 50,
+                            'observed_at': '2026-01-01T00:00:00Z'},
+                'codex-b': 'not-a-dict',
+                '': {'provider': 'openai', 'used_percent': 10, 'observed_at': '2026-01-01T00:00:00Z'},
+            })
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            self.assertEqual(len(report['usage']['workers']), 1)
+            self.assertEqual(report['usage']['corrupt_workers'], 2)
+
+    def test_missing_diff_stat_explains_what_is_needed(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'issue-5.json', {'issue': 5, 'status': 'review', 'agent': 'codex-a', 'time': 900.0})
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            issue = report['issues'][0]
+            self.assertIsNone(issue['diff_stat'])
+            self.assertIn('issue #5', issue['diff_stat_reason'])
+
+
+class UtilizationMathTests(unittest.TestCase):
+    def test_fully_busy_window_is_one_full_worker(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'agent', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertAlmostEqual(result['value'], 1.0)
+        self.assertAlmostEqual(result['percent_of_capacity'], 1.0 / 3.0)
+
+    def test_fully_idle_window_is_zero_active_workers(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'idle', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertAlmostEqual(result['value'], 0.0)
+        self.assertAlmostEqual(result['percent_of_capacity'], 0.0)
+
+    def test_mixed_intervals_compute_exact_average(self):
+        # idle [0,10), agent [10,40) -> busy 30s, idle [40,50) -> busy 0, agent [50,100) -> busy 50s
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'idle', 'agent': 'codex-a'},
+            {'time': 10.0, 'status': 'agent', 'agent': 'codex-a'},
+            {'time': 40.0, 'status': 'idle', 'agent': 'codex-a'},
+            {'time': 50.0, 'status': 'validation', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        # busy seconds = (40-10) + (100-50) = 80 out of 100
+        self.assertAlmostEqual(result['value'], 0.8)
+        self.assertAlmostEqual(result['percent_of_capacity'], 0.8 / 3.0)
+
+    def test_unsorted_events_are_sorted_before_computing(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 40.0, 'status': 'idle', 'agent': 'codex-a'},
+            {'time': 0.0, 'status': 'agent', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        # agent [0,40) busy=40, idle [40,100) busy=0 -> 40/100
+        self.assertAlmostEqual(result['value'], 0.4)
+
+    def test_window_before_first_event_is_clamped_to_first_event(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 50.0, 'status': 'agent', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        # effective window is [50,100), fully busy
+        self.assertAlmostEqual(result['value'], 1.0)
+        self.assertEqual(result['window_start'], 50.0)
+
+    def test_window_entirely_before_first_event_is_unknown(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 500.0, 'status': 'agent', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=1000.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertIsNone(result['value'])
+        self.assertIn('window', result['reason'])
+
+    def test_no_events_file_is_unknown_with_reason(self):
+        events_result = {'found': False, 'error': None, 'corrupt_lines': 0, 'events': []}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertIsNone(result['value'])
+        self.assertIn('events.jsonl', result['reason'])
+
+    def test_empty_events_file_is_unknown_with_reason(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': []}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertIsNone(result['value'])
+        self.assertIn('empty', result['reason'])
+
+    def test_events_error_propagates_as_unknown(self):
+        events_result = {'found': True, 'error': 'unreadable: OSError', 'corrupt_lines': 0, 'events': []}
+        result = fd.average_active_workers_for_window(
+            events_result, now=100.0, window_start=0.0, window_end=100.0, total_workers=3)
+        self.assertIsNone(result['value'])
+        self.assertIn('unreadable', result['reason'])
+
+    def test_last_event_extends_to_now(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'agent', 'agent': 'codex-a'},
+        ]}
+        result = fd.average_active_workers_for_window(
+            events_result, now=60.0, window_start=0.0, window_end=60.0, total_workers=3)
+        self.assertAlmostEqual(result['value'], 1.0)
+
+    def test_end_to_end_nine_day_and_total_via_build_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            now = 100.0 * 86400  # far enough that a 9-day window is well inside history
+            events = [
+                {'timestamp': now - (20 * 86400), 'status': 'idle', 'agent': 'codex-a'},
+                {'timestamp': now - (5 * 86400), 'status': 'agent', 'agent': 'codex-a'},  # busy last 5 days
+            ]
+            write_lines(state / 'events.jsonl', events)
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=now, utilization_window_days=9)
+            nine_day = report['utilization']['nine_day']
+            # busy 5 of the last 9 days, against a default capacity of 3 workers
+            self.assertAlmostEqual(nine_day['value'], 5.0 / 9.0, places=6)
+            self.assertAlmostEqual(nine_day['percent_of_capacity'], (5.0 / 9.0) / 3.0, places=6)
+            total = report['utilization']['total']
+            # busy 5 of the full 20-day history
+            self.assertAlmostEqual(total['value'], 5.0 / 20.0, places=6)
+
+
+class ProducerIntegrationTests(unittest.TestCase):
+    def test_overlapping_worker_intervals_average_two_active_workers(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            now = 1_000_000.0
+            events = [
+                {'timestamp': now - 100.0, 'status': 'agent', 'agent': 'codex-a'},
+                {'timestamp': now - 100.0, 'status': 'agent', 'agent': 'codex-b'},
+            ]
+            write_lines(state / 'events.jsonl', events)
+            config = {'state': str(state), 'agents': {'codex-a': {}, 'codex-b': {}}}
+            report = fd.build_report('cfg.json', config, now=now)
+            total = report['utilization']['total']
+            self.assertAlmostEqual(total['value'], 2.0, places=6)
+            self.assertAlmostEqual(total['percent_of_capacity'], 1.0, places=6)
+
+    def test_canonical_usage_percent_thresholds_slow_and_stop(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {
+                'codex-a': {'provider': 'openai', 'model': 'gpt-5-codex',
+                            'used_percent': 70.0, 'observed_at': '2026-01-01T00:00:00Z'},
+                'codex-b': {'provider': 'openai', 'model': 'gpt-5-codex',
+                            'used_percent': 80.0, 'observed_at': '2026-01-01T00:00:00Z'},
+            })
+            report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
+            workers = {w['worker']: w for w in report['usage']['workers']}
+            self.assertEqual(workers['codex-a']['state'], 'slow')
+            self.assertEqual(workers['codex-b']['state'], 'stop')
+
+
+class LongestBlockedDurationTests(unittest.TestCase):
+    def test_no_events_is_unknown(self):
+        events_result = {'found': False, 'error': None, 'corrupt_lines': 0, 'events': []}
+        result = fd.longest_blocked_duration(events_result, now=100.0)
+        self.assertIsNone(result['value'])
+        self.assertIn('events.jsonl', result['reason'])
+
+    def test_no_blocked_events_is_unknown(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'agent', 'agent': 'codex-a'},
+            {'time': 10.0, 'status': 'idle', 'agent': 'codex-a'},
+        ]}
+        result = fd.longest_blocked_duration(events_result, now=20.0)
+        self.assertIsNone(result['value'])
+        self.assertIn('waiting/blocked', result['reason'])
+
+    def test_finds_the_longest_of_several_blocked_intervals(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'waiting', 'agent': 'codex-a'},   # blocked for 5s
+            {'time': 5.0, 'status': 'agent', 'agent': 'codex-a'},
+            {'time': 10.0, 'status': 'waiting', 'agent': 'codex-a'},  # blocked for 40s (longest)
+            {'time': 50.0, 'status': 'review', 'agent': 'codex-a'},
+        ]}
+        result = fd.longest_blocked_duration(events_result, now=200.0)
+        self.assertAlmostEqual(result['value'], 40.0)
+
+    def test_still_blocked_extends_to_now(self):
+        events_result = {'found': True, 'error': None, 'corrupt_lines': 0, 'events': [
+            {'time': 0.0, 'status': 'waiting', 'agent': 'codex-a'},
+        ]}
+        result = fd.longest_blocked_duration(events_result, now=75.0)
+        self.assertAlmostEqual(result['value'], 75.0)
+
+
+class DiffStatTests(unittest.TestCase):
+    def test_prefers_record_level_diff_stat(self):
+        record = {'issue': 1, 'diff_stat': {'additions': 3, 'deletions': 1, 'files_changed': 2}}
+        stat, reason = fd._diff_stat_for_issue(record, events=[])
+        self.assertEqual(stat, {'additions': 3, 'deletions': 1, 'files_changed': 2})
+        self.assertIsNone(reason)
+
+    def test_falls_back_to_latest_matching_event(self):
+        record = {'issue': 7, 'diff_stat': None}
+        events = [
+            {'time': 1.0, 'issue': 7, 'diff_stat': {'additions': 1, 'deletions': 0, 'files_changed': 1}},
+            {'time': 2.0, 'issue': 7, 'diff_stat': {'additions': 5, 'deletions': 2, 'files_changed': 3}},
+            {'time': 3.0, 'issue': 8, 'diff_stat': {'additions': 99, 'deletions': 99, 'files_changed': 99}},
+        ]
+        stat, reason = fd._diff_stat_for_issue(record, events)
+        self.assertEqual(stat, {'additions': 5, 'deletions': 2, 'files_changed': 3})
+        self.assertIsNone(reason)
+
+    def test_unknown_when_nothing_available(self):
+        record = {'issue': 9, 'diff_stat': None}
+        stat, reason = fd._diff_stat_for_issue(record, events=[])
+        self.assertIsNone(stat)
+        self.assertIn('issue #9', reason)
+
+
+class WorkerStateTests(unittest.TestCase):
+    def test_active_worker_shows_current_issue_and_elapsed(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': 'openai', 'model': 'gpt-5-codex', 'label': None}}
+        records = {5: {'issue': 5, 'status': 'agent', 'time': 900.0, 'agent': 'codex-a',
+                       'branch': None, 'commit': None, 'pr': None, 'error': None, 'diff_stat': None}}
+        workers = fd.build_worker_views(agent_defs, records, events=[], heartbeat={}, now=1000.0)
+        self.assertEqual(workers[0]['state'], 'active')
+        self.assertEqual(workers[0]['current_issue'], 5)
+        self.assertAlmostEqual(workers[0]['elapsed_seconds'], 100.0)
+
+    def test_review_worker_state(self):
+        agent_defs = {'claude': {'key': 'claude', 'provider': None, 'model': None, 'label': None}}
+        records = {2: {'issue': 2, 'status': 'review', 'time': 500.0, 'agent': 'claude',
+                       'branch': None, 'commit': 'abc123', 'pr': 'https://example.invalid/pr/2',
+                       'error': None, 'diff_stat': None}}
+        workers = fd.build_worker_views(agent_defs, records, events=[], heartbeat={}, now=600.0)
+        self.assertEqual(workers[0]['state'], 'review')
+
+    def test_failed_worker_is_idle_with_last_failure(self):
+        agent_defs = {'codex-b': {'key': 'codex-b', 'provider': None, 'model': None, 'label': None}}
+        records = {3: {'issue': 3, 'status': 'failed', 'time': 500.0, 'agent': 'codex-b',
+                       'branch': None, 'commit': None, 'pr': None, 'error': 'pnpm check failed (1); see log',
+                       'diff_stat': None}}
+        workers = fd.build_worker_views(agent_defs, records, events=[], heartbeat={}, now=600.0)
+        self.assertEqual(workers[0]['state'], 'idle')
+        self.assertEqual(workers[0]['last_failure']['issue'], 3)
+        self.assertEqual(workers[0]['last_failure']['error'], 'pnpm check failed (1); see log')
+
+    def test_worker_with_no_activity_is_idle_with_reason(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}
+        workers = fd.build_worker_views(agent_defs, records={}, events=[], heartbeat={}, now=1000.0)
+        self.assertEqual(workers[0]['state'], 'idle')
+        self.assertIsNotNone(workers[0]['reason'])
+
+    def test_blocked_state_from_events_overrides_stale_issue_record(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}
+        records = {4: {'issue': 4, 'status': 'agent', 'time': 100.0, 'agent': 'codex-a',
+                       'branch': None, 'commit': None, 'pr': None, 'error': None, 'diff_stat': None}}
+        events = [{'time': 200.0, 'status': 'waiting', 'agent': 'codex-a', 'issue': 4}]
+        workers = fd.build_worker_views(agent_defs, records, events, heartbeat={}, now=300.0)
+        self.assertEqual(workers[0]['state'], 'blocked')
+        self.assertAlmostEqual(workers[0]['elapsed_seconds'], 100.0)
+
+
+class ValidationResultTests(unittest.TestCase):
+    def test_pending_before_validation(self):
+        self.assertEqual(fd.validation_result({'status': 'starting', 'commit': None}), 'pending')
+        self.assertEqual(fd.validation_result({'status': 'agent', 'commit': None}), 'pending')
+
+    def test_running_during_validation(self):
+        self.assertEqual(fd.validation_result({'status': 'validation', 'commit': None}), 'running')
+
+    def test_passed_on_review_or_commit_present(self):
+        self.assertEqual(fd.validation_result({'status': 'review', 'commit': 'abc'}), 'passed')
+        self.assertEqual(fd.validation_result({'status': 'review', 'commit': None}), 'passed')
+
+    def test_failed_status_is_failed(self):
+        self.assertEqual(fd.validation_result({'status': 'failed', 'commit': None}), 'failed')
+
+
+class UsagePolicyTests(unittest.TestCase):
+    def test_defaults_when_not_configured(self):
+        policy = fd.usage_policy({})
+        self.assertEqual(policy['slowdown_threshold_pct'], 70.0)
+        self.assertEqual(policy['stop_threshold_pct'], 80.0)
+        self.assertFalse(policy['stop_threshold_clamped_to_max'])
+
+    def test_config_overrides_defaults(self):
+        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50, 'stop_threshold_pct': 60}})
+        self.assertEqual(policy['slowdown_threshold_pct'], 50.0)
+        self.assertEqual(policy['stop_threshold_pct'], 60.0)
+
+    def test_stop_threshold_is_clamped_to_max_80(self):
+        policy = fd.usage_policy({'usage_policy': {'stop_threshold_pct': 95}})
+        self.assertEqual(policy['stop_threshold_pct'], 80.0)
+        self.assertTrue(policy['stop_threshold_clamped_to_max'])
+
+    def test_cli_overrides_take_precedence_over_config(self):
+        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50}}, slowdown_override=65)
+        self.assertEqual(policy['slowdown_threshold_pct'], 65.0)
+
+    def test_classify_usage_state(self):
+        policy = {'slowdown_threshold_pct': 70.0, 'stop_threshold_pct': 80.0}
+        self.assertEqual(fd.classify_usage_state(10, policy), 'green')
+        self.assertEqual(fd.classify_usage_state(75, policy), 'slow')
+        self.assertEqual(fd.classify_usage_state(85, policy), 'stop')
+        self.assertEqual(fd.classify_usage_state(None, policy), 'unknown')
+        self.assertEqual(fd.classify_usage_state('not-a-number', policy), 'unknown')
+
+
+class AgentDefinitionsTests(unittest.TestCase):
+    def test_data_driven_from_config_not_hardcoded(self):
+        config = {'agents': {'custom-worker': {'provider': 'anthropic', 'model': 'claude-x'}}}
+        defs = fd.agent_definitions(config)
+        self.assertEqual(defs['custom-worker']['provider'], 'anthropic')
+        self.assertEqual(defs['custom-worker']['model'], 'claude-x')
+
+    def test_missing_provider_model_is_unknown_none(self):
+        config = {'agents': {'codex-a': {}}}
+        defs = fd.agent_definitions(config)
+        self.assertIsNone(defs['codex-a']['provider'])
+        self.assertIsNone(defs['codex-a']['model'])
+
+    def test_no_agents_configured_is_empty(self):
+        self.assertEqual(fd.agent_definitions({}), {})
+
+
+class FormatDurationTests(unittest.TestCase):
+    def test_none_is_none(self):
+        self.assertIsNone(fd.format_duration(None))
+
+    def test_seconds_only(self):
+        self.assertEqual(fd.format_duration(45), '45s')
+
+    def test_hours_minutes_seconds(self):
+        self.assertEqual(fd.format_duration(3725), '1h 2m 5s')
+
+    def test_days(self):
+        self.assertEqual(fd.format_duration(90061), '1d 1h 1m 1s')
+
+
+class HttpRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        state = pathlib.Path(cls.tempdir.name) / 'state'
+        state.mkdir()
+        write_json(state / 'heartbeat.json', {'time': time.time(), 'pid': 1, 'status': 'idle'})
+        write_json(state / 'issue-1.json', {'issue': 1, 'status': 'review', 'agent': 'claude'})
+        config = {'state': str(state), 'agents': {'claude': {'provider': 'anthropic', 'model': 'claude-x'}}}
+        cls.server = fd.make_server('127.0.0.1', 0, 'cfg.json', config)
+        cls.host, cls.port = cls.server.server_address
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        cls.tempdir.cleanup()
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        try:
+            conn.request('GET', path)
+            resp = conn.getresponse()
+            body = resp.read()
+            return resp.status, resp.getheader('Content-Type'), body
+        finally:
+            conn.close()
+
+    def test_root_serves_html(self):
+        status, content_type, body = self._get('/')
+        self.assertEqual(status, 200)
+        self.assertIn('text/html', content_type)
+        self.assertIn(b'Threadline Factory Dashboard', body)
+
+    def test_api_status_serves_valid_json_with_expected_keys(self):
+        status, content_type, body = self._get('/api/status')
+        self.assertEqual(status, 200)
+        self.assertIn('application/json', content_type)
+        parsed = json.loads(body)
+        for key in ('generated_at', 'heartbeat', 'workers', 'queue', 'issues', 'utilization',
+                    'longest_blocked_duration', 'usage', 'capacity_note'):
+            self.assertIn(key, parsed)
+        self.assertEqual(parsed['workers'][0]['provider'], 'anthropic')
+
+    def test_unknown_route_is_404(self):
+        status, content_type, body = self._get('/does-not-exist')
+        self.assertEqual(status, 404)
+
+    def test_default_bind_host_is_loopback(self):
+        parser = fd.build_arg_parser()
+        args = parser.parse_args(['--config', 'cfg.json'])
+        self.assertEqual(args.host, '127.0.0.1')
+        self.assertEqual(args.port, fd.DEFAULT_PORT)
+
+
+class MainCliTests(unittest.TestCase):
+    def test_missing_config_reports_error_without_traceback(self):
+        rc = fd.main(['--config', '/nonexistent/config.json'])
+        self.assertEqual(rc, 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
