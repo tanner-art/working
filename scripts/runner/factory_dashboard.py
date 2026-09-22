@@ -106,6 +106,9 @@ REVIEW_STATUS = 'review'
 FAILED_STATUS = 'failed'
 BLOCKED_STATUSES = {'waiting', 'blocked'}
 BUSY_STATUSES = ACTIVE_STATUSES
+QUEUE_STATUSES = frozenset(('failed', 'review', 'running', 'ready', 'unqueued'))
+QUEUE_AGENTS = frozenset(('codex-a', 'codex-b', 'claude'))
+QUEUE_ENTRY_FIELDS = frozenset(('number', 'title', 'agent', 'readiness', 'status', 'created_at', 'dependencies'))
 
 # Config fields this dashboard is allowed to read. Everything else in the
 # config file (repo path, gh/git/pnpm executables, allowed_authors, per-agent
@@ -317,22 +320,33 @@ def load_queue_snapshot(state_dir):
     data, error = fstatus.read_json_safe(path)
     if error == 'missing':
         return {'found': False, 'error': None, 'entries': []}
-    if error or not isinstance(data, dict) or not isinstance(data.get('entries'), list):
+    if error or not isinstance(data, dict) or set(data) != {'entries'} or not isinstance(data.get('entries'), list):
         return {'found': True, 'error': error or 'corrupt: queue.json entries must be a list', 'entries': []}
     entries = []
     for item in data['entries']:
-        if not isinstance(item, dict):
-            continue
+        if not isinstance(item, dict) or set(item) != QUEUE_ENTRY_FIELDS:
+            return {'found': True, 'error': 'corrupt: queue.json entry has an invalid schema', 'entries': []}
         number = item.get('number')
         status = item.get('status')
-        if isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not isinstance(status, str):
-            continue
-        created_at = item.get('created_at') if isinstance(item.get('created_at'), str) else None
+        title = item.get('title')
+        agent = item.get('agent')
+        readiness = item.get('readiness')
+        created_at = item.get('created_at')
+        dependencies = item.get('dependencies')
+        if (isinstance(number, bool) or not isinstance(number, int) or number <= 0 or not isinstance(title, str) or
+                status not in QUEUE_STATUSES or agent not in QUEUE_AGENTS | {None} or not isinstance(readiness, bool) or
+                not (isinstance(created_at, str) or created_at is None) or not isinstance(dependencies, dict) or
+                set(dependencies) != {'items', 'count'} or not isinstance(dependencies['items'], list) or
+                isinstance(dependencies['count'], bool) or not isinstance(dependencies['count'], int) or
+                any(isinstance(dep, bool) or not isinstance(dep, int) or dep <= 0 for dep in dependencies['items']) or
+                dependencies['items'] != sorted(set(dependencies['items'])) or dependencies['count'] != len(dependencies['items']) or
+                readiness != (status == 'ready' and agent is not None)):
+            return {'found': True, 'error': 'corrupt: queue.json entry has invalid canonical values', 'entries': []}
         entries.append({
             'number': number,
-            'title': item.get('title') if isinstance(item.get('title'), str) else None,
-            'agent': item.get('agent') if isinstance(item.get('agent'), str) else None,
-            'readiness': item.get('readiness') is True,
+            'title': title,
+            'agent': agent,
+            'readiness': readiness,
             'status': status,
             'created_at': created_at,
         })
@@ -352,7 +366,7 @@ def queue_view(snapshot, issue_summary, records, now):
         return {
             'source': 'queue.json', 'by_status': by_status, 'by_agent': {},
             'total_records': len(entries), 'corrupt_records': 0,
-            'staged_count': len(entries), 'ready_count': by_status.get('ready', 0),
+            'staged_count': len(entries), 'ready_count': sum(entry['readiness'] is True for entry in entries),
             'running_count': by_status.get('running', 0), 'review_count': by_status.get('review', 0),
             'failure_count': by_status.get('failed', 0), 'queue_age_seconds': age,
             'queue_age_human': format_duration(age), 'snapshot_error': None,

@@ -86,9 +86,9 @@ class MissingOrCorruptDataTests(unittest.TestCase):
             state = pathlib.Path(d) / 'state'
             state.mkdir()
             write_json(state / 'queue.json', {'entries': [
-                {'number': 1, 'title': 'Ready', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': '1970-01-01T00:00:10Z', 'body': 'ignored'},
-                {'number': 2, 'title': 'Review', 'agent': 'codex-b', 'readiness': False, 'status': 'review', 'created_at': '1970-01-01T00:00:20Z'},
-                {'number': 3, 'title': 'Bad', 'status': 'running', 'created_at': 'bad'},
+                {'number': 1, 'title': 'Ready', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': '1970-01-01T00:00:10Z', 'dependencies': {'items': [], 'count': 0}},
+                {'number': 2, 'title': 'Review', 'agent': 'codex-b', 'readiness': False, 'status': 'review', 'created_at': '1970-01-01T00:00:20Z', 'dependencies': {'items': [4], 'count': 1}},
+                {'number': 3, 'title': 'Running', 'agent': 'claude', 'readiness': False, 'status': 'running', 'created_at': 'bad', 'dependencies': {'items': [], 'count': 0}},
             ]})
             report = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)
             queue = report['queue']
@@ -97,6 +97,33 @@ class MissingOrCorruptDataTests(unittest.TestCase):
             self.assertEqual(queue['ready_count'], 1)
             self.assertEqual(queue['review_count'], 1)
             self.assertEqual(queue['queue_age_seconds'], 90.0)
+
+    def test_unassignable_ready_snapshot_entry_does_not_count_as_ready(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'queue.json', {'entries': [
+                {'number': 1, 'title': 'Unassigned', 'agent': None, 'readiness': False, 'status': 'ready', 'created_at': None, 'dependencies': {'items': [], 'count': 0}},
+            ]})
+            queue = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)['queue']
+            self.assertEqual(queue['source'], 'queue.json')
+            self.assertEqual(queue['staged_count'], 1)
+            self.assertEqual(queue['ready_count'], 0)
+
+    def test_malformed_queue_entries_fall_back_to_issue_records(self):
+        for malformed in (
+            {'number': 1, 'title': 'Bad status', 'agent': 'codex-a', 'readiness': False, 'status': 'invented', 'created_at': None, 'dependencies': {'items': [], 'count': 0}},
+            {'number': 2, 'title': 'Bad dependencies', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': None, 'dependencies': {'items': [2, 2], 'count': 2}},
+        ):
+            with self.subTest(malformed=malformed), tempfile.TemporaryDirectory() as d:
+                state = pathlib.Path(d) / 'state'
+                state.mkdir()
+                write_json(state / 'queue.json', {'entries': [malformed]})
+                write_json(state / 'issue-4.json', {'issue': 4, 'status': 'ready', 'time': 90.0})
+                queue = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)['queue']
+                self.assertEqual(queue['source'], 'issue-records')
+                self.assertIn('corrupt', queue['snapshot_error'])
+                self.assertEqual(queue['ready_count'], 1)
 
     def test_corrupt_queue_snapshot_falls_back_to_issue_records(self):
         with tempfile.TemporaryDirectory() as d:
