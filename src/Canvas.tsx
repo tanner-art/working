@@ -120,6 +120,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       onCommit([...elements, { id: crypto.randomUUID(), type: 'arrow', x: 0, y: 0, fromId: connectFrom, toId: id }])
       setConnectFrom(null)
     } else {
+      if (selected !== id) setEditMode(false)
       setSelected(id)
     }
   }
@@ -178,7 +179,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div className="canvas-note">{connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { setSelected(null); setEditMode(false) }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="arrows">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, arrow.connectionPath); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(arrow)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); setSelected(arrow.id) }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelected(arrow.id) } }}/></g> })}<defs>
+    <svg className="arrows">{arrows.map(arrow => { const from = positioned(arrow.fromId); const to = positioned(arrow.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, arrow.connectionPath); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(arrow)} markerEnd="url(#head)"/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); setEditMode(false); setSelected(arrow.id) }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
     <marker id="head" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
     <path d="M0,0 L0,6 L7,3 z" />
     </marker>
@@ -192,7 +193,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </span>
     <span>
     </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea value={item.text ?? ''} aria-label="Block text" onFocus={() => setSelected(item.id)} onChange={event => onText(item.id, event.target.value)} onBlur={onFinishText} onPointerDown={event => event.stopPropagation()} />
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea value={item.text ?? ''} aria-label="Block text" onFocus={() => { if (selected !== item.id) setEditMode(false); setSelected(item.id) }} onChange={event => onText(item.id, event.target.value)} onBlur={onFinishText} onPointerDown={event => event.stopPropagation()} />
     {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
     </div> })}</div>
     </div>
