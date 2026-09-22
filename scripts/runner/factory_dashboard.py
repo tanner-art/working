@@ -323,6 +323,7 @@ def load_queue_snapshot(state_dir):
     if error or not isinstance(data, dict) or set(data) != {'entries'} or not isinstance(data.get('entries'), list):
         return {'found': True, 'error': error or 'corrupt: queue.json entries must be a list', 'entries': []}
     entries = []
+    numbers = set()
     for item in data['entries']:
         if not isinstance(item, dict) or set(item) != QUEUE_ENTRY_FIELDS:
             return {'found': True, 'error': 'corrupt: queue.json entry has an invalid schema', 'entries': []}
@@ -340,8 +341,10 @@ def load_queue_snapshot(state_dir):
                 isinstance(dependencies['count'], bool) or not isinstance(dependencies['count'], int) or
                 any(isinstance(dep, bool) or not isinstance(dep, int) or dep <= 0 for dep in dependencies['items']) or
                 dependencies['items'] != sorted(set(dependencies['items'])) or dependencies['count'] != len(dependencies['items']) or
-                readiness != (status == 'ready' and agent is not None)):
+                readiness != (status == 'ready' and agent is not None) or number in numbers or
+                (created_at is not None and _parse_iso(created_at) is None)):
             return {'found': True, 'error': 'corrupt: queue.json entry has invalid canonical values', 'entries': []}
+        numbers.add(number)
         entries.append({
             'number': number,
             'title': title,

@@ -88,7 +88,7 @@ class MissingOrCorruptDataTests(unittest.TestCase):
             write_json(state / 'queue.json', {'entries': [
                 {'number': 1, 'title': 'Ready', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': '1970-01-01T00:00:10Z', 'dependencies': {'items': [], 'count': 0}},
                 {'number': 2, 'title': 'Review', 'agent': 'codex-b', 'readiness': False, 'status': 'review', 'created_at': '1970-01-01T00:00:20Z', 'dependencies': {'items': [4], 'count': 1}},
-                {'number': 3, 'title': 'Running', 'agent': 'claude', 'readiness': False, 'status': 'running', 'created_at': 'bad', 'dependencies': {'items': [], 'count': 0}},
+                {'number': 3, 'title': 'Running', 'agent': 'claude', 'readiness': False, 'status': 'running', 'created_at': None, 'dependencies': {'items': [], 'count': 0}},
             ]})
             report = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)
             queue = report['queue']
@@ -124,6 +124,30 @@ class MissingOrCorruptDataTests(unittest.TestCase):
                 self.assertEqual(queue['source'], 'issue-records')
                 self.assertIn('corrupt', queue['snapshot_error'])
                 self.assertEqual(queue['ready_count'], 1)
+
+    def test_duplicate_snapshot_issue_numbers_fall_back_without_inflated_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            entry = {'number': 1, 'title': 'Duplicate', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': '1970-01-01T00:00:10Z', 'dependencies': {'items': [], 'count': 0}}
+            write_json(state / 'queue.json', {'entries': [entry, entry]})
+            write_json(state / 'issue-4.json', {'issue': 4, 'status': 'ready', 'time': 90.0})
+            queue = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)['queue']
+            self.assertEqual(queue['source'], 'issue-records')
+            self.assertEqual(queue['staged_count'], 1)
+            self.assertEqual(queue['ready_count'], 1)
+
+    def test_unparseable_snapshot_timestamp_falls_back_without_inaccurate_age(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'queue.json', {'entries': [
+                {'number': 1, 'title': 'Bad timestamp', 'agent': 'codex-a', 'readiness': True, 'status': 'ready', 'created_at': 'not-an-iso-timestamp', 'dependencies': {'items': [], 'count': 0}},
+            ]})
+            write_json(state / 'issue-4.json', {'issue': 4, 'status': 'ready', 'time': 80.0})
+            queue = fd.build_report('cfg.json', {'state': str(state)}, now=100.0)['queue']
+            self.assertEqual(queue['source'], 'issue-records')
+            self.assertEqual(queue['queue_age_seconds'], 20.0)
 
     def test_corrupt_queue_snapshot_falls_back_to_issue_records(self):
         with tempfile.TemporaryDirectory() as d:
