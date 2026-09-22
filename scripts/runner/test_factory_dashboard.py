@@ -701,6 +701,43 @@ class WorkerStateTests(unittest.TestCase):
         )[0]
         self.assertEqual(worker['effective_model'], 'luna')
         self.assertEqual(worker['usage_state'], 'unknown')
+        self.assertEqual(worker['dispatch_decision'], 'fallback')
+        self.assertTrue(worker['low_cost_only'])
+
+    def test_validation_heartbeat_uses_dispatch_tuple_from_latest_event(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': 'openai',
+                                  'model': 'terra', 'label': None}}
+        heartbeat = {'codex-a': {
+            'found': True, 'error': None, 'status': 'validation', 'issue': 4,
+            'time': 950.0, 'start_time': 800.0, 'effective_model': None,
+            'usage_state': None,
+        }}
+        events = [
+            {'time': 900.0, 'status': 'agent', 'agent': 'codex-a', 'issue': 4,
+             'effective_model': 'luna', 'usage_state': 'unknown'},
+            {'time': 940.0, 'status': 'validation', 'agent': 'codex-a', 'issue': 4},
+        ]
+        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'green',
+                                 'dispatch_decision': 'allow', 'low_cost_only': False}}
+        worker = fd.build_worker_views(
+            agent_defs, records={}, events=events, heartbeat=heartbeat, now=1000.0,
+            dispatch_models=projected,
+        )[0]
+        self.assertEqual(worker['effective_model'], 'luna')
+        self.assertEqual(worker['usage_state'], 'unknown')
+        self.assertEqual(worker['dispatch_decision'], 'fallback')
+        self.assertTrue(worker['low_cost_only'])
+
+    def test_green_runtime_tuple_replaces_projected_fallback_atomically(self):
+        worker = {
+            'effective_model': 'luna', 'usage_state': 'unknown',
+            'dispatch_decision': 'fallback', 'low_cost_only': True,
+        }
+        fd.apply_runtime_dispatch(worker, 'terra', 'green')
+        self.assertEqual(worker, {
+            'effective_model': 'terra', 'usage_state': 'green',
+            'dispatch_decision': 'allow', 'low_cost_only': False,
+        })
 
     def test_blocked_state_from_events_overrides_stale_issue_record(self):
         agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}

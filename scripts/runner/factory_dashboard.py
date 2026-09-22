@@ -581,6 +581,10 @@ def load_events(state_dir):
             event['commit'] = obj['commit']
         if isinstance(obj.get('pr'), str) and obj['pr']:
             event['pr'] = obj['pr']
+        if isinstance(obj.get('usage_state'), str) and obj['usage_state']:
+            event['usage_state'] = safe_display_identifier(obj['usage_state'])
+        if isinstance(obj.get('effective_model'), str) and obj['effective_model']:
+            event['effective_model'] = safe_display_identifier(obj['effective_model'])
         diff_stat = _safe_diff_stat({
             k: obj.get(k) for k in ('additions', 'deletions', 'files_changed')
         })
@@ -823,6 +827,31 @@ def effective_dispatch_models(config, state_dir, now):
     return result
 
 
+def apply_runtime_dispatch(worker, effective_model, usage_state):
+    """Apply one internally consistent model/state/decision runtime tuple."""
+    model = safe_display_identifier(effective_model)
+    state = safe_display_identifier(usage_state)
+    if model is None and state is None:
+        return
+    worker['effective_model'] = model
+    worker['usage_state'] = state or 'unknown'
+    if model is not None:
+        if state == 'green':
+            worker['dispatch_decision'] = 'allow'
+            worker['low_cost_only'] = False
+        else:
+            # A running task with a non-green dispatch state necessarily
+            # reached the fallback command before the usage snapshot changed.
+            worker['dispatch_decision'] = 'fallback'
+            worker['low_cost_only'] = True
+    elif state == 'stop':
+        worker['dispatch_decision'] = 'stop'
+        worker['low_cost_only'] = False
+    else:
+        worker['dispatch_decision'] = 'defer'
+        worker['low_cost_only'] = True
+
+
 def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_models=None):
     """Build the per-worker view.
 
@@ -884,10 +913,6 @@ def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_mod
             elif hb.get('time') is not None:
                 elapsed = max(0.0, now - hb['time'])
             worker['reason'] = None
-            if hb.get('effective_model') is not None:
-                worker['effective_model'] = hb['effective_model']
-            if hb.get('usage_state') is not None:
-                worker['usage_state'] = hb['usage_state']
             if status in BLOCKED_STATUSES:
                 worker['state'] = 'blocked'
                 worker['current_issue'] = current_issue
@@ -898,6 +923,23 @@ def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_mod
                 worker['current_issue'] = current_issue
                 worker['elapsed_seconds'] = elapsed
                 worker['elapsed_human'] = format_duration(elapsed)
+                # starting/agent heartbeats carry the exact dispatch tuple.
+                # validation heartbeats omit it, so retain the latest event's
+                # tuple for the same running attempt instead of projecting a
+                # new policy decision mid-task.
+                runtime_model = hb.get('effective_model')
+                runtime_state = hb.get('usage_state')
+                if runtime_model is None:
+                    dispatch_events = [event for event in events
+                                       if event.get('agent') == key
+                                       and event.get('issue') == current_issue
+                                       and (event.get('effective_model') is not None
+                                            or event.get('usage_state') is not None)]
+                    if dispatch_events:
+                        dispatch_event = max(dispatch_events, key=lambda event: event['time'])
+                        runtime_model = dispatch_event.get('effective_model')
+                        runtime_state = dispatch_event.get('usage_state')
+                apply_runtime_dispatch(worker, runtime_model, runtime_state)
             elif status == REVIEW_STATUS:
                 worker['state'] = 'review'
                 worker['current_issue'] = current_issue
