@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CanvasElement, CanvasViewport } from './domain'
 import { newCanvasElement } from './canvasDocument'
+import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
@@ -128,6 +129,15 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const groups = canvasGroups(elements)
   const selectedElement = selected ? positioned(selected) : undefined
   const canCaptureSelected = Boolean(selectedElement?.text?.trim() && selectedElement.type !== 'arrow')
+  const branchSelected = () => {
+    if (!selectedElement || selectedElement.type === 'arrow') return
+    const branch = branchCanvasChild(elements, selectedElement.id)
+    if (!branch) return
+    onCommit(branch.elements)
+    setConnectFrom(null)
+    setSelected(branch.childId)
+    setEditMode(true)
+  }
   const removeSelected = () => { if (!selected) return; onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null) }
   const fit = (selection = false) => {
     const rect = canvasRef.current?.getBoundingClientRect()
@@ -149,6 +159,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
     <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
     </select></label>
+    <button disabled={!selectedElement || selectedElement.type === 'arrow'} onClick={branchSelected}>Branch child</button>
     <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
     <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
     <button disabled={!selected} onClick={removeSelected}>Delete</button>
