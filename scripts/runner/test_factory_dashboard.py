@@ -180,6 +180,21 @@ class RedactionTests(unittest.TestCase):
             self.assertEqual({item['account']: item['state'] for item in workers},
                              {'stale': 'unknown', 'future': 'unknown'})
 
+    def test_missing_or_unparseable_usage_timestamp_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'workers': {
+                'codex-a': {
+                    'missing': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10},
+                    'invalid': {'provider': 'openai', 'model': 'gpt-5-codex', 'used_percent': 10,
+                                'observed_at': 'not-a-timestamp'},
+                },
+            }})
+            workers = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)['usage']['workers']
+            self.assertEqual({item['account']: item['state'] for item in workers},
+                             {'missing': 'unknown', 'invalid': 'unknown'})
+
 
 class MissingOrCorruptDataTests(unittest.TestCase):
     def test_sanitized_queue_snapshot_supplies_staged_counts_and_age(self):
@@ -617,6 +632,20 @@ class WorkerStateTests(unittest.TestCase):
         self.assertEqual(workers[0]['state'], 'blocked')
         self.assertAlmostEqual(workers[0]['elapsed_seconds'], 100.0)
 
+    def test_newer_terminal_events_override_stale_active_issue_record(self):
+        agent_defs = {'codex-a': {'key': 'codex-a', 'provider': None, 'model': None, 'label': None}}
+        records = {4: {'issue': 4, 'status': 'agent', 'time': 100.0, 'agent': 'codex-a',
+                       'branch': None, 'commit': None, 'pr': None, 'error': None, 'diff_stat': None}}
+        for status, expected in (('review', 'review'), ('failed', 'idle'), ('idle', 'idle'), ('completed', 'idle')):
+            with self.subTest(status=status):
+                workers = fd.build_worker_views(
+                    agent_defs, records,
+                    [{'time': 200.0, 'status': status, 'agent': 'codex-a', 'issue': 4}],
+                    heartbeat={}, now=300.0,
+                )
+                self.assertEqual(workers[0]['state'], expected)
+                self.assertIsNone(workers[0]['elapsed_seconds'])
+
 
 class ValidationResultTests(unittest.TestCase):
     def test_pending_before_validation(self):
@@ -771,6 +800,13 @@ class HttpRouteTests(unittest.TestCase):
         args = parser.parse_args(['--config', 'cfg.json'])
         self.assertEqual(args.host, '127.0.0.1')
         self.assertEqual(args.port, fd.DEFAULT_PORT)
+
+    def test_non_loopback_bind_host_is_rejected(self):
+        parser = fd.build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['--config', 'cfg.json', '--host', '0.0.0.0'])
+        with self.assertRaises(ValueError):
+            fd.make_server('0.0.0.0', 0, 'cfg.json', {'state': '/tmp/state'})
 
 
 class MainCliTests(unittest.TestCase):

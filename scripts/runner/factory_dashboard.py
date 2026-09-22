@@ -252,7 +252,9 @@ def usage_policy(config, slowdown_override=None, stop_override=None):
 def classify_usage_state(percent_used, policy, observed_at_seconds=None, now=None):
     if not isinstance(percent_used, (int, float)):
         return 'unknown'
-    if observed_at_seconds is not None and now is not None:
+    if now is not None:
+        if observed_at_seconds is None:
+            return 'unknown'
         stale_after = policy.get('stale_after_seconds', DEFAULT_USAGE_STALE_AFTER_SECONDS)
         if not isinstance(stale_after, (int, float)) or now < observed_at_seconds or now - observed_at_seconds > stale_after:
             return 'unknown'
@@ -825,13 +827,32 @@ def build_worker_views(agent_defs, records, events, heartbeat, now):
             workers.append(worker)
             continue
 
-        # Fall back safely: no usable per-lane heartbeat for this worker.
-        if event_time is not None and (record_time is None or event_time > record_time) \
-                and latest_event['status'] in BLOCKED_STATUSES:
-            worker['state'] = 'blocked'
-            worker['current_issue'] = latest_event.get('issue')
-            worker['elapsed_seconds'] = max(0.0, now - event_time)
-            worker['elapsed_human'] = format_duration(worker['elapsed_seconds'])
+        # Fall back safely: no usable per-lane heartbeat for this worker. A
+        # newer event is authoritative over a stale issue record for every
+        # terminal and active status, not only dependency blocking.
+        if event_time is not None and (record_time is None or event_time > record_time):
+            status = latest_event['status']
+            current_issue = latest_event.get('issue')
+            if current_issue is None and latest_record is not None:
+                current_issue = latest_record['issue']
+            worker['current_issue'] = current_issue
+            if status in BLOCKED_STATUSES or status in ACTIVE_STATUSES:
+                worker['state'] = 'blocked' if status in BLOCKED_STATUSES else 'active'
+                worker['elapsed_seconds'] = max(0.0, now - event_time)
+                worker['elapsed_human'] = format_duration(worker['elapsed_seconds'])
+            elif status == REVIEW_STATUS:
+                worker['state'] = 'review'
+                if latest_record is not None and latest_record['status'] == REVIEW_STATUS:
+                    worker['last_completion'] = completion_metadata(latest_record)
+            elif status == FAILED_STATUS:
+                worker['state'] = 'idle'
+                worker['last_failure'] = {
+                    'issue': current_issue,
+                    'error': None,
+                    'time_iso': fstatus.iso(event_time),
+                }
+            else:
+                worker['state'] = 'idle'
         elif latest_record is not None:
             if latest_record['status'] in ACTIVE_STATUSES:
                 worker['state'] = 'active'
@@ -964,10 +985,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._write(404, 'text/plain; charset=utf-8', b'not found')
 
 
+def loopback_host_arg(value):
+    if value != DEFAULT_HOST:
+        raise argparse.ArgumentTypeError(f'host must be {DEFAULT_HOST}')
+    return value
+
+
 def make_server(host, port, config_path, config, html_path=HTML_PATH,
                  stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS,
                  utilization_window_days=DEFAULT_UTILIZATION_WINDOW_DAYS,
                  slowdown_threshold_pct=None, stop_threshold_pct=None):
+    if host != DEFAULT_HOST:
+        raise ValueError(f'dashboard host must be {DEFAULT_HOST}')
     server = ThreadingHTTPServer((host, port), DashboardRequestHandler)
     server.dashboard_options = {
         'config_path': config_path,
@@ -984,7 +1013,8 @@ def make_server(host, port, config_path, config, html_path=HTML_PATH,
 def build_arg_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--config', required=True, help='Path to the runner config.json (only "state" and "agents" fields are read)')
-    ap.add_argument('--host', default=DEFAULT_HOST, help=f'Bind host (default {DEFAULT_HOST})')
+    ap.add_argument('--host', type=loopback_host_arg, default=DEFAULT_HOST,
+                    help=f'Bind host (fixed to {DEFAULT_HOST})')
     ap.add_argument('--port', type=int, default=DEFAULT_PORT, help=f'Bind port (default {DEFAULT_PORT})')
     ap.add_argument('--stale-after-seconds', type=float, default=DEFAULT_STALE_AFTER_SECONDS)
     ap.add_argument('--utilization-window-days', type=float, default=DEFAULT_UTILIZATION_WINDOW_DAYS)
