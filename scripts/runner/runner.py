@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Local GitHub issue runner. Never merges or cleans worktrees."""
 import argparse, contextlib, fcntl, json, os, pathlib, re, signal, subprocess, sys, time
+from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 
 
-def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
+def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
+        on_start=None):
     process = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                start_new_session=True)
@@ -23,6 +25,18 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None):
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous[sig]=signal.signal(sig,stop)
     try:
+        if on_start is not None:
+            try:
+                on_start(process.pid)
+            except BaseException:
+                try: os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError: pass
+                try: process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.wait()
+                raise
         output, _ = process.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
@@ -52,6 +66,14 @@ def save(path, data):
     temp.replace(path)
 
 
+def save_record(path, data, status=None):
+    """Persist a claim record and refresh its freshness timestamp."""
+    if status is not None:
+        data['status'] = status
+    data['updated_at'] = time.time()
+    save(path, data)
+
+
 @contextlib.contextmanager
 def file_lock(path, blocking=True):
     """Lock a small coordination file, releasing it even on agent failure."""
@@ -70,6 +92,7 @@ EVENT_FIELDS = {
     'timestamp', 'issue', 'task_id', 'title', 'agent', 'status', 'base',
     'worktree_path', 'commit', 'pr', 'validation_result', 'elapsed_seconds',
     'files_changed', 'additions', 'deletions',
+    'usage_state', 'effective_model',
 }
 
 
@@ -77,6 +100,7 @@ def append_event(state, *, issue, task_id=None, title=None, agent=None,
                  status, base=None, worktree_path=None, commit=None, pr=None,
                  validation_result=None, elapsed_seconds=None,
                  files_changed=None, additions=None, deletions=None,
+                 usage_state=None, effective_model=None,
                  timestamp=None):
     """Append one safe, single-line event while holding a short process lock."""
     event = {
@@ -95,6 +119,8 @@ def append_event(state, *, issue, task_id=None, title=None, agent=None,
         'files_changed': files_changed,
         'additions': additions,
         'deletions': deletions,
+        'usage_state': usage_state,
+        'effective_model': effective_model,
     }
     event = {key: value for key, value in event.items()
              if key in EVENT_FIELDS and value is not None}
@@ -107,11 +133,13 @@ def append_event(state, *, issue, task_id=None, title=None, agent=None,
 
 
 def write_heartbeat(state, *, status, issue=None, task_id=None,
-                    start_time=None, agent=None, worker=None):
+                    start_time=None, agent=None, worker=None,
+                    usage_state=None, effective_model=None):
     """Atomically publish one lane's current safe status."""
     name = 'heartbeat.json' if not agent else f'heartbeat-{agent}.json'
     data = {
         'time': time.time(),
+        'pid': os.getpid(),
         'status': status,
         'issue': issue,
         'task': task_id,
@@ -119,8 +147,69 @@ def write_heartbeat(state, *, status, issue=None, task_id=None,
     }
     if worker is not None:
         data['worker'] = worker
+    if usage_state is not None:
+        data['usage_state'] = usage_state
+    if effective_model is not None:
+        data['effective_model'] = effective_model
     save(state / name, data)
     return data
+
+
+def publish_completion_telemetry(state, *, issue, task_id, title, agent,
+                                 base, worktree_path, commit, pr,
+                                 validation_result, elapsed_seconds, stats,
+                                 heartbeat_kwargs, github_callback):
+    """Publish completion telemetry without changing the already-saved outcome."""
+    errors = []
+    callbacks = (
+        ('heartbeat', lambda: write_heartbeat(state, **heartbeat_kwargs)),
+        ('event', lambda: append_event(
+            state, issue=issue, task_id=task_id, title=title, agent=agent,
+            status='review', base=base, worktree_path=worktree_path,
+            commit=commit, pr=pr, validation_result=validation_result,
+            elapsed_seconds=elapsed_seconds, **stats)),
+        ('issue-label', github_callback),
+    )
+    for operation, callback in callbacks:
+        try:
+            callback()
+        except Exception as exc:
+            errors.append({'operation': operation,
+                           'error_class': type(exc).__name__})
+    if errors:
+        try:
+            with file_lock(state / 'telemetry-errors.lock'):
+                with (state / 'telemetry-errors.jsonl').open('a') as output:
+                    for error in errors:
+                        output.write(json.dumps({
+                            'time': time.time(), 'issue': issue, **error
+                        }, separators=(',', ':')) + '\n')
+                    output.flush()
+                    os.fsync(output.fileno())
+        except Exception:
+            pass
+    return errors
+
+
+def preserve_interrupted_attempt(state, record, data, *, issue, task_id,
+                                 title, agent, heartbeat_agent, worker,
+                                 started_at, error='runner interrupted'):
+    """Preserve an interrupted active attempt and make cleanup telemetry best effort."""
+    data.update(status='failed', preserved=True, interrupted=True,
+                error=error, time=time.time())
+    save_record(record, data)
+    try:
+        write_heartbeat(state, status='failed', issue=issue, task_id=task_id,
+                        start_time=started_at, agent=heartbeat_agent, worker=worker)
+    except Exception:
+        pass
+    try:
+        append_event(state, issue=issue, task_id=task_id, title=title, agent=agent,
+                     status='failed', base=data.get('base'),
+                     worktree_path=data.get('worktree'), validation_result='failed',
+                     elapsed_seconds=time.time() - started_at)
+    except Exception:
+        pass
 
 
 def aggregate_numstat(lines):
@@ -165,11 +254,71 @@ def active_paths(state):
     return paths
 
 
-def claim(state, issue, agent, body, retry=False):
+def _pid_alive(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except PermissionError:
+        return None
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    return True
+
+
+def _process_group_alive(pgid):
+    """Return True/False, or None when liveness cannot be established safely."""
+    try:
+        pgid = int(pgid)
+        if pgid <= 0:
+            return None
+        os.killpg(pgid, 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return None
+    return True
+
+
+def recover_stale_claims(state, stale_claim_seconds):
+    """Archive abandoned local claims without touching their work artifacts."""
+    now = time.time()
+    for record in state.glob('issue-*.json'):
+        try:
+            data = json.loads(record.read_text())
+            updated_at = float(data.get('updated_at', data.get('time', now)))
+        except (OSError, ValueError, TypeError):
+            continue
+        if data.get('status') not in {'starting', 'agent', 'validation'}:
+            continue
+        # Records written before PID tracking are not safe to reclaim.
+        if not data.get('runner_pid'):
+            continue
+        if now - updated_at <= stale_claim_seconds or _pid_alive(data.get('runner_pid')) is not False:
+            continue
+        if data.get('status') in {'agent', 'validation'}:
+            process_group_state = data.get('agent_process_group_state')
+            if process_group_state != 'recorded':
+                # An agent may have escaped its parent; uncertain state requires
+                # manual inspection rather than reclaiming the paths.
+                continue
+            process_group_alive = _process_group_alive(data.get('agent_pgid'))
+            if process_group_alive is not False:
+                continue
+        data.update(status='failed', preserved=True,
+                    error='stale local claim recovered; explicit retry required')
+        save_record(record, data)
+        archive = state / f"{record.stem}-failed-{time.time_ns()}.json"
+        save(archive, data)
+
+
+def claim(state, issue, agent, body, retry=False, stale_claim_seconds=1860):
     """Atomically reserve an issue and its exact paths under the short claim lock."""
     number = issue['number']
     record = state / f'issue-{number}.json'
     with file_lock(state / 'claims.lock'):
+        recover_stale_claims(state, stale_claim_seconds)
         if record.exists():
             current = json.loads(record.read_text())
             if not (retry and current.get('status') == 'failed'):
@@ -180,8 +329,10 @@ def claim(state, issue, agent, body, retry=False):
             # Keep the failed attempt auditable before explicit retry replaces its pointer.
             save(state / f'issue-{number}-failed-{time.time_ns()}.json', current)
             record.unlink()
-        data = {'issue': number, 'status': 'starting', 'time': time.time(),
-                'agent': agent, 'paths': list(body['paths'])}
+        now = time.time()
+        data = {'issue': number, 'status': 'starting', 'time': now,
+                'updated_at': now, 'runner_pid': os.getpid(), 'agent': agent,
+                'paths': list(body['paths'])}
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         try:
             fd = os.open(record, flags, 0o600)
@@ -214,6 +365,21 @@ def select(issue, allowed):
     return next(iter(agents)).split(':')[1], body
 
 
+def usage_policy_enabled(config):
+    """Usage gating is opt-in through an explicit policy or usage file."""
+    return any(key in config for key in ('usage_policy', 'usage', 'usage_file'))
+
+
+def build_agent_environment(base_env, configured_env, path):
+    """Build the minimal environment exposed to an agent CLI."""
+    if not isinstance(configured_env, dict):
+        raise ValueError('agent env must be an object')
+    allowed = {key: base_env[key] for key in ('HOME', 'TMPDIR') if key in base_env}
+    allowed.update(configured_env)
+    allowed['PATH'] = path
+    return allowed
+
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--config',required=True)
@@ -224,8 +390,13 @@ def main():
     args=ap.parse_args()
     c=json.loads(pathlib.Path(args.config).read_text())
     repo=pathlib.Path(c['repo']).resolve(); state=pathlib.Path(c['state']).resolve()
+    usage_path = pathlib.Path(c.get('usage_file', state / 'usage.json'))
+    if not usage_path.is_absolute():
+        usage_path = repo / usage_path
+    usage_enabled = usage_policy_enabled(c)
     env=os.environ.copy();env['PATH']=c['path']
     gh=c['gh']; git=c['git']; pnpm=c['pnpm']
+    stale_claim_seconds = c.get('stale_claim_seconds', c.get('agent_timeout', 1800) + 60)
     def github(*a): return run([gh,*a],cwd=repo,env=env)
     def g(*a,cwd=repo): return run([git,*a],cwd=cwd,env=env)
     # Dry-run performs only read-only GitHub/Git calls: no directories, labels, or fetch.
@@ -238,10 +409,40 @@ def main():
         issue['labels']=[x for x in issue['labels'] if x['name']!='runner:failed']
         issues=[issue]
     if args.dry_run:
+        if not usage_enabled:
+            usage = None
+            usage_error = None
+        else:
+            try:
+                usage = validate_usage(json.loads(usage_path.read_text()))
+                usage_error = None
+            except (OSError, json.JSONDecodeError, UsagePolicyError):
+                usage = None
+                usage_error = 'usage policy unavailable or invalid'
         for issue in issues:
             try:
                 agent,body=select(issue,c['allowed_authors'])
-                print(json.dumps({'issue':issue['number'],'agent':agent,'task':body['task'],'paths':body['paths'],'action':'would create fresh origin/main worktree, execute, validate, commit, push, open draft PR'}))
+                if usage_error:
+                    print(json.dumps({'issue': issue['number'], 'skip': usage_error}))
+                    continue
+                settings = agent_settings(c, agent)
+                decision = (dispatch_decision(c, usage, agent, settings['account'])
+                            if usage_enabled else
+                            {'state': 'green', 'decision': 'allow',
+                             'effective_model': settings['model']})
+                if not usage_enabled:
+                    decision['command'] = settings['command']
+                    if decision['command'] is None:
+                        decision['decision'] = 'defer'
+                        decision['effective_model'] = None
+                print(json.dumps({'issue': issue['number'], 'agent': agent,
+                                  'task': body['task'], 'paths': body['paths'],
+                                  'usage_state': decision['state'],
+                                  'decision': decision['decision'],
+                                  'effective_model': decision['effective_model'],
+                                  'action': ('would create fresh origin/main worktree, execute, validate, commit, push, open draft PR'
+                                             if decision['decision'] == 'allow' or decision['decision'] == 'fallback'
+                                             else 'would defer without claiming')}))
             except (ValueError,KeyError) as e: print(json.dumps({'issue':issue['number'],'skip':str(e)}))
         print(json.dumps({'dry_run':True,'queue_size':len(issues)}));return
     state.mkdir(parents=True,exist_ok=True)
@@ -273,7 +474,27 @@ def main():
             if blocked:
                 print(json.dumps({'issue':n,'status':'waiting','dependencies':blocked}))
                 continue
-            data = claim(state, issue, agent, body, args.retry)
+            settings = agent_settings(c, agent)
+            if not usage_enabled:
+                usage_decision = {'state': 'green', 'decision': 'allow',
+                                  'effective_model': settings['model'],
+                                  'command': settings['command']}
+                if usage_decision['command'] is None:
+                    usage_decision['decision'] = 'defer'
+                    usage_decision['effective_model'] = None
+            else:
+                try:
+                    usage = validate_usage(json.loads(usage_path.read_text()))
+                    usage_decision = dispatch_decision(c, usage, agent, settings['account'])
+                except (OSError, json.JSONDecodeError, UsagePolicyError) as exc:
+                    print(json.dumps({'issue': n, 'status': 'defer',
+                                      'reason': 'usage policy unavailable or invalid'}))
+                    continue
+            if usage_decision['decision'] in ('stop', 'defer'):
+                print(json.dumps({'issue': n, 'status': usage_decision['decision'],
+                                  'usage_state': usage_decision['state']}))
+                continue
+            data = claim(state, issue, agent, body, args.retry, stale_claim_seconds)
             if data == 'deferred':
                 print(json.dumps({'issue':n,'status':'deferred','reason':'overlapping active paths'}))
                 continue
@@ -281,9 +502,13 @@ def main():
             started_at = data['time']
             write_heartbeat(state, status='starting', issue=n,
                             task_id=body['task'], start_time=started_at,
-                            agent=heartbeat_agent, worker=worker)
+                            agent=heartbeat_agent, worker=worker,
+                            usage_state=usage_decision['state'],
+                            effective_model=usage_decision['effective_model'])
             append_event(state, issue=n, task_id=body['task'],
-                         title=issue.get('title'), agent=agent, status='starting')
+                         title=issue.get('title'), agent=agent, status='starting',
+                         usage_state=usage_decision['state'],
+                         effective_model=usage_decision['effective_model'])
             # Fetch and worktree-add touch shared Git metadata; serialize only these operations.
             with file_lock(state / 'git.lock'):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
@@ -294,15 +519,14 @@ def main():
             log=state/f'issue-{n}-{attempt}.log'
             data.update(agent=agent,base=base,branch=branch,worktree=str(wt),log=str(log))
             record=state/f'issue-{n}.json'
-            save(record,data)
+            save_record(record, data)
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
             if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
             with file_lock(state / 'git.lock'):
                 g('worktree','add','-b',branch,str(wt),base)
             run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
-            config=c['agents'][agent]; agentenv=env.copy();agentenv.update(config.get('env',{}))
-            for secret in ('GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY'):
-                agentenv.pop(secret,None)
+            config=c['agents'][agent]
+            agentenv=build_agent_environment(env, config.get('env', {}), c['path'])
             prompt=f'''Execute {body['task']} for GitHub issue #{n} in this assigned worktree.
 Read AGENTS.md, TASKS.md and all canonical docs before editing. Follow task scope.
 Only edit these paths: {json.dumps(body['paths'])}.
@@ -312,15 +536,32 @@ Run pnpm check. Leave changes for the runner and report validation and limitatio
 Assigned instructions:
 {body['instructions']}
 '''
-            data['status']='agent';save(record,data)
+            data['agent_process_group_state'] = 'unknown'
+            save_record(record, data, 'agent')
             write_heartbeat(state, status='agent', issue=n,
                             task_id=body['task'], start_time=started_at,
-                            agent=heartbeat_agent, worker=worker)
+                            agent=heartbeat_agent, worker=worker,
+                            usage_state=usage_decision['state'],
+                            effective_model=usage_decision['effective_model'])
             append_event(state, issue=n, task_id=body['task'],
                          title=issue.get('title'), agent=agent, status='agent',
                          base=base, worktree_path=str(wt),
-                         elapsed_seconds=time.time() - started_at)
-            run(config['command'],cwd=wt,env=agentenv,timeout=c.get('agent_timeout',1800),log=log,input=prompt)
+                         elapsed_seconds=time.time() - started_at,
+                         usage_state=usage_decision['state'],
+                         effective_model=usage_decision['effective_model'])
+            def record_agent_process_group(pid):
+                data['agent_pid'] = pid
+                try:
+                    data['agent_pgid'] = os.getpgid(pid)
+                except ProcessLookupError:
+                    data['agent_process_group_state'] = 'unknown'
+                    save_record(record, data)
+                    return
+                data['agent_process_group_state'] = 'recorded'
+                save_record(record, data)
+            run(usage_decision['command'],cwd=wt,env=agentenv,
+                timeout=c.get('agent_timeout',1800),log=log,input=prompt,
+                on_start=record_agent_process_group)
             def verify_changes():
                 if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
                     raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
@@ -329,7 +570,7 @@ Assigned instructions:
                 if any(p not in body['paths'] for p in names): raise ValueError('Change outside allowed paths; preserved for inspection')
                 if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
             verify_changes()
-            data['status']='validation';save(record,data)
+            save_record(record, data, 'validation')
             write_heartbeat(state, status='validation', issue=n,
                             task_id=body['task'], start_time=started_at,
                             agent=heartbeat_agent, worker=worker)
@@ -352,37 +593,69 @@ Assigned instructions:
             g('show','--format=','--check','HEAD',cwd=wt)
             stats = aggregate_numstat(g('diff-tree','--no-commit-id','--numstat','-r',
                                         'HEAD',cwd=wt))
-            save(record,data)
+            save_record(record, data)
             g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
-            data['status']='review';save(record,data)
-            write_heartbeat(state, status='review', issue=n,
-                            task_id=body['task'], start_time=started_at,
-                            agent=heartbeat_agent, worker=worker)
-            append_event(state, issue=n, task_id=body['task'],
-                         title=issue.get('title'), agent=agent, status='review',
-                         base=base, worktree_path=str(wt), commit=data['commit'],
-                         pr=data['pr'], validation_result='passed',
-                         elapsed_seconds=time.time() - started_at, **stats)
-            github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:running','--add-label','runner:review')
+            save_record(record, data, 'review')
+            telemetry_errors = publish_completion_telemetry(
+                state, issue=n, task_id=body['task'], title=issue.get('title'),
+                agent=agent, base=base, worktree_path=str(wt),
+                commit=data['commit'], pr=data['pr'], validation_result='passed',
+                elapsed_seconds=time.time() - started_at, stats=stats,
+                heartbeat_kwargs={'status': 'review', 'issue': n,
+                                  'task_id': body['task'], 'start_time': started_at,
+                                  'agent': heartbeat_agent, 'worker': worker},
+                github_callback=lambda: github(
+                    'issue','edit',str(n),'--repo',c['github'],
+                    '--remove-label','runner:running','--add-label','runner:review'))
+            if telemetry_errors:
+                data['telemetry_errors'] = telemetry_errors
+                save_record(record, data)
             print(json.dumps(data));break
+        except (SystemExit, KeyboardInterrupt) as exc:
+            # run() deliberately raises SystemExit for an interrupted child. Preserve
+            # the attempt before allowing the original exit status to escape.
+            if data is not None and started_at is not None and not data.get('pr'):
+                preserve_interrupted_attempt(
+                    state, record, data, issue=n, task_id=body.get('task'),
+                    title=issue.get('title'), agent=agent,
+                    heartbeat_agent=heartbeat_agent, worker=worker,
+                    started_at=started_at, error=str(exc))
+            try:
+                if args.agent:
+                    lane_lock.__exit__(None, None, None)
+                else:
+                    lock.close()
+            except Exception:
+                pass
+            raise
         except Exception as e:
+            claimed = data is not None
             if data is None:
                 data={'issue':n, 'status':'failed', 'time':time.time()}
-            data.update(status='failed',error=str(e),time=time.time());save(record,data)
-            if started_at is not None:
-                write_heartbeat(state, status='failed', issue=n,
-                                task_id=body.get('task'), start_time=started_at,
-                                agent=heartbeat_agent, worker=worker)
-            append_event(state, issue=n, task_id=body.get('task'),
-                         title=issue.get('title'), agent=agent,
-                         status='failed', base=data.get('base'),
-                         worktree_path=data.get('worktree'),
-                         validation_result='failed' if started_at is not None else None,
-                         elapsed_seconds=(time.time() - started_at if started_at is not None else None))
-            try: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--remove-label','runner:running','--add-label','runner:failed')
-            except Exception: pass
+            data.update(status='failed',error=str(e),time=time.time())
+            if claimed:
+                save_record(record, data)
+            if claimed and started_at is not None:
+                try:
+                    write_heartbeat(state, status='failed', issue=n,
+                                    task_id=body.get('task'), start_time=started_at,
+                                    agent=heartbeat_agent, worker=worker)
+                except Exception:
+                    pass
+                try:
+                    append_event(state, issue=n, task_id=body.get('task'),
+                                 title=issue.get('title'), agent=agent,
+                                 status='failed', base=data.get('base'),
+                                 worktree_path=data.get('worktree'),
+                                 validation_result='failed',
+                                 elapsed_seconds=time.time() - started_at)
+                except Exception:
+                    pass
+            if claimed:
+                try: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--remove-label','runner:running','--add-label','runner:failed')
+                except Exception: pass
             print(json.dumps(data),file=sys.stderr)
             break
     write_heartbeat(state, status='idle', worker=worker, agent=heartbeat_agent)

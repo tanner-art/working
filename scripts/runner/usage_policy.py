@@ -13,6 +13,7 @@ The canonical usage shape is::
 import argparse
 import datetime as _datetime
 import json
+import math
 import pathlib
 import sys
 from typing import Any, Dict, Mapping, Optional
@@ -30,7 +31,10 @@ class UsagePolicyError(ValueError):
 def _number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise UsagePolicyError("%s must be a number" % name)
-    return float(value)
+    result = float(value)
+    if not math.isfinite(result):
+        raise UsagePolicyError("%s must be finite" % name)
+    return result
 
 
 def _timestamp(value: Any, name: str) -> _datetime.datetime:
@@ -124,8 +128,39 @@ def validate_policy(config: Any) -> Dict[str, Any]:
             "fallback_models": raw.get("fallback_models", config.get("fallback_models", {}))}
 
 
+def _agent_config(config: Mapping[str, Any], worker: str) -> Mapping[str, Any]:
+    agents = config.get("agents", {})
+    if not isinstance(agents, dict) or not isinstance(agents.get(worker, {}), dict):
+        return {}
+    return agents[worker]
+
+
+def agent_settings(config: Mapping[str, Any], worker: str) -> Dict[str, Any]:
+    """Return the non-secret, worker-specific dispatch settings."""
+    raw = _agent_config(config, worker)
+    account = raw.get("account", "default")
+    if not isinstance(account, str) or not account.strip():
+        raise UsagePolicyError("agent account must be a non-empty string")
+    settings = {"account": account, "model": raw.get("model"),
+                "command": raw.get("command"),
+                "fallback_model": raw.get("fallback_model"),
+                "fallback_command": raw.get("fallback_command")}
+    for key in ("model", "fallback_model"):
+        if settings[key] is not None and (not isinstance(settings[key], str) or not settings[key].strip()):
+            raise UsagePolicyError("%s must be a non-empty string" % key)
+    for key in ("command", "fallback_command"):
+        if settings[key] is not None and (not isinstance(settings[key], list) or
+                                          not settings[key] or
+                                          any(not isinstance(item, str) or not item for item in settings[key])):
+            raise UsagePolicyError("%s must be a non-empty command list" % key)
+    return settings
+
+
 def _fallback_model(config: Mapping[str, Any], worker: str, account: str,
                     provider: Optional[str] = None) -> Optional[str]:
+    settings = agent_settings(config, worker)
+    if settings["fallback_model"] is not None:
+        return settings["fallback_model"]
     policy = validate_policy(config)
     choices = policy["fallback_models"]
     if not isinstance(choices, dict):
@@ -168,6 +203,7 @@ def dispatch_decision(config: Mapping[str, Any], usage: Any, worker: str,
                      account: str = "default", now: Optional[_datetime.datetime] = None) -> Dict[str, Any]:
     """Return a safe, JSON-serializable dispatch decision."""
     policy = validate_policy(config)
+    settings = agent_settings(config, worker)
     records = validate_usage(usage)
     record = records.get(worker, {}).get(account)
     state = worker_state(config, records, worker, account, now)
@@ -175,16 +211,28 @@ def dispatch_decision(config: Mapping[str, Any], usage: Any, worker: str,
     if state == "green":
         decision, low_cost_only = "allow", False
     elif state == "slow":
-        decision, low_cost_only = "slow", False
+        decision, low_cost_only = "fallback", True
     elif state == "stop":
         decision, low_cost_only = "stop", False
     elif policy["unknown_behavior"] == "stop":
         decision, low_cost_only = "stop", True
     else:
         decision, low_cost_only = "fallback", True
+    effective_model = settings["model"] if state == "green" else fallback
+    command = settings["command"] if state == "green" else settings["fallback_command"]
+    if decision == "fallback" and command is None:
+        decision = "defer"
+        effective_model = None
+    if state == "stop":
+        effective_model = None
+        command = None
+    if decision in ("allow", "fallback") and command is None:
+        decision = "defer"
+        effective_model = None
     return {"worker": worker, "account": account, "state": state,
             "decision": decision, "low_cost_only": low_cost_only,
-            "fallback_model": fallback}
+            "fallback_model": fallback, "effective_model": effective_model,
+            "command": command}
 
 
 def evaluate(config: Mapping[str, Any], usage: Any, worker: str,
