@@ -1,9 +1,10 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from runner import (build_agent_environment, preserve_interrupted_attempt,
-                    publish_completion_telemetry, refresh_queue_snapshot,
-                    run_repository_validation, select, usage_policy_enabled)
+from runner import (build_agent_environment, build_agent_prompt,
+                    preserve_interrupted_attempt, publish_completion_telemetry,
+                    refresh_queue_snapshot, run_repository_validation, select,
+                    usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -34,6 +35,19 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(env, {'PATH': '/runner/bin', 'HOME': '/home',
                                'TMPDIR': '/tmp', 'CODEX_HOME': '/agent-home',
                                'USER': 'launch-owner'})
+
+    def test_agent_prompt_reserves_full_validation_for_runner(self):
+        prompt = build_agent_prompt(17, {
+            'task': 'TASK-117', 'paths': ['src/example.ts'],
+            'instructions': 'Make the scoped change.',
+        })
+        self.assertIn('Run only focused checks that directly cover your changes.',
+                      prompt)
+        self.assertIn('Do not run the full pnpm check', prompt)
+        self.assertIn('runner owns that final shared-lock validation', prompt)
+        self.assertNotIn('Run pnpm check.', prompt)
+        self.assertIn('Read AGENTS.md', prompt)
+        self.assertIn('Leave changes for the runner', prompt)
 
 class ProcessTests(unittest.TestCase):
     def test_shared_validation_gate_serializes_checks_but_not_agent_stages(self):
@@ -273,6 +287,7 @@ class LifecycleTests(unittest.TestCase):
         calls, record = self.exercise_poll()
         self.assertEqual(record['status'], 'failed')
         self.assertIn('outside allowed paths', record['error'])
+        self.assertIn(['pnpm', 'check'], calls)
         self.assertNotIn(['git', 'commit'], [c[:2] for c in calls])
         self.assertNotIn(['git', 'push'], [c[:2] for c in calls])
 
