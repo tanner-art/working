@@ -1,62 +1,40 @@
 {
-  "repo": "/Users/domitian/Documents/Codex/working",
-  "github": "tanner-art/working",
-  "state": "/Users/domitian/Documents/Codex/threadline-runner-state",
-  "worktrees": "/Users/domitian/Documents/Codex/threadline-agent-worktrees",
-  "path": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-  "gh": "/Users/domitian/Documents/Codex/working-runner/scripts/runner/github.py",
+  "repo": "/absolute/path/to/threadline-repository",
+  "github": "OWNER/REPOSITORY",
+  "state": "/absolute/path/to/threadline-runner-state",
+  "worktrees": "/absolute/path/to/threadline-agent-worktrees",
+  "path": "/absolute/path/to/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+  "gh": "/absolute/path/to/threadline-repository/scripts/runner/github.py",
   "git": "/usr/bin/git",
-  "pnpm": "/opt/homebrew/bin/pnpm",
-  "allowed_authors": [
-    "tanner-art"
-  ],
+  "pnpm": "/absolute/path/to/pnpm",
+  "allowed_authors": ["GITHUB_LOGIN"],
   "agent_timeout": 1800,
   "usage_policy": {
     "slowdown_percent": 70,
-    "stop_percent": 80
+    "stop_percent": 80,
+    "stale_after_seconds": 3600,
+    "unknown_behavior": "slow"
   },
   "agents": {
     "codex-a": {
-      "command": [
-        "/opt/homebrew/bin/codex",
-        "exec",
-        "--ignore-user-config",
-        "-s",
-        "workspace-write",
-        "--json",
-        "-"
-      ],
-      "env": {
-        "CODEX_HOME": "/Users/domitian/.codex-a"
-      }
+      "provider": "openai", "account": "openai-account-a",
+      "model": "gpt-5.6-terra", "fallback_model": "gpt-5.6-luna",
+      "command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-terra", "--ignore-user-config", "-s", "workspace-write", "--json", "-"],
+      "fallback_command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-luna", "--ignore-user-config", "-s", "workspace-write", "--json", "-"],
+      "env": {"CODEX_HOME": "/absolute/path/to/codex-home-a"}
     },
     "codex-b": {
-      "command": [
-        "/opt/homebrew/bin/codex",
-        "exec",
-        "--ignore-user-config",
-        "-s",
-        "workspace-write",
-        "--json",
-        "-"
-      ],
-      "env": {
-        "CODEX_HOME": "/Users/domitian/.codex-b"
-      }
+      "provider": "openai", "account": "openai-account-b",
+      "model": "gpt-5.6-terra", "fallback_model": "gpt-5.6-luna",
+      "command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-terra", "--ignore-user-config", "-s", "workspace-write", "--json", "-"],
+      "fallback_command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-luna", "--ignore-user-config", "-s", "workspace-write", "--json", "-"],
+      "env": {"CODEX_HOME": "/absolute/path/to/codex-home-b"}
     },
     "claude": {
-      "command": [
-        "/opt/homebrew/bin/claude",
-        "-p",
-        "--permission-mode",
-        "acceptEdits",
-        "--permission-prompts",
-        "none",
-        "--output-format",
-        "json",
-        "--tools",
-        "Read,Edit,Write,Glob,Grep"
-      ],
+      "provider": "anthropic", "account": "anthropic-account-a",
+      "model": "claude-sonnet", "fallback_model": "claude-haiku",
+      "command": ["/absolute/path/to/claude", "-p", "--model", "claude-sonnet", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
+      "fallback_command": ["/absolute/path/to/claude", "-p", "--model", "claude-haiku", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
       "env": {}
     }
   }
