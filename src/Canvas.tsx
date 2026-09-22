@@ -162,7 +162,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <button aria-label="Zoom in" onClick={() => onViewport(zoomCanvasViewport(viewport, { x: (canvasRef.current?.clientWidth ?? 0) / 2, y: (canvasRef.current?.clientHeight ?? 0) / 2 }, scale + .15))}>＋</button>
     </div>
     </div>
-    <div className={`canvas-properties${selectedElement ? ' has-selection' : ''}`}>{selectedElement && selectedElement.type !== 'arrow' && <>
+    <div className={`canvas-properties${selectedElement && (editMode || selectedElement.type === 'arrow') ? ' has-selection' : ''}${editMode ? ' edit-mode' : ''}`}>{selectedElement && (editMode || selectedElement.type === 'arrow') && selectedElement.type !== 'arrow' && <>
     <label>Shape <select aria-label="Block shape" value={canvasNodeShape(selectedElement)} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
     {Object.entries(canvasShapeLabels).map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
     </select>

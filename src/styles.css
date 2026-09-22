@@ -349,3 +349,14 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
   .app-shell:has(.canvas-page) .sidebar { min-width: 0; }
   .canvas-head { width: 100%; }
 }
+
+/* Mobile Canvas gesture adapter keeps edit properties compact and explicit. */
+.canvas-properties:not(.has-selection) { visibility: hidden; pointer-events: none; }
+.canvas-properties.edit-mode { background: #f0f4eb; border-top: 1px solid #d9e2d3; border-bottom: 1px solid #d9e2d3; }
+.canvas-tools { scrollbar-width: none; }
+.canvas-tools::-webkit-scrollbar { display: none; }
+@media (max-width: 720px) {
+  .canvas-tools { min-height: 44px; }
+  .canvas-properties.edit-mode { max-height: 104px; }
+  .canvas-node:has(.canvas-resize-handle) { z-index: 3; }
+}
