@@ -1,6 +1,7 @@
 import os
 import pathlib
 import plistlib
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -49,12 +50,52 @@ class LaunchdInstallerTests(unittest.TestCase):
                 self.assertEqual(data['ProgramArguments'][-2:], ['--agent', agent])
                 self.assertIn('--dry-run', data['ProgramArguments'])
                 self.assertEqual(data['StandardOutPath'], str(state / f'launchd-{agent}.log'))
+                self.assertEqual(data['Umask'], 0o077)
             dashboard = plan[-1][1]
             self.assertEqual(dashboard['ProgramArguments'][-4:], ['--host', '127.0.0.1', '--port', '8787'])
             self.assertNotIn('StartInterval', dashboard)
             dumped = plistlib.dumps(dashboard).decode()
             self.assertNotIn('do-not-copy', dumped)
             self.assertNotIn('agent codex-a', dumped)
+            self.assertEqual(dashboard['Umask'], 0o077)
+
+    def test_private_storage_hardens_managed_paths_without_truncating_or_changing_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            factory = pathlib.Path(directory) / 'factory'
+            factory.mkdir(mode=0o755)
+            state = factory / 'state'
+            state.mkdir(mode=0o755)
+            existing = state / 'queue.json'
+            existing.write_text('preserved')
+            existing.chmod(0o644)
+            config_path = factory / 'config.json'
+            config_path.write_text('{}')
+            config_path.chmod(0o644)
+            config = self.config(state)
+            config['worktrees'] = str(factory / 'worktrees')
+            plan = installer.service_plan(config, config_path, pathlib.Path(__file__).parent, 'lanes')
+            owners = {path: path.stat().st_uid for path in (factory, state, existing, config_path)}
+
+            installer.prepare_private_storage(config_path, config, plan)
+
+            for path in (factory, state, factory / 'worktrees'):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            self.assertEqual(existing.read_text(), 'preserved')
+            for path in (existing, config_path):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            for _, data in plan:
+                for field in ('StandardOutPath', 'StandardErrorPath'):
+                    log = pathlib.Path(data[field])
+                    self.assertTrue(log.exists())
+                    self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+            for path, owner in owners.items():
+                self.assertEqual(path.stat().st_uid, owner)
+
+    def test_atomic_plist_is_owner_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / 'service.plist'
+            installer.atomic_write_plist(destination, {'Label': 'test'})
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
 
     def test_service_environment_uses_current_uid_identity_without_copying_process_user(self):
         with tempfile.TemporaryDirectory() as directory, \

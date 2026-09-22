@@ -14,6 +14,9 @@ import time
 SERIAL_LABEL = 'life.threadline.runner'
 LANE_AGENTS = ('codex-a', 'codex-b', 'claude')
 DASHBOARD_LABEL = 'life.threadline.factory-dashboard'
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+SERVICE_UMASK = 0o077
 
 
 def service_environment(path):
@@ -23,6 +26,55 @@ def service_environment(path):
         'HOME': str(pathlib.Path.home()),
         'USER': pwd.getpwuid(os.getuid()).pw_name,
     }
+
+
+def _set_owner_only(path, mode):
+    """Harden an owned, non-symlink path without changing its ownership."""
+    path = pathlib.Path(path)
+    metadata = path.lstat()
+    if path.is_symlink():
+        raise ValueError(f'refusing to change permissions through symlink: {path}')
+    if metadata.st_uid != os.getuid():
+        raise ValueError(f'refusing to change permissions for a path owned by another user: {path}')
+    path.chmod(mode)
+
+
+def prepare_private_storage(config_path, config, plan):
+    """Prepare only installer-managed local paths with owner-only access."""
+    config_path = pathlib.Path(config_path)
+    state = pathlib.Path(config['state'])
+    worktrees_value = config.get('worktrees')
+    worktrees = pathlib.Path(worktrees_value) if isinstance(worktrees_value, str) and worktrees_value else None
+    try:
+        state.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+        _set_owner_only(state, PRIVATE_DIRECTORY_MODE)
+        if worktrees is not None:
+            worktrees.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+            _set_owner_only(worktrees, PRIVATE_DIRECTORY_MODE)
+        if worktrees is not None and state.parent == config_path.parent == worktrees.parent:
+            _set_owner_only(config_path.parent, PRIVATE_DIRECTORY_MODE)
+        _set_owner_only(config_path, PRIVATE_FILE_MODE)
+
+        # Existing direct state artifacts are private immediately. Directories
+        # (for example launchd-backups) protect their descendants without
+        # rewriting repository/worktree contents recursively.
+        for artifact in state.iterdir():
+            if artifact.is_symlink():
+                continue
+            if artifact.is_dir():
+                _set_owner_only(artifact, PRIVATE_DIRECTORY_MODE)
+            elif artifact.is_file():
+                _set_owner_only(artifact, PRIVATE_FILE_MODE)
+
+        # launchd opens these paths itself, so create without truncating them
+        # before bootstrap and establish their final permissions explicitly.
+        for _, data in plan:
+            for field in ('StandardOutPath', 'StandardErrorPath'):
+                log = pathlib.Path(data[field])
+                log.touch(exist_ok=True, mode=PRIVATE_FILE_MODE)
+                _set_owner_only(log, PRIVATE_FILE_MODE)
+    except OSError as exc:
+        raise ValueError(f'cannot prepare private factory storage: {exc}') from exc
 
 
 def launch_agents_dir(home=None):
@@ -55,6 +107,7 @@ def runner_data(label, args, root, state, path, stdout, stderr):
     return {
         'Label': label, 'ProgramArguments': args, 'WorkingDirectory': str(root.parent.parent),
         'EnvironmentVariables': service_environment(path),
+        'Umask': SERVICE_UMASK,
         'RunAtLoad': True, 'StartInterval': 60, 'ProcessType': 'Background',
         'StandardOutPath': str(state / stdout), 'StandardErrorPath': str(state / stderr),
     }
@@ -66,6 +119,7 @@ def dashboard_data(config, root, state, path, port):
         'ProgramArguments': [sys.executable, str(root / 'factory_dashboard.py'), '--config', str(config), '--host', '127.0.0.1', '--port', str(port)],
         'WorkingDirectory': str(root.parent.parent),
         'EnvironmentVariables': service_environment(path),
+        'Umask': SERVICE_UMASK,
         'RunAtLoad': True, 'ProcessType': 'Background',
         'StandardOutPath': str(state / 'launchd-dashboard.log'),
         'StandardErrorPath': str(state / 'launchd-dashboard-error.log'),
@@ -113,6 +167,7 @@ def atomic_write_plist(destination, data):
     temporary = destination.with_name(f'.{destination.name}.{os.getpid()}.tmp')
     try:
         with open(temporary, 'wb') as output:
+            os.fchmod(output.fileno(), PRIVATE_FILE_MODE)
             output.write(plistlib.dumps(data))
             output.flush()
             os.fsync(output.fileno())
@@ -232,9 +287,9 @@ def main(argv=None):
         config_path = pathlib.Path(args.config).resolve()
         config = load_config(config_path)
         state = pathlib.Path(config['state'])
-        state.mkdir(parents=True, exist_ok=True)
         root = pathlib.Path(__file__).resolve().parent
         plan = service_plan(config, config_path, root, args.mode, args.live, args.dashboard_port)
+        prepare_private_storage(config_path, config, plan)
         destinations = install(plan, mode=args.mode, replace_mode=args.replace_mode,
                                replace_current=args.replace_current, state=state)
     except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
