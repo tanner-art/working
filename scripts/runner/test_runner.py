@@ -1,6 +1,7 @@
 import unittest
 from runner import (build_agent_environment, preserve_interrupted_attempt,
-                    publish_completion_telemetry, select, usage_policy_enabled)
+                    publish_completion_telemetry, refresh_queue_snapshot, select,
+                    usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -45,6 +46,47 @@ class ProcessTests(unittest.TestCase):
             run([sys.executable,'-c','raise SystemExit(4)'])
 
 class LifecycleTests(unittest.TestCase):
+    def test_queue_snapshot_stages_only_whitelisted_open_issue_metadata(self):
+        from unittest.mock import patch
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as d, patch('runner.write_queue_snapshot') as write:
+            refresh_queue_snapshot(pathlib.Path(d), lambda: __import__('json').dumps([{
+                'number': 7, 'title': 'Visible', 'labels': [{'name': 'runner:ready'}],
+                'createdAt': '2026-09-22T10:00:00Z', 'body': 'do not persist',
+            }]))
+        write.assert_called_once_with(pathlib.Path(d), [{
+            'number': 7, 'title': 'Visible', 'labels': [{'name': 'runner:ready'}],
+            'created_at': '2026-09-22T10:00:00Z',
+        }])
+
+    def test_queue_snapshot_failure_is_ignored_without_retaining_error_output(self):
+        from unittest.mock import patch
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as d, patch('runner.write_queue_snapshot', side_effect=OSError('secret output')):
+            refresh_queue_snapshot(pathlib.Path(d), lambda: '[{"number": 1}]')
+            self.assertEqual(list(pathlib.Path(d).iterdir()), [])
+
+    def test_dry_run_never_stages_a_queue_snapshot(self):
+        import contextlib, io, json, pathlib, tempfile
+        from unittest.mock import patch
+        import runner
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            config = {'repo': d, 'state': str(root/'state'), 'worktrees': str(root/'trees'),
+                      'path': '/usr/bin:/bin', 'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm',
+                      'github': 'owner/repo', 'allowed_authors': ['owner'],
+                      'agents': {'codex-a': {'command': ['agent']}}}
+            configfile = root/'config.json'; configfile.write_text(json.dumps(config))
+            issue = {'number': 1, 'title': 'test', 'author': {'login': 'owner'},
+                     'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}],
+                     'body': '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
+            def fake_run(args, **_kwargs):
+                return json.dumps([issue]) if args[:3] == ['gh', 'issue', 'list'] else ''
+            with patch.object(runner, 'run', side_effect=fake_run), patch.object(runner, 'write_queue_snapshot') as write, \
+                 patch('sys.argv', ['runner', '--config', str(configfile), '--dry-run']), contextlib.redirect_stdout(io.StringIO()):
+                runner.main()
+            write.assert_not_called()
+
     def test_interrupted_attempt_is_failed_even_when_telemetry_fails(self):
         import pathlib, tempfile
         from unittest.mock import patch
@@ -113,7 +155,7 @@ class LifecycleTests(unittest.TestCase):
                     try: os.killpg(child, signal.SIGKILL)
                     except ProcessLookupError: pass
 
-    def exercise_poll(self, blocked=False, preclaim_error=False):
+    def exercise_poll(self, blocked=False, preclaim_error=False, snapshot_failure=False):
         import contextlib, io, json, pathlib, tempfile
         from unittest.mock import patch
         import runner
@@ -151,7 +193,10 @@ class LifecycleTests(unittest.TestCase):
                     return 'outside.txt' if validated else ''
                 if args == ['pnpm', 'check']: validated = True
                 return ''
-            with patch.object(runner, 'run', side_effect=fake_run), patch('sys.argv', ['runner', '--config', str(configfile)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            snapshot = (patch.object(runner, 'write_queue_snapshot', side_effect=OSError('secret snapshot output'))
+                        if snapshot_failure else contextlib.nullcontext())
+            with patch.object(runner, 'run', side_effect=fake_run), snapshot, \
+                 patch('sys.argv', ['runner', '--config', str(configfile)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 runner.main()
             record = root/'state'/'issue-1.json'
             return calls, json.loads(record.read_text()) if record.exists() else None
@@ -174,6 +219,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(record['status'], 'agent')
         self.assertEqual(record['paths'], ['other.py'])
         self.assertNotIn(['gh', 'issue', 'edit'], [c[:3] for c in calls])
+
+    def test_snapshot_write_failure_does_not_prevent_a_claim(self):
+        calls, record = self.exercise_poll(snapshot_failure=True)
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('outside allowed paths', record['error'])
+        self.assertIn(['gh', 'issue', 'edit'], [call[:3] for call in calls])
 
 if __name__ == '__main__':
     unittest.main()

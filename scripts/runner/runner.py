@@ -2,6 +2,7 @@
 """Local GitHub issue runner. Never merges or cleans worktrees."""
 import argparse, contextlib, fcntl, json, os, pathlib, re, signal, subprocess, sys, time
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
+from queue_snapshot import write_queue_snapshot
 
 
 def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
@@ -380,6 +381,26 @@ def build_agent_environment(base_env, configured_env, path):
     return allowed
 
 
+def refresh_queue_snapshot(state, fetch_open_issues):
+    """Best-effort, metadata-only queue staging that cannot affect dispatch."""
+    try:
+        raw = fetch_open_issues()
+        issues = json.loads(raw)
+        if not isinstance(issues, list):
+            return
+        entries = [{
+            'number': issue.get('number') if isinstance(issue, dict) else None,
+            'title': issue.get('title') if isinstance(issue, dict) else None,
+            'labels': issue.get('labels') if isinstance(issue, dict) else None,
+            'created_at': issue.get('createdAt') if isinstance(issue, dict) else None,
+        } for issue in issues]
+        write_queue_snapshot(state, entries)
+    except Exception:
+        # The snapshot is local observability only. Never retain provider output
+        # or turn a network/storage problem into a dispatch failure.
+        pass
+
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--config',required=True)
@@ -459,6 +480,10 @@ def main():
         except BlockingIOError: return
     worker = 'serial' if not args.agent else None
     heartbeat_agent = args.agent
+    refresh_queue_snapshot(state, lambda: run(
+        [gh, 'issue', 'list', '--repo', c['github'], '--state', 'open',
+         '--limit', '100', '--json', 'number,title,labels,createdAt'],
+        cwd=repo, env=env, timeout=10))
     write_heartbeat(state, status='polling', agent=heartbeat_agent,
                     worker=worker)
     for issue in sorted(issues,key=lambda i:i['number']):
