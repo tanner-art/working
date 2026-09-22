@@ -116,19 +116,24 @@ def bootout(label, uid, run=subprocess.run):
     return run(['launchctl', 'bootout', f'gui/{uid}/{label}'], check=False).returncode == 0
 
 
-def install(plan, *, mode, replace_mode, state, home=None, run=subprocess.run, uid=None):
+def install(plan, *, mode, replace_mode, state, replace_current=False, home=None, run=subprocess.run, uid=None):
     """Install one serial service or the lane set; rollback only this invocation."""
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
     destinations = {label: label_path(label, home) for label, _ in plan}
     target_labels = tuple(destinations)
+    if replace_mode and replace_current:
+        raise ValueError('--replace-mode and --replace-current cannot be combined')
     old_mode = 'lanes' if mode == 'serial' else 'serial'
     old_labels = labels_for_mode(old_mode)
-    target_conflicts = [label for label, destination in destinations.items() if destination.exists() or is_loaded(label, uid, run)]
+    target_loaded = [label for label in target_labels if is_loaded(label, uid, run)]
+    target_conflicts = [label for label, destination in destinations.items() if destination.exists() or label in target_loaded]
     old_paths = {label: label_path(label, home) for label in old_labels}
     old_conflicts = [label for label, destination in old_paths.items() if destination.exists() or is_loaded(label, uid, run)]
-    if target_conflicts:
+    if target_conflicts and not replace_current:
         raise ValueError('existing service preserved: ' + ', '.join(target_conflicts))
+    if replace_current and not target_conflicts:
+        raise ValueError('--replace-current requires an installed current mode')
     if old_conflicts and not replace_mode:
         raise ValueError('mode change requires --replace-mode: ' + ', '.join(old_conflicts))
     if replace_mode and not old_conflicts:
@@ -136,9 +141,13 @@ def install(plan, *, mode, replace_mode, state, home=None, run=subprocess.run, u
     missing_backups = [label for label in old_conflicts if not old_paths[label].exists()]
     if missing_backups:
         raise ValueError('cannot safely migrate without plist backups: ' + ', '.join(missing_backups))
+    missing_target_backups = [label for label in target_conflicts if not destinations[label].exists()]
+    if missing_target_backups:
+        raise ValueError('cannot safely replace without plist backups: ' + ', '.join(missing_target_backups))
 
     backup_dir = None
     backups = {}
+    backup_destinations = {}
     written = []
     bootstrapped = []
     try:
@@ -150,7 +159,21 @@ def install(plan, *, mode, replace_mode, state, home=None, run=subprocess.run, u
                     target = backup_dir / source.name
                     shutil.copy2(source, target)
                     backups[label] = target
+                    backup_destinations[label] = source
             for label in old_conflicts:
+                if not bootout(label, uid, run):
+                    raise RuntimeError(f'could not boot out {label}')
+        if target_conflicts:
+            if backup_dir is None:
+                backup_dir = state / 'launchd-backups' / str(int(time.time() * 1000))
+                backup_dir.mkdir(parents=True, exist_ok=False)
+            for label in target_conflicts:
+                source = destinations[label]
+                target = backup_dir / source.name
+                shutil.copy2(source, target)
+                backups[label] = target
+                backup_destinations[label] = source
+            for label in target_loaded:
                 if not bootout(label, uid, run):
                     raise RuntimeError(f'could not boot out {label}')
         for label, data in plan:
@@ -166,7 +189,7 @@ def install(plan, *, mode, replace_mode, state, home=None, run=subprocess.run, u
             destinations[label].unlink(missing_ok=True)
         restored = []
         for label, backup in backups.items():
-            destination = old_paths[label]
+            destination = backup_destinations[label]
             shutil.copy2(backup, destination)
             try:
                 run(['launchctl', 'bootstrap', f'gui/{uid}', str(destination)], check=True)
@@ -184,6 +207,7 @@ def parse_args(argv=None):
     parser.add_argument('--live', action='store_true', help='Allow runner services to execute queued work')
     parser.add_argument('--mode', choices=('serial', 'lanes'), default='serial')
     parser.add_argument('--replace-mode', action='store_true', help='Explicitly replace an installed opposite mode')
+    parser.add_argument('--replace-current', action='store_true', help='Explicitly replace installed services in the selected mode')
     parser.add_argument('--dashboard-port', type=int, default=8787)
     return parser.parse_args(argv)
 
@@ -197,7 +221,8 @@ def main(argv=None):
         state.mkdir(parents=True, exist_ok=True)
         root = pathlib.Path(__file__).resolve().parent
         plan = service_plan(config, config_path, root, args.mode, args.live, args.dashboard_port)
-        destinations = install(plan, mode=args.mode, replace_mode=args.replace_mode, state=state)
+        destinations = install(plan, mode=args.mode, replace_mode=args.replace_mode,
+                               replace_current=args.replace_current, state=state)
     except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f'error: {exc}', file=sys.stderr)
         return 1
