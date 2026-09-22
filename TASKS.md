@@ -53,6 +53,31 @@ room to work on mobile. Multiple canvases remain a later step.
 
 ## IN_PROGRESS
 
+### TASK-057 - Installed-app email code login
+
+Status: REVIEW
+Owner: Codex
+Reviewer: Pending independent review
+Priority: P0
+Depends On: TASK-029
+
+Scope: Preserve the existing Supabase browser magic-link path while adding a six-digit email
+code that can be verified inside the installed PWA. Keep authentication separate from data
+ownership, fail closed, expose no provider details, and provide an accessible mobile code
+input. Prepare the exact dual code/link Supabase email template without changing production
+configuration or deploying the app.
+
+Acceptance: one email supports browser-link and installed-app code sign-in; malformed,
+rejected, expired or sessionless verification leaves Threadline signed out; local and account
+data behavior is unchanged; tests, TypeScript, API typecheck, production build and diff check
+pass; independent review and Preview/mobile validation precede promotion.
+
+Delivery and dashboard handoff: [TASK-057_DELIVERY.md](docs/TASK-057_DELIVERY.md).
+
+Build-in-public note: Threadline's installed phone app can sign in with a six-digit code from
+the same email that still supports browser sign-in. Account data remains untouched until the
+user explicitly chooses the existing account-storage controls.
+
 ### TASK-044 - Guided Cross-Device Account Merge
 
 Status: DONE

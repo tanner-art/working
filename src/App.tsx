@@ -328,14 +328,20 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
 
 function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
+  const [code, setCode] = useState('')
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
     {'message' in state && state.message && <p role={state.status === 'error' ? 'alert' : 'status'}>{state.message}</p>}
     {state.status === 'unconfigured' && <button className="secondary" disabled>Log in with email — unavailable</button>}
-    {state.status === 'signed-out' && <form onSubmit={event => { event.preventDefault(); void auth.act('login', email) }}>
+    {state.status === 'signed-out' && <form className="account-login" onSubmit={event => { event.preventDefault(); setEmail(email.trim()); setCode(''); void auth.act('login', email) }}>
       <label>Email address<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /></label>
       <button className="primary">Email me a sign-in link</button>
+    </form>}
+    {state.status === 'signed-out' && state.emailCodeSent && <form className="account-code" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}>
+      <p>Using the home-screen app? Enter the code from the same email here so this app signs in directly.</p>
+      <label>Six-digit code<input type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
+      <button className="primary">Sign in with code</button>
     </form>}
     {state.status === 'loading' && <button className="secondary" disabled>Please wait…</button>}
     {state.status === 'signed-in' && <button className="secondary" onClick={() => { void auth.act('logout') }}>Log out</button>}
