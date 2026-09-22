@@ -368,8 +368,8 @@ function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry:
       <button className="primary">Email me a sign-in code and link</button>
     </form>}
     {state.status === 'signed-out' && <form className="account-code" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}>
-      <p>Already have a code? Enter the email address above and the six-digit code here to sign in to this app, even if you requested the email in a browser.</p>
-      <label>Six-digit code<input type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))} /></label>
+      <p>Already have a code? Enter the email address above and the code from your email here to sign in to this app, even if you requested it in a browser.</p>
+      <label>Email sign-in code<input type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 10))} /></label>
       <button className="primary">Sign in with code</button>
     </form>}
     {state.status === 'loading' && <button className="secondary" disabled>Please wait…</button>}

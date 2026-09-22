@@ -66,28 +66,37 @@ describe('guarded account actions', () => {
     const first = auth.act('login', ' person@example.com ')
     await auth.act('login', 'person@example.com'); await first
     expect(client.sendEmailLink).toHaveBeenCalledExactlyOnceWith('person@example.com')
-    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('six-digit code') })
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('its code') })
     emit(session); expect(auth.getState()).toEqual(sessionState(session))
     await auth.act('logout'); expect(client.signOut).toHaveBeenCalledOnce()
     expect(auth.getState().status).toBe('signed-out'); disconnect()
   })
-  it('validates and verifies a six-digit email code while remaining signed out on failure', async () => {
+  it('validates provider-supported email code lengths while remaining signed out on failure', async () => {
     const { client } = provider()
     const auth = createAuthBoundary(config, client)
     const disconnect = auth.connect(); await flush()
     await auth.act('login', 'person@example.com')
     await auth.act('verify-code', 'person@example.com', '123')
     expect(client.verifyEmailCode).not.toHaveBeenCalled()
-    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('six-digit') })
+    expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('6–10 digit') })
+
+    await auth.act('verify-code', 'person@example.com', '12345678901')
+    expect(client.verifyEmailCode).not.toHaveBeenCalled()
+    await auth.act('verify-code', 'person@example.com', '12345a78')
+    expect(client.verifyEmailCode).not.toHaveBeenCalled()
 
     client.verifyEmailCode = vi.fn(async () => { throw Error('private provider detail') })
     await auth.act('verify-code', 'person@example.com', '123456')
     expect(auth.getState()).toMatchObject({ status: 'signed-out', emailCodeSent: true, message: expect.stringContaining('invalid or expired') })
     expect(JSON.stringify(auth.getState())).not.toContain('private provider detail')
 
+    client.verifyEmailCode = vi.fn(async () => null)
+    await auth.act('verify-code', 'person@example.com', '1234567890')
+    expect(client.verifyEmailCode).toHaveBeenCalledExactlyOnceWith('person@example.com', '1234567890')
+
     client.verifyEmailCode = vi.fn(async () => session)
-    await auth.act('verify-code', 'person@example.com', '654321')
-    expect(client.verifyEmailCode).toHaveBeenCalledExactlyOnceWith('person@example.com', '654321')
+    await auth.act('verify-code', 'person@example.com', '87654321')
+    expect(client.verifyEmailCode).toHaveBeenCalledExactlyOnceWith('person@example.com', '87654321')
     expect(auth.getState()).toEqual(sessionState(session))
     disconnect()
   })
