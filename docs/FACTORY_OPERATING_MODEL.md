@@ -12,7 +12,7 @@ The factory has three named slots:
 
 ### Current behavior: serial runner
 
-The current runner dispatches one assigned task at a time from an isolated worktree. It validates the task, commits, pushes, and opens a draft PR; it never merges. The unattended heartbeat/Claude runner is currently paused or unavailable, so manual dispatch is the operational fallback. Parallel dispatch is **not live**.
+The current runner dispatches one assigned task at a time from an isolated worktree. It validates the task, commits, pushes, and opens a draft PR; it never merges. The restored background runner polls the queue, while manual dispatch remains the fallback if its heartbeat stalls or an agent is unavailable. Parallel dispatch is **not live**.
 
 ### Proposed behavior: parallel canary
 
