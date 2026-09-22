@@ -18,6 +18,13 @@ def write_lines(path, lines):
 
 
 class RedactionTests(unittest.TestCase):
+    def test_usage_markup_matches_api_worker_schema(self):
+        markup = fd.HTML_PATH.read_text(encoding='utf-8')
+        self.assertIn('usage.workers', markup)
+        self.assertNotIn('usage.accounts', markup)
+        for field in ('a.worker', 'a.used_percent', 'a.observed_at'):
+            self.assertIn(field, markup)
+
     def test_report_redacts_config_and_state_paths(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'private-host-state'
@@ -592,6 +599,9 @@ class ValidationResultTests(unittest.TestCase):
 
     def test_failed_status_is_failed(self):
         self.assertEqual(fd.validation_result({'status': 'failed', 'commit': None}), 'failed')
+
+    def test_failed_status_with_local_commit_is_still_failed(self):
+        self.assertEqual(fd.validation_result({'status': 'failed', 'commit': 'local-commit'}), 'failed')
 
 
 class UsagePolicyTests(unittest.TestCase):

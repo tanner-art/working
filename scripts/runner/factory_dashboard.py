@@ -661,10 +661,10 @@ def _diff_stat_for_issue(record, events):
 
 def validation_result(record):
     status = record['status']
-    if status in (REVIEW_STATUS,) or record.get('commit'):
-        return 'passed'
     if status == FAILED_STATUS:
         return 'failed'
+    if status in (REVIEW_STATUS,) or record.get('commit'):
+        return 'passed'
     if status == 'validation':
         return 'running'
     if status in ('starting', 'agent'):
