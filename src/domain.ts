@@ -63,6 +63,8 @@ export interface CanvasElement {
   width?: number
   height?: number
   text?: string
+  /** Canvas presentation only; list text remains ordinary element text. */
+  nodeVariant?: 'bulleted-list'
   fromId?: string
   toId?: string
   /** Optional canvas-only containment. Only text blocks may belong to a group. */

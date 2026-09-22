@@ -30,6 +30,7 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.height === undefined || Number.isFinite(item.height)) &&
     (item.shape === undefined || (item.type === 'text' && ['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'].includes(item.shape))) &&
     (item.text === undefined || typeof item.text === 'string') &&
+    (item.nodeVariant === undefined || (item.type === 'text' && item.nodeVariant === 'bulleted-list')) &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&
     (item.groupId === undefined || typeof item.groupId === 'string') &&
@@ -38,6 +39,13 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.connectionWeight === undefined || ['light', 'regular', 'bold'].includes(item.connectionWeight)) &&
     (item.type === 'arrow' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined)) &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string'))
+}
+
+/** Toggle a canvas-only presentation choice without rewriting the node's text. */
+export function toggleCanvasNodeVariant(elements: CanvasElement[], id: string): CanvasElement[] {
+  return elements.map(item => item.id === id && item.type === 'text'
+    ? { ...item, ...(item.nodeVariant === 'bulleted-list' ? { nodeVariant: undefined } : { nodeVariant: 'bulleted-list' }) }
+    : item)
 }
 
 export function newCanvasElement(type: CanvasElement['type'], x: number, y: number): CanvasElement {
