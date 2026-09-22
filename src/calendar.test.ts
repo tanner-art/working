@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { CalendarEvent, Interpretation, PersistedState, SemanticObject } from './domain'
 import {
-  addMonths, buildCalendarMonth, dayAriaLabel, defaultTemporalProvenanceCheck, monthLabel, parseLocalDateKey
+  addDays, addMonths, buildCalendarMonth, buildCalendarTimeGrid, dayAriaLabel, defaultTemporalProvenanceCheck, monthLabel, navigateCalendarDate, parseLocalDateKey, weekStart
 } from './calendar'
 import { localDateKey } from './morningDigest'
+import { createCalendarCommitment } from './calendarEntry'
+import { legacyUiProjection, reconcileLegacyUi } from './migration'
 
 const object = (id: string, kind: SemanticObject['kind'], status: SemanticObject['status'] = 'confirmed'): SemanticObject => ({
   id, kind, metadata: {}, summary: `${id} summary`, status, captureIds: [], interpretationIds: [id], reminders: []
@@ -66,8 +68,47 @@ describe('calendar grid math', () => {
     expect(addMonths(2026, 0, -1)).toEqual({ year: 2025, month: 11 })
     expect(addMonths(2026, 5, 0)).toEqual({ year: 2026, month: 5 })
   })
+  it('keeps Week and Day navigation on local calendar dates through month, year, and DST boundaries', () => {
+    expect(weekStart('2026-03-08')).toBe('2026-03-08')
+    expect(weekStart('2026-03-14')).toBe('2026-03-08')
+    expect(addDays('2026-03-08', 7)).toBe('2026-03-15')
+    expect(addDays('2026-12-31', 1)).toBe('2027-01-01')
+  })
+  it('uses one selected date across Month, Week, and Day navigation without hidden month state', () => {
+    expect(navigateCalendarDate('2026-01-31', 'month', 1)).toBe('2026-02-28')
+    expect(navigateCalendarDate('2026-12-31', 'month', 1)).toBe('2027-01-31')
+    expect(navigateCalendarDate('2026-09-14', 'week', -1)).toBe('2026-09-07')
+    expect(navigateCalendarDate('2026-09-14', 'day', 1)).toBe('2026-09-15')
+  })
   it('monthLabel reads naturally', () => {
     expect(monthLabel(2026, 8)).toBe('September 2026')
+  })
+})
+
+describe('week and day time-grid data', () => {
+  it('returns exact consecutive local days and buckets confirmed events without changing their time', () => {
+    const promise = object('promise', 'commitment')
+    const state = model({ semanticObjects: [promise], calendarEvents: [event('morning-call', '2026-09-15T09:30:00.000Z', ['promise'])] })
+    const week = buildCalendarTimeGrid(state, '2026-09-13', 7, new Date(2026, 8, 14), () => true)
+    expect(week.days.map(day => day.date)).toEqual(['2026-09-13', '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17', '2026-09-18', '2026-09-19'])
+    expect(week.days.flatMap(day => day.events).map(item => item.event.startsAt)).toEqual(['2026-09-15T09:30:00.000Z'])
+    expect(week.days[2].events[0].linkedObjects).toEqual([promise])
+    expect(buildCalendarTimeGrid(state, '2026-09-15', 1, new Date(2026, 8, 14), () => true).days).toHaveLength(1)
+  })
+})
+
+describe('calendar commitment entry', () => {
+  it('records an explicitly confirmed obligation with source evidence and no CalendarEvent or invented time', () => {
+    const commitment = createCalendarCommitment('Send the proposal')
+    expect(commitment.kind).toBe('commitment')
+    expect(commitment.status).toBe('confirmed')
+    expect(commitment.metadata.deadline).toBeUndefined()
+    const base = legacyUiProjection(model())
+    const saved = reconcileLegacyUi({ ...base, objects: [commitment] })
+    expect(saved.calendarEvents).toEqual([])
+    expect(saved.captures).toHaveLength(1)
+    expect(saved.captures[0].originalContent).toBe('Send the proposal')
+    expect(saved.semanticObjects).toMatchObject([{ kind: 'commitment', status: 'confirmed', summary: 'Send the proposal' }])
   })
 })
 
