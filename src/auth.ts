@@ -104,8 +104,8 @@ export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
       if ((action === 'login' || action === 'verify-code') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
         publish({ status: 'signed-out', message: 'Enter a valid email address.', emailCodeSent: action === 'verify-code' }); return
       }
-      if (action === 'verify-code' && !/^\d{6}$/.test(code.trim())) {
-        publish({ status: 'signed-out', message: 'Enter the six-digit code from your email.', emailCodeSent: true }); return
+      if (action === 'verify-code' && !/^\d{6,10}$/.test(code.trim())) {
+        publish({ status: 'signed-out', message: 'Enter the 6–10 digit code from your email.', emailCodeSent: true }); return
       }
       pending = true
       const current = ++revision
@@ -113,7 +113,7 @@ export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
       try {
         if (action === 'login') {
           await client.sendEmailLink(email.trim())
-          if (current === revision) publish({ status: 'signed-out', message: 'Check your email. Enter the six-digit code here, or use the sign-in link in a browser.', emailCodeSent: true })
+          if (current === revision) publish({ status: 'signed-out', message: 'Check your email. Enter its code here, or use the sign-in link in a browser.', emailCodeSent: true })
         } else if (action === 'verify-code') {
           const session = await client.verifyEmailCode(email.trim(), code.trim())
           if (current === revision) publish(session ? sessionState(session) : { status: 'signed-out', message: 'That code could not be verified. Request a new email and try again.', emailCodeSent: true })

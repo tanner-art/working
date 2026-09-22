@@ -4,9 +4,9 @@ Updated: 2026-09-22. The primary app is https://temporary-zippy-agate-50psn81.ve
 
 ## Installed app sign-in
 
-TASK-057 is merged into main. The existing paid Threadline Supabase project has the primary URL as its Site URL, and its Magic link or OTP email template now includes both the six-digit token and browser confirmation link. The saved template was reloaded and previewed. The stable app responded successfully after deployment.
+TASK-057 is merged into main. The existing paid Threadline Supabase project has the primary URL as its Site URL, and its Magic link or OTP email template now includes both the email token and browser confirmation link. The saved template was reloaded and previewed. The stable app responded successfully after deployment.
 
-A real installed-iPhone test remains. Request an email in the home-screen app, enter the six-digit code in that app, confirm the session appears there, then sign out. Check the browser link separately. Do not uninstall the current app, clear local storage, or share credentials or codes. The code change did not move or delete local data.
+A real installed-iPhone test remains. Request an email in the home-screen app, enter its code in that app, confirm the session appears there, then sign out. Check the browser link separately. Do not uninstall the current app, clear local storage, or share credentials or codes. The code change did not move or delete local data.
 
 ## Account data and isolation
 

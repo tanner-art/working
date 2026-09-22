@@ -8,7 +8,7 @@ This is the active board. The previous board, including historical implementatio
 
 - PR #68 / TASK-056: durable canvas foundation.
 - PR #69 / TASK-046: preserved Review revisions and confirmation invalidation.
-- PR #70 / TASK-057: optional six-digit email-code sign-in inside an installed app, while retaining the browser link. The existing paid Threadline Supabase email template now contains both options.
+- PR #70 / TASK-057: optional email-code sign-in inside an installed app, while retaining the browser link. The existing paid Threadline Supabase email template now contains both options. PR #73 keeps the code field visible after an app restart or a code request in Safari.
 - PR #71 / TASK-058: direct thought editing and preserved chronological version history.
 - PR #72 / TASK-059: the first Canvas Bank slice: landing page and named, autosaved canvas documents, including lossless first-canvas migration. Duplicate, archive, and restore remain later work.
 
@@ -18,7 +18,7 @@ The URL responded successfully after these merges. The Bank landing page and Rev
 
 ## Open release checks
 
-1. **P0 — Installed iPhone sign-in.** On the existing primary URL, request one email from the installed app, enter its six-digit code there, verify signed-in and sign-out states, and separately verify the same email's browser link. Do not uninstall the existing app, clear browser storage, or share the code. Check that local captures remain available and account data still requires an explicit copy/load action.
+1. **P0 — Installed iPhone sign-in.** On the existing primary URL, request one email from the installed app, enter its code there, verify signed-in and sign-out states, and separately verify the same email's browser link. The provider may send 6–10 digits; the Threadline project has sent an eight-digit code. Do not uninstall the existing app, clear browser storage, or share the code. Check that local captures remain available and account data still requires an explicit copy/load action.
 2. **P0 — Account isolation and two-device sync.** Verify two distinct accounts and desktop/phone round trips, explicit import/load, owner-only reads and writes, stale-revision behavior, offline errors, and recovery export. Database catalog checks confirmed the owner policies and RLS, but real account tests remain.
 3. **P0 — Narrow excess account-table grants.** The signed-in role currently has DELETE, TRUNCATE, REFERENCES, and TRIGGER table grants beyond the intended SELECT/INSERT/UPDATE. No grant was changed: automatic approval review rejected the proposed production revocation because the earlier authorization did not cover that exact permission change. Obtain scoped approval, then remove only the excess grants and verify required operations still work before certifying cross-account safety.
 4. **P1 — Physical phone UX smoke.** Open Bank, verify the migrated canvas, create/name/edit/exit/reopen a new canvas, and test Review edit/history and unsaved-draft protection on the phone. Desktop and 390-pixel browser checks already passed. Preserve existing local data.

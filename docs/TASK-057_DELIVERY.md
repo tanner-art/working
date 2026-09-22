@@ -6,11 +6,12 @@ Threadline's existing email request now supports two explicit sign-in paths from
 message:
 
 - the existing confirmation link continues to sign a user into the browser that opens it;
-- a six-digit email code can be entered inside the installed home-screen app, creating the
+- an email code can be entered inside the installed home-screen app, creating the
   session in that app's own storage context.
 
-The code input is labelled and uses numeric input, `one-time-code` autofill, a six-digit
-pattern and a six-character limit. Threadline remains signed out when a code is malformed,
+The code input is labelled and uses numeric input, `one-time-code` autofill, a 6–10 digit
+pattern and a ten-character limit to match configurable Supabase email-code lengths.
+Threadline remains signed out when a code is malformed,
 expired, rejected, or accepted without a session. Provider errors are not shown to the user.
 This task does not read, migrate, clear or otherwise change local or account data.
 
@@ -57,7 +58,7 @@ stored in this repository.
 
 ## Build-in-public note
 
-Threadline's installed phone app can now sign in with a six-digit code from the same email that
+Threadline's installed phone app can now sign in with the code from the same email that
 still supports browser sign-in. Account data remains untouched until the user explicitly
 chooses the existing account-storage controls.
 
