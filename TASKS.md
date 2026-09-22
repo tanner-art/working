@@ -32,6 +32,26 @@ Build-in-public rule: when a task changes visible behavior, its issue/PR should 
 
 ## REVIEW — September 20 pipeline
 
+### TASK-058 - Review Thought Editing and Version History
+
+Status: REVIEW
+Owner: Codex
+Reviewer: Claude changes requested; fixes ready for independent re-review
+Scope authority: User-requested functional-design priority on September 21.
+
+Make Review thoughts clearly editable on mobile and desktop while preserving the immutable first
+capture and showing current text, organized meaning revisions, and correction history as one
+readable progression. Reuse the existing TASK-046 revision model. Do not change auth, Canvas,
+Calendar, architecture, confirmation rules, or merge `main`.
+
+Acceptance criteria and review handoff: [TASK-058_DELIVERY.md](docs/TASK-058_DELIVERY.md).
+Validation: `pnpm check` passed 410 tests, application/API TypeScript and production build;
+`git diff --check` passed. Local browser inspection verified both editors and the open version
+history on desktop. At 390×844, the panel fit at 375 pixels and both save controls measured
+290×44 pixels. The follow-up addresses Claude's non-text source behavior, draft-loss guards,
+modal focus/background/Escape behavior, and 44-pixel history disclosure findings. Independent
+re-review remains pending.
+
 ### TASK-056 - Existing Canvas Reliability Foundation
 
 Status: REVIEW
@@ -52,6 +72,31 @@ Build-in-public note: Canvas now remembers typed text and pan/zoom when you retu
 room to work on mobile. Multiple canvases remain a later step.
 
 ## IN_PROGRESS
+
+### TASK-057 - Installed-app email code login
+
+Status: REVIEW
+Owner: Codex
+Reviewer: Pending independent review
+Priority: P0
+Depends On: TASK-029
+
+Scope: Preserve the existing Supabase browser magic-link path while adding a six-digit email
+code that can be verified inside the installed PWA. Keep authentication separate from data
+ownership, fail closed, expose no provider details, and provide an accessible mobile code
+input. Prepare the exact dual code/link Supabase email template without changing production
+configuration or deploying the app.
+
+Acceptance: one email supports browser-link and installed-app code sign-in; malformed,
+rejected, expired or sessionless verification leaves Threadline signed out; local and account
+data behavior is unchanged; tests, TypeScript, API typecheck, production build and diff check
+pass; independent review and Preview/mobile validation precede promotion.
+
+Delivery and dashboard handoff: [TASK-057_DELIVERY.md](docs/TASK-057_DELIVERY.md).
+
+Build-in-public note: Threadline's installed phone app can sign in with a six-digit code from
+the same email that still supports browser sign-in. Account data remains untouched until the
+user explicitly chooses the existing account-storage controls.
 
 ### TASK-044 - Guided Cross-Device Account Merge
 

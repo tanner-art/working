@@ -5,6 +5,7 @@ export interface AuthSession { user: { id: string; email?: string } }
 export interface AuthClient {
   getSession(): Promise<AuthSession | null>
   sendEmailLink(email: string): Promise<void>
+  verifyEmailCode(email: string, code: string): Promise<AuthSession | null>
   signOut(): Promise<void>
   onSessionChange(listener: (session: AuthSession | null) => void): () => void
 }
@@ -22,7 +23,7 @@ export function readAuthConfig(env: { VITE_SUPABASE_URL?: string; VITE_SUPABASE_
 export type AuthState =
   | { status: 'unconfigured'; message: string }
   | { status: 'loading' }
-  | { status: 'signed-out'; message?: string }
+  | { status: 'signed-out'; message?: string; emailCodeSent?: boolean }
   | { status: 'signed-in'; session: AuthSession }
   | { status: 'error'; message: string }
 
@@ -40,6 +41,11 @@ export function createSupabaseAuthClient(config: Extract<AuthConfig, { status: '
     async sendEmailLink(email: string) {
       const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: redirectTo } })
       if (error) throw error
+    },
+    async verifyEmailCode(email: string, code: string) {
+      const { data, error } = await supabase.auth.verifyOtp({ email, token: code, type: 'email' })
+      if (error) throw error
+      return authSession(data.session)
     },
     async signOut() {
       const { error } = await supabase.auth.signOut()
@@ -93,20 +99,32 @@ export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
       })
       return () => { active = false; revision++; unsubscribe() }
     },
-    async act(action: 'login' | 'logout', email = '') {
-      if (!client || config.status !== 'configured' || pending || (action === 'login' ? state.status !== 'signed-out' : state.status !== 'signed-in')) return
-      if (action === 'login' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-        publish({ status: 'signed-out', message: 'Enter a valid email address.' }); return
+    async act(action: 'login' | 'verify-code' | 'logout', email = '', code = '') {
+      if (!client || config.status !== 'configured' || pending || (action === 'logout' ? state.status !== 'signed-in' : state.status !== 'signed-out')) return
+      if ((action === 'login' || action === 'verify-code') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+        publish({ status: 'signed-out', message: 'Enter a valid email address.', emailCodeSent: action === 'verify-code' }); return
+      }
+      if (action === 'verify-code' && !/^\d{6}$/.test(code.trim())) {
+        publish({ status: 'signed-out', message: 'Enter the six-digit code from your email.', emailCodeSent: true }); return
       }
       pending = true
       const current = ++revision
       publish({ status: 'loading' })
       try {
-        if (action === 'login') await client.sendEmailLink(email.trim())
-        else await client.signOut()
-        if (current === revision) publish({ status: 'signed-out', message: action === 'login' ? 'Check your email for a sign-in link. You are not signed in yet.' : undefined })
+        if (action === 'login') {
+          await client.sendEmailLink(email.trim())
+          if (current === revision) publish({ status: 'signed-out', message: 'Check your email. Enter the six-digit code here, or use the sign-in link in a browser.', emailCodeSent: true })
+        } else if (action === 'verify-code') {
+          const session = await client.verifyEmailCode(email.trim(), code.trim())
+          if (current === revision) publish(session ? sessionState(session) : { status: 'signed-out', message: 'That code could not be verified. Request a new email and try again.', emailCodeSent: true })
+        } else {
+          await client.signOut()
+          if (current === revision) publish({ status: 'signed-out' })
+        }
       } catch {
-        if (current === revision) publish({ status: 'error', message: 'Account action failed. Check your connection and retry checking your account.' })
+        if (current === revision) publish(action === 'verify-code'
+          ? { status: 'signed-out', message: 'That code is invalid or expired. Request a new email and try again.', emailCodeSent: true }
+          : { status: 'error', message: 'Account action failed. Check your connection and retry checking your account.' })
       } finally { pending = false }
     },
   }
