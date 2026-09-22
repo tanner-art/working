@@ -72,9 +72,18 @@ export interface CanvasElement {
   connectionWeight?: 'light' | 'regular' | 'bold'
 }
 export interface CanvasViewport { x: number; y: number; scale: number }
+export interface CanvasRecord {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  elements: CanvasElement[]
+  viewport: CanvasViewport
+}
+export interface CanvasBank { canvases: CanvasRecord[] }
 
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
-export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; model?: PersistedState; temporalHistory?: TemporalDecision[] }
+export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; canvasBank?: CanvasBank; model?: PersistedState; temporalHistory?: TemporalDecision[] }
 
 export const objectLabels: Record<ObjectKind, string> = {
   idea: 'Idea', action: 'Action', reminder: 'Reminder', project: 'Project', commitment: 'Commitment', person: 'Person', reference: 'Reference', objective: 'Objective'
@@ -154,6 +163,7 @@ export interface PersistedState {
   legacyUiIds: string[]
   canvas: CanvasElement[]
   canvasViewport?: CanvasViewport
+  canvasBank?: CanvasBank
 }
 export interface SourceCorrection {
   readonly id: string

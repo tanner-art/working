@@ -4,6 +4,7 @@ import { canvasSize, canvasConnector, canvasConnectorPath, connectionAppearance,
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
 import { moveCanvasNode, setCanvasGroup } from './canvasGroups'
 import { loadStateResult, saveState } from './store'
+import { LEGACY_CANVAS_ID } from './canvasBank'
 
 const nodes: CanvasElement[] = [
   { id: 'a', type: 'text', x: -30, y: 25, text: 'Original thought\nwith content', width: 190, height: 100 },
@@ -65,16 +66,19 @@ describe('canvas size and conversion', () => {
     vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
     const initial = loadStateResult().state
     const evidence = structuredClone(initial.model!)
-    let history = emptyCanvasHistory(initial.canvas)
-    history = commitCanvas(history, resizeCanvasNode(initial.canvas, 'canvas-idea', 420, 240))
+    const original = initial.canvasBank!.canvases[0].elements
+    let history = emptyCanvasHistory(original)
+    history = commitCanvas(history, resizeCanvasNode(original, 'canvas-idea', 420, 240))
     history = commitCanvas(history, convertCanvasNode(history.present, 'canvas-idea', 'container'))
     for (const snapshot of [history, undoCanvas(history), redoCanvas(undoCanvas(history))]) {
-      expect(saveState({ ...initial, canvas: snapshot.present })).toBeUndefined()
+      const canvasBank = { canvases: initial.canvasBank!.canvases.map(item => item.id === LEGACY_CANVAS_ID ? { ...item, elements: snapshot.present, updatedAt: new Date().toISOString() } : item) }
+      expect(saveState({ ...initial, canvasBank })).toBeUndefined()
       const loaded = loadStateResult()
       expect(loaded.error).toBeUndefined()
-      expect(loaded.state.canvas).toEqual(snapshot.present)
-      expect(loaded.state.model).toEqual({ ...evidence, canvas: snapshot.present })
-      expect(emptyCanvasHistory(loaded.state.canvas).past).toEqual([])
+      expect(loaded.state.canvasBank!.canvases[0].elements).toEqual(snapshot.present)
+      expect(loaded.state.canvas).toEqual(evidence.canvas)
+      expect(loaded.state.model).toEqual({ ...evidence, canvasBank })
+      expect(emptyCanvasHistory(loaded.state.canvasBank!.canvases[0].elements).past).toEqual([])
     }
   })
 
@@ -105,11 +109,13 @@ describe('canvas size and conversion', () => {
     vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
     const initial = loadStateResult().state
     expect(initial.canvas.find(item => item.type === 'arrow')).not.toHaveProperty('connectionPath')
-    const styled = updateCanvasConnection(initial.canvas, 'canvas-arrow', { connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
-    expect(saveState({ ...initial, canvas: styled })).toBeUndefined()
+    const styled = updateCanvasConnection(initial.canvasBank!.canvases[0].elements, 'canvas-arrow', { connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
+    const canvasBank = { canvases: [{ ...initial.canvasBank!.canvases[0], elements: styled, updatedAt: new Date().toISOString() }] }
+    expect(saveState({ ...initial, canvasBank })).toBeUndefined()
     const loaded = loadStateResult()
     expect(loaded.error).toBeUndefined()
-    expect(loaded.state.canvas.find(item => item.id === 'canvas-arrow')).toMatchObject({ connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
+    expect(loaded.state.canvasBank!.canvases[0].elements.find(item => item.id === 'canvas-arrow')).toMatchObject({ connectionPath: 'curved', connectionPattern: 'dotted', connectionWeight: 'bold' })
+    expect(loaded.state.canvas.find(item => item.id === 'canvas-arrow')).not.toHaveProperty('connectionPath')
   })
 })
 

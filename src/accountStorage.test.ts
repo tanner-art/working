@@ -6,6 +6,7 @@ import { loadStateResult, makeObject, saveState } from './store'
 import { legacyUiProjection } from './migration'
 import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
+import { addCanvas, createCanvasRecord, LEGACY_CANVAS_ID } from './canvasBank'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -169,18 +170,21 @@ describe('guided account merge', () => {
     interpretation: { summary: content, rationale: 'Explicit', suggestedKind: 'idea' } })
 
   it('combines disjoint device histories without mutating either source', () => {
-    const account = accountData({ objects: [thought('Mac idea')], canvas: [{ id: 'mac-node', type: 'text', x: 1, y: 2 }] },
+    const macCanvas = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:mac'), title: 'Mac map', elements: [{ id: 'mac-node', type: 'text' as const, x: 1, y: 2 }] }
+    const phoneCanvas = { ...createCanvasRecord('2026-09-22T00:00:01.000Z', 'canvas:phone'), title: 'Phone map', elements: [{ id: 'phone-node', type: 'text' as const, x: 3, y: 4 }] }
+    const account = accountData({ objects: [thought('Mac idea')], canvas: [], canvasBank: { canvases: [macCanvas] } },
       { ...defaultSettings, displayName: 'Mac' }, { enabled: false })
-    const device = accountData({ objects: [thought('Phone idea')], canvas: [{ id: 'phone-node', type: 'text', x: 3, y: 4 }] },
+    const device = accountData({ objects: [thought('Phone idea')], canvas: [], canvasBank: { canvases: [phoneCanvas] } },
       { ...defaultSettings, displayName: 'Phone' }, { enabled: true, confirmedAt: '2026-09-19T07:00:00Z' })
     const before = structuredClone({ account, device })
     const result = mergeAccountData(account, device, { settings: 'device', digest: 'account' })
     expect({ account, device }).toEqual(before)
     expect(legacyUiProjection(result.data.model).objects.map(item => item.originalContent)).toEqual(['Mac idea', 'Phone idea'])
-    expect(result.data.model.canvas.map(item => item.id)).toEqual(['mac-node', 'phone-node'])
+    expect(result.data.model.canvas).toEqual([])
+    expect(result.data.model.canvasBank?.canvases.map(item => item.id)).toEqual(['canvas:mac', 'canvas:phone'])
     expect(result.data.settings.displayName).toBe('Phone')
     expect(result.data.digest.enabled).toBe(false)
-    expect(result.preview.added).toEqual({ captures: 1, thoughts: 1, canvas: 1, events: 0 })
+    expect(result.preview.added).toEqual({ captures: 1, thoughts: 1, canvases: 1, events: 0 })
   })
 
   it('deduplicates identical records and stops on conflicting stable identities', () => {
@@ -241,7 +245,7 @@ describe('guided account merge', () => {
     const pending = guardAccountMergePreview(initial, () => prepared, () => current)
     current = accountData({ objects: [thought('Captured while loading')], canvas: [] }, defaultSettings, { enabled: false })
     finish({ userId: 'a', revision: 'r1', localFingerprint: JSON.stringify(initial), data: initial, preview: {
-      added: { captures: 0, thoughts: 0, canvas: 0, events: 0 }, duplicates: 0, settings: 'account', digest: 'account',
+      added: { captures: 0, thoughts: 0, canvases: 0, events: 0 }, duplicates: 0, settings: 'account', digest: 'account',
     } })
     await expect(pending).rejects.toThrow('this device changed while account data was loading')
   })
@@ -278,20 +282,24 @@ describe('TASK-056 account canvas viewport compatibility', () => {
     const db = database()
     const session = createAccountSession(db.adapter, 'canvas-user', () => 'canvas-user')
     const initial = await session.open(payload())
-    const state = { ...initial.state, canvas: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }], canvasViewport: { x: -55, y: 91, scale: 1.45 } }
+    const record = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:work'), elements: [{ id: 'node', type: 'text' as const, text: 'Before blur', x: 5, y: 8 }], viewport: { x: -55, y: 91, scale: 1.45 } }
+    const state = addCanvas(initial.state, record)
     await session.save(session.snapshot(state, defaultSettings, { enabled: false }))
     const reloaded = await session.open()
-    expect(reloaded.state.canvas).toEqual(state.canvas)
-    expect(reloaded.state.canvasViewport).toEqual(state.canvasViewport)
+    expect(reloaded.state.canvasBank?.canvases.find(item => item.id === record.id)).toEqual(record)
+    expect(reloaded.state.canvas).toEqual([])
   })
   it('keeps the destination account viewport, with device fallback for old account snapshots', () => {
     const account = payload(), device = payload()
+    delete account.model.canvasBank
+    delete device.model.canvasBank
     device.model.canvasViewport = { x: -40, y: 80, scale: .7 }
     const choices = { settings: 'account' as const, digest: 'account' as const }
-    expect(mergeAccountData(account, device, choices).data.model.canvasViewport).toEqual(device.model.canvasViewport)
+    expect(mergeAccountData(account, device, choices).data.model.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(device.model.canvasViewport)
     account.model.canvasViewport = { x: 15, y: 25, scale: 1.3 }
     const merged = mergeAccountData(account, device, choices).data.model
     expect(merged.canvasViewport).toEqual(account.model.canvasViewport)
+    expect(merged.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(account.model.canvasViewport)
     expect(device.model.canvasViewport).toEqual({ x: -40, y: 80, scale: .7 })
   })
 })

@@ -18,6 +18,7 @@ Use this before calling a product slice complete.
 - Every active object can be opened from at least one workbench surface.
 - Archive hides the object without deleting the underlying data.
 - Canvas nodes can be added, selected, moved, edited, connected, deleted, undone, and redone.
+- Bank opens before any canvas; create, title, exit, reopen, and per-canvas undo work on phone and desktop.
 
 ## Data Safety
 
@@ -25,6 +26,7 @@ Use this before calling a product slice complete.
 - Local state validation rejects unknown kinds, statuses, malformed metadata, and broken canvas arrows.
 - New semantic behavior has at least one focused unit test.
 - Browser smoke tests avoid leaving temporary user-visible objects behind.
+- Legacy single-canvas migration is read-only until save, preserves the frozen mirror, and fails closed on a conflicting account canvas.
 
 ## Git Policy
 

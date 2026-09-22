@@ -56,3 +56,20 @@ Focused tests exercise both consequential kinds from review/inbox through `setOb
 - **Inspection.** `reviewTextSnapshot` returns immutable source, current text, revisions and corrections; the object panel shows current text, the immutable source, and a text-history list.
 
 Tests: `src/reviewRevision.test.ts` (revise/correct, failure paths, chain validation, persistence), plus additions to `accountStorage.test.ts` and `store.test.ts` (reload through storage). Browser checks were not performed.
+
+## TASK-059 Canvas Bank compatibility
+
+Schema version 2 now accepts an optional `canvasBank` containing named current canvas documents.
+Opening an older v1 or schema-2 snapshot is still read-only: the projection creates a deterministic
+`canvas:legacy` document named `My first canvas` only when the legacy canvas has elements or a
+non-default viewport. The Bank is written on the next successful application save. An empty cleared
+workspace projects to an empty Bank and does not restore the seed canvas.
+
+The top-level `canvas` and `canvasViewport` fields are retained byte-for-byte as a frozen recovery
+mirror for one release. Bank editing never writes those fields. Validation refuses a save that drops
+an existing Bank document or mutates the frozen mirror, so older clients reject Bank snapshots rather
+than silently discarding them. Account merge unions stable canvas ids, stops on title or element
+conflicts, and keeps the account document viewport when only view position differs.
+
+This stores only each canvas's current editable document. Session undo remains in memory under D-010;
+durable capture-linked canvas revisions remain separate future work.

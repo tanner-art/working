@@ -1,19 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import type { AppState } from './domain'
 import { createCanvasRepository } from './canvasRepository'
 import { createCanvasSession } from './canvasSession'
 
-export function useCanvasWorkspace(state: AppState, update: (fn: (state: AppState) => AppState) => void, active: boolean) {
+export function useCanvasWorkspace(state: AppState, update: (fn: (state: AppState) => AppState) => void, canvasId: string | null) {
   const host = useRef({ state, update })
   host.current = { state, update }
-  const [repository] = useState(() => createCanvasRepository(() => host.current.state, fn => host.current.update(current => {
-    const next = fn(current)
-    host.current.state = next
-    return next
-  })))
-  const [session] = useState(() => createCanvasSession(repository))
+  const sessions = useRef(new Map<string, ReturnType<typeof createCanvasSession>>())
+  let session = canvasId ? sessions.current.get(canvasId) : undefined
+  if (canvasId && !session) {
+    const repository = createCanvasRepository(canvasId, () => host.current.state, fn => host.current.update(current => {
+      const next = fn(current)
+      host.current.state = next
+      return next
+    }))
+    session = createCanvasSession(repository)
+    sessions.current.set(canvasId, session)
+  }
   useEffect(() => {
-    if (!active) { session.finishText(); return }
+    if (!session) return
     const onKeyDown = (event: KeyboardEvent) => {
       const element = event.target as HTMLElement | null
       if (element?.closest('input, textarea, select, [contenteditable="true"]')) return
@@ -24,6 +29,6 @@ export function useCanvasWorkspace(state: AppState, update: (fn: (state: AppStat
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [active, session])
+  }, [session])
   return session
 }

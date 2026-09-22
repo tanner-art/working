@@ -4,13 +4,15 @@ import type { AppState, PersistedState } from './domain'
 import { isPersistedState, legacyUiProjection, reconcileLegacyUi } from './migration'
 import { readSettings, type LocalSettings } from './settings'
 import { readDelivery, type DigestDelivery } from './digestDelivery'
+import { bankFromLegacy } from './canvasBank'
+import { mergeCanvasBanks } from './canvasBankMerge'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
 export type AccountMergeSource = 'account' | 'device'
 export interface AccountMergeChoices { settings: AccountMergeSource; digest: AccountMergeSource }
 export interface AccountMergePreview {
-  added: { captures: number; thoughts: number; canvas: number; events: number }
+  added: { captures: number; thoughts: number; canvases: number; events: number }
   duplicates: number
   settings: AccountMergeSource
   digest: AccountMergeSource
@@ -77,7 +79,10 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   const semanticObjects = mergeRecords(account.model.semanticObjects, device.model.semanticObjects, 'semantic object')
   const calendarEvents = mergeRecords(account.model.calendarEvents, device.model.calendarEvents, 'calendar event')
   const relationships = mergeRecords(account.model.relationships, device.model.relationships, 'relationship')
-  const canvas = mergeRecords(account.model.canvas, device.model.canvas, 'canvas element')
+  const canvasBank = mergeCanvasBanks(
+    account.model.canvasBank ?? bankFromLegacy(account.model.canvas, account.model.canvasViewport),
+    device.model.canvasBank ?? bankFromLegacy(device.model.canvas, device.model.canvasViewport),
+  )
   const temporalHistory = mergeRecords(account.model.temporalHistory ?? [], device.model.temporalHistory ?? [], 'temporal decision')
   const legacyUiIds = [...account.model.legacyUiIds]
   for (const id of device.model.legacyUiIds) if (!legacyUiIds.includes(id)) legacyUiIds.push(id)
@@ -90,10 +95,10 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     calendarEvents: calendarEvents.merged,
     relationships: relationships.merged,
     legacyUiIds,
-    canvas: canvas.merged,
-    // The existing account canvas remains the destination of a merge.
-    ...((account.model.canvasViewport ?? device.model.canvasViewport) === undefined ? {} :
-      { canvasViewport: structuredClone(account.model.canvasViewport ?? device.model.canvasViewport!) }),
+    // Frozen compatibility mirror: account remains the destination and new edits use canvasBank.
+    canvas: structuredClone(account.model.canvas),
+    ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
+    canvasBank: canvasBank.merged,
     ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
   }
   const data = validateData({
@@ -107,10 +112,10 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
       added: {
         captures: captures.added,
         thoughts: device.model.legacyUiIds.filter(id => !account.model.legacyUiIds.includes(id)).length,
-        canvas: canvas.added,
+        canvases: canvasBank.added,
         events: calendarEvents.added,
       },
-      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvas.duplicates + temporalHistory.duplicates,
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates,
       settings: choices.settings,
       digest: choices.digest,
     },

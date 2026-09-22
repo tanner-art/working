@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { accountData, createAccountSession, type AccountAdapter, type AccountRow } from './accountStorage'
 import { defaultSettings } from './settings'
+import type { AppState } from './domain'
 
 const tick = async (ms: number) => { await vi.advanceTimersByTimeAsync(ms) }
 afterEach(() => { vi.useRealTimers() })
@@ -90,15 +91,15 @@ describe('canvas account text saves', () => {
       },
     }
     const session = createAccountSession(adapter, 'canvas-user', () => 'canvas-user')
-    const state = { objects: [], canvas: [{ id: 'node', type: 'text' as const, text: '', x: 1, y: 2 }] }
+    let state: AppState = { objects: [], canvas: [{ id: 'node', type: 'text' as const, text: '', x: 1, y: 2 }] }
     const digest = { enabled: false }
-    await session.open(accountData(state, defaultSettings, digest))
+    state = (await session.open(accountData(state, defaultSettings, digest))).state
     const queue = createCanvasTextSaveQueue(async retry => {
       await session.save(session.snapshot(state, defaultSettings, digest), retry)
       return true
     })
     for (let index = 0; index < 80; index++) {
-      state.canvas[0].text += 'x'
+      state.canvasBank!.canvases[0].elements[0].text += 'x'
       queue.edited()
       expect(queue.consumeStateUpdate()).toBe(true)
       await tick(10)
@@ -109,6 +110,6 @@ describe('canvas account text saves', () => {
     expect(writes).toBe(2)
     expect(queue.hasPending()).toBe(false)
     const reloaded = await createAccountSession(adapter, 'canvas-user', () => 'canvas-user').open()
-    expect(reloaded.state.canvas[0].text).toBe('x'.repeat(80))
+    expect(reloaded.state.canvasBank!.canvases[0].elements[0].text).toBe('x'.repeat(80))
   })
 })

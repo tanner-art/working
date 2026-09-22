@@ -1721,3 +1721,50 @@ TASK-026 has now merged to `main` via PR #39, so TASK-029 is unblocked for promo
 
 Commit: b61a39d plus review correction pending
 Review: pending independent review
+
+---
+
+### TASK-059 - Canvas Bank v1 and permanent canvas documents
+
+Status: IN PROGRESS
+Owner: Codex
+Reviewer: Pending independent review
+Priority: P0
+Milestone: Functional design
+
+Depends On:
+- TASK-056
+
+Goal:
+Make Bank the Canvas tab landing surface and let a user create, title, autosave, leave, reopen,
+and safely sync several permanent canvases.
+
+Scope:
+- Bank landing page with a prominent Think visually action and named canvas cards
+- immediate blank-canvas creation with title focus, in-canvas rename, autosave, and Back to Bank
+- deterministic, lossless projection of the existing single canvas as `canvas:legacy`
+- per-canvas session undo and repository isolation
+- strict local/account validation and conflict-stopping Bank merge
+- frozen top-level legacy canvas mirror for one release
+- rename the existing Organize Bank subsection to Thought folders
+
+Do Not:
+- add duplicate/archive/restore, thumbnails, hard deletion, durable D-010 revisions, gestures,
+  branches, pen, presentation, search, voice, AI, auth, or calendar changes
+- merge into main
+
+Acceptance Criteria:
+- opening Bank never auto-opens a canvas
+- create opens a blank saved canvas with the title focused; exit returns to Bank
+- title, elements, and viewport reload locally and through account storage
+- legacy elements, geometry, connections, grouping, shapes, and viewport migrate without loss
+- reads never write and new Bank edits never change the frozen legacy mirror
+- an account merge unions disjoint canvas ids, deduplicates matching ids, keeps the account
+  viewport, and stops on same-id title or element conflicts
+- phone layout is one column with 44 px controls and no horizontal overflow
+
+Result:
+Implemented on `codex/task-059-canvas-bank-v1`. See `docs/TASK-059_DELIVERY.md`.
+
+Commit: pending
+Review: pending independent review

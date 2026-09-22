@@ -1,6 +1,7 @@
 import { validTemporalHistory } from './temporalConfirmation'
 import type { AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
+import { bankFromLegacy, isCanvasBank } from './canvasBank'
 import { isAppState } from './store'
 
 // Compatibility authority stays inside migration. Validation uses detached copies;
@@ -131,7 +132,8 @@ function projectModel(model: PersistedState): AppState {
     if (reading.confirmation) registerCompatibility(item, reading.confirmation)
     return item
   })
-  return { objects, canvas: copy(model.canvas), ...(model.canvasViewport === undefined ? {} : { canvasViewport: copy(model.canvasViewport) }), model: copy(model) }
+  return { objects, canvas: copy(model.canvas), ...(model.canvasViewport === undefined ? {} : { canvasViewport: copy(model.canvasViewport) }),
+    canvasBank: copy(model.canvasBank ?? bankFromLegacy(model.canvas, model.canvasViewport)), model: copy(model) }
 }
 
 /** Append evidence versions on UI changes; source edits and destructive removals fail closed. */
@@ -140,6 +142,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   if (!state.model) {
     const model = migrateLegacyState({ objects: state.objects, canvas: state.canvas })
     if (state.canvasViewport !== undefined) model.canvasViewport = copy(state.canvasViewport)
+    model.canvasBank = copy(state.canvasBank ?? bankFromLegacy(state.canvas, state.canvasViewport))
     return model
   }
   if (!isPersistedState(state.model)) return fail()
@@ -147,6 +150,12 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   if (!unique(state.objects.map(o => o.id)) || !unique(state.canvas.map(e => e.id)) ||
       model.legacyUiIds.some(id => !state.objects.some(o => o.id === id))) return fail()
   const projection = legacyUiProjection(model)
+  // Once the Bank exists, the top-level canvas is a frozen one-release recovery mirror.
+  // Opening or editing a Bank document must never mutate it.
+  if (!equal(state.canvas, projection.canvas) || !equal(state.canvasViewport, projection.canvasViewport)) return fail()
+  const baselineBank = model.canvasBank ?? bankFromLegacy(model.canvas, model.canvasViewport)
+  const nextBank = state.canvasBank ?? baselineBank
+  if (baselineBank.canvases.some(saved => !nextBank.canvases.some(current => current.id === saved.id))) return fail()
   for (const item of state.objects) {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
@@ -188,8 +197,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
     }
   }
   model.legacyUiIds = state.objects.map(o => o.id)
-  model.canvas = copy(state.canvas)
-  if (state.canvasViewport !== undefined) model.canvasViewport = copy(state.canvasViewport)
+  model.canvasBank = copy(nextBank)
   if (state.temporalHistory !== undefined) {
     const previousHistory = model.temporalHistory ?? []
     if (!equal(state.temporalHistory.slice(0, previousHistory.length), previousHistory)) return fail()
@@ -243,8 +251,9 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'temporalHistory'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory'].includes(key))) return false
     if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
+    if (m.canvasBank !== undefined && !isCanvasBank(m.canvasBank)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
       m.relationships, m.legacyUiIds, m.canvas].every(Array.isArray)) return false
     if (![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents, m.relationships, m.canvas]

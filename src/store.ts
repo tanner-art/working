@@ -1,5 +1,6 @@
 import type { AppState, HistoryEvent, LegacyInterpretation, ObjectKind, ObjectMetadata, ObjectStatus, Relationship, SourceType, ThoughtObject, PersistedState } from './domain'
 import { isCanvasElements, isCanvasViewport } from './canvasDocument'
+import { isCanvasBank } from './canvasBank'
 export { newCanvasElement } from './canvasDocument'
 import { migrateLegacyState, isPersistedState, legacyUiProjection, reconcileLegacyUi } from './migration'
 
@@ -73,7 +74,8 @@ export function isAppState(value: unknown): value is AppState {
     Array.isArray(candidate.canvas) &&
     candidate.objects.every(isThoughtObject) &&
     isCanvasElements(candidate.canvas) &&
-    (candidate.canvasViewport === undefined || isCanvasViewport(candidate.canvasViewport))
+    (candidate.canvasViewport === undefined || isCanvasViewport(candidate.canvasViewport)) &&
+    (candidate.canvasBank === undefined || isCanvasBank(candidate.canvasBank))
 }
 export function makeObject(partial: Pick<ThoughtObject, 'kind' | 'originalContent' | 'source' | 'interpretation' | 'confidence'>): ThoughtObject {
   const now = new Date().toISOString()

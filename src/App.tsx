@@ -7,9 +7,11 @@ import { supabase, auth, accountLabel, dataOwnershipLabel, type AuthState } from
 import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { Canvas } from './Canvas'
+import { CanvasBank } from './CanvasBankView'
 import { useCanvasWorkspace } from './useCanvasWorkspace'
 import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
+import { addCanvas, canvasBankForState, createCanvasRecord, renameCanvas } from './canvasBank'
 import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
@@ -24,7 +26,7 @@ import { correctOriginal, reviseInterpretation, revisionNeedsReconfirmation, rev
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Canvas', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -129,13 +131,16 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
+  const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
+  const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
   const update = (fn: (current: AppState) => AppState) => {
     if (mergePlan) onCancelMerge()
     const next = fn(latestState.current)
     latestState.current = next
     setState(next)
   }
-  const canvas = useCanvasWorkspace(state, update, view === 'canvas')
+  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null)
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
   const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)
@@ -165,7 +170,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
     if (canvasTextSaveQueue.consumeStateUpdate()) return
     void persist()
   }, [state, preferences.value, digest, initial.error])
-  useEffect(() => { if (view !== 'canvas') canvasTextSaveQueue.flush() }, [view, canvasTextSaveQueue])
+  useEffect(() => { if (view !== 'canvas' || openCanvasId === null) canvasTextSaveQueue.flush() }, [view, openCanvasId, canvasTextSaveQueue])
   useEffect(() => () => canvasTextSaveQueue.dispose(), [canvasTextSaveQueue])
   useWorkspaceExitGuard(() => {
     if (initial.error || clearing.current) return false
@@ -224,7 +229,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
         <label>Profile settings after merge<select value={mergeChoices.settings} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, settings: event.target.value as AccountMergeChoices['settings'] })) }}><option value="account">Keep account settings</option><option value="device">Use this device’s settings</option></select></label>
         <label>Digest preference after merge<select value={mergeChoices.digest} onChange={event => { onCancelMerge(); setMergeChoices(value => ({ ...value, digest: event.target.value as AccountMergeChoices['digest'] })) }}><option value="account">Keep account preference</option><option value="device">Use this device’s preference</option></select></label>
         <button className="secondary" disabled={!accountAdapter || accountBusy || captureBusy} onClick={() => void previewMerge()}>Preview combined data</button>
-        {mergePlan && <div className="merge-preview" role="status"><p><strong>Ready to add from this device:</strong> {mergePlan.preview.added.thoughts} thoughts, {mergePlan.preview.added.canvas} canvas blocks, {mergePlan.preview.added.events} calendar events.</p><p>{mergePlan.preview.duplicates} identical records will stay single. Nothing has been written yet.</p><div className="settings-actions"><button className="secondary" onClick={onCancelMerge}>Cancel preview</button><button className="primary" disabled={accountBusy || captureBusy} onClick={() => void confirmMerge()}>Confirm and save combined data</button></div></div>}
+        {mergePlan && <div className="merge-preview" role="status"><p><strong>Ready to add from this device:</strong> {mergePlan.preview.added.thoughts} thoughts, {mergePlan.preview.added.canvases} canvases, {mergePlan.preview.added.events} calendar events.</p><p>{mergePlan.preview.duplicates} identical records will stay single. Nothing has been written yet.</p><div className="settings-actions"><button className="secondary" onClick={onCancelMerge}>Cancel preview</button><button className="primary" disabled={accountBusy || captureBusy} onClick={() => void confirmMerge()}>Confirm and save combined data</button></div></div>}
       </div>}
     </>}
     {cloud && <><p>Digest preference is saved with your account. Account mode currently offers the digest on demand; scheduled notices remain local-mode only.</p><label><input type="checkbox" checked={digest!.enabled} onChange={event => setDigest(setDeliveryEnabled(digest!, event.target.checked, new Date()))} />Enable 7 AM in-app digest preference</label><button className="secondary" onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) window.location.reload() }}>Return to this device’s local data</button></>}
@@ -280,11 +285,35 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
     setSelectedObjectId(item.id)
   }
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
+  const canvasBank = canvasBankForState(state)
+  const openCanvas = openCanvasId ? canvasBank.canvases.find(item => item.id === openCanvasId) : undefined
+  const createCanvas = () => {
+    const record = createCanvasRecord()
+    update(current => addCanvas(current, record))
+    setBankFocusTarget('create')
+    setFocusCanvasTitle(true)
+    setOpenCanvasId(record.id)
+  }
+  const openSavedCanvas = (id: string) => {
+    setBankFocusTarget(id)
+    setFocusCanvasTitle(false)
+    setOpenCanvasId(id)
+  }
+  const exitCanvas = () => {
+    canvas?.finishText()
+    canvasTextSaveQueue.flush()
+    setOpenCanvasId(null)
+  }
+  const navigate = (next: View) => {
+    if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+    if (next === 'canvas') setBankFocusTarget(null)
+    setView(next)
+  }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => setView(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => setView('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -317,7 +346,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} />}
-      {view === 'canvas' && <Canvas elements={state.canvas} viewport={state.canvasViewport ?? DEFAULT_CANVAS_VIEWPORT} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={() => { canvas.finishText(); canvasTextSaveQueue.flush(); setView('today') }} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />}
+      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
     {selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
@@ -393,7 +422,7 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
       <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage(accountActive ? 'Settings updated. Account save status is shown in Data.' : 'Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
         <fieldset disabled={!!error}><label>Display name / profile label<input maxLength={80} autoComplete="nickname" value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })} placeholder="Personal space" /></label>
-          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas</option></select></label>
+          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas Bank</option></select></label>
           <button className="primary" type="submit">Save settings</button></fieldset>
       </form><p role="status">{message}</p>
     </section>
@@ -463,7 +492,7 @@ function Review({ objects, onChangeKind, onConfirm, onReject, onOpen }: { object
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p>{item.kind === 'commitment' && <small>Confirms the obligation only.</small>}{item.kind === 'reminder' && <small>Choose an object type before confirming.</small>}</div></div>
     {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <div className="review-actions"><select aria-label="Object type" value={item.kind} onChange={event => onChangeKind(item.id, event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select><button className="secondary" onClick={() => onOpen(item.id)}>Edit</button><button className="primary" disabled={item.kind === 'reminder'} onClick={() => onConfirm(item.id, item.kind)}>Confirm</button></div>}
   </article>)}</div>}</details>
-    <section className="bank-section" aria-labelledby="bank-heading"><h2 id="bank-heading">Bank</h2>
+    <section className="bank-section" aria-labelledby="bank-heading"><h2 id="bank-heading">Thought folders</h2>
       <p>Filed thoughts grouped by context: Personal or Home, Business or Work. Other contexts stay Unfiled. Use Edit → Context or project to change the grouping.</p>
       {bankFolders.map(folder => <details className="compact-disclosure bank-folder" key={folder}>
         <summary>{folder} <span>{folders[folder].length}</span><span className="disclosure-caret" aria-hidden="true" /></summary>

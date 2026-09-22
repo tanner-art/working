@@ -4,12 +4,32 @@ import { newCanvasElement } from './canvasDocument'
 import { CANVAS_SIZE, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 
-export function Canvas({ elements, viewport, onViewport, onCommit, onText, onFinishText, canUndo, canRedo, onUndo, onRedo, onCaptureObject, onExit, saveStatus }: {
+export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onViewport, onCommit, onText, onFinishText, canUndo, canRedo, onUndo, onRedo, onCaptureObject, onExit, saveStatus }: {
+  title: string; autoFocusTitle: boolean; onTitle: (title: string) => void
   elements: CanvasElement[]; viewport: CanvasViewport; onViewport: (viewport: CanvasViewport) => void
   onCommit: (elements: CanvasElement[]) => void; onText: (id: string, text: string) => void; onFinishText: () => void
   canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void
   onCaptureObject: (element: CanvasElement) => void; onExit: () => void; saveStatus: string
 }) {
+  const [titleDraft, setTitleDraft] = useState(title)
+  const titleInput = useRef<HTMLInputElement>(null)
+  const cancelTitle = useRef(false)
+  const saveTitle = useRef(onTitle)
+  saveTitle.current = onTitle
+  useEffect(() => setTitleDraft(title), [title])
+  useEffect(() => { if (autoFocusTitle) { titleInput.current?.focus(); titleInput.current?.select() } }, [autoFocusTitle])
+  useEffect(() => {
+    const clean = titleDraft.trim()
+    if (!clean || clean === title) return
+    const timer = window.setTimeout(() => saveTitle.current(clean), 700)
+    return () => window.clearTimeout(timer)
+  }, [titleDraft, title])
+  const commitTitle = () => {
+    if (cancelTitle.current) { cancelTitle.current = false; setTitleDraft(title); return }
+    const clean = titleDraft.trim()
+    if (!clean) { setTitleDraft(title); return }
+    if (clean !== title) onTitle(clean)
+  }
   const [panPreview, setPanPreview] = useState<{ x: number; y: number } | null>(null)
   const pan = panPreview ?? viewport, scale = viewport.scale
   const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
@@ -92,8 +112,9 @@ export function Canvas({ elements, viewport, onViewport, onCommit, onText, onFin
   return <div className="canvas-page">
     <div className="canvas-head">
     <div>
-    <button className="canvas-exit" onClick={onExit}>← Back to Today</button>
-    <h1>Untitled canvas</h1>
+    <button className="canvas-exit" onClick={onExit}>← Back to Bank</button>
+    <label className="sr-only" htmlFor="canvas-title">Canvas title</label>
+    <input ref={titleInput} id="canvas-title" className="canvas-title-input" maxLength={120} value={titleDraft} onChange={event => { cancelTitle.current = false; setTitleDraft(event.target.value) }} onBlur={commitTitle} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { cancelTitle.current = true; setTitleDraft(title); event.currentTarget.blur() } }} />
     <p className="canvas-save-status" role="status">{saveStatus}</p>
     </div>
     <div className="canvas-tools">
