@@ -3,6 +3,9 @@
 // intentionally does not import from src/: src/ modules read Vite's import.meta.env at
 // load time, which is not defined in this runtime and would crash the function on cold
 // start. Validation logic below mirrors src/aiInterpretation.ts by design, not by import.
+//
+// Provider: Vercel AI Gateway (https://ai-gateway.vercel.sh/v1/messages)
+// Auth: Bearer token from AI_GATEWAY_API_KEY, or VERCEL_OIDC_TOKEN as OIDC fallback.
 export const config = { runtime: 'edge' }
 
 declare const process: { env: Record<string, string | undefined> }
@@ -24,7 +27,7 @@ const PROVIDER_TIMEOUT_MS = 15_000
 // Product cost boundary: all Threadline interpretation traffic uses Haiku. This is
 // intentionally not environment-overridable, so a dashboard setting cannot silently
 // move routine captures onto a larger, more expensive model.
-export const AI_INTERPRETATION_MODEL = 'claude-haiku-4-5-20251001'
+export const AI_INTERPRETATION_MODEL = 'anthropic/claude-haiku-4.5'
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -114,14 +117,15 @@ function coerceProposal(capture: CaptureInput, input: Record<string, unknown>) {
   throw new Error(`Provider returned an unsupported proposedKind: ${kind || 'missing'}`)
 }
 
-async function requestProviderInterpretation(capture: CaptureInput, apiKey: string, model: string) {
+async function requestProviderInterpretation(capture: CaptureInput, auth: { token: string; kind: 'bearer' | 'oidc' }, model: string) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
   let response: Response
   try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
+    const authHeader = `Bearer ${auth.token}`
+    response = await fetch('https://ai-gateway.vercel.sh/v1/messages', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      headers: { 'content-type': 'application/json', 'authorization': authHeader },
       body: JSON.stringify({
         model,
         max_tokens: 400,
@@ -147,12 +151,25 @@ export default async function handler(request: Request): Promise<Response> {
   const capture = validateCapture(body)
   if (!capture) return json(400, { error: 'invalid_capture' })
 
-  // Server-only secret. Must never carry a VITE_ prefix, which Vite would expose to the
+  // The server has its own opt-in gate because Vercel automatically injects OIDC credentials.
+  // A client flag alone cannot protect this public endpoint from direct requests.
+  if (process.env.AI_INTERPRETATION_PROVIDER !== 'enabled') {
+    return json(503, { error: 'provider_disabled', message: 'AI interpretation is not enabled for this deployment.' })
+  }
+
+  // Server-only secrets. Must never carry a VITE_ prefix, which Vite would expose to the
   // client bundle; see docs/AI_INTERPRETATION.md for the deployment contract.
-  const apiKey = process.env.AI_INTERPRETATION_API_KEY
-  if (!apiKey) return json(503, { error: 'not_configured', message: 'AI_INTERPRETATION_API_KEY is not set.' })
+  // Try AI_GATEWAY_API_KEY first (Bearer token), then fall back to VERCEL_OIDC_TOKEN (OIDC).
+  const bearerToken = process.env.AI_GATEWAY_API_KEY
+  const oidcToken = process.env.VERCEL_OIDC_TOKEN
+  if (!bearerToken && !oidcToken) {
+    return json(503, { error: 'not_configured', message: 'Neither AI_GATEWAY_API_KEY nor VERCEL_OIDC_TOKEN is set.' })
+  }
+  const auth = bearerToken
+    ? { token: bearerToken, kind: 'bearer' as const }
+    : { token: oidcToken!, kind: 'oidc' as const }
   try {
-    const proposal = await requestProviderInterpretation(capture, apiKey, AI_INTERPRETATION_MODEL)
+    const proposal = await requestProviderInterpretation(capture, auth, AI_INTERPRETATION_MODEL)
     return json(200, proposal)
   } catch (error) {
     return json(502, { error: 'provider_error', message: error instanceof Error ? error.message : 'Unknown provider error.' })

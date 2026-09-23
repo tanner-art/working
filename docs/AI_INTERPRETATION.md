@@ -1,9 +1,8 @@
-# Provider-Backed AI Interpretation (TASK-028, GitHub issue #38)
+# Provider-Backed AI Interpretation (TASK-122, GitHub issue #113)
 
-Status: implemented behind the existing interpretation boundary, opt-in and fail-closed.
-This is the precursor slice for TASK-031 (real AI interpretation provider) — it wires a
-real server-backed provider call, but does not turn it on by default and does not change
-what the browser does today unless explicitly configured.
+Status: implemented and migrated to Vercel AI Gateway, behind the existing interpretation boundary, opt-in and fail-closed.
+This slice uses a real server-backed provider call via Vercel AI Gateway (not the Anthropic API directly),
+but does not turn it on by default and does not change what the browser does today unless explicitly configured.
 
 ## What this is
 
@@ -30,12 +29,15 @@ server-only environment variable and never forwards it to the client.
 | Variable | Where | Purpose |
 | --- | --- | --- |
 | `VITE_AI_INTERPRETATION_PROVIDER` | Client (Vite `VITE_*`, safe to ship in the bundle) | Feature flag only, no secret. Set to exactly `enabled` to let the browser attempt the provider endpoint. Any other value (including unset) keeps the app fully deterministic and makes zero network calls to `/api/interpret`. |
-| `AI_INTERPRETATION_API_KEY` | Server only (Vercel Production/Preview env vars) | The provider API key. Must **never** use a `VITE_` prefix — Vite exposes `VITE_*` vars to the client bundle. If unset, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
-Threadline pins provider calls to Anthropic Haiku (`claude-haiku-4-5-20251001`) in code.
+| `AI_INTERPRETATION_PROVIDER` | Server only (set for Preview only during validation) | Server-side safety gate. Set to exactly `enabled` before the endpoint may use any provider credential. Automatic OIDC alone never activates the endpoint. Leave unset in Production until production rollout is explicitly approved. |
+| `AI_GATEWAY_API_KEY` | Server only (Vercel Production/Preview env vars) | Bearer token for Vercel AI Gateway. Must **never** use a `VITE_` prefix — Vite exposes `VITE_*` vars to the client bundle. If set, this takes precedence over `VERCEL_OIDC_TOKEN`. |
+| `VERCEL_OIDC_TOKEN` | Server only (Vercel automatic) | OIDC fallback for Vercel AI Gateway when `AI_GATEWAY_API_KEY` is not set. Vercel automatically provides it to deployments. If neither credential is available, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
+
+Threadline pins provider calls to Anthropic Haiku (`anthropic/claude-haiku-4.5`) in code.
 There is no model environment override, so a dashboard change cannot silently move routine
 captures to Sonnet or Opus. Changing the model requires a reviewed code change.
 
-Local development and any environment with none of these set behaves exactly as before this
+Local development and any environment without both enable flags set behaves exactly as before this
 task: deterministic-only, no network call, no setup required.
 
 ## Endpoint contract: `POST /api/interpret`
@@ -59,8 +61,9 @@ Responses:
   were omitted or different.
 - `400 { error: 'invalid_json' | 'invalid_capture' }` — malformed request.
 - `405 { error: 'method_not_allowed' }` — non-`POST` request.
-- `503 { error: 'not_configured', message }` — `AI_INTERPRETATION_API_KEY` is not set.
-- `502 { error: 'provider_error', message }` — the upstream provider call failed, timed out,
+- `503 { error: 'provider_disabled', message }` — the server-only provider gate is not enabled for this deployment.
+- `503 { error: 'not_configured', message }` — the server gate is enabled but neither `AI_GATEWAY_API_KEY` nor `VERCEL_OIDC_TOKEN` is set.
+- `502 { error: 'provider_error', message }` — the upstream provider call (to Vercel AI Gateway) failed, timed out,
   or returned output the server could not use.
 
 ## Confirmation rules are preserved (D-009)
@@ -85,24 +88,32 @@ grants notification-delivery eligibility. All existing Review/confirmation behav
 
 ## Provider call implementation
 
-`api/interpret.ts` calls Anthropic's Messages API directly over `fetch` with a forced tool
-call (`propose_interpretation`, a strict JSON schema) so the response is structured rather
-than free text — no provider SDK dependency was added. This was a deliberate choice for this
-task, not only a fallback: it keeps `package.json`/`pnpm-lock.yaml` untouched, avoids adding a
-server dependency to a project that previously had none, and sidesteps any need to install
-packages to deliver a real, working provider call. Swapping the provider or model later only
-requires editing `api/interpret.ts`'s request/response mapping; `src/aiInterpretation.ts` and
+`api/interpret.ts` calls Vercel AI Gateway (`https://ai-gateway.vercel.sh/v1/messages`) over `fetch`
+with a forced tool call (`propose_interpretation`, a strict JSON schema) so the response is structured
+rather than free text — no provider SDK dependency was added. Vercel AI Gateway provides a unified
+interface to Anthropic's Messages API (and future providers) with optional features like token caching
+and request routing.
+
+Authentication uses a Bearer token from `AI_GATEWAY_API_KEY` if present, or falls back to `VERCEL_OIDC_TOKEN`
+(Vercel's automatic OIDC token, available in Preview and Production deployments) when the Bearer key is not set.
+This design eliminates the need for manual secret management in most Vercel deployments while supporting
+explicit API keys where preferred.
+
+No provider SDK dependency was added. This keeps `package.json`/`pnpm-lock.yaml` untouched, avoids
+adding a server dependency to a project that previously had none, and sidesteps any need to install
+packages to deliver a real, working provider call. Swapping the provider or model later only requires
+editing `api/interpret.ts`'s request/response mapping; `src/aiInterpretation.ts` and
 `src/interpretationService.ts` do not need to change.
 
 ## Limitations and follow-ups
 
-- **Live provider validation is an open follow-up/blocker.** This session had no shell/network
-  access to run `pnpm install`, hit the real Anthropic API, or deploy to Vercel, so the actual
-  end-to-end call (`api/interpret.ts` → `api.anthropic.com`) has been reviewed carefully by
-  hand but not executed. Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled` in any real
-  environment: set `AI_INTERPRETATION_API_KEY` in Vercel, deploy, and manually verify a real
-  capture against the live endpoint (success, missing-key, and induced-failure cases) before
-  relying on it.
+- **Live provider validation is required before enabling in production.** The endpoint and authentication
+  paths have been implemented and tested with mocked fetch. Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled`
+  in any real environment:
+  1. Set `AI_INTERPRETATION_PROVIDER=enabled` for Preview only, then ensure either `AI_GATEWAY_API_KEY` is set or rely on automatic `VERCEL_OIDC_TOKEN`.
+  2. Deploy to Vercel (Preview or Production) and manually verify a real capture against the live endpoint.
+  3. Test success cases, missing-key (503), and induced-failure fallback scenarios.
+  4. Confirm the Vercel AI Gateway connection is stable and performant.
 - One proposal per capture, matching the existing `InterpretationService` contract's
   documented limitation in `src/interpretationService.ts` — this slice does not change that.
 - No retry/backoff or rate limiting is implemented; a provider outage simply falls back to
@@ -119,7 +130,10 @@ requires editing `api/interpret.ts`'s request/response mapping; `src/aiInterpret
 
 ### Exact response to move forward
 
-`Set AI_INTERPRETATION_API_KEY in Vercel Production/Preview, deploy, and manually validate a real /api/interpret call (success, missing-key 503, and induced-failure fallback) before enabling VITE_AI_INTERPRETATION_PROVIDER=enabled anywhere; then proceed with TASK-031's broader evaluation.`
+1. Deploy to Vercel with `AI_INTERPRETATION_PROVIDER=enabled` in Preview only (test with either `AI_GATEWAY_API_KEY` explicitly set or with automatic `VERCEL_OIDC_TOKEN`).
+2. Manually validate a real /api/interpret call (success, missing-key 503, and induced-failure fallback).
+3. Enable `VITE_AI_INTERPRETATION_PROVIDER=enabled` in Preview only.
+4. Proceed with TASK-031's broader evaluation.
 
 
 ## TASK-031 follow-up: safety and visibility hardening
@@ -128,5 +142,18 @@ This follow-up keeps provider-backed interpretation disabled unless `VITE_AI_INT
 
 Additional evaluator coverage now checks uncertain action-like captures, consequential reminder/timing captures, cancellation/change-of-intent language, provider status labels, and provider confidence bounds. `pnpm check` also runs `tsc -p tsconfig.api.json` so the Vercel Edge Function receives dedicated type-check coverage without adding provider keys or calling the live provider.
 
-### Exact response to move forward
-`Set AI_INTERPRETATION_API_KEY only as a server-side Vercel env var, deploy, validate /api/interpret success and failure cases manually, then consider enabling VITE_AI_INTERPRETATION_PROVIDER=enabled in Preview only.`
+### Preview Activation Checklist
+
+Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled`:
+
+- [ ] Deploy to Vercel with `AI_INTERPRETATION_PROVIDER=enabled` in Preview only and either `AI_GATEWAY_API_KEY` set or automatic `VERCEL_OIDC_TOKEN` available.
+- [ ] Call `/api/interpret` manually with a valid capture (curl or Postman) — expect 200 + proposal.
+- [ ] In a local or isolated deployment where automatic OIDC is unavailable, unset auth credentials and call `/api/interpret` again — expect 503 with not_configured.
+- [ ] Unset `AI_INTERPRETATION_PROVIDER` while OIDC remains available and call `/api/interpret` — expect 503 with provider_disabled and no Gateway request.
+- [ ] Intentionally send malformed output mock and verify endpoint returns 502.
+- [ ] Verify deterministic fallback activates when provider is unavailable (network error, timeout, etc.).
+- [ ] Confirm that `proposedAction.summary` always matches `proposal.summary` (D-009 enforcement).
+- [ ] Confirm that `reviewState` is always `"review"` regardless of provider output.
+- [ ] Enable `VITE_AI_INTERPRETATION_PROVIDER=enabled` in Preview env vars.
+- [ ] Create a test capture in Preview and verify the provider proposal appears in Review.
+- [ ] Document that producer can only be enabled for Preview; production rollout requires explicit approval.
