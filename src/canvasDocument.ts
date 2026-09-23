@@ -27,6 +27,7 @@ export function isCanvasElements(value: unknown): value is CanvasElement[] {
 
 const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow', 'freehand']
 const freehandKeys = new Set(['id', 'type', 'x', 'y', 'rawPoints', 'projection', 'refinements'])
+const isColor = (value: unknown): value is string => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
 const isPerimeterAnchor = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
   Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
   (value as { x: number }).x >= 0 && (value as { x: number }).x <= 1 &&
@@ -60,6 +61,8 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.connectionPath === undefined || ['straight', 'curved'].includes(item.connectionPath)) &&
     (item.connectionPattern === undefined || ['solid', 'dashed', 'dotted'].includes(item.connectionPattern)) &&
     (item.connectionWeight === undefined || ['light', 'regular', 'bold'].includes(item.connectionWeight)) &&
+    (item.fillColor === undefined || ((item.type === 'text' || item.type === 'container') && isColor(item.fillColor))) &&
+    (item.connectionColor === undefined || (item.type === 'arrow' && isColor(item.connectionColor))) &&
     (item.sourceAnchor === undefined || isPerimeterAnchor(item.sourceAnchor)) &&
     (item.targetAnchor === undefined || isPerimeterAnchor(item.targetAnchor)) &&
     (item.curveHandle === undefined || isCurveHandle(item.curveHandle)) &&
@@ -70,7 +73,7 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.type !== 'freehand' || (
       Object.keys(value).every(key => freehandKeys.has(key)) && item.rawPoints !== undefined && item.shape === undefined && item.text === undefined && item.width === undefined && item.height === undefined && item.fromId === undefined && item.toId === undefined && item.groupId === undefined && item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined &&
       hasValidFreehandRefinement(item))) &&
-    (item.type === 'arrow' || item.type === 'freehand' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
+    (item.type === 'arrow' || item.type === 'freehand' || (item.connectionPath === undefined && item.connectionPattern === undefined && item.connectionWeight === undefined && item.connectionColor === undefined && item.sourceAnchor === undefined && item.targetAnchor === undefined && item.curveHandle === undefined)) &&
     (item.type !== 'arrow' || (typeof item.fromId === 'string' && typeof item.toId === 'string' &&
       (item.curveHandle === undefined || item.connectionPath === 'curved')))
 }

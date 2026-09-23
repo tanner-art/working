@@ -79,6 +79,10 @@ export interface CanvasElement {
   connectionPath?: 'straight' | 'curved'
   connectionPattern?: 'solid' | 'dashed' | 'dotted'
   connectionWeight?: 'light' | 'regular' | 'bold'
+  /** Canvas-only fill color for blocks and shapes. */
+  fillColor?: string
+  /** Canvas-only stroke color for visual connections. */
+  connectionColor?: string
   /** Canvas-only perimeter hints; endpoint identities stay authoritative. */
   sourceAnchor?: CanvasPerimeterAnchor
   targetAnchor?: CanvasPerimeterAnchor

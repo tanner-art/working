@@ -29,6 +29,16 @@ describe('canvas bulleted-list variant', () => {
     expect(isCanvasElements([{ ...textNode, type: 'container', nodeVariant: 'bulleted-list' }])).toBe(false)
     expect(isCanvasElements([{ id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'a', toId: 'b', nodeVariant: 'bulleted-list' }])).toBe(false)
   })
+
+  it('accepts valid visual colors and rejects malformed or misplaced colors', () => {
+    const arrow: CanvasElement = { id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'a', toId: 'b' }
+    expect(isCanvasElements([{ ...textNode, fillColor: '#f3dcdf' }])).toBe(true)
+    expect(isCanvasElements([{ ...textNode, fillColor: 'red' }])).toBe(false)
+    expect(isCanvasElements([{ ...textNode, connectionColor: '#123456' }])).toBe(false)
+    expect(isCanvasElements([{ ...arrow, connectionColor: '#316b8a' }])).toBe(true)
+    expect(isCanvasElements([{ ...arrow, connectionColor: '#xyzxyz' }])).toBe(false)
+    expect(isCanvasElements([{ ...arrow, fillColor: '#ffffff' }])).toBe(false)
+  })
 })
 
 describe('freehand canvas elements', () => {
