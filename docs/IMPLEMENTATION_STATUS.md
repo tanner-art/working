@@ -16,7 +16,7 @@ Canonical, living status doc. Updated 2026-09-13 by TASK-012. This supersedes th
 - Today screen showing confirmed actions and fixed commitments.
 - A separate Commitments view (time-bound reminders and commitments only; no flexible execution work mixed in).
 - An infinite-feeling pan/zoom Canvas with text nodes, groups, arrows, drag, deletion, and persistence — no undo/redo, no freehand or arbitrary shapes, no resize.
-- A single persisted `AppState` (`ThoughtObject[]` + `CanvasElement[]`) in `src/store.ts`, loaded/saved to localStorage with silent seed-data fallback on any read/parse failure.
+- A single persisted `AppState` (`ThoughtObject[]` + `CanvasElement[]`) in `src/store.ts`, loaded/saved to localStorage with explicit failure, retry, and backup handling (TASK-011, integrated as 3458372).
 
 ## Architecture mismatches (tracked, not yet fixed)
 
@@ -29,7 +29,7 @@ The current MVP predates the entity boundaries in `docs/ARCHITECTURE.md`. Specif
 | Commitment and CalendarEvent are not distinguished; `fixedCommitments()` conflates `commitment` and `reminder` kinds | Commitment and CalendarEvent are distinct (D-005) | TASK-002, TASK-007 |
 | `confirmObject()` sets `status: 'confirmed'` directly from a click, and the generic object editor can also set status to `confirmed` via a plain dropdown | Consequential transitions require one explicit, traceable confirmation gesture (D-009) | TASK-003 |
 | `Relationship` is a flat `{targetId, type}` pair | Relationships need explicit endpoint identity, scope, and provenance | TASK-005, TASK-006 (bundled into TASK-002/003) |
-| `loadState`/`saveState` silently fall back to seed data or swallow write failures | Persistence must fail loud and preserve user work | TASK-011 |
+| Persistence failure handling is integrated; guided backup import remains unscoped | Preserve user work | TASK-011 complete; recovery follow-up proposed |
 | Canvas has no undo/redo and no revision history | Canvas edits should create preserved revisions (OD-002, open) | TASK-010 |
 
 ## Incomplete / deferred features
@@ -45,14 +45,14 @@ Intentionally deferred, not yet scheduled as tasks:
 
 ## Reusable work not yet ported
 
-`docs/ARCHIVE_SALVAGE_AUDIT.md` found substantial application work on the archived `wip/pre-orchestration` branch built on top of the current architecture docs but against the old flat `ThoughtObject` model. None of it has been ported to `main` yet. Per-item classification and reasoning live in the audit; current porting status:
+`docs/ARCHIVE_SALVAGE_AUDIT.md` found substantial application work on the archived `wip/pre-orchestration` branch built on top of the current architecture docs but against the old flat `ThoughtObject` model. TASK-011 persistence handling and TASK-012–014 documentation have been ported to main. Per-item classification and reasoning live in the audit; current porting status:
 
 | Item | Audit verdict | Status |
 | --- | --- | --- |
 | `canvasHistory.ts` undo/redo stack | MODIFY | Not ported — TASK-010 (READY) |
 | `dependencies.ts` cycle-safe dependency graph | MODIFY | Not ported — TASK-005 (BACKLOG, needs TASK-002/003) |
 | `morningDigest.ts` | MODIFY | Not ported — TASK-007 (BACKLOG, needs TASK-002) |
-| `store.ts` load/save failure handling | KEEP | Not ported — TASK-011 (READY) |
+| `store.ts` load/save failure handling | KEEP | Integrated — TASK-011 (3458372, 5553a7f) |
 | `objectWorkflow.ts` parent/child + dependency-aware helpers | MODIFY | Not ported — TASK-005/TASK-006 (BACKLOG) |
 | `interpreter.ts` confidence/ambiguity heuristics | MODIFY | Not ported — TASK-004 (BACKLOG, needs TASK-002) |
 | App.tsx UI surfaces (Objects workbench, digest strip, dependency/parent editors, history panel) | MODIFY / UNCLEAR (confirm flow) | Not ported — TASK-008 (BACKLOG) |
