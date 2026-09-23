@@ -1,4 +1,5 @@
 import { validTemporalHistory } from './temporalConfirmation'
+import { isGroupingReviewState } from './groupingProposal'
 import type { AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
 import { bankFromLegacy, isCanvasBank } from './canvasBank'
@@ -251,7 +252,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory', 'groupingReview'].includes(key))) return false
     if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
     if (m.canvasBank !== undefined && !isCanvasBank(m.canvasBank)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
@@ -285,6 +286,6 @@ export function isPersistedState(value: unknown): value is PersistedState {
       ['scheduled', 'cancelled'].includes(e.status) && Array.isArray(e.objectIds) &&
       e.objectIds.every(id => m.semanticObjects.some(o => o.id === id)) && Array.isArray(e.captureIds) &&
       e.captureIds.every(id => m.captures.some(c => c.id === id)))) return false
-    return validTemporalHistory(m) && isAppState(projectModel(m))
+    return validTemporalHistory(m) && (m.groupingReview === undefined || isGroupingReviewState(m.groupingReview, m.captures)) && isAppState(projectModel(m))
   } catch { return false }
 }

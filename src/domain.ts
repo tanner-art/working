@@ -1,5 +1,6 @@
 import type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
 export type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
+import type { GroupingReviewState } from './groupingProposal'
 
 /** Legacy UI vocabulary only. Persisted SemanticKind deliberately excludes reminders. */
 export type ObjectKind = 'idea' | 'action' | 'reminder' | 'project' | 'commitment' | 'person' | 'reference' | 'objective'
@@ -188,6 +189,8 @@ export interface PersistedState {
   canvas: CanvasElement[]
   canvasViewport?: CanvasViewport
   canvasBank?: CanvasBank
+  /** Additive review-only suggestions and user-confirmed capture links. */
+  groupingReview?: GroupingReviewState
 }
 export interface SourceCorrection {
   readonly id: string
