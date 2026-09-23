@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",
+    "@vercel/firewall": "^1.2.5",
     "@vercel/oidc": "^3.8.9",
     "@vitejs/plugin-react": "latest",
     "react": "latest",

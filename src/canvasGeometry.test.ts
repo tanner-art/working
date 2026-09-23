@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CanvasElement } from './domain'
-import { canvasSize, canvasConnector, canvasConnectorPath, connectionAppearance, convertCanvasNode, resizeCanvasNode, updateCanvasConnection } from './canvasGeometry'
+import { DEFAULT_CONNECTION_COLOR, canvasSize, canvasConnector, canvasConnectorPath, connectionAppearance, connectionMarkerAppearance, convertCanvasNode, resizeCanvasNode, updateCanvasConnection, updateCanvasNodeAppearance } from './canvasGeometry'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
 import { moveCanvasNode, setCanvasGroup } from './canvasGroups'
 import { loadStateResult, saveState } from './store'
@@ -88,11 +88,13 @@ describe('canvas size and conversion', () => {
   })
 
   it('maps connection pattern and weight to visible SVG styling with legacy defaults', () => {
-    expect(connectionAppearance(nodes[2])).toEqual({ strokeWidth: 2, strokeDasharray: undefined, strokeLinecap: 'butt' })
+    expect(connectionAppearance(nodes[2])).toEqual({ stroke: DEFAULT_CONNECTION_COLOR, strokeWidth: 2, strokeDasharray: undefined, strokeLinecap: 'butt' })
     expect(connectionAppearance({ ...nodes[2], connectionPattern: 'dotted', connectionWeight: 'bold' }))
-      .toEqual({ strokeWidth: 5, strokeDasharray: '2 7', strokeLinecap: 'round' })
-    expect(connectionAppearance({ ...nodes[2], connectionPattern: 'dashed', connectionWeight: 'light' }))
-      .toEqual({ strokeWidth: 1, strokeDasharray: '12 8', strokeLinecap: 'butt' })
+      .toEqual({ stroke: DEFAULT_CONNECTION_COLOR, strokeWidth: 5, strokeDasharray: '2 7', strokeLinecap: 'round' })
+    expect(connectionAppearance({ ...nodes[2], connectionPattern: 'dashed', connectionWeight: 'light', connectionColor: '#316b8a' }))
+      .toEqual({ stroke: '#316b8a', strokeWidth: 1, strokeDasharray: '12 8', strokeLinecap: 'butt' })
+    expect(connectionMarkerAppearance(nodes[2])).toEqual({ fill: DEFAULT_CONNECTION_COLOR })
+    expect(connectionMarkerAppearance({ ...nodes[2], connectionColor: '#316b8a' })).toEqual({ fill: '#316b8a' })
   })
 
   it('updates only the selected connection and participates in exact undo/redo', () => {
@@ -102,6 +104,16 @@ describe('canvas size and conversion', () => {
     const history = commitCanvas(emptyCanvasHistory(nodes), styled)
     expect(undoCanvas(history).present).toEqual(nodes)
     expect(redoCanvas(undoCanvas(history)).present).toEqual(styled)
+  })
+
+  it('changes block and connection colors as independent undoable edits', () => {
+    const filled = updateCanvasNodeAppearance(nodes, 'a', '#F3DCDF')
+    expect(filled[0]).toEqual({ ...nodes[0], fillColor: '#f3dcdf' })
+    const colored = updateCanvasConnection(filled, 'link', { connectionColor: '#6C4A91' })
+    const history = commitCanvas(commitCanvas(emptyCanvasHistory(nodes), filled), colored)
+    expect(history.present[2]).toEqual({ ...nodes[2], connectionColor: '#6c4a91' })
+    expect(undoCanvas(history).present).toEqual(filled)
+    expect(undoCanvas(undoCanvas(history)).present).toEqual(nodes)
   })
 
   it('persists styled connections while preserving legacy connections unchanged', () => {

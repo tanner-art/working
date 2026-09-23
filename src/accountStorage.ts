@@ -6,6 +6,7 @@ import { readSettings, type LocalSettings } from './settings'
 import { readDelivery, type DigestDelivery } from './digestDelivery'
 import { bankFromLegacy } from './canvasBank'
 import { mergeCanvasBanks } from './canvasBankMerge'
+import type { GroupingReviewState } from './groupingProposal'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
@@ -27,6 +28,16 @@ export interface AccountMergePlan {
 export interface AccountAdapter {
   read(userId: string): Promise<AccountRow | null>
   write(userId: string, data: AccountData, revision: string | null): Promise<AccountRow>
+}
+export type AccountStorageErrorCode = 'load-unavailable' | 'save-unavailable' | 'conflict' | 'owner-mismatch'
+export class AccountStorageError extends Error {
+  constructor(readonly code: AccountStorageErrorCode, message: string) {
+    super(message)
+    this.name = 'AccountStorageError'
+  }
+}
+export function isAccountStorageError(error: unknown, code?: AccountStorageErrorCode): error is AccountStorageError {
+  return error instanceof AccountStorageError && (code === undefined || error.code === code)
 }
 export const loadFailure = 'Account data could not be loaded. Check your connection, table configuration and account access (RLS), then retry. This device’s data is untouched.'
 export const saveFailure = 'Account changes could not be saved. Keep this tab open and download an export. Check your connection and account access (RLS); if another device changed the account, export first, then load its latest data.'
@@ -84,6 +95,15 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     device.model.canvasBank ?? bankFromLegacy(device.model.canvas, device.model.canvasViewport),
   )
   const temporalHistory = mergeRecords(account.model.temporalHistory ?? [], device.model.temporalHistory ?? [], 'temporal decision')
+  const groupingProposals = mergeRecords(account.model.groupingReview?.proposals ?? [], device.model.groupingReview?.proposals ?? [], 'grouping proposal')
+  const groupingRelationships = mergeRecords(account.model.groupingReview?.relationships ?? [], device.model.groupingReview?.relationships ?? [], 'grouping relationship')
+  const groupingHistory = mergeRecords(account.model.groupingReview?.history ?? [], device.model.groupingReview?.history ?? [], 'grouping decision')
+  const groupingReview: GroupingReviewState | undefined = account.model.groupingReview || device.model.groupingReview ? {
+    schemaVersion: 1,
+    proposals: groupingProposals.merged,
+    relationships: groupingRelationships.merged,
+    history: groupingHistory.merged,
+  } : undefined
   const legacyUiIds = [...account.model.legacyUiIds]
   for (const id of device.model.legacyUiIds) if (!legacyUiIds.includes(id)) legacyUiIds.push(id)
   const model: PersistedState = {
@@ -100,6 +120,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
     canvasBank: canvasBank.merged,
     ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
+    ...(groupingReview ? { groupingReview } : {}),
   }
   const data = validateData({
     model,
@@ -115,7 +136,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
         canvases: canvasBank.added,
         events: calendarEvents.added,
       },
-      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates,
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates + groupingProposals.duplicates + groupingRelationships.duplicates + groupingHistory.duplicates,
       settings: choices.settings,
       digest: choices.digest,
     },
@@ -125,13 +146,15 @@ export function createAccountAdapter(client: SupabaseClient | undefined, table: 
   if (!client || !table || !/^[a-z][a-z0-9_]*$/.test(table)) return undefined
   function row(value: unknown, userId: string): AccountRow {
     const result = value as AccountRow
-    if (!result || result.user_id !== userId || typeof result.revision !== 'string' || !result.revision) throw Error('Invalid account row')
+    if (!result || result.user_id !== userId || typeof result.revision !== 'string' || !result.revision) {
+      throw new AccountStorageError('owner-mismatch', loadFailure)
+    }
     return { ...result, data: validateData(result.data) }
   }
   return {
     async read(userId) {
       const { data, error } = await client.from(table).select('*').eq('user_id', userId).abortSignal(AbortSignal.timeout(15000)).maybeSingle()
-      if (error) throw Error(loadFailure)
+      if (error) throw new AccountStorageError('load-unavailable', loadFailure)
       return data === null ? null : row(data, userId)
     },
     async write(userId, payload, revision) {
@@ -140,8 +163,9 @@ export function createAccountAdapter(client: SupabaseClient | undefined, table: 
       const query = revision === null
         ? client.from(table).upsert(next, { onConflict: 'user_id', ignoreDuplicates: true })
         : client.from(table).update(next).eq('user_id', userId).eq('revision', revision)
-      const { data, error } = await query.select('*').abortSignal(AbortSignal.timeout(15000)).single()
-      if (error || !data || data.revision !== next.revision) throw Error(saveFailure)
+      const { data, error } = await query.select('*').abortSignal(AbortSignal.timeout(15000)).maybeSingle()
+      if (error) throw new AccountStorageError('save-unavailable', saveFailure)
+      if (!data || data.revision !== next.revision) throw new AccountStorageError('conflict', saveFailure)
       return row(data, userId)
     },
   }
@@ -171,6 +195,9 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
         return { state: legacyUiProjection(result.data.model), data: result.data }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('No account data')) throw error
+        if (local && isAccountStorageError(error, 'conflict')) {
+          throw Error('Local copy was not imported because this account already contains cloud data. Load the account data instead; local data is untouched.')
+        }
         throw Error(local ? 'Local copy was not imported. The account may already contain data, or storage is unavailable. Load account data instead; local data is untouched.' : loadFailure)
       }
     },

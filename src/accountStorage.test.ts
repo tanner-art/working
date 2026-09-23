@@ -7,6 +7,7 @@ import { legacyUiProjection } from './migration'
 import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
 import { addCanvas, createCanvasRecord, LEGACY_CANVAS_ID } from './canvasBank'
+import { emptyGroupingReviewState, persistGroupingProposal } from './groupingProposal'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -56,14 +57,14 @@ describe('account adapter', () => {
     const changed = await db.adapter.write('a', { ...payload(), settings: { ...defaultSettings, displayName: 'Phone' } }, created.revision)
     expect(changed.revision).not.toBe(created.revision)
     expect(db.calls.at(-1)).toMatchObject({ operation: 'update', filters: { user_id: 'a', revision: created.revision } })
-    await expect(db.adapter.write('a', payload(), created.revision)).rejects.toThrow(saveFailure)
-    await expect(db.adapter.write('a', payload(), null)).rejects.toThrow(saveFailure)
+    await expect(db.adapter.write('a', payload(), created.revision)).rejects.toMatchObject({ code: 'conflict', message: saveFailure })
+    await expect(db.adapter.write('a', payload(), null)).rejects.toMatchObject({ code: 'conflict', message: saveFailure })
     expect(db.saved()).toEqual(changed)
   })
   it('fails closed on denied reads/writes without exposing provider details', async () => {
     const db = database(); db.deny()
-    await expect(db.adapter.read('a')).rejects.toThrow(loadFailure)
-    await expect(db.adapter.write('a', payload(), null)).rejects.toThrow(saveFailure)
+    await expect(db.adapter.read('a')).rejects.toMatchObject({ code: 'load-unavailable', message: loadFailure })
+    await expect(db.adapter.write('a', payload(), null)).rejects.toMatchObject({ code: 'save-unavailable', message: saveFailure })
   })
   it('rejects malformed model, settings and digest', () => {
     for (const value of [null, { ...payload(), model: {} }, { ...payload(), settings: {} }, { ...payload(), digest: { enabled: true } }]) {
@@ -98,7 +99,7 @@ describe('explicit account session', () => {
     expect(source).toEqual(before)
     const phone = createAccountSession(db.adapter, 'a', () => 'a')
     expect((await phone.open()).data).toEqual(source)
-    await expect(phone.open(source)).rejects.toThrow('may already contain data')
+    await expect(phone.open(source)).rejects.toThrow('already contains cloud data')
   })
   it('surfaces offline load/save failures and stops automatic retries until explicit retry', async () => {
     const db = database()
@@ -302,5 +303,24 @@ describe('TASK-056 account canvas viewport compatibility', () => {
     expect(merged.canvasViewport).toEqual(account.model.canvasViewport)
     expect(merged.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(account.model.canvasViewport)
     expect(device.model.canvasViewport).toEqual({ x: -40, y: 80, scale: .7 })
+  })
+})
+
+describe('account grouping review compatibility', () => {
+  it('preserves review-only grouping proposals during an explicit device merge', () => {
+    const first = makeObject({ kind: 'idea', source: 'text', originalContent: 'Plan the beta', confidence: .8,
+      interpretation: { summary: 'Plan beta', rationale: 'test', suggestedKind: 'idea' } })
+    const second = makeObject({ kind: 'idea', source: 'text', originalContent: 'Invite beta users', confidence: .8,
+      interpretation: { summary: 'Invite users', rationale: 'test', suggestedKind: 'idea' } })
+    const device = accountData({ objects: [first, second], canvas: [] }, defaultSettings, { enabled: false })
+    const captureIds = device.model.captures.map(item => item.id).sort()
+    device.model.groupingReview = persistGroupingProposal(emptyGroupingReviewState(), {
+      id: 'grouping:beta', captureIds, summary: 'Beta preparation', rationale: 'Both captures concern beta preparation.',
+      confidence: .8, groupingKind: 'topic', relationships: [{ id: 'candidate:beta', type: 'relates_to',
+        sourceCaptureId: captureIds[0], targetCaptureId: captureIds[1], signals: [{ kind: 'shared-topic', terms: ['beta'], weight: .8 }] }],
+      provenance: { source: 'deterministic', generator: 'test', generatorVersion: '1', generatedAt: '2026-09-23T10:00:00Z', sourceCaptureIds: captureIds },
+    })
+    const merged = mergeAccountData(payload(), device, { settings: 'account', digest: 'account' }).data
+    expect(merged.model.groupingReview).toEqual(device.model.groupingReview)
   })
 })

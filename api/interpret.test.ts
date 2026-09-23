@@ -1,15 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getVercelOidcToken } from '@vercel/oidc'
+import { authenticateInterpretCaller } from './interpretAuth'
+import { checkInterpretationRateLimit } from './interpretRateLimit'
 import handler, { AI_INTERPRETATION_MODEL } from './interpret'
 
 vi.mock('@vercel/oidc', () => ({ getVercelOidcToken: vi.fn() }))
+vi.mock('./interpretAuth', () => ({ authenticateInterpretCaller: vi.fn() }))
+vi.mock('./interpretRateLimit', () => ({ checkInterpretationRateLimit: vi.fn() }))
 const getVercelOidcTokenMock = vi.mocked(getVercelOidcToken)
+const authenticateInterpretCallerMock = vi.mocked(authenticateInterpretCaller)
+const checkInterpretationRateLimitMock = vi.mocked(checkInterpretationRateLimit)
 
 declare const process: { env: Record<string, string | undefined> }
 
 const request = () => new Request('https://threadline.test/api/interpret', {
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: {
+    'content-type': 'application/json',
+    'origin': 'https://threadline.test',
+    'authorization': 'Bearer test-user-jwt',
+  },
   body: JSON.stringify({ capture: {
     id: 'capture-1', source: 'text', createdAt: '2026-09-20T00:00:00Z',
     originalContent: 'Organize the launch notes', evidence: 'text-only',
@@ -23,6 +33,10 @@ const validProviderResponse = { content: [{
 beforeEach(() => {
   vi.unstubAllGlobals()
   getVercelOidcTokenMock.mockReset()
+  authenticateInterpretCallerMock.mockReset()
+  authenticateInterpretCallerMock.mockResolvedValue({ ok: true, userId: 'user-1' })
+  checkInterpretationRateLimitMock.mockReset()
+  checkInterpretationRateLimitMock.mockResolvedValue({ ok: true, rateLimited: false })
   process.env.AI_INTERPRETATION_PROVIDER = 'enabled'
 })
 
@@ -154,6 +168,67 @@ describe('Authentication', () => {
     const json = await response.json()
     expect(json.error).toBe('not_configured')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unauthenticated caller before looking up provider credentials', async () => {
+    process.env.AI_GATEWAY_API_KEY = 'test-key'
+    authenticateInterpretCallerMock.mockResolvedValue({
+      ok: false, status: 401, error: 'unauthorized', message: 'Sign in before using AI interpretation.',
+    })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await handler(request())
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({ error: 'unauthorized' })
+    expect(checkInterpretationRateLimitMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('limits requests by the verified user id before calling the provider', async () => {
+    process.env.AI_GATEWAY_API_KEY = 'test-key'
+    checkInterpretationRateLimitMock.mockResolvedValue({ ok: true, rateLimited: true })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await handler(request())
+    expect(response.status).toBe(429)
+    expect(await response.json()).toMatchObject({ error: 'rate_limited' })
+    expect(checkInterpretationRateLimitMock).toHaveBeenCalledWith(expect.any(Request), 'user-1')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the firewall limit cannot be checked', async () => {
+    process.env.AI_GATEWAY_API_KEY = 'test-key'
+    checkInterpretationRateLimitMock.mockResolvedValue({ ok: false })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await handler(request())
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: 'rate_limit_unavailable' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('Request hardening', () => {
+  it('rejects an oversized body before authentication or provider access', async () => {
+    const oversized = new Request('https://threadline.test/api/interpret', {
+      method: 'POST',
+      headers: { 'content-length': '20000' },
+      body: '{}',
+    })
+    const response = await handler(oversized)
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({ error: 'request_too_large' })
+    expect(authenticateInterpretCallerMock).not.toHaveBeenCalled()
+  })
+
+  it('marks every response private and non-sniffable', async () => {
+    const response = await handler(new Request('https://threadline.test/api/interpret', { method: 'GET' }))
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('vary')).toContain('authorization')
   })
 })
 

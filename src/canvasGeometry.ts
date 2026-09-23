@@ -6,6 +6,11 @@ export const canvasNodeShape = (node: CanvasElement): CanvasShape => node.type =
 export type ConnectionPath = NonNullable<CanvasElement['connectionPath']>
 export type ConnectionPattern = NonNullable<CanvasElement['connectionPattern']>
 export type ConnectionWeight = NonNullable<CanvasElement['connectionWeight']>
+export const DEFAULT_CANVAS_COLOR = '#fffefa'
+export const DEFAULT_CONTAINER_COLOR = '#e9f0df'
+export const CANVAS_COLORS = [DEFAULT_CANVAS_COLOR, '#e8f4dc', '#dcecf7', '#f7e3d0', '#f3dcdf', '#e9e1f6'] as const
+export const CONNECTION_COLORS = ['#829687', '#42624f', '#316b8a', '#9a5d2e', '#9b3f4e', '#6c4a91'] as const
+export const DEFAULT_CONNECTION_COLOR = CONNECTION_COLORS[0]
 export const CANVAS_SIZE = { minWidth: 120, minHeight: 100, maxWidth: 1200, maxHeight: 900 } as const
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)))
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -149,19 +154,30 @@ export function connectionAppearance(connection: CanvasElement) {
   const weight = connection.connectionWeight ?? 'regular'
   const pattern = connection.connectionPattern ?? 'solid'
   return {
+    stroke: connection.connectionColor ?? DEFAULT_CONNECTION_COLOR,
     strokeWidth: weight === 'light' ? 1 : weight === 'bold' ? 5 : 2,
     strokeDasharray: pattern === 'dashed' ? '12 8' : pattern === 'dotted' ? '2 7' : undefined,
     strokeLinecap: pattern === 'dotted' ? 'round' as const : 'butt' as const,
   }
 }
 
-export function updateCanvasConnection(elements: CanvasElement[], id: string, patch: Pick<CanvasElement, 'connectionPath' | 'connectionPattern' | 'connectionWeight'>) {
+export function connectionMarkerAppearance(connection: CanvasElement) {
+  return { fill: connection.connectionColor ?? DEFAULT_CONNECTION_COLOR }
+}
+
+export function updateCanvasConnection(elements: CanvasElement[], id: string, patch: Pick<CanvasElement, 'connectionPath' | 'connectionPattern' | 'connectionWeight' | 'connectionColor'>) {
+  const normalized = patch.connectionColor === undefined ? patch : { ...patch, connectionColor: patch.connectionColor.toLowerCase() }
   return elements.map(element => {
     if (element.id !== id || element.type !== 'arrow') return element
-    if (patch.connectionPath !== 'straight') return { ...element, ...patch }
+    if (normalized.connectionPath !== 'straight') return { ...element, ...normalized }
     const { curveHandle: _curveHandle, ...withoutCurveHandle } = element
-    return { ...withoutCurveHandle, ...patch }
+    return { ...withoutCurveHandle, ...normalized }
   })
+}
+
+export function updateCanvasNodeAppearance(elements: CanvasElement[], id: string, fillColor: string) {
+  const normalized = fillColor.toLowerCase()
+  return elements.map(element => element.id === id && (element.type === 'text' || element.type === 'container') ? { ...element, fillColor: normalized } : element)
 }
 
 function pointInsideNode(node: CanvasElement, point: CanvasPoint) {
