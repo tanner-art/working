@@ -12,8 +12,8 @@ that:
 
 1. Stays fully deterministic (`src/interpreter.ts`) unless a client-safe feature flag is
    explicitly set to `enabled`.
-2. When enabled, POSTs only the minimal capture evidence to a same-origin Vercel Edge
-   Function, `api/interpret.ts`.
+2. When enabled for a signed-in user, POSTs only the minimal capture evidence and the
+   current Supabase access token to a same-origin Vercel Edge Function, `api/interpret.ts`.
 3. Validates the response strictly and forces `reviewState: 'review'` regardless of what the
    response contains — the endpoint cannot bypass D-009 confirmation rules by construction
    (see "Confirmation rules are preserved" below).
@@ -21,8 +21,9 @@ that:
    server API key, a network failure or timeout, a non-2xx response, or a payload that fails
    validation. A provider outage or misconfiguration never breaks or blocks a capture.
 
-No secret ever reaches the browser. `api/interpret.ts` reads its provider API key from a
-server-only environment variable and never forwards it to the client.
+No provider secret ever reaches the browser. `api/interpret.ts` verifies the user token with
+the existing Threadline Supabase project, reads its provider credential server-side, and never
+forwards that credential to the client. Signed-out users stay on deterministic interpretation.
 
 ## Configuration
 
@@ -32,6 +33,8 @@ server-only environment variable and never forwards it to the client.
 | `AI_INTERPRETATION_PROVIDER` | Server only (set for Preview only during validation) | Server-side safety gate. Set to exactly `enabled` before the endpoint may use any provider credential. Automatic OIDC alone never activates the endpoint. Leave unset in Production until production rollout is explicitly approved. |
 | `AI_GATEWAY_API_KEY` | Server only (Vercel Production/Preview env vars) | Bearer token for Vercel AI Gateway. Must **never** use a `VITE_` prefix — Vite exposes `VITE_*` vars to the client bundle. If set, this takes precedence over `VERCEL_OIDC_TOKEN`. |
 | Vercel OIDC token | Server only (Vercel automatic) | OIDC fallback for Vercel AI Gateway when `AI_GATEWAY_API_KEY` is not set. The official `@vercel/oidc` helper reads `VERCEL_OIDC_TOKEN` at build/local time or Vercel's trusted request context at function runtime. If no credential is available, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
+| `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` | Server only, optional aliases | Preferred server-side names for the existing Threadline Supabase project. If omitted, the endpoint uses the same client-safe `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` already required by login. The user access token is verified through `/auth/v1/user`; no service-role key is used or required. |
+| `AI_ALLOWED_ORIGINS` | Server only, optional | Comma-separated extra origins for an intentional cross-origin deployment. Normal production and Preview calls are same-origin and need no entry. Malformed or unexpected origins are rejected. |
 
 Threadline pins provider calls to Anthropic Haiku (`anthropic/claude-haiku-4.5`) in code.
 There is no model environment override, so a dashboard change cannot silently move routine
@@ -50,8 +53,9 @@ Request body:
 ```
 
 Only the fields `CaptureRecord` already carries are sent — never canvas state, settings,
-other captures, or account data. `originalContent` is capped at 4000 characters and content
-type/shape are validated server-side before any provider call is made.
+other captures, or account data. The request must include `Authorization: Bearer <Supabase access token>`
+and a same-origin browser `Origin`. The full request is capped at 16 KiB, `originalContent` is
+capped at 4000 characters, and content type/shape are validated before any provider call.
 
 Responses:
 
@@ -60,9 +64,14 @@ Responses:
   `reviewState` is always `"review"`; the client re-validates and would force this even if it
   were omitted or different.
 - `400 { error: 'invalid_json' | 'invalid_capture' }` — malformed request.
+- `401 { error: 'unauthorized' }` — missing, expired, or invalid account session.
+- `403 { error: 'origin_not_allowed' }` — missing or unexpected browser origin.
 - `405 { error: 'method_not_allowed' }` — non-`POST` request.
+- `413 { error: 'request_too_large' }` — request exceeds 16 KiB.
+- `429 { error: 'rate_limited' }` — the verified account exceeded the configured AI request rate.
 - `503 { error: 'provider_disabled', message }` — the server-only provider gate is not enabled for this deployment.
 - `503 { error: 'not_configured', message }` — the server gate is enabled but neither `AI_GATEWAY_API_KEY` nor `VERCEL_OIDC_TOKEN` is set.
+- `503 { error: 'auth_unavailable' | 'rate_limit_unavailable', message }` — account verification or the matching firewall rule could not be checked. Both fail closed before any provider call.
 - `502 { error: 'provider_error', message }` — the upstream provider call (to Vercel AI Gateway) failed, timed out,
   or returned output the server could not use.
 
@@ -94,29 +103,29 @@ rather than free text — no provider SDK dependency was added. Vercel AI Gatewa
 interface to Anthropic's Messages API (and future providers) with optional features like token caching
 and request routing.
 
-Authentication uses a Bearer token from `AI_GATEWAY_API_KEY` if present, or uses Vercel's official
+Provider authentication uses a Bearer token from `AI_GATEWAY_API_KEY` if present, or uses Vercel's official
 `getVercelOidcToken()` helper to retrieve the automatic deployment credential when the key is not set.
 This design eliminates the need for manual secret management in most Vercel deployments while supporting
 explicit API keys where preferred.
 
-No provider SDK dependency was added. This keeps `package.json`/`pnpm-lock.yaml` untouched, avoids
-adding a server dependency to a project that previously had none, and sidesteps any need to install
-packages to deliver a real, working provider call. Swapping the provider or model later only requires
-editing `api/interpret.ts`'s request/response mapping; `src/aiInterpretation.ts` and
-`src/interpretationService.ts` do not need to change.
+Caller authentication is separate: `api/interpretAuth.ts` checks the browser boundary, then asks the
+existing Supabase Auth `/auth/v1/user` endpoint to validate the user's access token. The verified user id
+becomes the rate-limit key. `api/interpretRateLimit.ts` uses Vercel's official `@vercel/firewall` SDK and
+requires a matching `threadline-ai-interpret` rule. Missing or unavailable rate-limit configuration fails
+closed. Every response uses `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 
 ## Limitations and follow-ups
 
 - **Live provider validation is required before enabling in production.** The endpoint and authentication
-  paths have been implemented and tested with mocked fetch. Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled`
+  paths have automated coverage. Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled`
   in any real environment:
-  1. Set `AI_INTERPRETATION_PROVIDER=enabled` for Preview only, then ensure either `AI_GATEWAY_API_KEY` is set or rely on automatic `VERCEL_OIDC_TOKEN`.
-  2. Deploy to Vercel (Preview or Production) and manually verify a real capture against the live endpoint.
-  3. Test success cases, missing-key (503), and induced-failure fallback scenarios.
-  4. Confirm the Vercel AI Gateway connection is stable and performant.
+  1. Add the `threadline-ai-interpret` Vercel WAF rate-limit rule, keyed by the SDK value, at 20 requests per minute. Stage it in log mode and validate it in Preview before publishing the production rule.
+  2. Set `AI_INTERPRETATION_PROVIDER=enabled` for Preview only, then ensure either `AI_GATEWAY_API_KEY` is set or rely on automatic `VERCEL_OIDC_TOKEN`.
+  3. Deploy to Preview and validate signed-in success plus signed-out 401, cross-origin 403, exceeded-limit 429, missing-rule 503, and deterministic fallback.
+  4. Confirm the Vercel AI Gateway connection is stable, performant, and within the intended project budget.
 - One proposal per capture, matching the existing `InterpretationService` contract's
   documented limitation in `src/interpretationService.ts` — this slice does not change that.
-- No retry/backoff or rate limiting is implemented; a provider outage simply falls back to
+- No retry/backoff is implemented; a provider, authentication, or firewall outage falls back to
   deterministic interpretation for each capture independently.
 - Settings now shows whether the browser is in deterministic-only mode or whether provider
   attempts are enabled by the client feature flag. This status is configuration-level only;
@@ -130,10 +139,10 @@ editing `api/interpret.ts`'s request/response mapping; `src/aiInterpretation.ts`
 
 ### Exact response to move forward
 
-1. Deploy to Vercel with `AI_INTERPRETATION_PROVIDER=enabled` in Preview only (test with either `AI_GATEWAY_API_KEY` explicitly set or with automatic `VERCEL_OIDC_TOKEN`).
-2. Manually validate a real /api/interpret call (success, missing-key 503, and induced-failure fallback).
-3. Enable `VITE_AI_INTERPRETATION_PROVIDER=enabled` in Preview only.
-4. Proceed with TASK-031's broader evaluation.
+1. Create and Preview-test the `threadline-ai-interpret` WAF rate-limit rule at 20 requests per minute per verified account.
+2. Deploy with both enable flags in Preview only and verify a signed-in capture receives provider output.
+3. Verify 401/403/429/503 paths and deterministic fallback without losing the original capture.
+4. Review Gateway spend and latency, then request explicit production promotion approval.
 
 
 ## TASK-031 follow-up: safety and visibility hardening
@@ -147,7 +156,12 @@ Additional evaluator coverage now checks uncertain action-like captures, consequ
 Before enabling `VITE_AI_INTERPRETATION_PROVIDER=enabled`:
 
 - [ ] Deploy to Vercel with `AI_INTERPRETATION_PROVIDER=enabled` in Preview only and either `AI_GATEWAY_API_KEY` set or automatic `VERCEL_OIDC_TOKEN` available.
-- [ ] Call `/api/interpret` manually with a valid capture (curl or Postman) — expect 200 + proposal.
+- [ ] Add a Preview `threadline-ai-interpret` rate-limit rule keyed by the SDK-provided verified account id; start at 20 requests per minute.
+- [ ] Sign in to Preview, capture a thought, and expect a 200 proposal in Review.
+- [ ] Call the endpoint signed out — expect 401 and local deterministic fallback.
+- [ ] Send an unexpected `Origin` — expect 403 and no Supabase or Gateway call.
+- [ ] Exceed the Preview limit — expect 429 and local deterministic fallback.
+- [ ] Remove or mismatch the Preview firewall rule — expect `rate_limit_unavailable` 503 and no Gateway call.
 - [ ] In a local or isolated deployment where automatic OIDC is unavailable, unset auth credentials and call `/api/interpret` again — expect 503 with not_configured.
 - [ ] Unset `AI_INTERPRETATION_PROVIDER` while OIDC remains available and call `/api/interpret` — expect 503 with provider_disabled and no Gateway request.
 - [ ] Intentionally send malformed output mock and verify endpoint returns 502.

@@ -1,4 +1,6 @@
 import { getVercelOidcToken } from '@vercel/oidc'
+import { authenticateInterpretCaller } from './interpretAuth'
+import { checkInterpretationRateLimit } from './interpretRateLimit'
 
 // Vercel Edge Function backing src/aiInterpretation.ts's provider client. This file is
 // deployed independently of the Vite SPA bundle (see docs/AI_INTERPRETATION.md), so it
@@ -25,6 +27,7 @@ interface CaptureInput {
 const ALLOWED_SOURCES = new Set(['text', 'voice', 'canvas'])
 const RESOLVED_KINDS = new Set(['idea', 'project', 'commitment', 'person', 'reference', 'objective'])
 const MAX_CONTENT_LENGTH = 4000
+const MAX_REQUEST_LENGTH = 16_384
 const PROVIDER_TIMEOUT_MS = 15_000
 // Product cost boundary: all Threadline interpretation traffic uses Haiku. This is
 // intentionally not environment-overridable, so a dashboard setting cannot silently
@@ -32,7 +35,12 @@ const PROVIDER_TIMEOUT_MS = 15_000
 export const AI_INTERPRETATION_MODEL = 'anthropic/claude-haiku-4.5'
 
 function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  return new Response(JSON.stringify(body), { status, headers: {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'vary': 'origin, authorization',
+  } })
 }
 
 function validateCapture(body: unknown): CaptureInput | null {
@@ -148,8 +156,16 @@ async function requestProviderInterpretation(capture: CaptureInput, token: strin
 
 export default async function handler(request: Request): Promise<Response> {
   if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' })
+  const declaredLength = Number(request.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_LENGTH) {
+    return json(413, { error: 'request_too_large' })
+  }
   let body: unknown
-  try { body = await request.json() } catch { return json(400, { error: 'invalid_json' }) }
+  try {
+    const raw = await request.text()
+    if (raw.length > MAX_REQUEST_LENGTH) return json(413, { error: 'request_too_large' })
+    body = JSON.parse(raw)
+  } catch { return json(400, { error: 'invalid_json' }) }
   const capture = validateCapture(body)
   if (!capture) return json(400, { error: 'invalid_capture' })
 
@@ -157,6 +173,17 @@ export default async function handler(request: Request): Promise<Response> {
   // A client flag alone cannot protect this public endpoint from direct requests.
   if (process.env.AI_INTERPRETATION_PROVIDER !== 'enabled') {
     return json(503, { error: 'provider_disabled', message: 'AI interpretation is not enabled for this deployment.' })
+  }
+
+  const caller = await authenticateInterpretCaller(request)
+  if (!caller.ok) return json(caller.status, { error: caller.error, message: caller.message })
+
+  const limit = await checkInterpretationRateLimit(request, caller.userId)
+  if (!limit.ok) {
+    return json(503, { error: 'rate_limit_unavailable', message: 'AI request limits are temporarily unavailable.' })
+  }
+  if (limit.rateLimited) {
+    return json(429, { error: 'rate_limited', message: 'AI interpretation is temporarily limited. Try again shortly.' })
   }
 
   // Server-only secrets. Must never carry a VITE_ prefix, which Vite would expose to the

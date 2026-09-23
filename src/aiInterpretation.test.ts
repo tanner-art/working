@@ -9,6 +9,7 @@ import { deterministicInterpretationService } from './interpreter'
 const capture: CaptureRecord = Object.freeze({ id: 'capture:test', source: 'text',
   createdAt: '2026-09-16T00:00:00.000Z', originalContent: 'Give marketing guys access',
   context: 'Marketing', evidence: 'text-only' })
+const signedIn = { getAccessToken: async () => 'test-user-jwt' }
 
 function okResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as Response
@@ -124,13 +125,14 @@ describe('validateInterpretationProposal', () => {
 describe('createProviderInterpretationService', () => {
   it('posts only the minimal capture fields to the configured endpoint', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ summary: 'Provider summary', rationale: 'Provider rationale', confidence: .8, proposedKind: 'idea' }))
-    const service = createProviderInterpretationService({ fetchImpl, endpoint: '/api/custom' })
+    const service = createProviderInterpretationService({ fetchImpl, endpoint: '/api/custom', ...signedIn })
     const result = await service.interpret(capture)
     expect(result).toMatchObject({ proposedKind: 'idea', summary: 'Provider summary', reviewState: 'review' })
     expect(fetchImpl).toHaveBeenCalledOnce()
     const [url, init] = fetchImpl.mock.calls[0]
     expect(url).toBe('/api/custom')
     expect(init?.method).toBe('POST')
+    expect(init?.headers).toHaveProperty('authorization', 'Bearer test-user-jwt')
     expect(JSON.parse(init?.body as string)).toEqual({ capture: {
       id: capture.id, source: capture.source, createdAt: capture.createdAt,
       originalContent: capture.originalContent, context: capture.context, evidence: capture.evidence,
@@ -139,30 +141,37 @@ describe('createProviderInterpretationService', () => {
 
   it('defaults to the /api/interpret endpoint', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea' }))
-    await createProviderInterpretationService({ fetchImpl }).interpret(capture)
+    await createProviderInterpretationService({ fetchImpl, ...signedIn }).interpret(capture)
     expect(fetchImpl.mock.calls[0][0]).toBe('/api/interpret')
   })
 
   it('propagates a network failure', async () => {
     const fetchImpl = fetchMock(async () => { throw new Error('offline') })
-    await expect(createProviderInterpretationService({ fetchImpl }).interpret(capture)).rejects.toThrow('offline')
+    await expect(createProviderInterpretationService({ fetchImpl, ...signedIn }).interpret(capture)).rejects.toThrow('offline')
   })
 
   it('propagates a non-2xx response as an error', async () => {
     const fetchImpl = fetchMock(async () => failResponse(503))
-    await expect(createProviderInterpretationService({ fetchImpl }).interpret(capture)).rejects.toThrow('status 503')
+    await expect(createProviderInterpretationService({ fetchImpl, ...signedIn }).interpret(capture)).rejects.toThrow('status 503')
   })
 
   it('propagates a malformed payload as a validation error', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ proposedKind: 'idea' }))
-    await expect(createProviderInterpretationService({ fetchImpl }).interpret(capture)).rejects.toThrow()
+    await expect(createProviderInterpretationService({ fetchImpl, ...signedIn }).interpret(capture)).rejects.toThrow()
   })
 
   it('aborts and rejects when the endpoint never responds within the timeout', async () => {
     const fetchImpl = fetchMock((_input, init) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
     }))
-    await expect(createProviderInterpretationService({ fetchImpl, timeoutMs: 5 }).interpret(capture)).rejects.toThrow()
+    await expect(createProviderInterpretationService({ fetchImpl, timeoutMs: 5, ...signedIn }).interpret(capture)).rejects.toThrow()
+  })
+
+  it('requires a signed-in account before calling the endpoint', async () => {
+    const fetchImpl = fetchMock(async () => okResponse({}))
+    const service = createProviderInterpretationService({ fetchImpl, getAccessToken: async () => undefined })
+    await expect(service.interpret(capture)).rejects.toThrow('Sign in')
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 })
 
@@ -177,33 +186,42 @@ describe('createFailClosedInterpretationService', () => {
 
   it('returns the validated provider result when enabled and the endpoint succeeds', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ summary: 'Provider summary', rationale: 'Provider rationale', confidence: .81, proposedKind: 'action' }))
-    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl })
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     const result = await service.interpret(capture)
     expect(result).toMatchObject({ proposedKind: 'action', summary: 'Provider summary', reviewState: 'review' })
   })
 
   it('falls back to the deterministic service on a network error', async () => {
     const fetchImpl = fetchMock(async () => { throw new Error('offline') })
-    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl })
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
   })
 
   it('falls back to the deterministic service on a non-2xx response', async () => {
     const fetchImpl = fetchMock(async () => failResponse(500))
-    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl })
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
   })
 
   it('falls back to the deterministic service on a malformed payload', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ proposedKind: 'idea' }))
-    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl })
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
   })
 
   it('never lets a provider response bypass review, even when it tries to', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ summary: 's', rationale: 'r', confidence: .9, proposedKind: 'idea', reviewState: 'accepted' }))
-    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl })
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     const result = await service.interpret(capture)
     expect(result.reviewState).toBe('review')
+  })
+
+  it('falls back locally when the user is signed out', async () => {
+    const fetchImpl = fetchMock(async () => okResponse({}))
+    const service = createFailClosedInterpretationService({ status: 'enabled' }, {
+      fetchImpl, getAccessToken: async () => undefined,
+    })
+    expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 })

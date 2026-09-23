@@ -1,6 +1,7 @@
 import type { CaptureRecord } from './domain'
 import type { InterpretationProposal, InterpretationService } from './interpretationService'
 import { deterministicInterpretationService } from './interpreter'
+import { supabase } from './auth'
 
 /** Only the capture evidence needed to interpret one thought; never account, canvas,
  * or persisted-state data. Mirrors CaptureRecord so the server cannot request more. */
@@ -19,7 +20,7 @@ export function readProviderConfig(env: { VITE_AI_INTERPRETATION_PROVIDER?: stri
 
 export function providerStatus(config: ProviderConfig): ProviderStatus {
   return config.status === 'enabled'
-    ? { enabled: true, label: 'Provider attempts enabled', description: 'Threadline may ask the server provider for proposed meaning, then falls back to built-in rules if the provider is unavailable. Review confirmation is still required.' }
+    ? { enabled: true, label: 'Provider attempts enabled', description: 'Signed-in captures may ask the server provider for proposed meaning. Threadline falls back to built-in rules if the provider is unavailable. Review confirmation is still required.' }
     : { enabled: false, label: 'Built-in rules only', description: 'Captures are organized by deterministic rules built into the app. No provider request is made unless the client feature flag is enabled.' }
 }
 
@@ -58,17 +59,31 @@ export function validateInterpretationProposal(capture: CaptureRecord, value: un
   throw new Error(`Provider response has an unsupported proposedKind: ${String(proposedKind)}`)
 }
 
-export interface ProviderCallOptions { endpoint?: string; fetchImpl?: typeof fetch; timeoutMs?: number }
+export interface ProviderCallOptions {
+  endpoint?: string
+  fetchImpl?: typeof fetch
+  timeoutMs?: number
+  getAccessToken?: () => Promise<string | undefined>
+}
+
+async function currentAccessToken(): Promise<string | undefined> {
+  if (!supabase) return undefined
+  const { data, error } = await supabase.auth.getSession()
+  if (error) throw error
+  return data.session?.access_token
+}
 
 async function callInterpretEndpoint(capture: CaptureRecord, options: ProviderCallOptions): Promise<unknown> {
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT
   const fetchImpl = options.fetchImpl ?? fetch
+  const accessToken = await (options.getAccessToken ?? currentAccessToken)()
+  if (!accessToken) throw new Error('Sign in before using provider-backed interpretation.')
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   try {
     const response = await fetchImpl(endpoint, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'authorization': `Bearer ${accessToken}` },
       body: JSON.stringify({ capture: {
         id: capture.id, source: capture.source, createdAt: capture.createdAt,
         originalContent: capture.originalContent, context: capture.context, evidence: capture.evidence,
