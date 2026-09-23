@@ -47,7 +47,7 @@ export function summarizeAgents(tasks: DashboardTask[]): AgentSummary[] {
 
 export function buildTaskRows(issues: GitHubIssue[], pulls: GitHubPull[]): DashboardTask[] {
   const issueRows = issues
-    .filter(issue => !issue.pull_request)
+    .filter(issue => issue.state === 'open' && !issue.pull_request)
     .map(issue => ({
       number: issue.number,
       title: issue.title,

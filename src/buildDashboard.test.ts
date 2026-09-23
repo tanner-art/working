@@ -21,6 +21,7 @@ describe('build dashboard helpers', () => {
     const rows = buildTaskRows([
       { number: 1, title: 'Task', html_url: 'u', state: 'open', labels: [{ name: 'runner:running' }, { name: 'agent:claude' }], created_at: '2026-09-15T00:00:00Z', updated_at: '2026-09-15T01:00:00Z' },
       { number: 2, title: 'PR issue', html_url: 'u', state: 'open', labels: [], created_at: '2026-09-15T00:00:00Z', updated_at: '2026-09-15T01:00:00Z', pull_request: {} },
+      { number: 4, title: 'Completed issue with stale review label', html_url: 'u', state: 'closed', labels: [{ name: 'runner:review' }, { name: 'agent:codex-a' }], created_at: '2026-09-15T00:00:00Z', updated_at: '2026-09-15T03:00:00Z' },
     ], [
       { number: 3, title: 'Merged', html_url: 'p', state: 'closed', merged_at: '2026-09-15T02:00:00Z', created_at: '2026-09-15T00:00:00Z', updated_at: '2026-09-15T02:00:00Z' },
     ])

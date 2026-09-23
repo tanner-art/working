@@ -16,7 +16,7 @@ export function BuildDashboard() {
     try {
       setLoad(current => current.status === 'ready' ? current : { status: 'loading' })
       const [issuesResponse, pullsResponse] = await Promise.all([
-        fetch(`${apiBase}/issues?state=all&per_page=100`, { headers: { Accept: 'application/vnd.github+json' } }),
+        fetch(`${apiBase}/issues?state=open&per_page=100`, { headers: { Accept: 'application/vnd.github+json' } }),
         fetch(`${apiBase}/pulls?state=closed&per_page=30&sort=updated&direction=desc`, { headers: { Accept: 'application/vnd.github+json' } }),
       ])
       if (!issuesResponse.ok || !pullsResponse.ok) throw new Error('GitHub public API did not return the dashboard data.')
