@@ -56,14 +56,14 @@ describe('account adapter', () => {
     const changed = await db.adapter.write('a', { ...payload(), settings: { ...defaultSettings, displayName: 'Phone' } }, created.revision)
     expect(changed.revision).not.toBe(created.revision)
     expect(db.calls.at(-1)).toMatchObject({ operation: 'update', filters: { user_id: 'a', revision: created.revision } })
-    await expect(db.adapter.write('a', payload(), created.revision)).rejects.toThrow(saveFailure)
-    await expect(db.adapter.write('a', payload(), null)).rejects.toThrow(saveFailure)
+    await expect(db.adapter.write('a', payload(), created.revision)).rejects.toMatchObject({ code: 'conflict', message: saveFailure })
+    await expect(db.adapter.write('a', payload(), null)).rejects.toMatchObject({ code: 'conflict', message: saveFailure })
     expect(db.saved()).toEqual(changed)
   })
   it('fails closed on denied reads/writes without exposing provider details', async () => {
     const db = database(); db.deny()
-    await expect(db.adapter.read('a')).rejects.toThrow(loadFailure)
-    await expect(db.adapter.write('a', payload(), null)).rejects.toThrow(saveFailure)
+    await expect(db.adapter.read('a')).rejects.toMatchObject({ code: 'load-unavailable', message: loadFailure })
+    await expect(db.adapter.write('a', payload(), null)).rejects.toMatchObject({ code: 'save-unavailable', message: saveFailure })
   })
   it('rejects malformed model, settings and digest', () => {
     for (const value of [null, { ...payload(), model: {} }, { ...payload(), settings: {} }, { ...payload(), digest: { enabled: true } }]) {
@@ -98,7 +98,7 @@ describe('explicit account session', () => {
     expect(source).toEqual(before)
     const phone = createAccountSession(db.adapter, 'a', () => 'a')
     expect((await phone.open()).data).toEqual(source)
-    await expect(phone.open(source)).rejects.toThrow('may already contain data')
+    await expect(phone.open(source)).rejects.toThrow('already contains cloud data')
   })
   it('surfaces offline load/save failures and stops automatic retries until explicit retry', async () => {
     const db = database()
