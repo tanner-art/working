@@ -1,3 +1,5 @@
+import { getVercelOidcToken } from '@vercel/oidc'
+
 // Vercel Edge Function backing src/aiInterpretation.ts's provider client. This file is
 // deployed independently of the Vite SPA bundle (see docs/AI_INTERPRETATION.md), so it
 // intentionally does not import from src/: src/ modules read Vite's import.meta.env at
@@ -117,12 +119,12 @@ function coerceProposal(capture: CaptureInput, input: Record<string, unknown>) {
   throw new Error(`Provider returned an unsupported proposedKind: ${kind || 'missing'}`)
 }
 
-async function requestProviderInterpretation(capture: CaptureInput, auth: { token: string; kind: 'bearer' | 'oidc' }, model: string) {
+async function requestProviderInterpretation(capture: CaptureInput, token: string, model: string) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
   let response: Response
   try {
-    const authHeader = `Bearer ${auth.token}`
+    const authHeader = `Bearer ${token}`
     response = await fetch('https://ai-gateway.vercel.sh/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'authorization': authHeader },
@@ -161,15 +163,15 @@ export default async function handler(request: Request): Promise<Response> {
   // client bundle; see docs/AI_INTERPRETATION.md for the deployment contract.
   // Try AI_GATEWAY_API_KEY first (Bearer token), then fall back to VERCEL_OIDC_TOKEN (OIDC).
   const bearerToken = process.env.AI_GATEWAY_API_KEY
-  const oidcToken = process.env.VERCEL_OIDC_TOKEN
+  let oidcToken = process.env.VERCEL_OIDC_TOKEN
+  if (!bearerToken && !oidcToken) {
+    try { oidcToken = await getVercelOidcToken() } catch { /* unavailable outside Vercel runtime */ }
+  }
   if (!bearerToken && !oidcToken) {
     return json(503, { error: 'not_configured', message: 'Neither AI_GATEWAY_API_KEY nor VERCEL_OIDC_TOKEN is set.' })
   }
-  const auth = bearerToken
-    ? { token: bearerToken, kind: 'bearer' as const }
-    : { token: oidcToken!, kind: 'oidc' as const }
   try {
-    const proposal = await requestProviderInterpretation(capture, auth, AI_INTERPRETATION_MODEL)
+    const proposal = await requestProviderInterpretation(capture, bearerToken ?? oidcToken!, AI_INTERPRETATION_MODEL)
     return json(200, proposal)
   } catch (error) {
     return json(502, { error: 'provider_error', message: error instanceof Error ? error.message : 'Unknown provider error.' })

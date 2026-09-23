@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getVercelOidcToken } from '@vercel/oidc'
 import handler, { AI_INTERPRETATION_MODEL } from './interpret'
+
+vi.mock('@vercel/oidc', () => ({ getVercelOidcToken: vi.fn() }))
+const getVercelOidcTokenMock = vi.mocked(getVercelOidcToken)
 
 declare const process: { env: Record<string, string | undefined> }
 
@@ -18,6 +22,7 @@ const validProviderResponse = { content: [{
 
 beforeEach(() => {
   vi.unstubAllGlobals()
+  getVercelOidcTokenMock.mockReset()
   process.env.AI_INTERPRETATION_PROVIDER = 'enabled'
 })
 
@@ -97,6 +102,18 @@ describe('API endpoint', () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('https://ai-gateway.vercel.sh/v1/messages')
     expect(init?.headers).toHaveProperty('authorization', 'Bearer test-oidc-token')
+  })
+
+  it('uses the trusted Vercel runtime OIDC helper when no environment token is present', async () => {
+    getVercelOidcTokenMock.mockResolvedValue('runtime-oidc-token')
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(validProviderResponse), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await handler(request())
+    expect(response.status).toBe(200)
+    expect(getVercelOidcTokenMock).toHaveBeenCalledTimes(1)
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init?.headers).toHaveProperty('authorization', 'Bearer runtime-oidc-token')
   })
 
   it('prefers Bearer token over OIDC token when both are present', async () => {

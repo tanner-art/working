@@ -31,7 +31,7 @@ server-only environment variable and never forwards it to the client.
 | `VITE_AI_INTERPRETATION_PROVIDER` | Client (Vite `VITE_*`, safe to ship in the bundle) | Feature flag only, no secret. Set to exactly `enabled` to let the browser attempt the provider endpoint. Any other value (including unset) keeps the app fully deterministic and makes zero network calls to `/api/interpret`. |
 | `AI_INTERPRETATION_PROVIDER` | Server only (set for Preview only during validation) | Server-side safety gate. Set to exactly `enabled` before the endpoint may use any provider credential. Automatic OIDC alone never activates the endpoint. Leave unset in Production until production rollout is explicitly approved. |
 | `AI_GATEWAY_API_KEY` | Server only (Vercel Production/Preview env vars) | Bearer token for Vercel AI Gateway. Must **never** use a `VITE_` prefix — Vite exposes `VITE_*` vars to the client bundle. If set, this takes precedence over `VERCEL_OIDC_TOKEN`. |
-| `VERCEL_OIDC_TOKEN` | Server only (Vercel automatic) | OIDC fallback for Vercel AI Gateway when `AI_GATEWAY_API_KEY` is not set. Vercel automatically provides it to deployments. If neither credential is available, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
+| Vercel OIDC token | Server only (Vercel automatic) | OIDC fallback for Vercel AI Gateway when `AI_GATEWAY_API_KEY` is not set. The official `@vercel/oidc` helper reads `VERCEL_OIDC_TOKEN` at build/local time or Vercel's trusted request context at function runtime. If no credential is available, `api/interpret.ts` returns `503 { error: 'not_configured' }` and the client falls back to deterministic interpretation. |
 
 Threadline pins provider calls to Anthropic Haiku (`anthropic/claude-haiku-4.5`) in code.
 There is no model environment override, so a dashboard change cannot silently move routine
@@ -94,8 +94,8 @@ rather than free text — no provider SDK dependency was added. Vercel AI Gatewa
 interface to Anthropic's Messages API (and future providers) with optional features like token caching
 and request routing.
 
-Authentication uses a Bearer token from `AI_GATEWAY_API_KEY` if present, or falls back to `VERCEL_OIDC_TOKEN`
-(Vercel's automatic OIDC token, available in Preview and Production deployments) when the Bearer key is not set.
+Authentication uses a Bearer token from `AI_GATEWAY_API_KEY` if present, or uses Vercel's official
+`getVercelOidcToken()` helper to retrieve the automatic deployment credential when the key is not set.
 This design eliminates the need for manual secret management in most Vercel deployments while supporting
 explicit API keys where preferred.
 
