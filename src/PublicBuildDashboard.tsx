@@ -46,6 +46,8 @@ export function BuildDashboard() {
       </div>
       <div className="dashboard-actions">
         <a className="secondary" href="/">Open app</a>
+        <a className="secondary" href="https://github.com/tanner-art/working/issues" target="_blank" rel="noreferrer">Open task queue</a>
+        <a className="secondary" href="https://github.com/tanner-art/working/issues/new" target="_blank" rel="noreferrer">Add task</a>
         <button className="primary" onClick={() => void refresh()}>Refresh</button>
       </div>
     </section>

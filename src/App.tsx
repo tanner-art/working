@@ -24,6 +24,9 @@ import { bankFolders, bankObjects, reviewObjects, canvasObjectDraft, confirmObje
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
+import { appSurfaceForPath } from './appRoutes'
+import { OnboardingTutorial } from './OnboardingTutorial'
+import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -49,6 +52,7 @@ type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountD
 type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
+  const surface = appSurfaceForPath(window.location.pathname)
   const [landingDismissed, setLandingDismissed] = useState(() => {
     try { return localStorage.getItem(BETA_LANDING_DISMISSED_KEY) === 'dismissed' } catch { return false }
   })
@@ -81,6 +85,8 @@ export function App() {
   }
   const landingInput = readBetaLandingInput(localStorage, account.state)
   const landingVisibility = betaLandingVisibility({ ...landingInput, dismissed: landingDismissed || landingInput.dismissed })
+  if (surface === 'tutorial-preview') return <TutorialPreview />
+  if (surface === 'landing-preview') return <BetaLanding preview state={account.state} onContinue={() => window.location.assign('/preview/tutorial')} />
   if (landingVisibility === 'loading') return <main className="beta-loading" role="status"><p>Checking your account…</p></main>
   if (landingVisibility === 'landing') return <BetaLanding state={account.state} onContinue={() => {
     try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Continue remains available for this visit. */ }
@@ -90,14 +96,14 @@ export function App() {
     mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
-function BetaLanding({ state, onContinue }: { state: AuthState; onContinue: () => void }) {
+function BetaLanding({ state, onContinue, preview = false }: { state: AuthState; onContinue: () => void; preview?: boolean }) {
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
   const codeRef = useRef<HTMLInputElement>(null)
   const codeSent = state.status === 'signed-out' && state.emailCodeSent
   useEffect(() => { if (codeSent) codeRef.current?.focus() }, [codeSent])
   return <main className="beta-landing"><div className="beta-landing-inner">
-    <header className="beta-landing-header"><p className="eyebrow">Friends &amp; family beta</p><p className="beta-brand"><span className="brand-mark">⊹</span> threadline</p></header>
+    <header className="beta-landing-header"><p className="eyebrow">Friends &amp; family beta</p><p className="beta-brand"><span className="brand-mark">⊹</span> threadline</p>{preview && <a className="beta-preview-return" href="/settings">Back to Settings</a>}</header>
     <section className="beta-landing-hero" aria-labelledby="beta-landing-title"><div><p className="beta-kicker">Capture less. Understand more.</p><h1 id="beta-landing-title">A calm path from thought to action.</h1><p className="beta-intro">Threadline keeps your raw thoughts close, helps you organize their meaning, and gives you a clear place to act on them.</p></div><div className="beta-loop" aria-label="Threadline loop"><div><strong>Capture</strong><span>Get it out quickly.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Organize</strong><span>Shape the meaning.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Calendar / Canvas</strong><span>Plan or see the bigger picture.</span></div></div></section>
     <section className="beta-landing-card" aria-labelledby="beta-sign-in-title"><h2 id="beta-sign-in-title">Sign in to Threadline</h2><p className="beta-copy">Use your email to receive a sign-in link and a one-time code. The code lets you sign in on this device even when the email was requested elsewhere.</p>
       {state.status === 'unconfigured' && <p className="beta-alert" role="alert">Sign-in is not available in this deployment yet. You can continue on this device.</p>}{state.status === 'error' && <p className="beta-alert" role="alert">{state.message}</p>}{state.status === 'signed-out' && state.message && <p className="beta-message" role={codeSent ? 'status' : 'alert'}>{state.message}</p>}
@@ -105,6 +111,17 @@ function BetaLanding({ state, onContinue }: { state: AuthState; onContinue: () =
       {state.status === 'signed-out' && <form className="beta-form beta-code-form" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}><label htmlFor="beta-code">6–10 digit email code</label><input ref={codeRef} id="beta-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 10))} /><button className="primary" type="submit">Continue with code</button></form>}
       {state.status === 'loading' && <p className="beta-message" role="status">Checking your account…</p>}<button className="beta-device-button" type="button" onClick={onContinue}>Continue on this device</button><p className="beta-note"><strong>Your data stays yours.</strong> Existing local captures remain on this device. Account data is only loaded or copied when you explicitly choose that in Settings. AI suggestions always require your review.</p>
     </section><p className="beta-footer">Private by default · Local-first · Built for thinking in motion</p>
+  </div></main>
+}
+
+function TutorialPreview() {
+  const [tutorial, setTutorial] = useState<TutorialState>(() => startTutorial(initialTutorialState()))
+  const restart = () => setTutorial(startTutorial(initialTutorialState()))
+  return <main className="tutorial-preview-shell"><div className="tutorial-preview-inner">
+    <header className="tutorial-preview-header"><div><p className="eyebrow">Beta preview</p><h1>First-run tutorial</h1></div><a className="secondary" href="/settings">Back to Settings</a></header>
+    <p className="tutorial-preview-note">This replay does not change your saved onboarding status, thoughts, or account data.</p>
+    <OnboardingTutorial state={tutorial} onStateChange={setTutorial} />
+    {tutorial.status !== 'active' && <section className="tutorial-preview-complete"><h2>{tutorial.status === 'completed' ? 'Tutorial complete' : 'Tutorial skipped'}</h2><p>You can restart the walkthrough or return to Settings.</p><button className="primary" type="button" onClick={restart}>Restart tutorial</button></section>}
   </div></main>
 }
 
@@ -151,7 +168,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
     if (focusInstallHelp) installOpener.current?.focus()
     setFocusInstallHelp(false)
   }
-  const [view, setView] = useState<View>(preferences.value.startPage)
+  const [view, setView] = useState<View>(() => appSurfaceForPath(window.location.pathname) === 'settings' ? 'settings' : preferences.value.startPage)
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
@@ -463,6 +480,7 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
     </section>
     {dataControls}
     <AiInterpretationSection />
+    <section className="settings-card"><h2>Beta previews and build room</h2><p>Replay the landing page and first-run tutorial without changing your saved onboarding progress, or open the hosted build dashboard and task queue.</p><div className="settings-actions"><a className="secondary" href="/preview/landing">Test landing page and tutorial</a><a className="secondary" href="/dashboard">Open agent dashboard</a></div></section>
     <MobileInstallSection installOpener={installOpener} onInstallHelp={onInstallHelp} />
     <DigestSection onOpen={onOpenDigest} />
     <section className="settings-card"><h2>Recovery</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>

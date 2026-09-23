@@ -225,6 +225,7 @@
 .beta-landing { min-height: 100dvh; padding: max(22px, env(safe-area-inset-top, 0px)) max(18px, env(safe-area-inset-right, 0px)) max(30px, env(safe-area-inset-bottom, 0px)) max(18px, env(safe-area-inset-left, 0px)); box-sizing: border-box; background: radial-gradient(circle at 8% 0%, #eaf4d7 0, transparent 35%), linear-gradient(145deg, #17251f 0%, #203d34 50%, #f8f3e7 50%, #fbf8ef 100%); color: #1b2b24; }
 .beta-landing-inner { width: min(980px, 100%); margin: 0 auto; }
 .beta-landing-header { display: flex; justify-content: space-between; align-items: center; color: #f8f2e4; }
+.beta-preview-return { color: #f8f2e4; font-size: 13px; font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
 .beta-landing-header .eyebrow { margin: 0; color: #c9d9c2; }
 .beta-brand { margin: 0; font-weight: 800; letter-spacing: .04em; }
 .beta-brand .brand-mark { margin-right: 7px; color: #b4d57f; font-size: 22px; }
@@ -238,6 +239,12 @@
 .beta-loop span:not(.beta-arrow) { color: #b9c9ba; font-size: 12px; line-height: 1.4; }
 .beta-arrow { color: #a7c873; font-size: 24px; }
 .beta-landing-card { max-width: 580px; margin: 0 0 28px auto; padding: clamp(22px, 5vw, 38px); border: 1px solid rgba(34, 57, 46, .15); border-radius: 18px; background: #fffdf6; box-shadow: 0 22px 65px rgba(12, 31, 22, .2); }
+.tutorial-preview-shell { min-height: 100dvh; box-sizing: border-box; padding: max(24px, env(safe-area-inset-top, 0px)) max(18px, env(safe-area-inset-right, 0px)) max(32px, env(safe-area-inset-bottom, 0px)) max(18px, env(safe-area-inset-left, 0px)); background: radial-gradient(circle at top left, #eaf4d7 0, transparent 38%), #f8f3e7; color: #1b2b24; }
+.tutorial-preview-inner { width: min(760px, 100%); margin: 0 auto; }
+.tutorial-preview-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.tutorial-preview-header h1 { margin: 6px 0 0; font-size: clamp(36px, 8vw, 64px); letter-spacing: -.05em; }
+.tutorial-preview-note, .tutorial-preview-complete { margin: 0 auto 24px; padding: 18px; border: 1px solid #ccd5c6; border-radius: 14px; background: rgba(255,255,255,.76); line-height: 1.55; }
+.tutorial-preview-complete { max-width: 32rem; text-align: center; }
 .beta-landing-card h2 { margin: 0 0 10px; font: 500 clamp(26px, 4vw, 34px) 'Playfair Display'; }
 .beta-copy, .beta-note { color: #52635a; font-size: 13px; line-height: 1.6; }
 .beta-form { display: grid; gap: 8px; margin-top: 18px; }
