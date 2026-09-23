@@ -14,13 +14,33 @@ Paths are exact files, not directories or globs. Dependencies are issue numbers 
 
 ## Setup and operation
 
-Copy and edit config.example.json for the host; use absolute executable paths and distinct Codex homes. `github.py` uses the existing Git credential for GitHub only, with no token file or logging. It currently targets github.com and the Homebrew gh path. No organization scope is required. Headless Codex follows its workspace sandbox; Claude has only file tools and the runner performs validation. Agent CLI auth must already exist.
+Copy and edit `config.example.json` for the host. Every path, repository owner, account name, executable, and model name in that file is a placeholder; replace it before use. Keep credentials in the installed CLI’s authenticated profile or host keychain, never in this JSON file. `github.py` uses the existing Git credential for GitHub only, with no token file or logging. Headless Codex follows its workspace sandbox; Claude has only file tools and the runner performs validation. Agent CLI auth must already exist.
 
-Run `python3 scripts/runner/runner.py --config /absolute/config.json --dry-run` to inspect the queue without mutation. Run without `--dry-run` for one poll. Install with `python3 scripts/runner/install_launchd.py --config /absolute/config.json`; installation defaults to dry-run. `--live` enables execution explicitly. launchd uses the configured PATH and runs at login and every 60 seconds; it does not run while the user is logged out or the Mac is asleep.
+Each agent needs `provider`, `account`, `model`, `command`, `fallback_model`, and `fallback_command`. The example uses Terra as the primary Codex tier with Luna as its lower-cost fallback, and Sonnet with Haiku for Claude. These are replaceable, model-agnostic examples: choose model names and command flags supported by the installed CLI on the host. Use distinct account names and authentication homes whenever workers have separate provider budgets.
+
+Usage gating reads `usage.json` from the configured state directory unless `usage_file` sets another local path. It is keyed by worker, then account, so one worker can track separate account budgets:
+
+```json
+{
+  "codex-a": {
+    "openai-account-a": {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "used_percent": 42.5,
+      "observed_at": "2026-09-22T10:00:00Z",
+      "reset_at": "2026-09-22T15:00:00Z"
+    }
+  }
+}
+```
+
+The example policy slows a worker at 70% usage and stops it at 80%. A usage record older than `stale_after_seconds`, missing for its worker/account, or dated in the future is unknown. With `unknown_behavior: "slow"`, unknown and 70–79.99% usage use the configured low-cost fallback command; 80% or more stops dispatch. If the usage file itself is unavailable or malformed, the runner defers work rather than claiming it. A missing fallback command also defers safely.
+
+Run `python3 scripts/runner/runner.py --config /absolute/config.json --dry-run` to inspect the queue without mutation. Run without `--dry-run` for one poll. Install with `python3 scripts/runner/install_launchd.py --config /absolute/config.json`; installation defaults to dry-run. `--live` enables execution explicitly. The default `--mode serial` preserves the one-runner setup. `--mode lanes` installs the three fixed agent lanes plus a read-only dashboard bound to `127.0.0.1`; use `--replace-mode` only to explicitly migrate between serial and lanes. To promote installed dry-run services to live services in the same mode, use `--live --replace-current`; it backs up the current plists and restores them if bootstrap fails. These replacement flags cannot be combined. launchd uses the configured PATH and runs at login and every 60 seconds; it does not run while the user is logged out or the Mac is asleep.
 
 Status is in the configured state directory: heartbeat.json, issue-N.json, per-attempt logs, launchd logs. GitHub labels transition ready → running → review or failed. No automatic retry: use `--retry N` after inspecting the failure. Retrying creates a new attempt and retains the old one; inspect existing pushed branches/PRs before retrying a publication failure. A crash leaves a durable starting/running record and is not silently redispatched. Reboot recovery requires inspection and explicit retry after labeling the issue runner:failed. Keep one service/config per repository; the lock coordinates processes sharing that state directory.
 
-Stop using `launchctl bootout gui/$(id -u)/life.threadline.runner`. Logs need periodic retention management; task logs may contain source code. Merge and issue closure remain human responsibilities. An independent reviewer must assess code before merge. The daemon does not advance task-board status or assume that a PR is approved.
+Stop services with `launchctl bootout gui/$(id -u)/<label>`; serial uses `life.threadline.runner`, while lane mode uses `life.threadline.runner.codex-a`, `.codex-b`, `.claude`, and `life.threadline.factory-dashboard`. Logs need periodic retention management; task logs may contain source code. Merge and issue closure remain human responsibilities. An independent reviewer must assess code before merge. The daemon does not advance task-board status or assume that a PR is approved.
 
 ## Verification
 
