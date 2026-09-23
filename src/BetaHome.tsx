@@ -14,8 +14,7 @@ const featureLinks: { destination: BetaHomeDestination; eyebrow: string; title: 
   { destination: 'capture', eyebrow: 'Start here', title: 'Capture', description: 'Put down a thought before deciding what it is.', icon: '＋' },
   { destination: 'review', eyebrow: 'Decide', title: 'Review', description: 'Confirm proposed meaning and keep uncertain work visible.', icon: '◇' },
   { destination: 'calendar', eyebrow: 'See time', title: 'Calendar', description: 'View confirmed events and proposed timing separately.', icon: '▦' },
-  { destination: 'canvas', eyebrow: 'Think spatially', title: 'Canvas', description: 'Arrange blocks, shapes, groups, and connections.', icon: '⌁' },
-  { destination: 'review', eyebrow: 'Find again', title: 'Bank', description: 'Browse confirmed thoughts in the Organize view.', icon: '▤' },
+  { destination: 'canvas', eyebrow: 'Think spatially', title: 'Bank', description: 'Open saved canvases or start a new visual workspace.', icon: '⌁' },
   { destination: 'settings', eyebrow: 'Make it yours', title: 'Settings', description: 'Manage your account, data, install, and recovery controls.', icon: '⚙' },
 ]
 
@@ -60,7 +59,7 @@ export function BetaHome({ state, displayName, onNavigate, now: fixedNow }: Beta
       </div>
       <div className="beta-stat-grid">
         <button onClick={() => onNavigate('review')}><strong>{snapshot.reviewCount}</strong><span>waiting for review</span></button>
-        <button onClick={() => onNavigate('review')}><strong>{snapshot.bankCount}</strong><span>in the Bank</span></button>
+        <button onClick={() => onNavigate('review')}><strong>{snapshot.bankCount}</strong><span>organized thoughts</span></button>
         <button onClick={() => onNavigate('canvas')}><strong>{snapshot.canvasBlockCount}</strong><span>canvas blocks</span></button>
         <button onClick={() => onNavigate('capture')}><strong>{snapshot.capturedCount}</strong><span>captured thoughts</span></button>
       </div>

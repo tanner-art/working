@@ -2,6 +2,7 @@ import type { AppState } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { buildMorningDigest } from './morningDigest'
 import { bankObjects, reviewObjects } from './objectWorkflow'
+import { canvasBankForState } from './canvasBank'
 
 export type BetaHomeDestination = 'today' | 'capture' | 'review' | 'calendar' | 'canvas' | 'settings' | 'digest'
 
@@ -17,6 +18,7 @@ export function buildBetaHomeSnapshot(state: AppState, now = new Date()) {
     capturedCount: state.objects.length,
     reviewCount: reviewObjects(state.objects).length,
     bankCount: folders.Personal.length + folders.Business.length + folders.Unfiled.length,
-    canvasBlockCount: state.canvas.filter(item => item.type !== 'arrow').length,
+    canvasBlockCount: canvasBankForState(state).canvases.reduce((count, canvas) =>
+      count + canvas.elements.filter(item => item.type !== 'arrow').length, 0),
   }
 }

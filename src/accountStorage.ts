@@ -6,6 +6,7 @@ import { readSettings, type LocalSettings } from './settings'
 import { readDelivery, type DigestDelivery } from './digestDelivery'
 import { bankFromLegacy } from './canvasBank'
 import { mergeCanvasBanks } from './canvasBankMerge'
+import type { GroupingReviewState } from './groupingProposal'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
@@ -94,6 +95,15 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     device.model.canvasBank ?? bankFromLegacy(device.model.canvas, device.model.canvasViewport),
   )
   const temporalHistory = mergeRecords(account.model.temporalHistory ?? [], device.model.temporalHistory ?? [], 'temporal decision')
+  const groupingProposals = mergeRecords(account.model.groupingReview?.proposals ?? [], device.model.groupingReview?.proposals ?? [], 'grouping proposal')
+  const groupingRelationships = mergeRecords(account.model.groupingReview?.relationships ?? [], device.model.groupingReview?.relationships ?? [], 'grouping relationship')
+  const groupingHistory = mergeRecords(account.model.groupingReview?.history ?? [], device.model.groupingReview?.history ?? [], 'grouping decision')
+  const groupingReview: GroupingReviewState | undefined = account.model.groupingReview || device.model.groupingReview ? {
+    schemaVersion: 1,
+    proposals: groupingProposals.merged,
+    relationships: groupingRelationships.merged,
+    history: groupingHistory.merged,
+  } : undefined
   const legacyUiIds = [...account.model.legacyUiIds]
   for (const id of device.model.legacyUiIds) if (!legacyUiIds.includes(id)) legacyUiIds.push(id)
   const model: PersistedState = {
@@ -110,6 +120,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
     canvasBank: canvasBank.merged,
     ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
+    ...(groupingReview ? { groupingReview } : {}),
   }
   const data = validateData({
     model,
@@ -125,7 +136,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
         canvases: canvasBank.added,
         events: calendarEvents.added,
       },
-      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates,
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates + groupingProposals.duplicates + groupingRelationships.duplicates + groupingHistory.duplicates,
       settings: choices.settings,
       digest: choices.digest,
     },

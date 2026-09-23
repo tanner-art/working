@@ -40,6 +40,23 @@ describe('beta home preview', () => {
     expect(state).toEqual(before)
   })
 
+  it('counts current Canvas Bank documents instead of the frozen legacy mirror', () => {
+    const state: AppState = {
+      objects: [],
+      canvas: [{ id: 'legacy', type: 'text', x: 0, y: 0, text: 'Frozen recovery copy' }],
+      canvasBank: { canvases: [{
+        id: 'canvas:current', title: 'Current', createdAt: '2026-09-23T09:00:00Z', updatedAt: '2026-09-23T09:00:00Z',
+        viewport: { x: 0, y: 0, scale: 1 },
+        elements: [
+          { id: 'one', type: 'text', x: 0, y: 0, text: 'One' },
+          { id: 'two', type: 'container', x: 20, y: 20, text: 'Two' },
+          { id: 'link', type: 'arrow', x: 0, y: 0, fromId: 'one', toId: 'two' },
+        ],
+      }] },
+    }
+    expect(buildBetaHomeSnapshot(state, new Date('2026-09-23T10:00:00Z')).canvasBlockCount).toBe(2)
+  })
+
   it('renders canonical project signals, linked commitments, and classic-digest navigation', () => {
     const commitment = thought('commitment', 'review')
     const project = confirmObject(thought('project', 'review'))

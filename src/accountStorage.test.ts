@@ -7,6 +7,7 @@ import { legacyUiProjection } from './migration'
 import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
 import { addCanvas, createCanvasRecord, LEGACY_CANVAS_ID } from './canvasBank'
+import { emptyGroupingReviewState, persistGroupingProposal } from './groupingProposal'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -302,5 +303,24 @@ describe('TASK-056 account canvas viewport compatibility', () => {
     expect(merged.canvasViewport).toEqual(account.model.canvasViewport)
     expect(merged.canvasBank?.canvases.find(item => item.id === LEGACY_CANVAS_ID)?.viewport).toEqual(account.model.canvasViewport)
     expect(device.model.canvasViewport).toEqual({ x: -40, y: 80, scale: .7 })
+  })
+})
+
+describe('account grouping review compatibility', () => {
+  it('preserves review-only grouping proposals during an explicit device merge', () => {
+    const first = makeObject({ kind: 'idea', source: 'text', originalContent: 'Plan the beta', confidence: .8,
+      interpretation: { summary: 'Plan beta', rationale: 'test', suggestedKind: 'idea' } })
+    const second = makeObject({ kind: 'idea', source: 'text', originalContent: 'Invite beta users', confidence: .8,
+      interpretation: { summary: 'Invite users', rationale: 'test', suggestedKind: 'idea' } })
+    const device = accountData({ objects: [first, second], canvas: [] }, defaultSettings, { enabled: false })
+    const captureIds = device.model.captures.map(item => item.id).sort()
+    device.model.groupingReview = persistGroupingProposal(emptyGroupingReviewState(), {
+      id: 'grouping:beta', captureIds, summary: 'Beta preparation', rationale: 'Both captures concern beta preparation.',
+      confidence: .8, groupingKind: 'topic', relationships: [{ id: 'candidate:beta', type: 'relates_to',
+        sourceCaptureId: captureIds[0], targetCaptureId: captureIds[1], signals: [{ kind: 'shared-topic', terms: ['beta'], weight: .8 }] }],
+      provenance: { source: 'deterministic', generator: 'test', generatorVersion: '1', generatedAt: '2026-09-23T10:00:00Z', sourceCaptureIds: captureIds },
+    })
+    const merged = mergeAccountData(payload(), device, { settings: 'account', digest: 'account' }).data
+    expect(merged.model.groupingReview).toEqual(device.model.groupingReview)
   })
 })
