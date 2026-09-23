@@ -23,6 +23,7 @@ import { createInterpretedObject } from './captureInterpretation'
 import { bankFolders, bankObjects, reviewObjects, canvasObjectDraft, confirmObject, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
+import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -48,6 +49,9 @@ type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountD
 type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
+  const [landingDismissed, setLandingDismissed] = useState(() => {
+    try { return localStorage.getItem(BETA_LANDING_DISMISSED_KEY) === 'dismissed' } catch { return false }
+  })
   const [cloud, setCloud] = useState<CloudWorkspace>()
   const [preparedMerge, setPreparedMerge] = useState<PreparedMerge>()
   const [generation, setGeneration] = useState(0)
@@ -75,8 +79,33 @@ export function App() {
     const result = await preparedMerge.session.confirmMerge(preparedMerge.plan, currentLocal)
     setPreparedMerge(undefined); setCloud({ session: preparedMerge.session, ...result }); setGeneration(value => value + 1)
   }
+  const landingInput = readBetaLandingInput(localStorage, account.state)
+  const landingVisibility = betaLandingVisibility({ ...landingInput, dismissed: landingDismissed || landingInput.dismissed })
+  if (landingVisibility === 'loading') return <main className="beta-loading" role="status"><p>Checking your account…</p></main>
+  if (landingVisibility === 'landing') return <BetaLanding state={account.state} onContinue={() => {
+    try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Continue remains available for this visit. */ }
+    setLandingDismissed(true)
+  }} />
   return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open}
     mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
+}
+
+function BetaLanding({ state, onContinue }: { state: AuthState; onContinue: () => void }) {
+  const [email, setEmail] = useState('')
+  const [code, setCode] = useState('')
+  const codeRef = useRef<HTMLInputElement>(null)
+  const codeSent = state.status === 'signed-out' && state.emailCodeSent
+  useEffect(() => { if (codeSent) codeRef.current?.focus() }, [codeSent])
+  return <main className="beta-landing"><div className="beta-landing-inner">
+    <header className="beta-landing-header"><p className="eyebrow">Friends &amp; family beta</p><p className="beta-brand"><span className="brand-mark">⊹</span> threadline</p></header>
+    <section className="beta-landing-hero" aria-labelledby="beta-landing-title"><div><p className="beta-kicker">Capture less. Understand more.</p><h1 id="beta-landing-title">A calm path from thought to action.</h1><p className="beta-intro">Threadline keeps your raw thoughts close, helps you organize their meaning, and gives you a clear place to act on them.</p></div><div className="beta-loop" aria-label="Threadline loop"><div><strong>Capture</strong><span>Get it out quickly.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Organize</strong><span>Shape the meaning.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Calendar / Canvas</strong><span>Plan or see the bigger picture.</span></div></div></section>
+    <section className="beta-landing-card" aria-labelledby="beta-sign-in-title"><h2 id="beta-sign-in-title">Sign in to Threadline</h2><p className="beta-copy">Use your email to receive a sign-in link and a one-time code. The code lets you sign in on this device even when the email was requested elsewhere.</p>
+      {state.status === 'unconfigured' && <p className="beta-alert" role="alert">Sign-in is not available in this deployment yet. You can continue on this device.</p>}{state.status === 'error' && <p className="beta-alert" role="alert">{state.message}</p>}{state.status === 'signed-out' && state.message && <p className="beta-message" role={codeSent ? 'status' : 'alert'}>{state.message}</p>}
+      {state.status === 'signed-out' && <form className="beta-form" onSubmit={event => { event.preventDefault(); setEmail(email.trim()); setCode(''); void auth.act('login', email) }}><label htmlFor="beta-email">Email address</label><input id="beta-email" type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /><button className="primary" type="submit">Email me a sign-in link and code</button></form>}
+      {state.status === 'signed-out' && <form className="beta-form beta-code-form" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}><label htmlFor="beta-code">6–10 digit email code</label><input ref={codeRef} id="beta-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 10))} /><button className="primary" type="submit">Continue with code</button></form>}
+      {state.status === 'loading' && <p className="beta-message" role="status">Checking your account…</p>}<button className="beta-device-button" type="button" onClick={onContinue}>Continue on this device</button><p className="beta-note"><strong>Your data stays yours.</strong> Existing local captures remain on this device. Account data is only loaded or copied when you explicitly choose that in Settings. AI suggestions always require your review.</p>
+    </section><p className="beta-footer">Private by default · Local-first · Built for thinking in motion</p>
+  </div></main>
 }
 
 function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {

@@ -221,6 +221,48 @@
   .settings-card { padding: 18px; }
 }
 
+/* TASK-119: friends-and-family beta entry. */
+.beta-landing { min-height: 100dvh; padding: max(22px, env(safe-area-inset-top, 0px)) max(18px, env(safe-area-inset-right, 0px)) max(30px, env(safe-area-inset-bottom, 0px)) max(18px, env(safe-area-inset-left, 0px)); box-sizing: border-box; background: radial-gradient(circle at 8% 0%, #eaf4d7 0, transparent 35%), linear-gradient(145deg, #17251f 0%, #203d34 50%, #f8f3e7 50%, #fbf8ef 100%); color: #1b2b24; }
+.beta-landing-inner { width: min(980px, 100%); margin: 0 auto; }
+.beta-landing-header { display: flex; justify-content: space-between; align-items: center; color: #f8f2e4; }
+.beta-landing-header .eyebrow { margin: 0; color: #c9d9c2; }
+.beta-brand { margin: 0; font-weight: 800; letter-spacing: .04em; }
+.beta-brand .brand-mark { margin-right: 7px; color: #b4d57f; font-size: 22px; }
+.beta-landing-hero { display: grid; gap: 26px; padding: clamp(42px, 8vw, 92px) 0 30px; color: #f9f4e8; }
+.beta-kicker { margin: 0; color: #bddc88; font: 11px 'DM Mono'; letter-spacing: .11em; text-transform: uppercase; }
+.beta-landing h1 { max-width: 780px; margin: 10px 0 18px; font-size: clamp(42px, 8vw, 84px); line-height: .95; letter-spacing: -.065em; }
+.beta-intro { max-width: 650px; margin: 0; color: #d8e0d3; font-size: clamp(16px, 2.4vw, 21px); line-height: 1.5; }
+.beta-loop { display: grid; grid-template-columns: 1fr auto 1fr auto 1.25fr; gap: 12px; align-items: center; padding: 18px; border: 1px solid rgba(217, 232, 203, .25); border-radius: 16px; background: rgba(17, 39, 30, .58); }
+.beta-loop div { display: grid; gap: 4px; }
+.beta-loop strong { color: #e5f3c9; font-size: 15px; }
+.beta-loop span:not(.beta-arrow) { color: #b9c9ba; font-size: 12px; line-height: 1.4; }
+.beta-arrow { color: #a7c873; font-size: 24px; }
+.beta-landing-card { max-width: 580px; margin: 0 0 28px auto; padding: clamp(22px, 5vw, 38px); border: 1px solid rgba(34, 57, 46, .15); border-radius: 18px; background: #fffdf6; box-shadow: 0 22px 65px rgba(12, 31, 22, .2); }
+.beta-landing-card h2 { margin: 0 0 10px; font: 500 clamp(26px, 4vw, 34px) 'Playfair Display'; }
+.beta-copy, .beta-note { color: #52635a; font-size: 13px; line-height: 1.6; }
+.beta-form { display: grid; gap: 8px; margin-top: 18px; }
+.beta-form label { color: #34493d; font-size: 12px; font-weight: 700; }
+.beta-form input { box-sizing: border-box; width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid #9eb397; border-radius: 7px; background: #fffefa; color: #26352e; font: inherit; }
+.beta-form input:focus-visible, .beta-landing-card button:focus-visible { outline: 3px solid #507737; outline-offset: 3px; }
+.beta-code-form { padding-top: 18px; border-top: 1px solid #d9ddd5; }
+.beta-code-form input { font: 20px 'DM Mono'; letter-spacing: .18em; }
+.beta-device-button { width: 100%; min-height: 48px; margin-top: 14px; border: 1px solid #7f9d71; border-radius: 7px; background: transparent; color: #31532f; font: inherit; font-weight: 700; cursor: pointer; }
+.beta-message, .beta-alert { padding: 11px 12px; border-radius: 7px; font-size: 13px; line-height: 1.5; }
+.beta-message { background: #edf4e5; color: #31532f; }
+.beta-alert { background: #f8e9df; color: #7a382b; }
+.beta-note { margin: 20px 0 0; padding-top: 17px; border-top: 1px solid #d9ddd5; }
+.beta-footer { margin: 0; color: #5c7564; font: 10px 'DM Mono'; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
+.beta-loading { min-height: 100dvh; display: grid; place-items: center; background: #f8f6ef; color: #52635a; }
+.beta-loading p { font: 13px 'DM Mono'; }
+@media (max-width: 720px) {
+  .beta-landing-header { align-items: flex-start; gap: 12px; }
+  .beta-landing-header .eyebrow { max-width: 150px; }
+  .beta-loop { grid-template-columns: 1fr; gap: 10px; }
+  .beta-arrow { display: none; }
+  .beta-landing-card { margin: 0 0 24px; }
+  .beta-footer { text-align: left; line-height: 1.6; }
+}
+
 /* TASK-038: compact capture and organization controls. */
 button.sidebar-bottom { border: 0; background: transparent; text-align: left; cursor: pointer; }
 button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
