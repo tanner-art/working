@@ -583,6 +583,10 @@ def load_events(state_dir):
             corrupt += 1
             continue
         event = {'time': float(obj['timestamp']), 'status': obj['status']}
+        for field in ('schema_version', 'attempt_id', 'parent_agent', 'slot',
+                      'executor_kind', 'blocked_reason', 'task_id'):
+            if field in obj and obj[field] is not None:
+                event[field] = obj[field]
         issue_num = obj.get('issue')
         if isinstance(issue_num, int) and not isinstance(issue_num, bool):
             event['issue'] = issue_num
@@ -1073,6 +1077,12 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     queue = queue_view(queue_snapshot, issue_summary, records, now)
     events_result = load_events(state_dir)
     events = events_result['events']
+    runtime_events = {
+        'found': events_result['found'], 'error': events_result['error'],
+        'corrupt_lines': events_result['corrupt_lines'],
+        'events': [{**event, 'timestamp': event['time']} for event in events],
+    }
+    runtime = fstatus.runtime_metrics(runtime_events, now)
 
     policy = usage_policy(config, slowdown_threshold_pct, stop_threshold_pct)
     usage = load_usage(state_dir, policy, now=now)
@@ -1116,6 +1126,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
             'events_corrupt_lines': events_result['corrupt_lines'],
             'total': average_active_workers_for_window(events_result, now, total_window_start, now, total_workers),
             'nine_day': average_active_workers_for_window(events_result, now, nine_day_window_start, now, total_workers),
+            **runtime,
         },
         'longest_blocked_duration': longest_blocked_duration(events_result, now),
         'validation': {

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local GitHub issue runner. Never merges or cleans worktrees."""
-import argparse, contextlib, fcntl, json, os, pathlib, pwd, re, signal, subprocess, sys, time
+import argparse, contextlib, fcntl, json, os, pathlib, pwd, re, signal, subprocess, sys, time, uuid
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 from queue_snapshot import write_queue_snapshot
 
@@ -76,13 +76,20 @@ def save_record(path, data, status=None):
 
 
 @contextlib.contextmanager
-def file_lock(path, blocking=True):
+def file_lock(path, blocking=True, on_wait=None):
     """Lock a small coordination file, releasing it even on agent failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, 'a')
     flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
     try:
-        fcntl.flock(handle, flags)
+        if blocking and on_wait is not None:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                on_wait()
+                fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            fcntl.flock(handle, flags)
         yield handle
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)
@@ -90,7 +97,8 @@ def file_lock(path, blocking=True):
 
 
 EVENT_FIELDS = {
-    'timestamp', 'issue', 'task_id', 'title', 'agent', 'status', 'base',
+    'schema_version', 'attempt_id', 'timestamp', 'issue', 'task_id', 'title', 'agent', 'status',
+    'blocked_reason', 'executor_kind', 'base',
     'worktree_path', 'commit', 'pr', 'validation_result', 'elapsed_seconds',
     'files_changed', 'additions', 'deletions',
     'usage_state', 'effective_model', 'worker', 'parent_agent', 'slot',
@@ -102,16 +110,21 @@ def append_event(state, *, issue, task_id=None, title=None, agent=None,
                  validation_result=None, elapsed_seconds=None,
                  files_changed=None, additions=None, deletions=None,
                  usage_state=None, effective_model=None,
-                 worker=None, parent_agent=None, slot=None,
-                 timestamp=None):
+                 worker=None, parent_agent=None, slot=None, timestamp=None,
+                 attempt_id=None, blocked_reason=None, executor_kind=None,
+                 schema_version=2):
     """Append one safe, single-line event while holding a short process lock."""
     event = {
+        'schema_version': schema_version,
+        'attempt_id': attempt_id,
         'timestamp': time.time() if timestamp is None else timestamp,
         'issue': issue,
         'task_id': task_id,
         'title': title,
         'agent': agent,
         'status': status,
+        'blocked_reason': blocked_reason,
+        'executor_kind': executor_kind or ('parent_lane' if slot in (None, 1) else 'child_lane'),
         'base': base,
         'worktree_path': worktree_path,
         'commit': commit,
@@ -164,7 +177,8 @@ def publish_completion_telemetry(state, *, issue, task_id, title, agent,
                                  base, worktree_path, commit, pr,
                                  validation_result, elapsed_seconds, stats,
                                  heartbeat_kwargs, github_callback,
-                                 worker=None, parent_agent=None, slot=None):
+                                 worker=None, parent_agent=None, slot=None,
+                                 attempt_id=None, executor_kind=None):
     """Publish completion telemetry without changing the already-saved outcome."""
     errors = []
     callbacks = (
@@ -174,7 +188,8 @@ def publish_completion_telemetry(state, *, issue, task_id, title, agent,
             status='review', base=base, worktree_path=worktree_path,
             commit=commit, pr=pr, validation_result=validation_result,
             elapsed_seconds=elapsed_seconds, worker=worker,
-            parent_agent=parent_agent, slot=slot, **stats)),
+            parent_agent=parent_agent, slot=slot, attempt_id=attempt_id,
+            executor_kind=executor_kind, **stats)),
         ('issue-label', github_callback),
     )
     for operation, callback in callbacks:
@@ -214,6 +229,7 @@ def preserve_interrupted_attempt(state, record, data, *, issue, task_id,
     try:
         append_event(state, issue=issue, task_id=task_id, title=title, agent=agent,
                      worker=worker, parent_agent=agent, slot=slot,
+                     attempt_id=data.get('attempt_id'), executor_kind=data.get('executor_kind'),
                      status='failed', base=data.get('base'),
                      worktree_path=data.get('worktree'), validation_result='failed',
                      elapsed_seconds=time.time() - started_at)
@@ -320,6 +336,15 @@ def recover_stale_claims(state, stale_claim_seconds):
         save_record(record, data)
         archive = state / f"{record.stem}-failed-{time.time_ns()}.json"
         save(archive, data)
+        try:
+            append_event(state, issue=data.get('issue'), task_id=data.get('task_id'),
+                         agent=data.get('agent'), worker=data.get('worker'),
+                         parent_agent=data.get('parent_agent', data.get('agent')),
+                         slot=data.get('slot', 1), attempt_id=data.get('attempt_id'),
+                         executor_kind=data.get('executor_kind'), status='stale_claim_recovery',
+                         blocked_reason='stale_claim')
+        except Exception:
+            pass
 
 
 def claim(state, issue, agent, body, retry=False, stale_claim_seconds=1860,
@@ -340,9 +365,13 @@ def claim(state, issue, agent, body, retry=False, stale_claim_seconds=1860,
             save(state / f'issue-{number}-failed-{time.time_ns()}.json', current)
             record.unlink()
         now = time.time()
+        attempt_id = uuid.uuid4().hex
         data = {'issue': number, 'status': 'starting', 'time': now,
                 'updated_at': now, 'runner_pid': os.getpid(), 'agent': agent,
                 'worker': worker or agent, 'slot': slot,
+                'attempt_id': attempt_id, 'parent_agent': agent,
+                'executor_kind': 'parent_lane' if slot == 1 else 'child_lane',
+                'task_id': body.get('task'),
                 'paths': list(body['paths'])}
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         try:
@@ -395,11 +424,27 @@ def build_agent_environment(base_env, configured_env, path):
     return allowed
 
 
-def run_repository_validation(state, pnpm, worktree, env, log, run_command=None):
+def run_repository_validation(state, pnpm, worktree, env, log, run_command=None,
+                              on_blocked=None, on_acquired=None):
     """Run the expensive repository check in one cross-lane validation slot."""
     if run_command is None:
         run_command = run
-    with file_lock(pathlib.Path(state) / 'validation.lock'):
+    lock_path = pathlib.Path(state) / 'validation.lock'
+    if on_blocked is not None:
+        try:
+            with file_lock(lock_path, blocking=False):
+                if on_acquired is not None:
+                    on_acquired()
+                return run_command([pnpm, 'check'], cwd=worktree, env=env,
+                                   timeout=600, log=log)
+        except BlockingIOError:
+            on_blocked()
+            with file_lock(lock_path):
+                if on_acquired is not None:
+                    on_acquired()
+                return run_command([pnpm, 'check'], cwd=worktree, env=env,
+                                   timeout=600, log=log)
+    with file_lock(lock_path):
         return run_command([pnpm, 'check'], cwd=worktree, env=env,
                            timeout=600, log=log)
 
@@ -569,6 +614,10 @@ def main():
             blocked = [dep for dep in body.get('depends_on',[])
                        if json.loads(github('issue','view',str(dep),'--repo',c['github'],'--json','state'))['state']!='CLOSED']
             if blocked:
+                append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                             agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                             status='blocked', blocked_reason='dependency_wait',
+                             attempt_id=f'wait-{lane}-{n}')
                 print(json.dumps({'issue':n,'status':'waiting','dependencies':blocked}))
                 continue
             settings = agent_settings(c, agent)
@@ -584,25 +633,45 @@ def main():
                     usage = validate_usage(json.loads(usage_path.read_text()))
                     usage_decision = dispatch_decision(c, usage, agent, settings['account'])
                 except (OSError, json.JSONDecodeError, UsagePolicyError) as exc:
+                    append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                                 agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                                 status='blocked', blocked_reason='usage',
+                                 attempt_id=f'wait-{lane}-{n}')
                     print(json.dumps({'issue': n, 'status': 'defer',
                                       'reason': 'usage policy unavailable or invalid'}))
                     continue
             if not child_slot_allowed(args.slot, usage_enabled, usage_decision['state']):
+                append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                             agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                             status='blocked', blocked_reason='usage',
+                             attempt_id=f'wait-{lane}-{n}')
                 print(json.dumps({'issue': n, 'status': 'defer',
                                   'worker': lane, 'slot': args.slot,
                                   'reason': 'child lanes require fresh usage telemetry'}))
                 continue
             if usage_decision['decision'] in ('stop', 'defer'):
+                append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                             agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                             status='blocked', blocked_reason='usage',
+                             attempt_id=f'wait-{lane}-{n}')
                 print(json.dumps({'issue': n, 'status': usage_decision['decision'],
                                   'usage_state': usage_decision['state']}))
                 continue
             data = claim(state, issue, agent, body, args.retry, stale_claim_seconds,
                          worker=lane, slot=args.slot)
             if data == 'deferred':
+                append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                             agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                             status='blocked', blocked_reason='path_lock',
+                             attempt_id=f'wait-{lane}-{n}')
                 print(json.dumps({'issue':n,'status':'deferred','reason':'overlapping active paths'}))
                 continue
             if data is None: continue
             started_at = data['time']
+            # Close any prior queue-wait interval before the claimed attempt starts.
+            append_event(state, issue=n, task_id=body.get('task'), title=issue.get('title'),
+                         agent=agent, worker=lane, parent_agent=agent, slot=args.slot,
+                         attempt_id=f'wait-{lane}-{n}', status='idle')
             write_heartbeat(state, status='starting', issue=n,
                             task_id=body['task'], start_time=started_at,
                             agent=heartbeat_agent, worker=worker,
@@ -611,10 +680,15 @@ def main():
             append_event(state, issue=n, task_id=body['task'],
                          title=issue.get('title'), agent=agent, status='starting',
                          worker=lane, parent_agent=agent, slot=args.slot,
+                         attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
                          usage_state=usage_decision['state'],
                          effective_model=usage_decision['effective_model'])
             # Fetch and worktree-add touch shared Git metadata; serialize only these operations.
-            with file_lock(state / 'git.lock'):
+            with file_lock(state / 'git.lock', on_wait=lambda: append_event(
+                    state, issue=n, task_id=body['task'], title=issue.get('title'), agent=agent,
+                    worker=lane, parent_agent=agent, slot=args.slot,
+                    attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
+                    status='blocked', blocked_reason='git_lock')):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
                 g('fetch','origin','main');base=g('rev-parse','origin/main')
             attempt=str(time.time_ns());branch=f'runner/{body["task"].lower()}-{n}-{attempt}'
@@ -626,7 +700,11 @@ def main():
             save_record(record, data)
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
             if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
-            with file_lock(state / 'git.lock'):
+            with file_lock(state / 'git.lock', on_wait=lambda: append_event(
+                    state, issue=n, task_id=body['task'], title=issue.get('title'), agent=agent,
+                    worker=lane, parent_agent=agent, slot=args.slot,
+                    attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
+                    status='blocked', blocked_reason='git_lock')):
                 g('worktree','add','-b',branch,str(wt),base)
             run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]
@@ -642,6 +720,7 @@ def main():
             append_event(state, issue=n, task_id=body['task'],
                          title=issue.get('title'), agent=agent, status='agent',
                          worker=lane, parent_agent=agent, slot=args.slot,
+                         attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
                          base=base, worktree_path=str(wt),
                          elapsed_seconds=time.time() - started_at,
                          usage_state=usage_decision['state'],
@@ -674,10 +753,20 @@ def main():
             append_event(state, issue=n, task_id=body['task'],
                          title=issue.get('title'), agent=agent, status='validation',
                          worker=lane, parent_agent=agent, slot=args.slot,
+                         attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
                          base=base, worktree_path=str(wt),
                          validation_result='pending',
                          elapsed_seconds=time.time() - started_at)
-            run_repository_validation(state, pnpm, wt, env, log)
+            run_repository_validation(
+                state, pnpm, wt, env, log,
+                on_blocked=lambda: append_event(
+                    state, issue=n, task_id=body['task'], title=issue.get('title'), agent=agent,
+                    worker=lane, parent_agent=agent, slot=args.slot, attempt_id=data['attempt_id'],
+                    executor_kind=data['executor_kind'], status='blocked', blocked_reason='validation_lock'),
+                on_acquired=lambda: append_event(
+                    state, issue=n, task_id=body['task'], title=issue.get('title'), agent=agent,
+                    worker=lane, parent_agent=agent, slot=args.slot, attempt_id=data['attempt_id'],
+                    executor_kind=data['executor_kind'], status='validation', validation_result='pending'))
             verify_changes()
             g('diff','--check',cwd=wt)
             g('add','--',*body['paths'],cwd=wt)
@@ -702,6 +791,7 @@ def main():
                 commit=data['commit'], pr=data['pr'], validation_result='passed',
                 elapsed_seconds=time.time() - started_at, stats=stats,
                 worker=lane, parent_agent=agent, slot=args.slot,
+                attempt_id=data['attempt_id'], executor_kind=data['executor_kind'],
                 heartbeat_kwargs={'status': 'review', 'issue': n,
                                   'task_id': body['task'], 'start_time': started_at,
                                   'agent': heartbeat_agent, 'worker': worker},
@@ -750,7 +840,8 @@ def main():
                                  status='failed', base=data.get('base'),
                                  worktree_path=data.get('worktree'),
                                  validation_result='failed',
-                                 elapsed_seconds=time.time() - started_at)
+                                 elapsed_seconds=time.time() - started_at,
+                                 attempt_id=data.get('attempt_id'), executor_kind=data.get('executor_kind'))
                 except Exception:
                     pass
             if claimed:
@@ -759,6 +850,10 @@ def main():
             print(json.dumps(data),file=sys.stderr)
             break
     write_heartbeat(state, status='idle', worker=worker, agent=heartbeat_agent)
+    append_event(state, issue=None, agent=None, worker=worker,
+                 parent_agent=args.agent, slot=args.slot if args.agent else 1,
+                 status='idle', executor_kind=(
+                     'child_lane' if args.agent and args.slot != 1 else 'parent_lane'))
     if args.agent:
         lane_lock.__exit__(None, None, None)
     else:
