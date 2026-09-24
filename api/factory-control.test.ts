@@ -7,7 +7,7 @@ vi.mock('./interpretAuth', () => ({ authenticateInterpretCaller: vi.fn() }))
 const authenticateMock = vi.mocked(authenticateInterpretCaller)
 declare const process: { env: Record<string, string | undefined> }
 
-const request = () => new Request('https://threadline.test/api/factory-control', { method: 'GET', headers: { origin: 'https://threadline.test', authorization: 'Bearer user-jwt' } })
+const request = () => new Request('https://threadline.test/api/factory-control', { method: 'GET', headers: { authorization: 'Bearer user-jwt', 'sec-fetch-site': 'same-origin' } })
 
 async function signature(body: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -39,6 +39,9 @@ describe('Factory Control Center API', () => {
     vi.stubGlobal('fetch', fetchMock)
     expect((await handler(request())).status).toBe(401)
     expect(fetchMock).not.toHaveBeenCalled()
+    expect(authenticateMock).toHaveBeenCalledWith(expect.any(Request), expect.any(Function), {
+      allowSameOriginSafeRequestWithoutOrigin: true,
+    })
   })
 
   it('fails closed when the projection transport is incomplete', async () => {

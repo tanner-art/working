@@ -81,7 +81,9 @@ async function loadProjection(transport: ProjectionTransport): Promise<FactoryCo
 
 export default async function handler(request: Request): Promise<Response> {
   if (request.method !== 'GET') return response(405, { error: 'method_not_allowed' })
-  const caller = await authenticateInterpretCaller(request)
+  const caller = await authenticateInterpretCaller(request, fetch, {
+    allowSameOriginSafeRequestWithoutOrigin: true,
+  })
   if (!caller.ok) return response(caller.status, { error: caller.error, message: caller.message })
   const allowedUsers = readAllowedUserIds(process.env.FACTORY_CONTROL_ALLOWED_USER_IDS)
   if (!allowedUsers) return response(503, { error: 'authorization_unconfigured', message: 'Factory visibility authorization is not configured.' })

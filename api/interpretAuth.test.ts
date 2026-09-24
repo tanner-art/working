@@ -60,6 +60,29 @@ describe('authenticateInterpretCaller', () => {
     expect(result).toEqual({ ok: true, userId: 'account-1' })
   })
 
+  it('accepts an Origin-less safe browser request only with same-origin fetch metadata', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 'account-1' }), { status: 200 }))
+    const browserRequest = new Request('https://threadline.test/api/factory-control', {
+      method: 'GET',
+      headers: { authorization: 'Bearer user-jwt', 'sec-fetch-site': 'same-origin' },
+    })
+    await expect(authenticateInterpretCaller(browserRequest, fetchImpl, {
+      allowSameOriginSafeRequestWithoutOrigin: true,
+    })).resolves.toEqual({ ok: true, userId: 'account-1' })
+
+    const rejectedHeaders: Array<Record<string, string>> = [
+      { authorization: 'Bearer user-jwt' },
+      { authorization: 'Bearer user-jwt', 'sec-fetch-site': 'cross-site' },
+    ]
+    for (const headers of rejectedHeaders) {
+      const rejected = new Request('https://threadline.test/api/factory-control', { method: 'GET', headers })
+      await expect(authenticateInterpretCaller(rejected, fetchImpl, {
+        allowSameOriginSafeRequestWithoutOrigin: true,
+      })).resolves.toMatchObject({ ok: false, error: 'origin_not_allowed' })
+    }
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
   it('returns unauthorized for an expired or invalid Supabase session', async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ message: 'invalid' }), { status: 401 }))
     await expect(authenticateInterpretCaller(request(), fetchImpl)).resolves.toMatchObject({

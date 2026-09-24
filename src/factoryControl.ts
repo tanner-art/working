@@ -322,3 +322,13 @@ export function formatRelativeTime(iso: string | null, now = new Date()): string
   if (seconds < 172800) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86400)}d ago`
 }
+
+export function safeExternalUrl(value: string): string | null {
+  try {
+    const url = new URL(value)
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}

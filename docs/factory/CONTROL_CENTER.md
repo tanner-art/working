@@ -52,4 +52,10 @@ Claude consumption is represented as Factory-measured scopes when no provider pe
 
 The API returns no snapshot when authentication, owner authorization, transport configuration, transport availability, content type, size, HMAC verification, JSON parsing, or runtime contract validation fails. The UI shows an unavailable state with a retry action and retains no independent copy as operational truth.
 
+Same-origin browser `GET` requests may omit the `Origin` header. The API accepts that browser shape only when `Sec-Fetch-Site: same-origin` is present. Requests with a foreign Origin, cross-site fetch metadata, or neither signal remain rejected. Evidence and pull-request URLs become links only when runtime validation identifies an absolute HTTP or HTTPS URL without embedded credentials; invalid values remain plain text.
+
+Local component checks establish that the seven read-only views render, expose labeled controls, keep Features expandable, and turn unsafe evidence or pull-request URLs into plain text. A development-server route smoke verifies that `/dashboard` serves the application shell. Browser automation was unavailable in the implementation environment because no browser provider was connected and macOS Computer Use permission was not granted, so this package does not claim a completed interactive browser smoke or screenshot.
+
+These local checks do not prove the hosted Registry projection path. A hosted test with a real allowed Supabase account, configured signed projection transport, and live Registry revision is still required before this dashboard satisfies the restart gate. That test must confirm all seven views against one current Registry revision and capture browser evidence after authentication.
+
 This delivery does not create the Registry projection service, configure hosted secrets, deploy the dashboard, or grant Factory write authority. Those are separate reviewed operations.

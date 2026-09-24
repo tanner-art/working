@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { auth, supabase, type AuthState } from './auth'
 import { capacitySummary, emptyQueueFilters, filterFactoryFeatures, packageIndex, type QueueFilters } from './buildDashboard'
-import { formatDuration, formatFactoryState, formatRelativeTime, parseFactoryControlSnapshot, type CapacitySource, type FactoryCapacityScope, type FactoryControlSnapshot, type FactoryEvidence, type FactoryPackage, type FactoryState, type FactoryWorker } from './factoryControl'
+import { formatDuration, formatFactoryState, formatRelativeTime, parseFactoryControlSnapshot, safeExternalUrl, type CapacitySource, type FactoryCapacityScope, type FactoryControlSnapshot, type FactoryEvidence, type FactoryPackage, type FactoryState, type FactoryWorker } from './factoryControl'
 
-type View = 'overview' | 'queue' | 'workers' | 'reviews' | 'capacity' | 'history' | 'failures'
+export type View = 'overview' | 'queue' | 'workers' | 'reviews' | 'capacity' | 'history' | 'failures'
 type LoadState = { status: 'idle' | 'loading' } | { status: 'error'; message: string } | { status: 'ready'; snapshot: FactoryControlSnapshot; refreshing: boolean }
 
 const views: Array<{ id: View; label: string }> = [
@@ -88,7 +88,7 @@ function FactorySignIn({ state, onRetry }: { state: AuthState; onRetry: () => vo
   </section></main>
 }
 
-function DashboardView({ view, snapshot, refreshing, onRefresh }: { view: View; snapshot: FactoryControlSnapshot; refreshing: boolean; onRefresh: () => void }) {
+export function DashboardView({ view, snapshot, refreshing, onRefresh }: { view: View; snapshot: FactoryControlSnapshot; refreshing: boolean; onRefresh: () => void }) {
   return <>
     <div className="factory-snapshot-bar"><div><StatusDot state={snapshot.factory.health} /><strong>Registry revision {snapshot.registryRevision}</strong><span>Generated {formatRelativeTime(snapshot.generatedAt)}</span><span>Signature verified {formatRelativeTime(snapshot.verification.verifiedAt)}</span></div><button type="button" className="factory-button secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button></div>
     {view === 'overview' && <Overview snapshot={snapshot} />}
@@ -191,7 +191,10 @@ function SectionHeading({ title, note }: { title: string; note: string }) { retu
 function Fact({ label, value: factValue }: { label: string; value: ReactNode }) { return <div className="factory-fact"><span>{label}</span><strong>{factValue}</strong></div> }
 function InfoList({ title, items, empty }: { title: string; items: string[]; empty: string }) { return <div className="factory-info-list"><h4>{title}</h4>{items.length ? <ul>{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p>{empty}</p>}</div> }
 function EvidenceList({ evidence, title = 'Evidence' }: { evidence: FactoryEvidence[]; title?: string }) { return <div className="factory-evidence"><h4>{title}</h4>{evidence.length ? <ul>{evidence.map(item => <li key={item.id}>{item.url ? <SafeLink href={item.url}>{item.label}</SafeLink> : <span>{item.label}</span>}<small>{item.kind} · {formatRelativeTime(item.recordedAt)}</small></li>)}</ul> : <p>No evidence recorded.</p>}</div> }
-function SafeLink({ href, children }: { href: string; children: ReactNode }) { return <a href={href} target="_blank" rel="noreferrer">{children}</a> }
+function SafeLink({ href, children }: { href: string; children: ReactNode }) {
+  const safeHref = safeExternalUrl(href)
+  return safeHref ? <a href={safeHref} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>
+}
 function Empty({ title, text }: { title: string; text: string }) { return <div className="factory-empty"><h3>{title}</h3><p>{text}</p></div> }
 function Filter({ label, value: filterValue, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: string[][] }) { return <label>{label}<select value={filterValue} onChange={event => onChange(event.target.value)}><option value="">All</option>{options.map(([optionValue, label]) => <option value={optionValue} key={optionValue}>{label}</option>)}</select></label> }
 function StatusDot({ state }: { state: string }) { return <span className={`factory-status-dot ${state}`} aria-label={state} /> }
