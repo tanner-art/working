@@ -85,7 +85,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         )
         self.registry.record_evidence(
             Evidence(
-                "evidence-1", "PACKAGE-1", "check", "https://example.test/check",
+                "evidence-1", "PACKAGE-1", "runner-log", "https://example.test/check",
                 "Projection contract test", "2026-09-24T19:50:00Z",
                 {"attempt_id": "attempt-1"},
             )
@@ -177,6 +177,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         package = projection["features"][0]["packages"][0]
         self.assertEqual(package["attempts"][0]["commitSha"], "abc123")
         self.assertEqual(package["evidence"][0]["id"], "evidence-1")
+        self.assertEqual(package["evidence"][0]["kind"], "artifact")
         self.assertEqual(projection["reviews"][0]["eligibleReviewerIds"], ["claude"])
         invocation = projection["usageInvocations"][0]
         self.assertEqual(invocation["packageId"], "REVIEW-1")
@@ -196,10 +197,21 @@ class ControlCenterProjectionTest(unittest.TestCase):
         package["pr_url"] = "javascript:alert(1)"
         evidence = dict(raw.evidence[0])
         evidence["uri"] = "https://user:secret@example.test/private"
+        attempt = dict(raw.attempts[0])
+        attempt["provider_diagnostics"] = {
+            **attempt["provider_diagnostics"],
+            "pr_url": "https://user:secret@example.test/attempt-pr",
+        }
+        event = dict(raw.events[0])
+        event["detail"] = {
+            **event["detail"],
+            "pr_url": "https://user:secret@example.test/event-pr",
+        }
         from scripts.factory_registry.control_center_projection import project_control_center
         projection = project_control_center(replace(
             raw, workers=(worker, *raw.workers[1:]),
             work_packages=(package, *raw.work_packages[1:]), evidence=(evidence,),
+            attempts=(attempt, *raw.attempts[1:]), events=(event,),
         ))
         projected_worker = next(item for item in projection["workers"] if item["id"] == worker["id"])
         self.assertEqual(projected_worker["serviceState"], "unknown")
@@ -207,6 +219,31 @@ class ControlCenterProjectionTest(unittest.TestCase):
         projected_package = projection["features"][0]["packages"][0]
         self.assertIsNone(projected_package["pullRequestUrl"])
         self.assertIsNone(projected_package["evidence"][0]["url"])
+        self.assertIsNone(projected_package["attempts"][0]["pullRequestUrl"])
+        self.assertIsNone(projection["events"][0]["pullRequestUrl"])
+        serialized = json.dumps(projection)
+        self.assertNotIn("user:secret", serialized)
+
+    def test_capacity_states_match_control_center_contract_exactly(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        from scripts.factory_registry.control_center_projection import project_control_center
+        cases = {
+            "GREEN": "normal", "CAUTION": "caution", "CHECKPOINT": "checkpoint",
+            "FINISH_ONLY": "checkpoint", "HARD_STOP": "hard_stop",
+            "LIMITED": "limited", "UNKNOWN": "unknown",
+        }
+        for source, expected in cases.items():
+            worker = dict(raw.workers[0])
+            worker["usage_state"] = source
+            projection = project_control_center(replace(raw, workers=(worker, *raw.workers[1:])))
+            projected = next(item for item in projection["workers"] if item["id"] == worker["id"])
+            self.assertEqual(projected["capacityState"], expected)
+        limited = dict(raw.usage_invocations[0])
+        limited["outcome"] = "LIMITED"
+        limited["limit_signal"] = "rate_limit"
+        projection = project_control_center(replace(raw, usage_invocations=(limited,)))
+        measured = next(item for item in projection["capacity"] if item["source"] == "factory_measured")
+        self.assertEqual(measured["state"], "limited")
 
     def test_projection_is_logically_read_only(self) -> None:
         before = self._logical_state()

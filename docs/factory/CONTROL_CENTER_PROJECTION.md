@@ -19,6 +19,8 @@ Schema version 2 has no `unknown` Factory health value. A Registry read with no 
 
 Provider and account identity remain diagnostic. Raw telemetry `account_id`, source identity, raw limit errors, and source/calibration metadata are excluded. The response uses a non-identifying account label. Evidence and pull request links are limited to absolute HTTP or HTTPS URLs without embedded credentials.
 
+Capacity states use the Control Center schema vocabulary exactly: `normal`, `caution`, `checkpoint`, `hard_stop`, `limited`, or `unknown`. Legacy `FINISH_ONLY` observations normalize to `checkpoint`; actual limit/exhaustion signals remain `limited`. Evidence kinds normalize to `commit`, `check`, `test`, `review`, `artifact`, or `screenshot`; runner logs and otherwise unsupported kinds remain visible as generic `artifact` evidence.
+
 ## Local transport
 
 The included server is intentionally local. It binds to `127.0.0.1` by default and rejects non-loopback hosts. It exposes only:

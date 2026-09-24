@@ -19,7 +19,8 @@ _EVENT_KINDS = {
     "READY", "CLAIMED", "LAUNCHED", "HEARTBEAT", "VALIDATION", "REVIEW",
     "FAILURE", "RETRY", "DONE", "LEASE_RELEASED", "LEASE_EXPIRED",
 }
-_CAPACITY_STATES = {"normal", "caution", "finish_only", "hard_stop", "unknown"}
+_CAPACITY_STATES = {"normal", "caution", "checkpoint", "hard_stop", "limited", "unknown"}
+_EVIDENCE_KINDS = {"commit", "check", "test", "review", "artifact", "screenshot"}
 _REVIEW_STATES = {"waiting", "assigned", "changes_requested", "approved"}
 
 
@@ -89,10 +90,12 @@ def _capacity_state(value: Any) -> str:
         return "normal"
     if normalized in {"YELLOW", "SLOW", "CAUTION"}:
         return "caution"
-    if normalized in {"FINISH_ONLY", "FINISH-ONLY"}:
-        return "finish_only"
-    if normalized in {"RED", "STOP", "HARD_STOP", "EXHAUSTED", "LIMITED"}:
+    if normalized in {"FINISH_ONLY", "FINISH-ONLY", "CHECKPOINT"}:
+        return "checkpoint"
+    if normalized in {"RED", "STOP", "HARD_STOP"}:
         return "hard_stop"
+    if normalized in {"EXHAUSTED", "LIMITED", "RATE_LIMITED"}:
+        return "limited"
     return "unknown"
 
 
@@ -112,9 +115,19 @@ def _attempt_outcome(value: Any, ended_at: Any) -> str:
 
 
 def _evidence(item: Mapping[str, Any]) -> dict[str, Any]:
+    raw_kind = str(item.get("kind") or "").strip().lower().replace("_", "-")
+    kind = {
+        "commit": "commit",
+        "check": "check", "checks": "check", "ci": "check",
+        "test": "test", "tests": "test",
+        "review": "review", "assurance": "review",
+        "screenshot": "screenshot", "image": "screenshot",
+        "artifact": "artifact", "runner-log": "artifact", "log": "artifact",
+        "telemetry": "artifact", "bundle": "artifact",
+    }.get(raw_kind, "artifact")
     return {
         "id": str(item.get("id", "")),
-        "kind": str(item.get("kind", "unknown")),
+        "kind": kind,
         "label": str(item.get("summary") or item.get("id") or "Evidence"),
         "url": _safe_url(item.get("uri")),
         "recordedAt": _iso(item.get("recorded_at")),
@@ -291,7 +304,7 @@ def _project_capacity(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any
             "id": f"factory-measured:{worker_id}", "workerId": worker_id,
             "label": "Factory-measured consumption", "source": "factory_measured",
             "observedAt": _iso(latest.get("observed_at")),
-            "state": "hard_stop" if latest.get("limit_signal") or latest.get("outcome") == "LIMITED" else "normal",
+            "state": "limited" if latest.get("limit_signal") or latest.get("outcome") == "LIMITED" else "normal",
             "usedPercent": None, "resetAt": None,
             "rolling24Hours": _measurement(day), "rolling7Days": week_measurement,
             "averageTokensPerTask": token_total / task_count if task_count else None,
@@ -421,7 +434,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
                     "outcome": _attempt_outcome(attempt.get("outcome"), attempt.get("ended_at")),
                     "branch": attempt_diagnostics.get("branch") if isinstance(attempt_diagnostics.get("branch"), str) else None,
                     "commitSha": attempt_diagnostics.get("commit_sha") if isinstance(attempt_diagnostics.get("commit_sha"), str) else None,
-                    "pullRequestUrl": attempt_diagnostics.get("pr_url") if isinstance(attempt_diagnostics.get("pr_url"), str) else None,
+                    "pullRequestUrl": _safe_url(attempt_diagnostics.get("pr_url")),
                     "evidence": [_evidence(item) for item in evidence_by_attempt.get(str(attempt.get("id")), [])],
                 })
             projected = {
@@ -529,7 +542,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "workerId": item.get("worker_id") if isinstance(item.get("worker_id"), str) else None,
             "branch": detail.get("branch") if isinstance(detail.get("branch"), str) else None,
             "commitSha": detail.get("commit_sha") if isinstance(detail.get("commit_sha"), str) else None,
-            "pullRequestUrl": detail.get("pr_url") if isinstance(detail.get("pr_url"), str) else None,
+            "pullRequestUrl": _safe_url(detail.get("pr_url")),
             "evidenceIds": _strings(detail.get("evidence_ids")),
             "summary": str(detail.get("summary") or str(item.get("event_type", kind)).replace("_", " ").title()),
         })
@@ -732,6 +745,7 @@ def _validate_evidence(value: Any) -> None:
     if (
         not isinstance(value, Mapping)
         or not all(isinstance(value.get(field), str) for field in ("id", "kind", "label"))
+        or value.get("kind") not in _EVIDENCE_KINDS
         or _iso(value.get("recordedAt")) is None
         or (value.get("url") is not None and _safe_url(value.get("url")) is None)
     ):
