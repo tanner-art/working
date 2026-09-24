@@ -32,6 +32,10 @@ from .models import (
 from .repository import RegistryConflict, RegistryNotFound
 
 
+CURRENT_SCHEMA_VERSION = 3
+MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
@@ -85,6 +89,24 @@ class SQLiteRegistry:
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
+            existing_version: int | None = None
+            if connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='registry_metadata'"
+            ).fetchone():
+                try:
+                    row = connection.execute(
+                        "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                    ).fetchone()
+                except sqlite3.Error as error:
+                    raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+                if row is None:
+                    raise RegistryConflict("SCHEMA_VERSION_MISSING")
+                raw_version = row[0]
+                if not isinstance(raw_version, str) or not raw_version.isdecimal():
+                    raise RegistryConflict("SCHEMA_VERSION_INVALID", str(raw_version))
+                existing_version = int(raw_version)
+                if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= existing_version <= CURRENT_SCHEMA_VERSION:
+                    raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
             connection.executescript(schema)
             package_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(work_packages)")
@@ -152,8 +174,9 @@ class SQLiteRegistry:
                    END"""
             )
             connection.execute(
-                "UPDATE registry_metadata SET value='3' "
-                "WHERE key='schema_version' AND CAST(value AS INTEGER) < 3"
+                "UPDATE registry_metadata SET value=? "
+                "WHERE key='schema_version' AND CAST(value AS INTEGER) < ?",
+                (str(CURRENT_SCHEMA_VERSION), CURRENT_SCHEMA_VERSION),
             )
 
     def journal_mode(self) -> str:

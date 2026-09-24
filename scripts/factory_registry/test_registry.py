@@ -232,6 +232,30 @@ class SQLiteRegistryTest(unittest.TestCase):
         )
         self.assertEqual(version, "3")
 
+    def test_initialize_never_downgrades_a_newer_schema(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
+            )
+
+        with self.assertRaisesRegex(RegistryConflict, "SCHEMA_VERSION_UNSUPPORTED: 4"):
+            self.registry.initialize()
+
+        with sqlite3.connect(self.database) as connection:
+            version = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+        self.assertEqual(version, "4")
+
+    def test_initialize_rejects_malformed_schema_version(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE registry_metadata SET value='future' WHERE key='schema_version'"
+            )
+
+        with self.assertRaisesRegex(RegistryConflict, "SCHEMA_VERSION_INVALID: future"):
+            self.registry.initialize()
+
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()
         for number in range(1, 5):
