@@ -56,18 +56,30 @@ Before a claim, the adapter commits any stale-lease reconciliation in its own tr
 
 Releasing a lease and leaving `ACTIVE` also happens in one transaction. Ordinary status transitions cannot move an actively leased package; callers use the lease-release operation with the desired next state.
 
-The later scheduler will select the first eligible task by:
+The shadow scheduler selects the first eligible worker-package pair by:
 
 1. dependencies satisfied;
 2. highest priority;
-3. capability compatibility;
-4. oldest READY task.
+3. capability compatibility and smallest capability surplus;
+4. oldest READY task;
+5. stable package and worker IDs.
 
-Selection is intentionally absent from this unit so it can be shadow-tested before it gains launch authority.
+Selection remains non-authoritative: it produces a shadow decision record and
+cannot create a lease or launch work.
 
 ## Scheduler read boundary
 
 `dispatch_snapshot(observed_at)` returns a consistent read at one monotonically increasing registry revision. It includes features; complete work-package state and `ready_at`; dependencies; workers, roles, availability, capabilities, and approved lanes; unreleased leases and expiry state; usage observations; the active-parent limit; and the Orchestra reserve percentage. Both shadow and live schedulers consume this contract. They do not query SQLite directly.
+
+Capacity observations may include a provider-neutral `capacity_scope`, and
+worker configuration may declare expected `capacity_scopes`. This is part of
+the read contract rather than provider/model ownership. Until the owner maps
+real usage windows, shadow dispatch treats every declared scope independently,
+requires fresh evidence for each one, and uses `default` when none is declared.
+Observations for scopes absent from that configuration—whether historical or
+fresh—do not influence eligibility. Adding a real capacity window therefore
+requires an explicit worker-configuration change rather than merely emitting a
+new observation.
 
 ### Attempt, evidence, usage, and failure
 

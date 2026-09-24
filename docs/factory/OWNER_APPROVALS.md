@@ -22,7 +22,18 @@ These decisions do not block the registry foundation, importer, lane skeletons, 
 
 - Identify which provider/account usage window constitutes Orchestra capacity when the coordinating session and implementation workers share or change accounts.
 - Decide whether the 20% reserve applies independently to each relevant usage window or to the most constrained current window. Until approved, the stricter interpretation wins.
+- Map each real Orchestra provider/account usage window to the normalized
+  `capacity_scope` identifiers supplied to `DispatchSnapshot`. Shadow mode
+  requires every declared scope and evaluates each independently until this is
+  approved.
 - Approve the reporting precision for reserve thresholds. The implementation default will compare unrounded values and round only dashboard display values.
+- Define a provider-neutral low-cost work-package classification before `SLOW`
+  capacity can receive work. Until then, shadow dispatch accepts only fresh
+  normalized `GREEN` capacity; it does not assume every package can use a
+  fallback model safely.
+- Approve or delegate the live-policy freshness windows. Shadow defaults are a
+  180-second heartbeat window, 900-second usage window, and 900-second sweep
+  interval with 60 seconds of scheduling tolerance.
 
 ## Current technical defaults that do not require product approval
 
