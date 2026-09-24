@@ -103,6 +103,7 @@ export function DashboardView({ view, snapshot, refreshing, onRefresh }: { view:
 
 function Overview({ snapshot }: { snapshot: FactoryControlSnapshot }) {
   const packages = packageIndex(snapshot.features)
+  const attentionCount = visibleAttention(snapshot).length
   return <div className="factory-view">
     <section className="factory-metrics" aria-label="Factory summary">
       <Metric label="Active parent packages" value={`${snapshot.factory.activeParentCount} / ${snapshot.factory.activeParentLimit}`} tone={snapshot.factory.activeParentCount >= snapshot.factory.activeParentLimit ? 'warning' : 'calm'} />
@@ -110,7 +111,7 @@ function Overview({ snapshot }: { snapshot: FactoryControlSnapshot }) {
       <Metric label="Ready" value={snapshot.factory.readyCount} />
       <Metric label="Verify / review" value={snapshot.factory.verifyReviewCount} tone={snapshot.factory.verifyReviewCount ? 'warning' : 'calm'} />
       <Metric label="Blocked" value={snapshot.factory.blockedCount} tone={snapshot.factory.blockedCount ? 'danger' : 'calm'} />
-      <Metric label="Needs attention" value={snapshot.factory.attentionCount} tone={snapshot.factory.attentionCount ? 'danger' : 'calm'} />
+      <Metric label="Needs attention" value={attentionCount} tone={attentionCount ? 'danger' : 'calm'} />
     </section>
     <section className="factory-section"><SectionHeading title="Everyone at a glance" note="Assignment, heartbeat, lane, runtime and capacity" /><div className="factory-worker-grid">{snapshot.workers.map(worker => <WorkerSummary worker={worker} item={worker.currentPackageId ? packages.get(worker.currentPackageId) : undefined} scopes={snapshot.capacity.filter(scope => scope.workerId === worker.id)} generatedAt={snapshot.generatedAt} key={worker.id} />)}</div></section>
     <section className="factory-section"><SectionHeading title="Preservation reconciliation" note={`Observed ${formatRelativeTime(snapshot.reconciliation.observedAt)}`} /><div className={`factory-reconciliation ${snapshot.reconciliation.status}`}><StatusChip label={snapshot.reconciliation.status === 'clean' ? 'Clean' : snapshot.reconciliation.status} tone={snapshot.reconciliation.status === 'clean' ? 'healthy' : 'danger'} /><span>{value(snapshot.reconciliation.worktreeCount)} worktrees</span><span>{value(snapshot.reconciliation.dirtyWorktreeCount)} dirty</span><span>{value(snapshot.reconciliation.unmergedBranchCount)} unmerged branches</span><span>{value(snapshot.reconciliation.unexplainedRecordCount)} unexplained records</span><span>{value(snapshot.reconciliation.activeStaleLeaseCount)} stale leases</span></div></section>

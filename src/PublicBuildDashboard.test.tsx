@@ -47,6 +47,11 @@ describe('Factory Control Center components', () => {
     expect(failureMarkup).toContain('Review outcome is not recorded')
     expect(failureMarkup).toContain('this Registry revision has no structured review outcome or failure')
     expect(failureMarkup).not.toContain('Review remediation required')
+
+    const overviewMarkup = renderToStaticMarkup(<DashboardView view="overview" snapshot={actualSoakCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
+    const currentAttentionCards = failureMarkup.match(/factory-card factory-failure/g) ?? []
+    expect(currentAttentionCards).toHaveLength(1)
+    expect(overviewMarkup).toContain(`<span>Needs attention</span><strong>${currentAttentionCards.length}</strong>`)
   })
 
   it('keeps recovered CI out of current attention while retaining it in provenance', () => {
@@ -69,6 +74,7 @@ describe('Factory Control Center components', () => {
     const overviewMarkup = renderToStaticMarkup(<DashboardView view="overview" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
     expect(overviewMarkup).toContain('<span>Needs attention</span><strong>0</strong>')
     const failureMarkup = renderToStaticMarkup(<DashboardView view="failures" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(failureMarkup.match(/factory-card factory-failure/g) ?? []).toHaveLength(0)
     expect(failureMarkup).toContain('No failures need attention')
     expect(failureMarkup).not.toContain('Recovered CI failure')
     const historyMarkup = renderToStaticMarkup(<DashboardView view="history" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
