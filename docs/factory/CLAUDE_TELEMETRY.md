@@ -48,6 +48,10 @@ members, and unknown cost-state members are excluded because they can contain
 conversation or tool-input data. Present allowlisted fields with the wrong type
 fail ingestion instead of being serialized.
 
+For stream JSON, only the verified `system`, `user`, `assistant`, and `result`
+record-type labels are retained. Unknown type values are counted but omitted;
+they are never stringified into Registry metadata.
+
 The live probe in the current shell returned exit status 1 with a structured
 result whose `is_error` was true, `terminal_reason` was `api_error`, and error
 text reported that the CLI was not logged in. `claude auth status` also
@@ -86,6 +90,13 @@ Observed assistant records use top-level `type`, `sessionId`, `timestamp`,
 from Claude Code `2.1.270` and `2.1.278` and shared the token fields listed
 above.
 
+The `2.1.278` terminal `cost-state` records observed on this host use camelCase:
+`startTime`, `totalAPIDuration`, `totalAPIDurationWithoutRetries`,
+`totalCostUSD`, `totalDuration`, `totalToolDuration`, `totalLinesAdded`,
+`totalLinesRemoved`, `hasUnknownModelCost`, and `modelUsage`. The parser applies
+typed allowlists to those fields and normalizes their names. It omits unknown
+members and never retains the raw cost-state object.
+
 One provider message commonly appears as several assistant JSONL records, one
 per content block. Those records have the same `message.id` and identical
 usage. Transcript ingestion therefore counts one usage object per unique
@@ -107,7 +118,8 @@ message identity, and explicitly allowlisted terminal cost-state counters.
 
 - Registry entry ID, provider, worker/account, invocation ID, and session ID;
 - an observation class: `AUTONOMOUS` or the separate
-  `DIAGNOSTIC` health-probe class;
+  `DIAGNOSTIC` health-probe class; migrated records whose original class cannot
+  be proven are visibly marked `LEGACY_UNCLASSIFIED`;
 - mandatory package and attempt references for every autonomous invocation;
 - observation timestamp and model diagnostic;
 - optional input, output, cache-read, and cache-creation tokens;
@@ -172,6 +184,10 @@ usage observations, failures, or events. Rollback is to stop telemetry
 ingestion and run the previous Registry reader, which ignores these additive
 tables. Do not downgrade the schema version or delete ledger rows: retained
 telemetry is provenance and a later adapter migration must copy it losslessly.
+Migration classifies a linked version-2 row as `AUTONOMOUS` only when its
+attempt exists and matches the package and worker. Unlinked or inconsistent
+legacy rows remain `LEGACY_UNCLASSIFIED`; they are not invented as diagnostic
+health probes. New ingestion cannot request this reserved migration class.
 
 ## Analytics and capacity semantics
 

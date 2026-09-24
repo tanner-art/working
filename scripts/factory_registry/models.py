@@ -70,6 +70,7 @@ class UsageObservationClass(StringEnum):
 
     AUTONOMOUS = "AUTONOMOUS"
     DIAGNOSTIC = "DIAGNOSTIC"
+    LEGACY_UNCLASSIFIED = "LEGACY_UNCLASSIFIED"
 
 
 @dataclass(frozen=True)

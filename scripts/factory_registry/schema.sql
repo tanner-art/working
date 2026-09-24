@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     invocation_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     observation_class TEXT NOT NULL CHECK(observation_class IN (
-        'AUTONOMOUS', 'DIAGNOSTIC'
+        'AUTONOMOUS', 'DIAGNOSTIC', 'LEGACY_UNCLASSIFIED'
     )),
     package_id TEXT REFERENCES work_packages(id),
     attempt_id TEXT REFERENCES attempts(id),
@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     CHECK(
         (observation_class='AUTONOMOUS' AND package_id IS NOT NULL AND attempt_id IS NOT NULL)
         OR (observation_class='DIAGNOSTIC' AND package_id IS NULL AND attempt_id IS NULL)
+        OR observation_class='LEGACY_UNCLASSIFIED'
     ),
     UNIQUE(provider, worker_id, account_id, invocation_id)
 );

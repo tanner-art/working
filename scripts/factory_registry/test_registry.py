@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from scripts.factory_registry import (
+    Attempt,
     Feature,
     Lane,
     RegistryConflict,
@@ -95,13 +96,32 @@ class SQLiteRegistryTest(unittest.TestCase):
 
     def test_initialize_classifies_version_two_usage_provenance(self) -> None:
         legacy_database = self.root / "legacy-v2.sqlite3"
+        legacy = SQLiteRegistry(legacy_database)
+        legacy.initialize()
+        legacy.register_feature(Feature("FEATURE", "Feature", 100, TaskStatus.READY))
+        legacy.register_worker(
+            Worker("claude", "Claude", ("registry",), (Lane.PLATFORM,))
+        )
+        for package_id in ("TASK", "OTHER"):
+            legacy.register_work_package(
+                WorkPackage(
+                    package_id,
+                    "FEATURE",
+                    package_id,
+                    "ORCHESTRATION",
+                    Lane.PLATFORM,
+                    ("registry",),
+                    100,
+                    ("evidence",),
+                    status=TaskStatus.READY,
+                )
+            )
+        legacy.register_attempt(
+            Attempt("ATTEMPT", "TASK", "claude", "2026-09-24T20:00:00Z")
+        )
         with sqlite3.connect(legacy_database) as connection:
-            connection.execute(
-                "CREATE TABLE registry_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO registry_metadata(key, value) VALUES ('schema_version', '2')"
-            )
+            connection.execute("DROP TABLE usage_ledger_sources")
+            connection.execute("DROP TABLE usage_ledger")
             connection.execute(
                 """CREATE TABLE usage_ledger (
                     id TEXT PRIMARY KEY, provider TEXT NOT NULL, worker_id TEXT NOT NULL,
@@ -144,7 +164,20 @@ class SQLiteRegistryTest(unittest.TestCase):
                            ?, ?, 'source-probe', ?, ?)""",
                 values,
             )
-        SQLiteRegistry(legacy_database).initialize()
+            connection.execute(
+                """INSERT INTO usage_ledger
+                   (id, provider, worker_id, account_id, invocation_id, session_id,
+                    package_id, attempt_id, observed_at, outcome, task_completed,
+                    review_completed, calibration_metadata_json, primary_source_type,
+                    primary_source_identity, primary_source_metadata_json, created_at)
+                   VALUES ('mismatched', ?, ?, ?, 'mismatched', 'session-mismatched',
+                           'OTHER', 'ATTEMPT', ?, ?, 0, 0, ?, ?, 'source-mismatched', ?, ?)""",
+                values,
+            )
+            connection.execute(
+                "UPDATE registry_metadata SET value='2' WHERE key='schema_version'"
+            )
+        legacy.initialize()
         with sqlite3.connect(legacy_database) as connection:
             classes = dict(
                 connection.execute("SELECT id, observation_class FROM usage_ledger")
@@ -152,7 +185,14 @@ class SQLiteRegistryTest(unittest.TestCase):
             version = connection.execute(
                 "SELECT value FROM registry_metadata WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(classes, {"linked": "AUTONOMOUS", "probe": "DIAGNOSTIC"})
+        self.assertEqual(
+            classes,
+            {
+                "linked": "AUTONOMOUS",
+                "probe": "LEGACY_UNCLASSIFIED",
+                "mismatched": "LEGACY_UNCLASSIFIED",
+            },
+        )
         self.assertEqual(version, "3")
 
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:

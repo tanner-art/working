@@ -41,6 +41,7 @@ _LIMIT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+_STREAM_RECORD_TYPES = frozenset(("assistant", "result", "system", "user"))
 
 
 def _source_identity(kind: str, raw: bytes) -> str:
@@ -156,21 +157,43 @@ def _allowlisted_model_usage(value: Any) -> Mapping[str, Mapping[str, int | floa
 
 
 def _allowlisted_cost_state(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize the content-free fields observed in Claude Code 2.1.278.
+
+    The installed CLI writes camelCase cost-state records. Snake-case aliases
+    remain accepted for older fixtures, but unknown members are never copied.
+    """
     metadata: dict[str, Any] = {}
-    for key in (
-        "total_cost_usd",
-        "total_api_duration_ms",
-        "total_duration_ms",
-        "total_lines_added",
-        "total_lines_removed",
-        "total_input_tokens",
-        "total_output_tokens",
-        "cache_read_input_tokens",
-        "cache_creation_input_tokens",
-    ):
-        value = _number(record, key, integer=key != "total_cost_usd")
+    number_fields = {
+        "totalCostUSD": ("total_cost_usd", False),
+        "totalAPIDuration": ("total_api_duration_ms", True),
+        "totalAPIDurationWithoutRetries": (
+            "total_api_duration_without_retries_ms",
+            True,
+        ),
+        "totalDuration": ("total_duration_ms", True),
+        "totalToolDuration": ("total_tool_duration_ms", True),
+        "totalLinesAdded": ("total_lines_added", True),
+        "totalLinesRemoved": ("total_lines_removed", True),
+        "startTime": ("start_time", True),
+        "total_cost_usd": ("total_cost_usd", False),
+        "total_api_duration_ms": ("total_api_duration_ms", True),
+        "total_duration_ms": ("total_duration_ms", True),
+        "total_lines_added": ("total_lines_added", True),
+        "total_lines_removed": ("total_lines_removed", True),
+        "total_input_tokens": ("total_input_tokens", True),
+        "total_output_tokens": ("total_output_tokens", True),
+        "cache_read_input_tokens": ("cache_read_input_tokens", True),
+        "cache_creation_input_tokens": ("cache_creation_input_tokens", True),
+    }
+    for source_key, (target_key, integer) in number_fields.items():
+        value = _number(record, source_key, integer=integer)
         if value is not None:
-            metadata[key] = value
+            prior = metadata.get(target_key)
+            if prior is not None and prior != value:
+                raise ClaudeTelemetryError(
+                    f"conflicting cost-state aliases for {target_key}"
+                )
+            metadata[target_key] = value
     for key in ("model", "service_tier", "stop_reason", "terminal_reason"):
         value = _optional_text(record, key)
         if value is not None:
@@ -178,6 +201,12 @@ def _allowlisted_cost_state(record: Mapping[str, Any]) -> Mapping[str, Any]:
     is_error = _optional_bool(record, "is_error")
     if is_error is not None:
         metadata["is_error"] = is_error
+    has_unknown_model_cost = _optional_bool(record, "hasUnknownModelCost")
+    if has_unknown_model_cost is not None:
+        metadata["has_unknown_model_cost"] = has_unknown_model_cost
+    model_usage = _allowlisted_model_usage(record.get("modelUsage"))
+    if model_usage:
+        metadata["model_usage"] = model_usage
     return metadata
 
 
@@ -191,9 +220,15 @@ def _validate_provenance(
             raise ClaudeTelemetryError(
                 "autonomous telemetry requires package_id and attempt_id"
             )
-    elif package_id is not None or attempt_id is not None:
+    elif observation_class is UsageObservationClass.DIAGNOSTIC:
+        if package_id is None and attempt_id is None:
+            return
         raise ClaudeTelemetryError(
             "diagnostic health probes must not claim package or attempt provenance"
+        )
+    else:
+        raise ClaudeTelemetryError(
+            "legacy-unclassified provenance is reserved for Registry migration"
         )
 
 
@@ -435,7 +470,17 @@ def parse_claude_stream_json(raw: bytes, **kwargs: Any) -> UsageLedgerEntry:
                 "format": "stream-json",
                 "record_count": len(records),
                 "record_types": sorted(
-                    {str(record.get("type")) for record in records if record.get("type")}
+                    {
+                        record_type
+                        for record in records
+                        if isinstance((record_type := record.get("type")), str)
+                        and record_type in _STREAM_RECORD_TYPES
+                    }
+                ),
+                "unknown_record_type_count": sum(
+                    not isinstance(record.get("type"), str)
+                    or record.get("type") not in _STREAM_RECORD_TYPES
+                    for record in records
                 ),
             },
         }

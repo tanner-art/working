@@ -90,22 +90,32 @@ class SQLiteRegistry:
                 row["name"] for row in connection.execute("PRAGMA table_info(usage_ledger)")
             }
             if "observation_class" not in usage_columns:
-                if connection.execute(
-                    """SELECT 1 FROM usage_ledger
-                       WHERE (package_id IS NULL) <> (attempt_id IS NULL) LIMIT 1"""
-                ).fetchone():
-                    raise RegistryConflict("AMBIGUOUS_USAGE_PROVENANCE_MIGRATION")
                 connection.execute("DROP TRIGGER IF EXISTS usage_ledger_is_append_only_update")
                 connection.execute(
                     """ALTER TABLE usage_ledger ADD COLUMN observation_class TEXT NOT NULL
-                       DEFAULT 'DIAGNOSTIC' CHECK(observation_class IN (
-                           'AUTONOMOUS', 'DIAGNOSTIC'
+                       DEFAULT 'LEGACY_UNCLASSIFIED' CHECK(observation_class IN (
+                           'AUTONOMOUS', 'DIAGNOSTIC', 'LEGACY_UNCLASSIFIED'
                        ))"""
                 )
                 connection.execute(
-                    """UPDATE usage_ledger SET observation_class=CASE
-                           WHEN package_id IS NOT NULL AND attempt_id IS NOT NULL
-                           THEN 'AUTONOMOUS' ELSE 'DIAGNOSTIC' END"""
+                    """UPDATE usage_ledger AS ledger
+                       SET observation_class='AUTONOMOUS'
+                       WHERE ledger.package_id IS NOT NULL
+                         AND ledger.attempt_id IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1
+                             FROM attempts AS attempt
+                             JOIN work_packages AS package
+                               ON package.id=attempt.package_id
+                             JOIN workers AS worker
+                               ON worker.id=ledger.worker_id
+                             WHERE attempt.id=ledger.attempt_id
+                               AND attempt.package_id=ledger.package_id
+                               AND (
+                                   attempt.worker_id IS NULL
+                                   OR attempt.worker_id=ledger.worker_id
+                               )
+                         )"""
                 )
                 connection.execute(
                     """CREATE TRIGGER usage_ledger_is_append_only_update
@@ -695,6 +705,8 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_USAGE_ENTRY", "completion flags")
         if not isinstance(entry.observation_class, UsageObservationClass):
             raise RegistryConflict("INVALID_USAGE_ENTRY", "observation_class")
+        if entry.observation_class is UsageObservationClass.LEGACY_UNCLASSIFIED:
+            raise RegistryConflict("LEGACY_USAGE_CLASS_RESERVED")
         if entry.observation_class is UsageObservationClass.AUTONOMOUS:
             if not entry.package_id or not entry.attempt_id:
                 raise RegistryConflict(

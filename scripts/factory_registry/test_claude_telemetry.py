@@ -175,6 +175,7 @@ class ClaudeParserTest(unittest.TestCase):
     def test_stream_json_uses_final_aggregate_result(self) -> None:
         records = [
             {"type": "system", "session_id": "session"},
+            {"type": {"private": "must not be stringified"}},
             json.loads(cli_result()),
         ]
         entry = parse_claude_stream_json(
@@ -187,7 +188,10 @@ class ClaudeParserTest(unittest.TestCase):
         )
         self.assertEqual(entry.source_type, UsageSource.CLI_STREAM_JSON)
         self.assertEqual(entry.input_tokens, 10)
-        self.assertEqual(entry.source_metadata["record_count"], 2)
+        self.assertEqual(entry.source_metadata["record_count"], 3)
+        self.assertEqual(entry.source_metadata["record_types"], ["result", "system"])
+        self.assertEqual(entry.source_metadata["unknown_record_type_count"], 1)
+        self.assertNotIn("private", json.dumps(entry.source_metadata))
 
     def test_transcript_deduplicates_repeated_provider_message_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -231,7 +235,22 @@ class ClaudeParserTest(unittest.TestCase):
                 {
                     "type": "cost-state",
                     "sessionId": session_id,
-                    "total_cost_usd": 0.01,
+                    "startTime": 1_790_284_800_000,
+                    "totalAPIDuration": 1200,
+                    "totalAPIDurationWithoutRetries": 1100,
+                    "totalCostUSD": 0.01,
+                    "totalDuration": 2000,
+                    "totalToolDuration": 500,
+                    "totalLinesAdded": 3,
+                    "totalLinesRemoved": 1,
+                    "hasUnknownModelCost": False,
+                    "modelUsage": {
+                        "claude-sonnet-test": {
+                            "inputTokens": 2,
+                            "outputTokens": 7,
+                            "costUSD": 0.01,
+                        }
+                    },
                     "private_payload": {"prompt": "private cost state"},
                 },
             ]
@@ -249,6 +268,27 @@ class ClaudeParserTest(unittest.TestCase):
             self.assertEqual(entry.source_metadata["unique_assistant_messages"], 1)
             self.assertEqual(entry.source_metadata["duplicate_assistant_records_ignored"], 1)
             self.assertEqual(len(entry.source_metadata["assistant_usage_records"]), 1)
+            self.assertEqual(
+                entry.source_metadata["cost_state"],
+                {
+                    "start_time": 1_790_284_800_000,
+                    "total_api_duration_ms": 1200,
+                    "total_api_duration_without_retries_ms": 1100,
+                    "total_cost_usd": 0.01,
+                    "total_duration_ms": 2000,
+                    "total_tool_duration_ms": 500,
+                    "total_lines_added": 3,
+                    "total_lines_removed": 1,
+                    "has_unknown_model_cost": False,
+                    "model_usage": {
+                        "claude-sonnet-test": {
+                            "inputTokens": 2,
+                            "outputTokens": 7,
+                            "costUSD": 0.01,
+                        }
+                    },
+                },
+            )
             self.assertNotIn("private", json.dumps(entry.source_metadata))
             self.assertIsNone(entry.limit_raw_error)
             transcript.write_text(
@@ -581,6 +621,17 @@ class UsageLedgerTest(unittest.TestCase):
             }
         )
         self.assertTrue(self.registry.record_usage(diagnostic).inserted)
+        legacy = UsageLedgerEntry(
+            **{
+                **diagnostic.__dict__,
+                "id": "legacy",
+                "invocation_id": "legacy",
+                "source_identity": "legacy-source",
+                "observation_class": UsageObservationClass.LEGACY_UNCLASSIFIED,
+            }
+        )
+        with self.assertRaisesRegex(RegistryConflict, "LEGACY_USAGE_CLASS_RESERVED"):
+            self.registry.record_usage(legacy)
         with sqlite3.connect(self.database) as connection:
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
