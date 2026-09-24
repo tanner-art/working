@@ -78,6 +78,24 @@ Future implementation should separate capture provenance from semantic meaning, 
 
 Persistence must support stable references, preserved source revisions, and consistent updates to accepted meaning and its derivations. These requirements do not select a database, graph database, backend, or framework. This documentation change does not migrate data or modify application behavior.
 
+## Engineering Factory control plane
+
+The Factory coordinates engineering work on Threadline. It is an operations control plane, separate from the product semantic architecture above. Its registry schema does not select the database or service topology used for Threadline user data.
+
+The installed runner remains the current live dispatch authority. The registry foundation, shadow scheduler, and live observer merged in PRs #150–152 are migration components; merging them did not enable claims, launches, queue mutation, service restart, or registry cutover. The controlled restart is a separate reviewed change.
+
+After cutover, the backend-neutral registry contract is the operational source of truth for work packages, features, workers, leases, attempts, evidence, usage observations, failures, and append-only task events. SQLite in WAL mode is the local migration/control-plane adapter, not a permanent architectural dependency. A future Postgres, Supabase, or other adapter must preserve the same contract and pass the same contract tests. The dashboard is a projection of this registry boundary and has no independent scheduling or state authority.
+
+Factory feature state follows `ON DECK → READY → ACTIVE → VERIFY / REVIEW → BLOCKED → DONE`. `ACTIVE` is established through a transactional lease rather than a direct status write. The registry centrally enforces at most one live lease per work package, at most one per worker, and no more than three active parent packages globally. The cap and lease invariants remain authoritative across storage adapters.
+
+Dispatch uses declared capabilities, approved lanes, availability, capacity, dependencies, priority, and readiness age (`ready_at`). Agent names, provider names, and model names are diagnostics rather than permanent role semantics. Orchestra coordinates and adjudicates; it cannot claim routine implementation work. Missing, stale, future, invalid, or unknown usage is constrained, and scheduling must retain at least 20% Orchestra capacity. The mapping of real provider/account windows to normalized capacity scopes remains an owner decision.
+
+Preservation import is read-only with respect to preserved branches and worktrees: migration must not delete, reset, rebase, clean, consolidate, rename, or opportunistically refactor them. Shadow dispatch consumes a consistent registry snapshot, records the assignment it would make, and has no launch or mutation authority. Live cutover requires clean provenance/reconciliation, passing shadow evidence, an independent ASSURANCE review, a rollback procedure, and a separately reviewed controlled restart. An implementer cannot be the sole reviewer.
+
+Factory dispatch follows this priority rule: **A known production-relevant risk with a small, bounded remediation outranks speculative platform expansion.** This rule orders engineering work; it does not redefine product scope or grant the Factory authority to invent work.
+
+The detailed contracts and current evidence boundaries are documented in [REGISTRY.md](factory/REGISTRY.md), [SHADOW_DISPATCH.md](factory/SHADOW_DISPATCH.md), [LIVE_OBSERVATION.md](factory/LIVE_OBSERVATION.md), and [OWNER_APPROVALS.md](factory/OWNER_APPROVALS.md).
+
 ## Open product decisions
 
 - Which explicit language or interaction counts as confirmation of an Action or Commitment, and which non-consequential interpretations may be accepted automatically?
