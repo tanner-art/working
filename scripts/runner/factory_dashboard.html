@@ -93,9 +93,9 @@
   .badge-failed { background: rgba(217,83,79,0.18); color: var(--red); }
   .badge-running { background: rgba(74,134,232,0.18); color: var(--blue); }
   .badge-pending { background: rgba(90,98,112,0.25); color: var(--gray); }
-  .badge-green { background: rgba(47,177,112,0.18); color: var(--green); }
-  .badge-slow { background: rgba(217,165,44,0.18); color: var(--yellow); }
-  .badge-stop { background: rgba(217,83,79,0.18); color: var(--red); }
+  .badge-normal { background: rgba(47,177,112,0.18); color: var(--green); }
+  .badge-caution, .badge-checkpoint { background: rgba(217,165,44,0.18); color: var(--yellow); }
+  .badge-hard_stop { background: rgba(217,83,79,0.18); color: var(--red); }
   table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--panel-border); vertical-align: top; }
   th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
@@ -177,7 +177,7 @@
     <p class="note" id="usage-policy-line"></p>
     <div class="table-wrap">
       <table id="usage-table">
-        <thead><tr><th>Account</th><th>Provider</th><th>Model</th><th>Used</th><th>State</th><th>Updated</th></tr></thead>
+        <thead><tr><th>Account / Scope</th><th>Provider</th><th>Model</th><th>Mode</th><th>Observed capacity</th><th>State</th><th>Updated</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -373,23 +373,32 @@
 
   function renderUsage(usage) {
     document.getElementById('usage-policy-line').textContent =
-      'Slowdown at ' + usage.policy.slowdown_percent + '%, stop at ' + usage.policy.stop_percent + '%'
-      + (usage.policy.stop_threshold_clamped_to_max ? ' (clamped to configured maximum of ' + usage.policy.max_stop_threshold_pct + '%)' : '');
+      'Caution at ' + usage.policy.caution_percent + '%, checkpoint at '
+      + usage.policy.checkpoint_percent + '%, hard stop at ' + usage.policy.hard_stop_percent + '%.';
     var tbody = document.querySelector('#usage-table tbody');
     clearChildren(tbody);
     var note = document.getElementById('usage-note');
     note.textContent = usage.note || (usage.error ? ('usage.json ' + usage.error) : '');
     var workers = Array.isArray(usage.workers) ? usage.workers : [];
     if (!workers.length) {
-      tbody.appendChild(el('tr', {}, [el('td', { colspan: '6' }, [unknown('no accounts recorded in usage.json')])]));
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '7' }, [unknown('no accounts recorded in usage.json')])]));
       return;
     }
     workers.forEach(function (a) {
-      var usedCell = typeof a.used_percent === 'number' ? el('span', { text: a.used_percent + '%' }) : unknown('not recorded');
+      var usedCell;
+      if (typeof a.used_percent === 'number') {
+        usedCell = el('span', { text: a.used_percent + '%' });
+      } else if (a.capacity_mode === 'provider_signal') {
+        usedCell = el('span', { text: 'Health signals; limit ' + (a.limit_signal || 'unknown') });
+      } else {
+        usedCell = unknown('not recorded');
+      }
       tbody.appendChild(el('tr', {}, [
-        el('td', { text: (a.worker || 'Unknown') + ' / ' + (a.account || 'Unknown') }),
+        el('td', { text: (a.worker || 'Unknown') + ' / ' + (a.account || 'Unknown')
+          + (a.scope ? ' / ' + a.scope : '') }),
         el('td', { text: a.provider || 'Unknown' }),
         el('td', { text: a.model || 'Unknown' }),
+        el('td', { text: a.capacity_mode || 'Unknown' }),
         el('td', {}, [usedCell]),
         el('td', {}, [badge(a.state, a.state)]),
         el('td', { text: a.observed_at || 'Unknown' })

@@ -94,7 +94,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import factory_status as fstatus
 from usage_policy import (UsagePolicyError, agent_settings as runner_agent_settings,
-                          dispatch_decision, validate_usage)
+                          dispatch_decision, validate_policy, validate_usage)
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8787
@@ -104,9 +104,9 @@ DEFAULT_STALE_AFTER_SECONDS = fstatus.DEFAULT_STALE_AFTER_SECONDS
 DEFAULT_UTILIZATION_WINDOW_DAYS = fstatus.DEFAULT_UTILIZATION_WINDOW_DAYS
 DEFAULT_UTILIZATION_TARGET_WORKERS = fstatus.DEFAULT_UTILIZATION_TARGET_WORKERS
 
-DEFAULT_SLOWDOWN_THRESHOLD_PCT = 70.0
-DEFAULT_STOP_THRESHOLD_PCT = 80.0
-MAX_STOP_THRESHOLD_PCT = 80.0
+DEFAULT_CAUTION_THRESHOLD_PCT = 90.0
+DEFAULT_CHECKPOINT_THRESHOLD_PCT = 95.0
+DEFAULT_HARD_STOP_THRESHOLD_PCT = 98.0
 DEFAULT_USAGE_STALE_AFTER_SECONDS = 3600.0
 
 ACTIVE_STATUSES = {'starting', 'agent', 'validation'}
@@ -224,45 +224,26 @@ def agent_definitions(config):
     return result
 
 
-def usage_policy(config, slowdown_override=None, stop_override=None):
-    """Read usage_policy.py's canonical percentages, with legacy aliases.
-
-    Only numeric threshold fields are consumed. This keeps arbitrary runner
-    configuration, including commands and credentials, out of the report.
-    """
-    configured = config.get('usage_policy')
-    slowdown = DEFAULT_SLOWDOWN_THRESHOLD_PCT
-    stop = DEFAULT_STOP_THRESHOLD_PCT
-    stale_after = DEFAULT_USAGE_STALE_AFTER_SECONDS
-    if isinstance(configured, dict):
-        # usage_policy.py writes these canonical names. The dashboard accepts
-        # its original names for existing local configs, but canonical values
-        # win when both are present.
-        v = configured.get('slowdown_percent', configured.get('slowdown_threshold_pct'))
-        if isinstance(v, (int, float)):
-            slowdown = float(v)
-        v = configured.get('stop_percent', configured.get('stop_threshold_pct'))
-        if isinstance(v, (int, float)):
-            stop = float(v)
-        v = configured.get('stale_after_seconds')
-        if isinstance(v, (int, float)):
-            stale_after = float(v)
-    if isinstance(slowdown_override, (int, float)):
-        slowdown = float(slowdown_override)
-    if isinstance(stop_override, (int, float)):
-        stop = float(stop_override)
-    clamped = stop > MAX_STOP_THRESHOLD_PCT
-    if clamped:
-        stop = MAX_STOP_THRESHOLD_PCT
+def usage_policy(config, caution_override=None, checkpoint_override=None,
+                 hard_stop_override=None):
+    """Project the runner's canonical staged policy without provider secrets."""
+    policy_config = dict(config)
+    configured = config.get('usage_policy', config.get('usage'))
+    configured = dict(configured) if isinstance(configured, dict) else {}
+    if isinstance(caution_override, (int, float)):
+        configured['caution_percent'] = float(caution_override)
+    if isinstance(checkpoint_override, (int, float)):
+        configured['checkpoint_percent'] = float(checkpoint_override)
+    if isinstance(hard_stop_override, (int, float)):
+        configured['hard_stop_percent'] = float(hard_stop_override)
+    policy_config['usage_policy'] = configured
+    validated = validate_policy(policy_config)
     return {
-        'slowdown_percent': slowdown,
-        'stop_percent': stop,
-        # Kept for the existing dashboard API and command-line integrations.
-        'slowdown_threshold_pct': slowdown,
-        'stop_threshold_pct': stop,
-        'stop_threshold_clamped_to_max': clamped,
-        'max_stop_threshold_pct': MAX_STOP_THRESHOLD_PCT,
-        'stale_after_seconds': stale_after,
+        'caution_percent': validated['caution_percent'],
+        'checkpoint_percent': validated['checkpoint_percent'],
+        'hard_stop_percent': validated['hard_stop_percent'],
+        'stale_after_seconds': validated['stale_after_seconds'],
+        'unknown_behavior': validated['unknown_behavior'],
     }
 
 
@@ -275,13 +256,41 @@ def classify_usage_state(percent_used, policy, observed_at_seconds=None, now=Non
         stale_after = policy.get('stale_after_seconds', DEFAULT_USAGE_STALE_AFTER_SECONDS)
         if not isinstance(stale_after, (int, float)) or now < observed_at_seconds or now - observed_at_seconds > stale_after:
             return 'unknown'
-    stop = policy.get('stop_percent', policy.get('stop_threshold_pct', DEFAULT_STOP_THRESHOLD_PCT))
-    slowdown = policy.get('slowdown_percent', policy.get('slowdown_threshold_pct', DEFAULT_SLOWDOWN_THRESHOLD_PCT))
-    if percent_used >= stop:
-        return 'stop'
-    if percent_used >= slowdown:
-        return 'slow'
-    return 'green'
+    hard_stop = policy.get('hard_stop_percent', DEFAULT_HARD_STOP_THRESHOLD_PCT)
+    checkpoint = policy.get('checkpoint_percent', DEFAULT_CHECKPOINT_THRESHOLD_PCT)
+    caution = policy.get('caution_percent', DEFAULT_CAUTION_THRESHOLD_PCT)
+    if percent_used >= hard_stop:
+        return 'hard_stop'
+    if percent_used >= checkpoint:
+        return 'checkpoint'
+    if percent_used >= caution:
+        return 'caution'
+    return 'normal'
+
+
+def classify_provider_signal_state(record, policy, observed_at_seconds=None, now=None):
+    """Classify observable provider health without inventing percentage usage."""
+    if now is not None:
+        if observed_at_seconds is None:
+            return 'unknown'
+        stale_after = policy.get('stale_after_seconds', DEFAULT_USAGE_STALE_AFTER_SECONDS)
+        if (not isinstance(stale_after, (int, float)) or now < observed_at_seconds
+                or now - observed_at_seconds > stale_after):
+            return 'unknown'
+    if (record.get('service_state') not in ('healthy', 'unhealthy')
+            or record.get('authentication_state') not in ('valid', 'invalid')
+            or record.get('live_invocation_state') not in ('succeeded', 'failed')
+            or record.get('limit_signal') not in (
+                'NONE', 'RATE_LIMIT', 'EXHAUSTION', 'THROTTLING',
+                'CAPACITY_LAUNCH_FAILURE')):
+        return 'unknown'
+    healthy = (
+        record.get('service_state') == 'healthy'
+        and record.get('authentication_state') == 'valid'
+        and record.get('live_invocation_state') == 'succeeded'
+        and record.get('limit_signal') == 'NONE'
+    )
+    return 'normal' if healthy else 'hard_stop'
 
 
 def _parse_iso(value):
@@ -312,7 +321,8 @@ def load_usage(state_dir, policy, now=None):
                 '{"<worker>": {"<account>": {"provider": "...", '
                 '"model": "...", '
                 '"used_percent": <0-100>, "observed_at": "<ISO 8601>", '
-                '"reset_at": "<ISO 8601, optional>"}}} (optionally wrapped '
+                '"reset_at": "<ISO 8601, optional>"}}} or a canonical '
+                'provider_signal record (optionally wrapped '
                 'in {"workers": {...}}) to show real usage.'
             ),
         }
@@ -340,7 +350,9 @@ def load_usage(state_dir, policy, now=None):
         # usage_policy.py's canonical shape is worker -> account -> record.
         # Keep accepting the original flat worker -> record shape as the
         # worker's default account during local migration.
-        record_keys = ('provider', 'model', 'used_percent', 'observed_at', 'reset_at')
+        record_keys = ('provider', 'model', 'capacity_mode', 'used_percent', 'observed_at',
+                       'reset_at', 'service_state', 'authentication_state',
+                       'live_invocation_state', 'limit_signal', 'scopes')
         is_flat_record = any(key in raw_accounts and not isinstance(raw_accounts[key], dict)
                              for key in record_keys)
         accounts = {'default': raw_accounts} if is_flat_record else raw_accounts
@@ -348,26 +360,75 @@ def load_usage(state_dir, policy, now=None):
             if not isinstance(account_key, str) or not account_key or not isinstance(entry, dict):
                 corrupt += 1
                 continue
-            used_percent = entry.get('used_percent')
-            if not isinstance(used_percent, (int, float)) or isinstance(used_percent, bool) or not math.isfinite(float(used_percent)):
-                used_percent = None
-            observed_at = entry.get('observed_at') if isinstance(entry.get('observed_at'), str) else None
-            observed_at_seconds = _parse_iso(observed_at)
-            reset_at = entry.get('reset_at') if isinstance(entry.get('reset_at'), str) else None
-            reset_at_seconds = _parse_iso(reset_at)
-            result.append({
+            mode = str(entry.get('capacity_mode', 'percentage')).lower()
+            if mode not in ('percentage', 'provider_signal'):
+                corrupt += 1
+                continue
+            base = {
                 'worker': safe_display_identifier(worker_key, fallback='unknown-worker'),
                 'account': safe_display_identifier(account_key, fallback='unknown-account'),
                 'provider': safe_display_identifier(entry.get('provider')),
                 'model': safe_display_identifier(entry.get('model')),
+                'capacity_mode': mode,
+                'scope': None,
+                'limit_signal': None,
+            }
+            observations = entry.get('scopes') if mode == 'percentage' else None
+            if 'scopes' in entry and (not isinstance(observations, dict) or not observations):
+                corrupt += 1
+                continue
+            if isinstance(observations, dict):
+                for scope, observation in observations.items():
+                    if not isinstance(scope, str) or not scope or not isinstance(observation, dict):
+                        corrupt += 1
+                        continue
+                    used_percent = observation.get('used_percent')
+                    if (not isinstance(used_percent, (int, float)) or isinstance(used_percent, bool)
+                            or not math.isfinite(float(used_percent))
+                            or not 0 <= float(used_percent) <= 100):
+                        used_percent = None
+                    observed_at = observation.get('observed_at') if isinstance(observation.get('observed_at'), str) else None
+                    observed_at_seconds = _parse_iso(observed_at)
+                    reset_at = observation.get('reset_at') if isinstance(observation.get('reset_at'), str) else None
+                    reset_at_seconds = _parse_iso(reset_at)
+                    result.append({
+                        **base,
+                        'scope': safe_display_identifier(scope, fallback='unknown-scope'),
+                        'used_percent': used_percent,
+                        'observed_at': fstatus.iso(observed_at_seconds) if observed_at_seconds is not None else None,
+                        'observed_at_seconds': observed_at_seconds,
+                        'reset_at': fstatus.iso(reset_at_seconds) if reset_at_seconds is not None else None,
+                        'reset_at_seconds': reset_at_seconds,
+                        'state': classify_usage_state(used_percent, policy, observed_at_seconds, observed_now),
+                    })
+                continue
+
+            observed_at = entry.get('observed_at') if isinstance(entry.get('observed_at'), str) else None
+            observed_at_seconds = _parse_iso(observed_at)
+            reset_at = entry.get('reset_at') if isinstance(entry.get('reset_at'), str) else None
+            reset_at_seconds = _parse_iso(reset_at)
+            used_percent = entry.get('used_percent') if mode == 'percentage' else None
+            if (not isinstance(used_percent, (int, float)) or isinstance(used_percent, bool)
+                    or not math.isfinite(float(used_percent))
+                    or not 0 <= float(used_percent) <= 100):
+                used_percent = None
+            if mode == 'provider_signal':
+                state = classify_provider_signal_state(entry, policy, observed_at_seconds, observed_now)
+                limit_signal = safe_display_identifier(entry.get('limit_signal'), fallback='UNKNOWN')
+            else:
+                state = classify_usage_state(used_percent, policy, observed_at_seconds, observed_now)
+                limit_signal = None
+            result.append({
+                **base,
                 'used_percent': used_percent,
                 'observed_at': fstatus.iso(observed_at_seconds) if observed_at_seconds is not None else None,
                 'observed_at_seconds': observed_at_seconds,
                 'reset_at': fstatus.iso(reset_at_seconds) if reset_at_seconds is not None else None,
                 'reset_at_seconds': reset_at_seconds,
-                'state': classify_usage_state(used_percent, policy, observed_at_seconds, observed_now),
+                'state': state,
+                'limit_signal': limit_signal,
             })
-    result.sort(key=lambda w: (w['worker'], w['account']))
+    result.sort(key=lambda w: (w['worker'], w['account'], w['scope'] or ''))
     return {'found': True, 'error': None, 'workers': result, 'corrupt_workers': corrupt, 'note': None}
 
 
@@ -832,10 +893,12 @@ def effective_dispatch_models(config, state_dir, now):
             if not usage_enabled:
                 command_available = settings['command'] is not None
                 decision = {
-                    'state': 'green',
+                    'state': 'normal',
                     'decision': 'allow' if command_available else 'defer',
                     'effective_model': settings['model'] if command_available else None,
                     'low_cost_only': False,
+                    'capacity_mode': None,
+                    'limit_signal': None,
                 }
             elif usage_error is not None:
                 decision = {'state': 'unknown', 'decision': 'defer',
@@ -850,17 +913,19 @@ def effective_dispatch_models(config, state_dir, now):
             'usage_state': safe_display_identifier(decision.get('state'), fallback='unknown'),
             'dispatch_decision': safe_display_identifier(decision.get('decision'), fallback='defer'),
             'low_cost_only': bool(decision.get('low_cost_only')),
+            'capacity_mode': safe_display_identifier(decision.get('capacity_mode')),
+            'limit_signal': safe_display_identifier(decision.get('limit_signal')),
             'child_slots_allowed': bool(
                 usage_enabled
-                and decision.get('state') == 'green'
-                and decision.get('decision') in ('allow', 'fallback')
+                and decision.get('state') in ('normal', 'caution', 'checkpoint')
+                and decision.get('decision') == 'allow'
             ),
         }
     return result
 
 
 def worker_dispatch(definition, dispatch_models):
-    """Apply the runner's stricter green-only gate to provider child slots."""
+    """Apply the runner's fresh eligible-capacity gate to provider child slots."""
     parent_agent = definition.get('agent', definition.get('key'))
     dispatch = dict(dispatch_models.get(parent_agent, {}))
     if definition.get('slot', 1) > 1 and not dispatch.get('child_slots_allowed', False):
@@ -881,15 +946,19 @@ def apply_runtime_dispatch(worker, effective_model, usage_state):
     worker['effective_model'] = model
     worker['usage_state'] = state or 'unknown'
     if model is not None:
-        if state == 'green':
+        if state == 'normal':
             worker['dispatch_decision'] = 'allow'
             worker['low_cost_only'] = False
+        elif state == 'caution':
+            worker['dispatch_decision'] = 'continue'
+            worker['low_cost_only'] = False
+        elif state in ('checkpoint', 'hard_stop'):
+            worker['dispatch_decision'] = 'checkpoint'
+            worker['low_cost_only'] = False
         else:
-            # A running task with a non-green dispatch state necessarily
-            # reached the fallback command before the usage snapshot changed.
-            worker['dispatch_decision'] = 'fallback'
-            worker['low_cost_only'] = True
-    elif state == 'stop':
+            worker['dispatch_decision'] = 'defer'
+            worker['low_cost_only'] = False
+    elif state == 'hard_stop':
         worker['dispatch_decision'] = 'stop'
         worker['low_cost_only'] = False
     else:
@@ -940,6 +1009,8 @@ def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_mod
             'usage_state': dispatch.get('usage_state', 'unknown'),
             'dispatch_decision': dispatch.get('dispatch_decision', 'defer'),
             'low_cost_only': bool(dispatch.get('low_cost_only')),
+            'capacity_mode': dispatch.get('capacity_mode'),
+            'limit_signal': dispatch.get('limit_signal'),
             'label': definition['label'],
             'state': 'idle',
             'current_issue': None,
@@ -1059,7 +1130,8 @@ def build_worker_views(agent_defs, records, events, heartbeat, now, dispatch_mod
 def build_report(config_path, config, state_dir_override=None, now=None,
                   stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS,
                   utilization_window_days=DEFAULT_UTILIZATION_WINDOW_DAYS,
-                  slowdown_threshold_pct=None, stop_threshold_pct=None):
+                  caution_threshold_pct=None, checkpoint_threshold_pct=None,
+                  hard_stop_threshold_pct=None):
     now = time.time() if now is None else now
     state_dir = pathlib.Path(state_dir_override if state_dir_override is not None else config['state'])
 
@@ -1074,7 +1146,8 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     events_result = load_events(state_dir)
     events = events_result['events']
 
-    policy = usage_policy(config, slowdown_threshold_pct, stop_threshold_pct)
+    policy = usage_policy(config, caution_threshold_pct, checkpoint_threshold_pct,
+                          hard_stop_threshold_pct)
     usage = load_usage(state_dir, policy, now=now)
 
     agent_defs = agent_definitions(config)
@@ -1089,7 +1162,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     workers = build_worker_views(agent_defs, records, events, worker_heartbeats, now, dispatch_models)
     dispatchable_lane_keys = {
         key for key, definition in agent_defs.items()
-        if worker_dispatch(definition, dispatch_models).get('dispatch_decision') in ('allow', 'fallback')
+        if worker_dispatch(definition, dispatch_models).get('dispatch_decision') == 'allow'
     }
     capacity = fstatus.capacity_status(
         state_dir, config, stale_after_seconds, now,
@@ -1167,8 +1240,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 opts['config_path'], opts['config'],
                 stale_after_seconds=opts['stale_after_seconds'],
                 utilization_window_days=opts['utilization_window_days'],
-                slowdown_threshold_pct=opts['slowdown_threshold_pct'],
-                stop_threshold_pct=opts['stop_threshold_pct'],
+                caution_threshold_pct=opts['caution_threshold_pct'],
+                checkpoint_threshold_pct=opts['checkpoint_threshold_pct'],
+                hard_stop_threshold_pct=opts['hard_stop_threshold_pct'],
             )
             self._write(200, 'application/json; charset=utf-8', json.dumps(report, indent=2).encode('utf-8'))
         else:
@@ -1184,7 +1258,8 @@ def loopback_host_arg(value):
 def make_server(host, port, config_path, config, html_path=HTML_PATH,
                  stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS,
                  utilization_window_days=DEFAULT_UTILIZATION_WINDOW_DAYS,
-                 slowdown_threshold_pct=None, stop_threshold_pct=None):
+                 caution_threshold_pct=None, checkpoint_threshold_pct=None,
+                 hard_stop_threshold_pct=None):
     if host != DEFAULT_HOST:
         raise ValueError(f'dashboard host must be {DEFAULT_HOST}')
     server = ThreadingHTTPServer((host, port), DashboardRequestHandler)
@@ -1194,8 +1269,9 @@ def make_server(host, port, config_path, config, html_path=HTML_PATH,
         'html_path': html_path,
         'stale_after_seconds': stale_after_seconds,
         'utilization_window_days': utilization_window_days,
-        'slowdown_threshold_pct': slowdown_threshold_pct,
-        'stop_threshold_pct': stop_threshold_pct,
+        'caution_threshold_pct': caution_threshold_pct,
+        'checkpoint_threshold_pct': checkpoint_threshold_pct,
+        'hard_stop_threshold_pct': hard_stop_threshold_pct,
     }
     return server
 
@@ -1208,10 +1284,12 @@ def build_arg_parser():
     ap.add_argument('--port', type=int, default=DEFAULT_PORT, help=f'Bind port (default {DEFAULT_PORT})')
     ap.add_argument('--stale-after-seconds', type=float, default=DEFAULT_STALE_AFTER_SECONDS)
     ap.add_argument('--utilization-window-days', type=float, default=DEFAULT_UTILIZATION_WINDOW_DAYS)
-    ap.add_argument('--slowdown-threshold-pct', type=float, default=None,
-                     help=f'Overrides config usage_policy.slowdown_threshold_pct (default {DEFAULT_SLOWDOWN_THRESHOLD_PCT})')
-    ap.add_argument('--stop-threshold-pct', type=float, default=None,
-                     help=f'Overrides config usage_policy.stop_threshold_pct (default {DEFAULT_STOP_THRESHOLD_PCT}, capped at {MAX_STOP_THRESHOLD_PCT})')
+    ap.add_argument('--caution-threshold-pct', type=float, default=None,
+                    help=f'Overrides config usage_policy.caution_percent (default {DEFAULT_CAUTION_THRESHOLD_PCT})')
+    ap.add_argument('--checkpoint-threshold-pct', type=float, default=None,
+                    help=f'Overrides config usage_policy.checkpoint_percent (default {DEFAULT_CHECKPOINT_THRESHOLD_PCT})')
+    ap.add_argument('--hard-stop-threshold-pct', type=float, default=None,
+                    help=f'Overrides config usage_policy.hard_stop_percent (default {DEFAULT_HARD_STOP_THRESHOLD_PCT})')
     return ap
 
 
@@ -1226,8 +1304,9 @@ def main(argv=None):
         args.host, args.port, args.config, config,
         stale_after_seconds=args.stale_after_seconds,
         utilization_window_days=args.utilization_window_days,
-        slowdown_threshold_pct=args.slowdown_threshold_pct,
-        stop_threshold_pct=args.stop_threshold_pct,
+        caution_threshold_pct=args.caution_threshold_pct,
+        checkpoint_threshold_pct=args.checkpoint_threshold_pct,
+        hard_stop_threshold_pct=args.hard_stop_threshold_pct,
     )
     print(f'Factory dashboard listening on http://{args.host}:{args.port}/ (auto-refreshes every {REFRESH_SECONDS}s)')
     try:
