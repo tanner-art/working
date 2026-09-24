@@ -64,6 +64,11 @@ The shadow scheduler selects the first eligible worker-package pair by:
 4. oldest READY task;
 5. stable package and worker IDs.
 
+The Orchestra applies this dispatch-priority principle when it assigns package
+priority and readiness: **A known production-relevant risk with a small,
+bounded remediation outranks speculative platform expansion.** This changes
+backlog preparation, not the deterministic scheduler ordering above.
+
 Selection remains non-authoritative: it produces a shadow decision record and
 cannot create a lease or launch work.
 

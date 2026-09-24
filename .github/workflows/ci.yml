@@ -9,6 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+          cache: pip
+          cache-dependency-path: .github/requirements-factory-ci.txt
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -17,4 +22,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Install deterministic Factory Python dependencies
+        run: >-
+          python3 -m pip install
+          --disable-pip-version-check
+          --require-hashes
+          --no-deps
+          -r .github/requirements-factory-ci.txt
+      - name: Test Factory registry, scheduler, and live observer
+        run: python3 -m unittest discover -s scripts/factory_registry -p 'test_*.py' -v
+      - name: Test legacy Factory runner
+        run: python3 -m unittest discover -s scripts/runner -p 'test_*.py' -v
       - run: pnpm check
