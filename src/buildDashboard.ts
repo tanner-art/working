@@ -114,14 +114,26 @@ export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayI
 export function visibleAttention(snapshot: FactoryControlSnapshot): AttentionDisplayItem[] {
   const explicit = snapshot.failures.map(failure => ({ ...failure, source: 'registry_failure' as const }))
   const represented = new Set(explicit.map(failure => `${failure.packageId ?? ''}:${failure.code}`))
+  const packagesWithStructuredReview = new Set(snapshot.reviews.map(review => review.packageId))
+  const packagesWithStructuredFailure = new Set(snapshot.failures.flatMap(failure => failure.packageId === null ? [] : [failure.packageId]))
   const derived = snapshot.features.flatMap(feature => feature.packages).flatMap(item => {
-    const code = item.failureCode ?? (item.reviewState === 'changes_requested' ? 'REVIEW_FAILURE' : null)
+    const reviewStateUnrecorded = item.state === 'VERIFY_REVIEW'
+      && item.reviewState === null
+      && item.evidence.some(evidence => evidence.kind === 'review')
+      && !packagesWithStructuredReview.has(item.id)
+      && !packagesWithStructuredFailure.has(item.id)
+    const code = item.failureCode
+      ?? (item.reviewState === 'changes_requested' ? 'REVIEW_FAILURE' : null)
+      ?? (reviewStateUnrecorded ? 'REVIEW_STATE_UNRECORDED' : null)
     if (!code || represented.has(`${item.id}:${code}`)) return []
+    const missingReviewState = code === 'REVIEW_STATE_UNRECORDED'
     return [{
       id: `package-attention-${item.id}-${code}`,
       code,
-      title: item.reviewState === 'changes_requested' ? 'Review remediation required' : 'Package requires attention',
-      detail: item.blockReason ?? 'The Registry package state records a failure without a structured failure detail.',
+      title: missingReviewState ? 'Review outcome is not recorded' : item.reviewState === 'changes_requested' ? 'Review remediation required' : 'Package requires attention',
+      detail: missingReviewState
+        ? 'Review evidence exists for this VERIFY / REVIEW package, but this Registry revision has no structured review outcome or failure.'
+        : item.blockReason ?? 'The Registry package state records a failure without a structured failure detail.',
       severity: 'warning' as const,
       occurredAt: null,
       workerId: item.ownerWorkerId,

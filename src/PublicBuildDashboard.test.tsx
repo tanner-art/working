@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { DashboardView, type View } from './PublicBuildDashboard'
 import { factoryControlFixture } from './factoryControl.fixture'
-import { preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
+import { actualSoakCanaryProjectionFixture, preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
 
 const viewHeadings: Record<View, string> = {
   overview: 'Everyone at a glance',
@@ -33,6 +33,19 @@ describe('Factory Control Center components', () => {
   ] as Array<[View, string[]]>)('reconciles the preserved canary projection in the %s view', (view, evidence) => {
     const markup = renderToStaticMarkup(<DashboardView view={view} snapshot={preservedCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
     for (const value of evidence) expect(markup).toContain(value)
+  })
+
+  it('keeps the observed SOAK review evidence visible as neutral attention when its outcome is absent', () => {
+    const reviewMarkup = renderToStaticMarkup(<DashboardView view="reviews" snapshot={actualSoakCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
+    expect(reviewMarkup).toContain('SOAK-001-A')
+    expect(reviewMarkup).toContain('Independent canary review evidence')
+    expect(reviewMarkup).toContain('waiting')
+
+    const failureMarkup = renderToStaticMarkup(<DashboardView view="failures" snapshot={actualSoakCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
+    expect(failureMarkup).toContain('REVIEW_STATE_UNRECORDED')
+    expect(failureMarkup).toContain('Review outcome is not recorded')
+    expect(failureMarkup).toContain('this Registry revision has no structured review outcome or failure')
+    expect(failureMarkup).not.toContain('Review remediation required')
   })
 
   it('renders queue filters as labeled controls and exposes expandable Features', () => {

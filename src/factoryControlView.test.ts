@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { factoryControlFixture } from './factoryControl.fixture'
-import { preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
+import { actualSoakCanaryProjectionFixture, preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
 import { capacitySummary, effectiveWorkerHealth, emptyQueueFilters, filterFactoryFeatures, packageIndex, visibleAttention, visibleReviews } from './buildDashboard'
 
 describe('Factory Control Center view helpers', () => {
@@ -36,6 +36,24 @@ describe('Factory Control Center view helpers', () => {
       code: 'REVIEW_FAILURE', source: 'package_state', occurredAt: null,
       detail: 'Raw lease and mutation evidence is incomplete.',
     })
+  })
+
+  it('flags an unrecorded review outcome from typed evidence without interpreting its label', () => {
+    const snapshot = structuredClone(actualSoakCanaryProjectionFixture)
+    const soak = snapshot.features.find(feature => feature.id === 'SOAK-001')?.packages.find(item => item.id === 'SOAK-001-A')
+    if (!soak) throw new Error('SOAK-001-A fixture package is missing')
+    soak.evidence[0].label = 'This arbitrary label must not determine approve or reject'
+
+    expect(visibleAttention(snapshot).find(item => item.packageId === 'SOAK-001-A')).toMatchObject({
+      code: 'REVIEW_STATE_UNRECORDED',
+      title: 'Review outcome is not recorded',
+      detail: 'Review evidence exists for this VERIFY / REVIEW package, but this Registry revision has no structured review outcome or failure.',
+      source: 'package_state',
+    })
+
+    soak.evidence[0].kind = 'artifact'
+    soak.evidence[0].label = 'Rejected review according to unstructured human text'
+    expect(visibleAttention(snapshot).find(item => item.packageId === 'SOAK-001-A')).toBeUndefined()
   })
 
   it('does not duplicate package-state fallbacks when structured rows are present', () => {
