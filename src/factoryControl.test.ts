@@ -7,7 +7,9 @@ describe('Factory Control Center snapshot contract', () => {
     const parsed = parseFactoryControlSnapshot({ ...factoryControlFixture, ignored: 'not returned' })
     expect(parsed.registryRevision).toBe('registry-1842')
     expect(parsed.features[0].packages[0].currentLease?.workerId).toBe('agent-b')
+    expect(parsed.features[0].packages[0].attempts[0].commitSha).toMatch(/^c4f2da8/)
     expect(parsed.capacity.find(scope => scope.workerId === 'claude')?.usedPercent).toBeNull()
+    expect(parsed.usageInvocations[0]).toMatchObject({ workerId: 'claude', inputTokens: 2, outputTokens: 18, outcome: 'SUCCEEDED' })
     expect(parsed).not.toHaveProperty('ignored')
   })
 
@@ -15,6 +17,26 @@ describe('Factory Control Center snapshot contract', () => {
     expect(() => parseFactoryControlSnapshot({ ...factoryControlFixture, factory: { ...factoryControlFixture.factory, health: 'excellent' } })).toThrow('unsupported')
     const { reviews: _reviews, ...withoutReviews } = factoryControlFixture
     expect(() => parseFactoryControlSnapshot(withoutReviews)).toThrow('snapshot.reviews')
+    const { usageInvocations: _usage, ...withoutUsage } = factoryControlFixture
+    expect(() => parseFactoryControlSnapshot(withoutUsage)).toThrow('snapshot.usageInvocations')
+  })
+
+  it('fails closed when usage provenance or source history is incomplete', () => {
+    const missingAttempt = structuredClone(factoryControlFixture)
+    missingAttempt.usageInvocations[0].attemptId = null
+    expect(() => parseFactoryControlSnapshot(missingAttempt)).toThrow('invalid provenance')
+    const missingSource = structuredClone(factoryControlFixture)
+    missingSource.usageInvocations[0].sources = []
+    expect(() => parseFactoryControlSnapshot(missingSource)).toThrow('must contain an observation')
+  })
+
+  it('fails closed when invocation provenance does not resolve in the same projection', () => {
+    const unknownAttempt = structuredClone(factoryControlFixture)
+    unknownAttempt.usageInvocations[0].attemptId = 'attempt-not-in-registry-projection'
+    expect(() => parseFactoryControlSnapshot(unknownAttempt)).toThrow('unknown package attempt')
+    const unknownWorker = structuredClone(factoryControlFixture)
+    unknownWorker.usageInvocations[0].workerId = 'unknown-worker'
+    expect(() => parseFactoryControlSnapshot(unknownWorker)).toThrow('unknown worker')
   })
 
   it('parses the signed transport payload before API verification metadata is added', () => {

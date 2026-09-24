@@ -4,7 +4,7 @@
 
 `/dashboard` is the authenticated, read-only human view of Factory state. The Registry remains authoritative for features, packages, workers, leases, attempts, evidence, capacity, failures, and events. The browser and Vercel endpoint do not store or mutate Factory state.
 
-The Control Center provides seven views: Overview, Queue, Workers, Reviews, Capacity, History / provenance, and Failures / attention. Queue is organized by Feature and expands into Work Packages. The UI renders `VERIFY_REVIEW` as **VERIFY / REVIEW**.
+The Control Center provides seven views: Overview, Queue, Workers, Reviews, Capacity, History / provenance, and Failures / attention. Queue is organized by Feature and expands into Work Packages. History provides an expandable Registry-backed path from Feature to package, attempt, branch, commit, pull request, and evidence. The UI renders `VERIFY_REVIEW` as **VERIFY / REVIEW**.
 
 ## Request path
 
@@ -20,7 +20,7 @@ There is no dashboard database, browser fallback, GitHub-label fallback, or writ
 
 ## Hosted projection transport limitation
 
-Vercel cannot read the Mac-hosted SQLite Registry or its local files. A separately operated, read-only HTTPS projection transport must call the backend-neutral Registry read contract and serialize schema version `1`. This package deliberately does not expose SQLite, copy its database into Vercel, or introduce a second state store.
+Vercel cannot read the Mac-hosted SQLite Registry or its local files. A separately operated, read-only HTTPS projection transport must call the backend-neutral Registry read contract and serialize schema version `2`. This package deliberately does not expose SQLite, copy its database into Vercel, or introduce a second state store.
 
 Until the owner allowlist is configured, authenticated requests return `503 authorization_unconfigured`. Until the projection transport is running and its server variables are configured, they return `503 projection_unconfigured`. These are the expected safe states.
 
@@ -40,13 +40,15 @@ The projection transport responds to authenticated `GET` with:
 - `Content-Type: application/json`;
 - `X-Threadline-Factory-Signature: sha256=<64 lowercase hexadecimal characters>`;
 - no more than 1 MiB of UTF-8 JSON; and
-- a schema-version-1 Registry projection matching `src/factoryControl.ts`.
+- a schema-version-2 Registry projection matching `src/factoryControl.ts`.
 
 The signature is the lowercase hexadecimal HMAC-SHA-256 of the exact response-body bytes using `FACTORY_CONTROL_PROJECTION_SIGNING_SECRET`. Whitespace changes after signing invalidate the response.
 
 The projection must be generated through Registry methods or a Registry API service. It includes one Registry revision so features, packages, workers, leases, attempts, evidence, usage, failures, and events describe one coherent read. Provider/model values are diagnostic. Capacity values declare whether they are provider reported, Factory measured, inferred, or unknown.
 
-Claude consumption is represented as Factory-measured scopes when no provider percentage exists. A missing percentage remains `null`; the UI never converts measured consumption or an inferred ceiling into provider-reported usage.
+Claude consumption is represented as Factory-measured scopes when no provider percentage exists. A missing percentage remains `null`; the UI never converts measured consumption or an inferred ceiling into provider-reported usage. The same coherent projection includes the rolling per-invocation ledger used on Workers and Capacity: sanitized account label, session, task/attempt or explicit diagnostic class, timestamp, model diagnostic, input/output/cache measurements, duration, outcome, actual limit signal, and every observed structured source. The dashboard does not ingest transcripts or calculate a second ledger.
+
+Each Work Package carries its Registry attempts and attempt-specific branch, commit, pull request, and evidence projection. The History drill-through uses those fields directly. Event history remains a separate chronological view of Registry transitions; neither surface queries Git or GitHub from the browser.
 
 ## Failure behavior
 
@@ -54,8 +56,8 @@ The API returns no snapshot when authentication, owner authorization, transport 
 
 Same-origin browser `GET` requests may omit the `Origin` header. The API accepts that browser shape only when `Sec-Fetch-Site: same-origin` is present. Requests with a foreign Origin, cross-site fetch metadata, or neither signal remain rejected. Evidence and pull-request URLs become links only when runtime validation identifies an absolute HTTP or HTTPS URL without embedded credentials; invalid values remain plain text.
 
-Local component checks establish that the seven read-only views render, expose labeled controls, keep Features expandable, and turn unsafe evidence or pull-request URLs into plain text. A development-server route smoke verifies that `/dashboard` serves the application shell. Browser automation was unavailable in the implementation environment because no browser provider was connected and macOS Computer Use permission was not granted, so this package does not claim a completed interactive browser smoke or screenshot.
+Local component checks establish that the seven read-only views render, expose labeled controls, keep Features and provenance expandable, expose semantic usage tables, and turn unsafe evidence or pull-request URLs into plain text. A development-server route smoke verifies that `/dashboard` serves the application shell. Browser automation was unavailable in the implementation environment because no browser provider was connected and macOS Computer Use permission was not granted, so this package does not claim a completed interactive browser smoke or screenshot.
 
-These local checks do not prove the hosted Registry projection path. A hosted test with a real allowed Supabase account, configured signed projection transport, and live Registry revision is still required before this dashboard satisfies the restart gate. That test must confirm all seven views against one current Registry revision and capture browser evidence after authentication.
+These local checks do not prove the hosted Registry projection path. A hosted test with a real allowed Supabase account, configured signed schema-version-2 projection transport, and live Registry revision is still required before this dashboard satisfies the restart gate. That test must confirm all seven views, drill-through provenance, and Claude ledger rows against one current Registry revision and capture browser evidence after authentication.
 
 This delivery does not create the Registry projection service, configure hosted secrets, deploy the dashboard, or grant Factory write authority. Those are separate reviewed operations.

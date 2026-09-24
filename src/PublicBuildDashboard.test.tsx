@@ -39,4 +39,28 @@ describe('Factory Control Center components', () => {
     expect(markup).not.toContain('href="javascript:')
     expect(markup).not.toContain('href="data:')
   })
+
+  it('renders the complete Feature to evidence provenance drill-through', () => {
+    const markup = renderToStaticMarkup(<DashboardView view="history" snapshot={factoryControlFixture} refreshing={false} onRefresh={() => undefined} />)
+    for (const value of ['Feature CONTROL-001', 'Package CONTROL-UI', 'Attempt 1', 'Branch', 'Commit', 'Pull request', 'Evidence', 'c4f2da8cb51c32923cde379660b51186f59674c5']) expect(markup).toContain(value)
+    expect(markup).toContain('aria-label="Provenance for attempt-control-ui-1"')
+    expect(markup).toContain('Registry event timeline')
+  })
+
+  it.each(['workers', 'capacity'] as const)('shows per-invocation Claude usage history in %s', view => {
+    const markup = renderToStaticMarkup(<DashboardView view={view} snapshot={factoryControlFixture} refreshing={false} onRefresh={() => undefined} />)
+    for (const value of ['session-review-001', 'approved-claude-account', '16,788', '23,484', 'SUCCEEDED', 'CLI JSON', 'TRANSCRIPT']) expect(markup).toContain(value)
+    expect(markup).toContain('<table>')
+    expect(markup).toContain('<th scope="col">Cache read</th>')
+    expect(markup).toContain('<th scope="col">Source history</th>')
+  })
+
+  it('keeps unsafe attempt provenance URLs non-clickable', () => {
+    const snapshot = structuredClone(factoryControlFixture)
+    snapshot.features[1].packages[0].attempts[0].pullRequestUrl = 'javascript:alert(1)'
+    snapshot.features[1].packages[0].attempts[0].evidence[0].url = 'data:text/html,unsafe'
+    const markup = renderToStaticMarkup(<DashboardView view="history" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(markup).not.toContain('href="javascript:')
+    expect(markup).not.toContain('href="data:')
+  })
 })

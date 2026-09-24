@@ -1,4 +1,4 @@
-export const FACTORY_SNAPSHOT_SCHEMA_VERSION = 1 as const
+export const FACTORY_SNAPSHOT_SCHEMA_VERSION = 2 as const
 
 export type FactoryState = 'ON_DECK' | 'READY' | 'ACTIVE' | 'VERIFY_REVIEW' | 'BLOCKED' | 'DONE'
 export type HealthState = 'healthy' | 'constrained' | 'offline'
@@ -24,6 +24,19 @@ export interface FactoryLease {
   expiresAt: string
 }
 
+export interface FactoryAttempt {
+  id: string
+  number: number
+  workerId: string | null
+  startedAt: string
+  endedAt: string | null
+  outcome: 'active' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'unknown'
+  branch: string | null
+  commitSha: string | null
+  pullRequestUrl: string | null
+  evidence: FactoryEvidence[]
+}
+
 export interface FactoryPackage {
   id: string
   featureId: string
@@ -44,6 +57,7 @@ export interface FactoryPackage {
   blockReason: string | null
   acceptanceCriteria: string[]
   evidence: FactoryEvidence[]
+  attempts: FactoryAttempt[]
 }
 
 export interface FactoryFeature {
@@ -121,6 +135,31 @@ export interface FactoryCapacityScope {
   lastLimitHitAt: string | null
 }
 
+export interface FactoryUsageSourceObservation {
+  sourceType: 'CLI_JSON' | 'CLI_STREAM_JSON' | 'TRANSCRIPT'
+  observedAt: string
+}
+
+export interface FactoryUsageInvocation {
+  id: string
+  workerId: string
+  accountLabel: string
+  sessionId: string
+  packageId: string | null
+  attemptId: string | null
+  observationClass: 'AUTONOMOUS' | 'DIAGNOSTIC'
+  observedAt: string
+  modelDiagnostic: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  cacheReadTokens: number | null
+  cacheWriteTokens: number | null
+  durationSeconds: number | null
+  outcome: 'SUCCEEDED' | 'FAILED' | 'LIMITED'
+  limitSignal: string | null
+  sources: FactoryUsageSourceObservation[]
+}
+
 export interface FactoryEvent {
   id: string
   kind: EventKind
@@ -176,6 +215,7 @@ export interface FactoryProjectionPayload {
   workers: FactoryWorker[]
   reviews: FactoryReview[]
   capacity: FactoryCapacityScope[]
+  usageInvocations: FactoryUsageInvocation[]
   events: FactoryEvent[]
   failures: FactoryFailure[]
 }
@@ -242,10 +282,14 @@ function parseLease(value: unknown, path: string): FactoryLease {
   return { id: string(v.id, `${path}.id`), workerId: string(v.workerId, `${path}.workerId`), acquiredAt: timestamp(v.acquiredAt, `${path}.acquiredAt`), expiresAt: timestamp(v.expiresAt, `${path}.expiresAt`) }
 }
 function parseNullableLease(value: unknown, path: string): FactoryLease | null { return value === null ? null : parseLease(value, path) }
+function parseAttempt(value: unknown, path: string): FactoryAttempt {
+  const v = object(value, path)
+  return { id: string(v.id, `${path}.id`), number: number(v.number, `${path}.number`), workerId: nullableString(v.workerId, `${path}.workerId`), startedAt: timestamp(v.startedAt, `${path}.startedAt`), endedAt: nullableTimestamp(v.endedAt, `${path}.endedAt`), outcome: oneOf(v.outcome, ['active', 'succeeded', 'failed', 'blocked', 'cancelled', 'unknown'] as const, `${path}.outcome`), branch: nullableString(v.branch, `${path}.branch`), commitSha: nullableString(v.commitSha, `${path}.commitSha`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence) }
+}
 function parsePackage(value: unknown, path: string): FactoryPackage {
   const v = object(value, path)
   return {
-    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence),
+    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence), attempts: list(v.attempts, `${path}.attempts`, parseAttempt),
   }
 }
 function parseFeature(value: unknown, path: string): FactoryFeature {
@@ -270,6 +314,20 @@ function parseCapacity(value: unknown, path: string): FactoryCapacityScope {
   const v = object(value, path)
   return { id: string(v.id, `${path}.id`), workerId: string(v.workerId, `${path}.workerId`), label: string(v.label, `${path}.label`), source: oneOf(v.source, ['provider_reported', 'factory_measured', 'inferred', 'unknown'] as const, `${path}.source`), observedAt: nullableTimestamp(v.observedAt, `${path}.observedAt`), state: oneOf(v.state, capacityStates, `${path}.state`), usedPercent: nullableNumber(v.usedPercent, `${path}.usedPercent`), resetAt: nullableTimestamp(v.resetAt, `${path}.resetAt`), rolling24Hours: parseMeasurement(v.rolling24Hours, `${path}.rolling24Hours`), rolling7Days: parseMeasurement(v.rolling7Days, `${path}.rolling7Days`), averageTokensPerTask: nullableNumber(v.averageTokensPerTask, `${path}.averageTokensPerTask`), outputTokensPerHour: nullableNumber(v.outputTokensPerHour, `${path}.outputTokensPerHour`), productiveRuntimeSeconds: number(v.productiveRuntimeSeconds, `${path}.productiveRuntimeSeconds`), reviewThroughput: number(v.reviewThroughput, `${path}.reviewThroughput`), inferredCeilingTokens: nullableNumber(v.inferredCeilingTokens, `${path}.inferredCeilingTokens`), limitHitCount: number(v.limitHitCount, `${path}.limitHitCount`), lastLimitHitAt: nullableTimestamp(v.lastLimitHitAt, `${path}.lastLimitHitAt`) }
 }
+function parseUsageSource(value: unknown, path: string): FactoryUsageSourceObservation {
+  const v = object(value, path)
+  return { sourceType: oneOf(v.sourceType, ['CLI_JSON', 'CLI_STREAM_JSON', 'TRANSCRIPT'] as const, `${path}.sourceType`), observedAt: timestamp(v.observedAt, `${path}.observedAt`) }
+}
+function parseUsageInvocation(value: unknown, path: string): FactoryUsageInvocation {
+  const v = object(value, path)
+  const observationClass = oneOf(v.observationClass, ['AUTONOMOUS', 'DIAGNOSTIC'] as const, `${path}.observationClass`)
+  const packageId = nullableString(v.packageId, `${path}.packageId`)
+  const attemptId = nullableString(v.attemptId, `${path}.attemptId`)
+  if (observationClass === 'AUTONOMOUS' ? (!packageId || !attemptId) : (packageId !== null || attemptId !== null)) throw new Error(`${path} has invalid provenance.`)
+  const sources = list(v.sources, `${path}.sources`, parseUsageSource)
+  if (!sources.length) throw new Error(`${path}.sources must contain an observation.`)
+  return { id: string(v.id, `${path}.id`), workerId: string(v.workerId, `${path}.workerId`), accountLabel: string(v.accountLabel, `${path}.accountLabel`), sessionId: string(v.sessionId, `${path}.sessionId`), packageId, attemptId, observationClass, observedAt: timestamp(v.observedAt, `${path}.observedAt`), modelDiagnostic: nullableString(v.modelDiagnostic, `${path}.modelDiagnostic`), inputTokens: nullableNumber(v.inputTokens, `${path}.inputTokens`), outputTokens: nullableNumber(v.outputTokens, `${path}.outputTokens`), cacheReadTokens: nullableNumber(v.cacheReadTokens, `${path}.cacheReadTokens`), cacheWriteTokens: nullableNumber(v.cacheWriteTokens, `${path}.cacheWriteTokens`), durationSeconds: nullableNumber(v.durationSeconds, `${path}.durationSeconds`), outcome: oneOf(v.outcome, ['SUCCEEDED', 'FAILED', 'LIMITED'] as const, `${path}.outcome`), limitSignal: nullableString(v.limitSignal, `${path}.limitSignal`), sources }
+}
 function parseEvent(value: unknown, path: string): FactoryEvent {
   const v = object(value, path)
   return { id: string(v.id, `${path}.id`), kind: oneOf(v.kind, ['READY', 'CLAIMED', 'LAUNCHED', 'HEARTBEAT', 'VALIDATION', 'REVIEW', 'FAILURE', 'RETRY', 'DONE', 'LEASE_RELEASED', 'LEASE_EXPIRED'] as const, `${path}.kind`), occurredAt: timestamp(v.occurredAt, `${path}.occurredAt`), featureId: nullableString(v.featureId, `${path}.featureId`), packageId: nullableString(v.packageId, `${path}.packageId`), attemptNumber: nullableNumber(v.attemptNumber, `${path}.attemptNumber`), workerId: nullableString(v.workerId, `${path}.workerId`), branch: nullableString(v.branch, `${path}.branch`), commitSha: nullableString(v.commitSha, `${path}.commitSha`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), evidenceIds: strings(v.evidenceIds, `${path}.evidenceIds`), summary: string(v.summary, `${path}.summary`) }
@@ -285,15 +343,31 @@ export function parseFactoryProjection(value: unknown): FactoryProjectionPayload
   const source = object(v.source, 'snapshot.source')
   const factory = object(v.factory, 'snapshot.factory')
   const reconciliation = object(v.reconciliation, 'snapshot.reconciliation')
-  return {
+  const projection: FactoryProjectionPayload = {
     schemaVersion: FACTORY_SNAPSHOT_SCHEMA_VERSION,
     registryRevision: string(v.registryRevision, 'snapshot.registryRevision'),
     generatedAt: timestamp(v.generatedAt, 'snapshot.generatedAt'),
     source: { kind: oneOf(source.kind, ['registry-projection'] as const, 'snapshot.source.kind'), projectionId: string(source.projectionId, 'snapshot.source.projectionId') },
     factory: { health: oneOf(factory.health, healthStates, 'snapshot.factory.health'), activeParentCount: number(factory.activeParentCount, 'snapshot.factory.activeParentCount'), activeParentLimit: number(factory.activeParentLimit, 'snapshot.factory.activeParentLimit'), orchestraReservePercent: nullableNumber(factory.orchestraReservePercent, 'snapshot.factory.orchestraReservePercent'), readyCount: number(factory.readyCount, 'snapshot.factory.readyCount'), verifyReviewCount: number(factory.verifyReviewCount, 'snapshot.factory.verifyReviewCount'), blockedCount: number(factory.blockedCount, 'snapshot.factory.blockedCount'), attentionCount: number(factory.attentionCount, 'snapshot.factory.attentionCount') },
     reconciliation: { status: oneOf(reconciliation.status, ['clean', 'mismatch', 'unknown'] as const, 'snapshot.reconciliation.status'), worktreeCount: nullableNumber(reconciliation.worktreeCount, 'snapshot.reconciliation.worktreeCount'), dirtyWorktreeCount: nullableNumber(reconciliation.dirtyWorktreeCount, 'snapshot.reconciliation.dirtyWorktreeCount'), unmergedBranchCount: nullableNumber(reconciliation.unmergedBranchCount, 'snapshot.reconciliation.unmergedBranchCount'), unexplainedRecordCount: nullableNumber(reconciliation.unexplainedRecordCount, 'snapshot.reconciliation.unexplainedRecordCount'), activeStaleLeaseCount: nullableNumber(reconciliation.activeStaleLeaseCount, 'snapshot.reconciliation.activeStaleLeaseCount'), observedAt: nullableTimestamp(reconciliation.observedAt, 'snapshot.reconciliation.observedAt') },
-    features: list(v.features, 'snapshot.features', parseFeature), workers: list(v.workers, 'snapshot.workers', parseWorker), reviews: list(v.reviews, 'snapshot.reviews', parseReview), capacity: list(v.capacity, 'snapshot.capacity', parseCapacity), events: list(v.events, 'snapshot.events', parseEvent), failures: list(v.failures, 'snapshot.failures', parseFailure),
+    features: list(v.features, 'snapshot.features', parseFeature), workers: list(v.workers, 'snapshot.workers', parseWorker), reviews: list(v.reviews, 'snapshot.reviews', parseReview), capacity: list(v.capacity, 'snapshot.capacity', parseCapacity), usageInvocations: list(v.usageInvocations, 'snapshot.usageInvocations', parseUsageInvocation), events: list(v.events, 'snapshot.events', parseEvent), failures: list(v.failures, 'snapshot.failures', parseFailure),
   }
+  const workers = new Set(projection.workers.map(worker => worker.id))
+  const attemptsByPackage = new Map<string, Set<string>>()
+  for (const feature of projection.features) {
+    for (const item of feature.packages) {
+      if (item.featureId !== feature.id) throw new Error(`snapshot package ${item.id} has invalid Feature provenance.`)
+      if (attemptsByPackage.has(item.id)) throw new Error(`snapshot package ID ${item.id} is duplicated.`)
+      attemptsByPackage.set(item.id, new Set(item.attempts.map(attempt => attempt.id)))
+    }
+  }
+  for (const invocation of projection.usageInvocations) {
+    if (!workers.has(invocation.workerId)) throw new Error(`snapshot usage invocation ${invocation.id} references an unknown worker.`)
+    if (invocation.observationClass === 'AUTONOMOUS' && !attemptsByPackage.get(invocation.packageId!)?.has(invocation.attemptId!)) {
+      throw new Error(`snapshot usage invocation ${invocation.id} references an unknown package attempt.`)
+    }
+  }
+  return projection
 }
 
 export function parseFactoryControlSnapshot(value: unknown): FactoryControlSnapshot {
