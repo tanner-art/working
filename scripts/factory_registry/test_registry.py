@@ -1,0 +1,557 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from scripts.factory_registry import (
+    Feature,
+    Lane,
+    RegistryConflict,
+    SQLiteRegistry,
+    TaskStatus,
+    Worker,
+    WorkPackage,
+)
+from scripts.factory_registry.preservation_import import import_snapshot
+
+
+class SQLiteRegistryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.database = self.root / "registry.sqlite3"
+        self.registry = SQLiteRegistry(self.database)
+        self.registry.initialize()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def feature(self, feature_id: str = "FEATURE-1") -> None:
+        self.registry.register_feature(Feature(feature_id, "Feature", 100, TaskStatus.READY))
+
+    def worker(self, worker_id: str, *capabilities: str) -> None:
+        self.registry.register_worker(
+            Worker(worker_id, worker_id, capabilities, (Lane.PLATFORM,), usage_state="GREEN")
+        )
+
+    def package(
+        self,
+        package_id: str,
+        *,
+        dependencies: tuple[str, ...] = (),
+        capabilities: tuple[str, ...] = ("registry",),
+    ) -> None:
+        self.registry.register_work_package(
+            WorkPackage(
+                package_id,
+                "FEATURE-1",
+                package_id,
+                "ORCHESTRATION",
+                Lane.PLATFORM,
+                capabilities,
+                100,
+                ("test evidence exists",),
+                status=TaskStatus.READY,
+                dependency_ids=dependencies,
+            )
+        )
+
+    def test_uses_wal_and_expected_schema_version(self) -> None:
+        self.assertEqual(self.registry.journal_mode(), "wal")
+        with sqlite3.connect(self.database) as connection:
+            version = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+        self.assertEqual(version, "1")
+
+    def test_enforces_three_active_parent_packages_transactionally(self) -> None:
+        self.feature()
+        for number in range(1, 5):
+            self.worker(f"worker-{number}", "registry")
+            self.package(f"TASK-{number}")
+        leases = []
+        for number in range(1, 4):
+            leases.append(
+                self.registry.acquire_lease(
+                    f"TASK-{number}", f"worker-{number}",
+                    acquired_at="2026-09-24T10:00:00+00:00",
+                    expires_at="2026-09-24T10:05:00+00:00",
+                )
+            )
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_PARENT_LIMIT"):
+            self.registry.acquire_lease(
+                "TASK-4", "worker-4",
+                acquired_at="2026-09-24T10:01:00+00:00",
+                expires_at="2026-09-24T10:06:00+00:00",
+            )
+        self.registry.release_lease(
+            leases[0].id,
+            released_at="2026-09-24T10:02:00+00:00",
+            reason="READY_FOR_REVIEW",
+            next_status=TaskStatus.VERIFY_REVIEW,
+        )
+        replacement = self.registry.acquire_lease(
+            "TASK-4", "worker-4",
+            acquired_at="2026-09-24T10:03:00+00:00",
+            expires_at="2026-09-24T10:08:00+00:00",
+        )
+        self.assertEqual(replacement.package_id, "TASK-4")
+
+    def test_concurrent_claim_allows_only_one_worker_to_own_package(self) -> None:
+        self.feature()
+        self.worker("worker-1", "registry")
+        self.worker("worker-2", "registry")
+        self.package("TASK")
+
+        def claim(worker_id: str) -> str:
+            try:
+                lease = self.registry.acquire_lease(
+                    "TASK", worker_id,
+                    acquired_at="2026-09-24T10:00:00+00:00",
+                    expires_at="2026-09-24T10:05:00+00:00",
+                )
+                return lease.worker_id
+            except RegistryConflict as error:
+                return error.code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = sorted(pool.map(claim, ("worker-1", "worker-2")))
+        self.assertEqual(sum(result.startswith("worker-") for result in results), 1)
+        self.assertEqual(sum(result in {"PACKAGE_NOT_READY", "LEASE_CONFLICT"} for result in results), 1)
+
+    def test_active_package_transition_requires_atomic_lease_release(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-24T10:00:00+00:00",
+            expires_at="2026-09-24T10:05:00+00:00",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_TRANSITION_REQUIRES_LEASE_RELEASE"):
+            self.registry.transition_work_package(
+                "TASK", expected_status=TaskStatus.ACTIVE,
+                new_status=TaskStatus.VERIFY_REVIEW,
+                changed_at="2026-09-24T10:01:00+00:00",
+            )
+
+    def test_active_status_can_only_be_entered_by_acquiring_a_lease(self) -> None:
+        self.feature()
+        self.package("TASK")
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_REQUIRES_LEASE"):
+            self.registry.transition_work_package(
+                "TASK", expected_status=TaskStatus.READY,
+                new_status=TaskStatus.ACTIVE,
+                changed_at="2026-09-24T10:01:00Z",
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT status FROM work_packages WHERE id='TASK'").fetchone()[0],
+                "READY",
+            )
+            self.assertEqual(connection.execute("SELECT count(*) FROM leases").fetchone()[0], 0)
+
+    def test_work_package_cannot_be_registered_as_active(self) -> None:
+        self.feature()
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_REQUIRES_LEASE"):
+            self.registry.register_work_package(
+                WorkPackage(
+                    "ACTIVE-TASK", "FEATURE-1", "Active", "ORCHESTRATION",
+                    Lane.PLATFORM, ("registry",), 1, ("complete",),
+                    status=TaskStatus.ACTIVE,
+                )
+            )
+
+    def test_explicit_expiry_reconciles_lease_package_worker_failure_and_event(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        lease = self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-24T10:00:00Z",
+            expires_at="2026-09-24T10:05:00Z",
+        )
+        self.assertEqual(
+            self.registry.expire_leases(observed_at="2026-09-24T10:06:00Z"), 1
+        )
+        with sqlite3.connect(self.database) as connection:
+            released = connection.execute(
+                "SELECT released_at, release_reason FROM leases WHERE id=?", (lease.id,)
+            ).fetchone()
+            package = connection.execute(
+                "SELECT status, failure_code FROM work_packages WHERE id='TASK'"
+            ).fetchone()
+            worker = connection.execute(
+                "SELECT availability FROM workers WHERE id='worker'"
+            ).fetchone()[0]
+            event_count = connection.execute(
+                "SELECT count(*) FROM task_events WHERE event_type='LEASE_EXPIRED'"
+            ).fetchone()[0]
+            failure_count = connection.execute(
+                "SELECT count(*) FROM failure_observations WHERE code='HEARTBEAT_MISSED'"
+            ).fetchone()[0]
+        self.assertEqual(released[1], "LEASE_EXPIRED")
+        self.assertEqual(package, ("BLOCKED", "HEARTBEAT_MISSED"))
+        self.assertEqual(worker, "IDLE")
+        self.assertEqual(event_count, 1)
+        self.assertEqual(failure_count, 1)
+
+    def test_release_after_expiry_reconciles_expiry_instead_of_completing(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        lease = self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-24T10:00:00Z",
+            expires_at="2026-09-24T10:05:00Z",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "LEASE_NOT_ACTIVE"):
+            self.registry.release_lease(
+                lease.id,
+                released_at="2026-09-24T10:06:00Z",
+                reason="COMPLETED",
+                next_status=TaskStatus.DONE,
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT status FROM work_packages WHERE id='TASK'").fetchone()[0],
+                "BLOCKED",
+            )
+
+    def test_lease_lifecycle_cannot_move_backward_in_time(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        lease = self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-24T10:00:00Z",
+            expires_at="2026-09-24T10:10:00Z",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_LEASE_CHRONOLOGY"):
+            self.registry.renew_lease(
+                lease.id,
+                now="2026-09-24T09:59:00Z",
+                expires_at="2026-09-24T10:11:00Z",
+            )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_LEASE_CHRONOLOGY"):
+            self.registry.release_lease(
+                lease.id,
+                released_at="2026-09-24T09:59:00Z",
+                reason="COMPLETED",
+                next_status=TaskStatus.DONE,
+            )
+        self.registry.renew_lease(
+            lease.id,
+            now="2026-09-24T10:02:00Z",
+            expires_at="2026-09-24T10:12:00Z",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_LEASE_CHRONOLOGY"):
+            self.registry.renew_lease(
+                lease.id,
+                now="2026-09-24T10:01:00Z",
+                expires_at="2026-09-24T10:13:00Z",
+            )
+
+    def test_actively_leased_worker_cannot_be_reconfigured(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-24T10:00:00Z",
+            expires_at="2026-09-24T10:05:00Z",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "WORKER_HAS_ACTIVE_LEASE"):
+            self.registry.register_worker(
+                Worker(
+                    "worker", "Changed", (), (), role="ORCHESTRA",
+                    availability="IDLE", usage_state="GREEN",
+                )
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT role, availability FROM workers WHERE id='worker'"
+                ).fetchone(),
+                ("WORKER", "BUSY"),
+            )
+
+    def test_lease_timestamps_are_normalized_before_duration_check(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_LEASE_EXPIRY"):
+            self.registry.acquire_lease(
+                "TASK", "worker",
+                acquired_at="2026-09-24T10:00:00.900000+00:00",
+                expires_at="2026-09-24T10:00:00Z",
+            )
+
+    def test_orchestra_role_cannot_claim_implementation_work(self) -> None:
+        self.feature()
+        self.registry.register_worker(
+            Worker(
+                "orchestra", "Orchestra", ("registry",), (Lane.PLATFORM,),
+                role="ORCHESTRA", usage_state="GREEN",
+            )
+        )
+        self.package("TASK")
+        with self.assertRaisesRegex(RegistryConflict, "ORCHESTRA_CANNOT_CLAIM"):
+            self.registry.acquire_lease(
+                "TASK", "orchestra",
+                acquired_at="2026-09-24T10:00:00Z",
+                expires_at="2026-09-24T10:05:00Z",
+            )
+
+    def test_rejects_capability_mismatch_and_incomplete_dependency(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("DEPENDENCY")
+        self.package("BLOCKED", dependencies=("DEPENDENCY",))
+        self.package("MISMATCH", capabilities=("database-migration",))
+        with self.assertRaisesRegex(RegistryConflict, "DEPENDENCY_BLOCKED"):
+            self.registry.acquire_lease(
+                "BLOCKED", "worker",
+                acquired_at="2026-09-24T10:00:00+00:00",
+                expires_at="2026-09-24T10:05:00+00:00",
+            )
+        with self.assertRaisesRegex(RegistryConflict, "CAPABILITY_MISMATCH"):
+            self.registry.acquire_lease(
+                "MISMATCH", "worker",
+                acquired_at="2026-09-24T10:00:00+00:00",
+                expires_at="2026-09-24T10:05:00+00:00",
+            )
+
+    def test_events_are_append_only(self) -> None:
+        event_id = self.registry.append_event(
+            "OBSERVED", recorded_at="2026-09-24T10:00:00+00:00", detail={"safe": True}
+        )
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "TASK_EVENTS_APPEND_ONLY"):
+                connection.execute(
+                    "UPDATE task_events SET event_type='CHANGED' WHERE id=?", (event_id,)
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "TASK_EVENTS_APPEND_ONLY"):
+                connection.execute("DELETE FROM task_events WHERE id=?", (event_id,))
+
+    def test_preservation_import_is_read_only_and_idempotent(self) -> None:
+        snapshot = {
+            "snapshot_version": 1,
+            "canonical_repository": {
+                "origin_main": "abc", "path": str(self.root / "canonical")
+            },
+            "services": {"heartbeats": {"codex-a": {"time": 1000, "status": "idle"}}},
+            "open_task_mapping": [
+                {
+                    "issue": 146,
+                    "task": "TASK-140",
+                    "title": "Usage feed",
+                    "status": "VERIFY / REVIEW",
+                    "worker": "Agent B",
+                    "branch": "runner/task-140",
+                    "pr": 148,
+                }
+            ],
+            "worktrees": [
+                {"worktree": "/preserved/worktree", "branch": "refs/heads/preserved", "dirty": True}
+            ],
+            "unmerged_local_branches": ["runner/task-140 abc123"],
+        }
+        source = self.root / "snapshot.json"
+        source.write_text(json.dumps(snapshot, sort_keys=True))
+        before = source.read_bytes()
+        digest = hashlib.sha256(before).hexdigest()
+        self.assertTrue(import_snapshot(source, self.database))
+        self.assertFalse(import_snapshot(source, self.database))
+        self.assertEqual(source.read_bytes(), before)
+        with sqlite3.connect(self.database) as connection:
+            imported_digest = connection.execute(
+                "SELECT source_sha256 FROM preservation_imports"
+            ).fetchone()[0]
+            package = connection.execute(
+                "SELECT status, lane, source_system, source_ref FROM work_packages WHERE id='TASK-140'"
+            ).fetchone()
+            dirty = connection.execute(
+                "SELECT dirty FROM preserved_artifacts WHERE kind='WORKTREE'"
+            ).fetchone()[0]
+        self.assertEqual(imported_digest, digest)
+        self.assertEqual(package, ("VERIFY_REVIEW", None, "github_issue", "146"))
+        self.assertEqual(dirty, 1)
+
+    def test_preservation_import_rejects_database_inside_preserved_worktree(self) -> None:
+        preserved = self.root / "preserved-worktree"
+        preserved.mkdir()
+        snapshot = {
+            "snapshot_version": 1,
+            "canonical_repository": {
+                "origin_main": "abc", "path": str(self.root / "canonical")
+            },
+            "services": {"heartbeats": {}},
+            "open_task_mapping": [],
+            "worktrees": [{"worktree": str(preserved), "dirty": True}],
+            "unmerged_local_branches": [],
+        }
+        source = self.root / "snapshot-safe.json"
+        source.write_text(json.dumps(snapshot))
+        unsafe_database = preserved / "registry.sqlite3"
+        with self.assertRaisesRegex(RegistryConflict, "UNSAFE_IMPORT_TARGET"):
+            import_snapshot(source, unsafe_database)
+        self.assertFalse(unsafe_database.exists())
+
+    def test_preservation_import_rejects_database_inside_canonical_repository(self) -> None:
+        canonical = self.root / "canonical-repository"
+        canonical.mkdir()
+        snapshot = {
+            "snapshot_version": 1,
+            "canonical_repository": {"origin_main": "abc", "path": str(canonical)},
+            "services": {"heartbeats": {}},
+            "open_task_mapping": [],
+            "worktrees": [],
+            "unmerged_local_branches": [],
+        }
+        source = self.root / "snapshot-canonical.json"
+        source.write_text(json.dumps(snapshot))
+        unsafe_database = canonical / "registry.sqlite3"
+        with self.assertRaisesRegex(RegistryConflict, "UNSAFE_IMPORT_TARGET"):
+            import_snapshot(source, unsafe_database)
+        self.assertFalse(unsafe_database.exists())
+
+    def test_preservation_import_rejects_duplicate_normalized_tasks(self) -> None:
+        duplicate = {
+            "snapshot_version": 1,
+            "canonical_repository": {
+                "origin_main": "abc", "path": str(self.root / "canonical")
+            },
+            "services": {"heartbeats": {}},
+            "open_task_mapping": [
+                {"issue": 1, "task": "TASK-1", "title": "First", "status": "ON DECK"},
+                {"issue": 2, "task": "TASK-1", "title": "Second", "status": "ON DECK"},
+            ],
+            "worktrees": [],
+            "unmerged_local_branches": [],
+        }
+        with self.assertRaisesRegex(RegistryConflict, "DUPLICATE_PRESERVATION_TASK"):
+            self.registry.import_preservation_snapshot(
+                duplicate,
+                source_uri="snapshot.json",
+                source_sha256="a" * 64,
+                imported_at="2026-09-24T10:00:00Z",
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM preservation_imports").fetchone()[0], 0)
+
+    def test_preservation_import_rejects_existing_legacy_worker_collision(self) -> None:
+        self.registry.register_worker(
+            Worker(
+                "legacy-worker:codex-a", "Existing", ("registry",),
+                (Lane.PLATFORM,), usage_state="GREEN",
+            )
+        )
+        snapshot = {
+            "snapshot_version": 1,
+            "canonical_repository": {
+                "origin_main": "abc", "path": str(self.root / "canonical")
+            },
+            "services": {"heartbeats": {"codex-a": {"time": 1000}}},
+            "open_task_mapping": [],
+            "worktrees": [],
+            "unmerged_local_branches": [],
+        }
+        with self.assertRaisesRegex(RegistryConflict, "PRESERVATION_COLLISION"):
+            self.registry.import_preservation_snapshot(
+                snapshot,
+                source_uri="snapshot.json",
+                source_sha256="b" * 64,
+                imported_at="2026-09-24T10:00:00Z",
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM preservation_imports").fetchone()[0], 0)
+
+    def test_preservation_import_rejects_malformed_artifacts_and_heartbeats(self) -> None:
+        base = {
+            "snapshot_version": 1,
+            "canonical_repository": {
+                "origin_main": "abc", "path": str(self.root / "canonical")
+            },
+            "services": {"heartbeats": {}},
+            "open_task_mapping": [],
+            "worktrees": [],
+            "unmerged_local_branches": [],
+        }
+        malformed = [
+            ({**base, "unmerged_local_branches": [None]}, "INVALID_PRESERVATION_BRANCH"),
+            ({**base, "worktrees": [{"worktree": "relative/path"}]}, "INVALID_PRESERVATION_WORKTREE"),
+            ({**base, "services": {"heartbeats": {"worker": "bad"}}}, "INVALID_PRESERVATION_HEARTBEAT"),
+        ]
+        for index, (snapshot, code) in enumerate(malformed):
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(RegistryConflict, code):
+                    self.registry.import_preservation_snapshot(
+                        snapshot,
+                        source_uri=f"snapshot-{index}.json",
+                        source_sha256=str(index) * 64,
+                        imported_at="2026-09-24T10:00:00Z",
+                    )
+
+    def test_registered_timestamps_are_normalized_to_utc(self) -> None:
+        self.feature()
+        self.registry.register_worker(
+            Worker(
+                "worker", "Worker", ("registry",), (Lane.PLATFORM,),
+                last_heartbeat_at="2026-09-24T11:00:00+01:00", usage_state="GREEN",
+            )
+        )
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK", "FEATURE-1", "Task", "ORCHESTRATION", Lane.PLATFORM,
+                ("registry",), 1, ("complete",), status=TaskStatus.READY,
+                started_at="2026-09-24T11:00:00+01:00",
+                last_heartbeat_at="2026-09-24T11:01:00+01:00",
+            )
+        )
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-24T10:02:00Z")
+        self.assertEqual(snapshot.workers[0]["last_heartbeat_at"], "2026-09-24T10:00:00.000000Z")
+        self.assertEqual(snapshot.work_packages[0]["started_at"], "2026-09-24T10:00:00.000000Z")
+        self.assertEqual(
+            snapshot.work_packages[0]["last_heartbeat_at"], "2026-09-24T10:01:00.000000Z"
+        )
+
+    def test_dispatch_snapshot_exposes_backend_neutral_scheduler_inputs(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-24T10:00:00Z")
+        self.assertGreaterEqual(snapshot.revision, 3)
+        self.assertEqual(snapshot.active_parent_limit, 3)
+        self.assertEqual(snapshot.orchestra_reserve_percent, 20)
+        self.assertEqual(snapshot.work_packages[0]["ready_at"] is not None, True)
+        self.assertEqual(snapshot.workers[0]["availability"], "IDLE")
+        self.assertEqual(snapshot.workers[0]["capabilities"], ["registry"])
+        self.assertEqual(snapshot.dependencies, ())
+        self.assertEqual(snapshot.active_leases, ())
+
+    def test_provider_metadata_does_not_grant_lane_or_capability(self) -> None:
+        self.feature()
+        self.registry.register_worker(
+            Worker(
+                "diagnostic-worker", "Diagnostic worker", (), (),
+                provider_diagnostics={"provider": "preferred", "model": "expensive"},
+                usage_state="GREEN",
+            )
+        )
+        self.package("TASK")
+        with self.assertRaisesRegex(RegistryConflict, "LANE_NOT_APPROVED"):
+            self.registry.acquire_lease(
+                "TASK", "diagnostic-worker",
+                acquired_at="2026-09-24T10:00:00+00:00",
+                expires_at="2026-09-24T10:05:00+00:00",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
