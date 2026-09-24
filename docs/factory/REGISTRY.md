@@ -13,6 +13,13 @@ The dormant, provider-neutral restart sequence is specified in
 authority; concrete Registry and runtime adapters remain a separately reviewed
 restart gate.
 
+The SQLite migration adapter initializes dispatch control as `PAUSED` with the
+kill switch engaged. Controlled callers use revision-checked mode changes and
+must re-read the gate before claim and launch. Attempt runtime ownership stores
+runner PID plus provider PID/process group and remains queryable after expiry,
+worker disappearance, or another ownership mismatch. These tables remain
+dormant until the separately approved runner/service adapter is wired.
+
 ## Entities
 
 ### Feature

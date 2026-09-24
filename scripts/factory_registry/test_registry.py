@@ -67,10 +67,14 @@ class SQLiteRegistryTest(unittest.TestCase):
     def test_uses_wal_and_expected_schema_version(self) -> None:
         self.assertEqual(self.registry.journal_mode(), "wal")
         with sqlite3.connect(self.database) as connection:
-            version = connection.execute(
-                "SELECT value FROM registry_metadata WHERE key='schema_version'"
-            ).fetchone()[0]
-        self.assertEqual(version, "3")
+            versions = dict(connection.execute(
+                """SELECT key, value FROM registry_metadata
+                   WHERE key IN ('schema_version', 'control_schema_version')"""
+            ).fetchall())
+        self.assertEqual(
+            versions,
+            {"schema_version": "3", "control_schema_version": "1"},
+        )
 
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
         legacy_database = self.root / "legacy.sqlite3"
@@ -391,7 +395,6 @@ class SQLiteRegistryTest(unittest.TestCase):
                     )
                 finally:
                     connection.close()
-
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()
         for number in range(1, 5):
@@ -892,6 +895,211 @@ class SQLiteRegistryTest(unittest.TestCase):
                 acquired_at="2026-09-24T10:00:00+00:00",
                 expires_at="2026-09-24T10:05:00+00:00",
             )
+
+    def test_dispatch_control_defaults_paused_and_requires_revision_cas(self) -> None:
+        control = self.registry.dispatch_control()
+        self.assertEqual(control["dispatch_mode"], "PAUSED")
+        self.assertTrue(control["kill_switch_engaged"])
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAUSED"):
+            self.registry.require_live_dispatch()
+        with self.assertRaisesRegex(
+            RegistryConflict, "DISPATCH_CONTROL_COMPARE_AND_SWAP_FAILED"
+        ):
+            self.registry.set_dispatch_control(
+                expected_revision=control["revision"] + 1,
+                expected_mode="PAUSED",
+                new_mode="LIVE",
+                kill_switch_engaged=False,
+                changed_at="2026-09-25T10:00:00Z",
+                reason="stale caller",
+            )
+        revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        self.assertEqual(self.registry.require_live_dispatch(), revision)
+
+    def test_runtime_provenance_is_atomic_and_finishes_all_ownership(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        lease = self.registry.acquire_lease(
+            "TASK",
+            "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:10:00Z",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        self.registry.begin_attempt_runtime(
+            "attempt-1",
+            package_id="TASK",
+            worker_id="worker",
+            runner_pid=100,
+            started_at="2026-09-25T10:02:00Z",
+            expected_revision=revision,
+        )
+        self.registry.record_attempt_process(
+            "attempt-1",
+            agent_pid=101,
+            agent_pgid=101,
+            recorded_at="2026-09-25T10:02:01Z",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at="2026-09-25T10:02:02Z", reason="operator stop"
+        )
+        stopped = self.registry.dispatch_control()
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_OWNERSHIP_PRESENT"):
+            self.registry.set_dispatch_control(
+                expected_revision=stopped["revision"],
+                expected_mode="STOPPING",
+                new_mode="PAUSED",
+                kill_switch_engaged=True,
+                changed_at="2026-09-25T10:02:03Z",
+                reason="unsafe early pause",
+            )
+        self.registry.finish_attempt_runtime(
+            "attempt-1",
+            ended_at="2026-09-25T10:03:00Z",
+            outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW,
+            reason="ready for review",
+        )
+        with sqlite3.connect(self.database) as connection:
+            runtime = connection.execute(
+                """SELECT runner_pid, agent_pid, agent_pgid, released_at
+                   FROM attempt_runtime_ownership WHERE attempt_id='attempt-1'"""
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT outcome, ended_at FROM attempts WHERE id='attempt-1'"
+            ).fetchone()
+            package = connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK'"
+            ).fetchone()[0]
+            released = connection.execute(
+                "SELECT release_reason FROM leases WHERE id=?", (lease.id,)
+            ).fetchone()[0]
+        self.assertEqual(runtime[:3], (100, 101, 101))
+        self.assertIsNotNone(runtime[3])
+        self.assertEqual(attempt[0], "SUCCEEDED")
+        self.assertIsNotNone(attempt[1])
+        self.assertEqual(package, "VERIFY_REVIEW")
+        self.assertEqual(released, "ready for review")
+        self.assertEqual(self.registry.runtime_orphans(), ())
+        stopped = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=stopped["revision"],
+            expected_mode="STOPPING",
+            new_mode="PAUSED",
+            kill_switch_engaged=True,
+            changed_at="2026-09-25T10:04:00Z",
+            reason="ownership drained",
+        )
+
+    def test_process_binding_rechecks_kill_switch_and_orphans_stay_visible(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        self.registry.acquire_lease(
+            "TASK",
+            "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:10:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1",
+            package_id="TASK",
+            worker_id="worker",
+            runner_pid=100,
+            started_at="2026-09-25T10:02:00Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at="2026-09-25T10:02:01Z", reason="operator stop"
+        )
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAUSED"):
+            self.registry.record_attempt_process(
+                "attempt-1",
+                agent_pid=101,
+                agent_pgid=101,
+                recorded_at="2026-09-25T10:02:02Z",
+            )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE attempts SET ended_at=?, outcome='FAILED' WHERE id='attempt-1'",
+                ("2026-09-25T10:03:00.000000Z",),
+            )
+        orphans = self.registry.runtime_orphans()
+        self.assertEqual([item["attempt_id"] for item in orphans], ["attempt-1"])
+        self.assertIsNone(orphans[0]["released_at"])
+
+    def test_expired_lease_and_disappeared_worker_surface_runtime_orphans(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        self.registry.acquire_lease(
+            "TASK",
+            "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:10:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1",
+            package_id="TASK",
+            worker_id="worker",
+            runner_pid=100,
+            started_at="2026-09-25T10:02:00Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.record_attempt_process(
+            "attempt-1",
+            agent_pid=101,
+            agent_pgid=101,
+            recorded_at="2026-09-25T10:02:01Z",
+        )
+        self.assertEqual(
+            self.registry.runtime_orphans(observed_at="2026-09-25T10:05:00Z"), ()
+        )
+        expired = self.registry.runtime_orphans(observed_at="2026-09-25T10:11:00Z")
+        self.assertEqual([item["attempt_id"] for item in expired], ["attempt-1"])
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE workers SET availability='OFFLINE' WHERE id='worker'"
+            )
+        disappeared = self.registry.runtime_orphans(
+            observed_at="2026-09-25T10:05:00Z"
+        )
+        self.assertEqual(disappeared[0]["worker_availability"], "OFFLINE")
 
 
 if __name__ == "__main__":

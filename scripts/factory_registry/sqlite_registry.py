@@ -240,6 +240,446 @@ class SQLiteRegistry:
         with self._connection() as connection:
             return str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
 
+    def dispatch_control(self) -> Mapping[str, Any]:
+        """Return the durable, fail-closed runner dispatch gate."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT control.dispatch_mode, control.kill_switch_engaged,
+                          control.changed_at, control.reason, metadata.value AS revision
+                   FROM factory_control AS control
+                   JOIN registry_metadata AS metadata ON metadata.key='revision'
+                   WHERE control.singleton=1"""
+            ).fetchone()
+        if row is None:
+            raise RegistryConflict("DISPATCH_CONTROL_MISSING")
+        return {
+            "dispatch_mode": row["dispatch_mode"],
+            "kill_switch_engaged": bool(row["kill_switch_engaged"]),
+            "changed_at": row["changed_at"],
+            "reason": row["reason"],
+            "revision": int(row["revision"]),
+        }
+
+    def require_live_dispatch(self, *, expected_revision: int | None = None) -> int:
+        """Fail closed unless the authoritative Registry currently permits work."""
+        control = self.dispatch_control()
+        if control["dispatch_mode"] != "LIVE" or control["kill_switch_engaged"]:
+            raise RegistryConflict("DISPATCH_PAUSED", str(control["dispatch_mode"]))
+        revision = int(control["revision"])
+        if expected_revision is not None and revision != expected_revision:
+            raise RegistryConflict(
+                "DISPATCH_REVISION_CHANGED", f"expected {expected_revision}, got {revision}"
+            )
+        return revision
+
+    def set_dispatch_control(
+        self,
+        *,
+        expected_revision: int,
+        expected_mode: str,
+        new_mode: str,
+        kill_switch_engaged: bool,
+        changed_at: str,
+        reason: str,
+    ) -> int:
+        """Atomically compare-and-swap the persistent dispatch gate."""
+        if new_mode not in {"PAUSED", "LIVE", "STOPPING", "RECOVERY_REQUIRED"}:
+            raise RegistryConflict("INVALID_DISPATCH_MODE", new_mode)
+        if new_mode == "LIVE" and kill_switch_engaged:
+            raise RegistryConflict("INVALID_DISPATCH_CONTROL")
+        if new_mode != "LIVE" and not kill_switch_engaged:
+            raise RegistryConflict("INVALID_DISPATCH_CONTROL")
+        changed_at = _normalize_timestamp(changed_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                revision = int(connection.execute(
+                    "SELECT value FROM registry_metadata WHERE key='revision'"
+                ).fetchone()[0])
+                control = connection.execute(
+                    "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if revision != expected_revision or control is None or control[0] != expected_mode:
+                    raise RegistryConflict("DISPATCH_CONTROL_COMPARE_AND_SWAP_FAILED")
+                if new_mode == "LIVE":
+                    active = connection.execute(
+                        "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                    ).fetchone()
+                    running = connection.execute(
+                        "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                    ).fetchone()
+                    if active or running:
+                        raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                if new_mode == "PAUSED":
+                    active = connection.execute(
+                        "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                    ).fetchone()
+                    running = connection.execute(
+                        "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                    ).fetchone()
+                    runtimes = connection.execute(
+                        """SELECT 1 FROM attempt_runtime_ownership
+                           WHERE released_at IS NULL LIMIT 1"""
+                    ).fetchone()
+                    if active or running or runtimes:
+                        raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                connection.execute(
+                    """UPDATE factory_control
+                       SET dispatch_mode=?, kill_switch_engaged=?, changed_at=?, reason=?
+                       WHERE singleton=1""",
+                    (new_mode, int(kill_switch_engaged), changed_at, reason),
+                )
+                self._insert_event(
+                    connection,
+                    "DISPATCH_CONTROL_CHANGED",
+                    changed_at,
+                    None,
+                    None,
+                    None,
+                    {
+                        "from": expected_mode,
+                        "to": new_mode,
+                        "kill_switch_engaged": kill_switch_engaged,
+                        "reason": reason,
+                    },
+                )
+                result = self._bump_revision(connection)
+                connection.commit()
+                return result
+            except Exception:
+                connection.rollback()
+                raise
+
+    def engage_dispatch_kill_switch(self, *, changed_at: str, reason: str) -> int:
+        """Engage the kill switch without relying on a stale caller revision."""
+        changed_at = _normalize_timestamp(changed_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                control = connection.execute(
+                    "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None:
+                    raise RegistryConflict("DISPATCH_CONTROL_MISSING")
+                connection.execute(
+                    """UPDATE factory_control
+                       SET dispatch_mode='STOPPING', kill_switch_engaged=1,
+                           changed_at=?, reason=? WHERE singleton=1""",
+                    (changed_at, reason),
+                )
+                self._insert_event(
+                    connection,
+                    "DISPATCH_KILL_SWITCH_ENGAGED",
+                    changed_at,
+                    None,
+                    None,
+                    None,
+                    {"from": control["dispatch_mode"], "reason": reason},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
+    def begin_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        package_id: str,
+        worker_id: str,
+        runner_pid: int,
+        started_at: str,
+        expected_revision: int,
+    ) -> None:
+        """Persist attempt and runner ownership before any provider launch."""
+        if runner_pid <= 0:
+            raise RegistryConflict("INVALID_PROCESS_ID")
+        started_at = _normalize_timestamp(started_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                control = connection.execute(
+                    """SELECT control.dispatch_mode, control.kill_switch_engaged,
+                              metadata.value AS revision
+                       FROM factory_control AS control
+                       JOIN registry_metadata AS metadata ON metadata.key='revision'
+                       WHERE control.singleton=1"""
+                ).fetchone()
+                if (
+                    control is None
+                    or control["dispatch_mode"] != "LIVE"
+                    or control["kill_switch_engaged"]
+                    or int(control["revision"]) != expected_revision
+                ):
+                    raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                lease = connection.execute(
+                    """SELECT id FROM leases
+                       WHERE package_id=? AND worker_id=? AND released_at IS NULL
+                         AND expires_at > ?""",
+                    (package_id, worker_id, started_at),
+                ).fetchone()
+                package = connection.execute(
+                    "SELECT status FROM work_packages WHERE id=?", (package_id,)
+                ).fetchone()
+                if lease is None or package is None or package["status"] != "ACTIVE":
+                    raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+                connection.execute(
+                    """INSERT INTO attempts
+                       (id, package_id, worker_id, lease_id, started_at,
+                        provider_diagnostics_json)
+                       VALUES (?, ?, ?, ?, ?, '{}')""",
+                    (attempt_id, package_id, worker_id, lease["id"], started_at),
+                )
+                connection.execute(
+                    """INSERT INTO attempt_runtime_ownership
+                       (attempt_id, runner_pid, recorded_at, updated_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (attempt_id, runner_pid, started_at, started_at),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_RUNTIME_RESERVED",
+                    started_at,
+                    package_id,
+                    worker_id,
+                    attempt_id,
+                    {"runner_pid": runner_pid, "lease_id": lease["id"]},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("ATTEMPT_RUNTIME_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    def record_attempt_process(
+        self,
+        attempt_id: str,
+        *,
+        agent_pid: int,
+        agent_pgid: int,
+        recorded_at: str,
+    ) -> None:
+        """Bind the launched provider process only while dispatch remains live."""
+        if agent_pid <= 0 or agent_pgid <= 0:
+            raise RegistryConflict("INVALID_PROCESS_ID")
+        recorded_at = _normalize_timestamp(recorded_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                control = connection.execute(
+                    """SELECT dispatch_mode, kill_switch_engaged
+                       FROM factory_control WHERE singleton=1"""
+                ).fetchone()
+                if (
+                    control is None
+                    or control["dispatch_mode"] != "LIVE"
+                    or control["kill_switch_engaged"]
+                ):
+                    raise RegistryConflict("DISPATCH_PAUSED")
+                active = connection.execute(
+                    """SELECT 1
+                       FROM attempt_runtime_ownership AS runtime
+                       JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                       JOIN leases AS lease ON lease.id=attempt.lease_id
+                       WHERE runtime.attempt_id=? AND runtime.released_at IS NULL
+                         AND attempt.ended_at IS NULL AND lease.released_at IS NULL
+                         AND lease.expires_at > ?""",
+                    (attempt_id, recorded_at),
+                ).fetchone()
+                if active is None:
+                    raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
+                updated = connection.execute(
+                    """UPDATE attempt_runtime_ownership
+                       SET agent_pid=?, agent_pgid=?, updated_at=?
+                       WHERE attempt_id=? AND released_at IS NULL""",
+                    (agent_pid, agent_pgid, recorded_at, attempt_id),
+                ).rowcount
+                if updated != 1:
+                    raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
+                row = connection.execute(
+                    "SELECT package_id, worker_id FROM attempts WHERE id=?", (attempt_id,)
+                ).fetchone()
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_PROCESS_RECORDED",
+                    recorded_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {"agent_pid": agent_pid, "agent_pgid": agent_pgid},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def release_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        released_at: str,
+        reason: str,
+    ) -> None:
+        released_at = _normalize_timestamp(released_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                updated = connection.execute(
+                    """UPDATE attempt_runtime_ownership
+                       SET released_at=?, release_reason=?, updated_at=?
+                       WHERE attempt_id=? AND released_at IS NULL""",
+                    (released_at, reason, released_at, attempt_id),
+                ).rowcount
+                if updated != 1:
+                    raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
+                row = connection.execute(
+                    "SELECT package_id, worker_id FROM attempts WHERE id=?", (attempt_id,)
+                ).fetchone()
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_RUNTIME_RELEASED",
+                    released_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {"reason": reason},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def finish_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        ended_at: str,
+        outcome: str,
+        next_status: TaskStatus,
+        reason: str,
+        failure_detail: str | None = None,
+    ) -> None:
+        """Atomically close runtime, attempt, lease, package, and worker ownership."""
+        if outcome not in {"SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED"}:
+            raise RegistryConflict("INVALID_ATTEMPT_OUTCOME", outcome)
+        if next_status == TaskStatus.ACTIVE:
+            raise RegistryConflict("INVALID_RELEASE_STATUS")
+        allowed_statuses = {
+            "SUCCEEDED": {TaskStatus.VERIFY_REVIEW, TaskStatus.DONE},
+            "FAILED": {TaskStatus.BLOCKED},
+            "BLOCKED": {TaskStatus.BLOCKED},
+            "CANCELLED": {TaskStatus.BLOCKED, TaskStatus.READY},
+        }
+        if next_status not in allowed_statuses[outcome]:
+            raise RegistryConflict("ATTEMPT_OUTCOME_STATUS_MISMATCH")
+        ended_at = _normalize_timestamp(ended_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """SELECT attempt.package_id, attempt.worker_id, attempt.lease_id,
+                              attempt.started_at, attempt.ended_at,
+                              runtime.released_at AS runtime_released_at
+                       FROM attempts AS attempt
+                       JOIN attempt_runtime_ownership AS runtime
+                         ON runtime.attempt_id=attempt.id
+                       WHERE attempt.id=?""",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"attempt runtime {attempt_id}")
+                if row["ended_at"] is not None or row["runtime_released_at"] is not None:
+                    raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
+                if ended_at < row["started_at"]:
+                    raise RegistryConflict("INVALID_ATTEMPT_CHRONOLOGY")
+                lease = connection.execute(
+                    "SELECT released_at FROM leases WHERE id=?", (row["lease_id"],)
+                ).fetchone()
+                if lease is None or lease["released_at"] is not None:
+                    raise RegistryConflict("LEASE_NOT_ACTIVE")
+                connection.execute(
+                    """UPDATE attempt_runtime_ownership
+                       SET released_at=?, release_reason=?, updated_at=?
+                       WHERE attempt_id=?""",
+                    (ended_at, reason, ended_at, attempt_id),
+                )
+                connection.execute(
+                    """UPDATE attempts
+                       SET ended_at=?, outcome=?, failure_detail=?
+                       WHERE id=?""",
+                    (ended_at, outcome, failure_detail, attempt_id),
+                )
+                connection.execute(
+                    "UPDATE leases SET released_at=?, release_reason=? WHERE id=?",
+                    (ended_at, reason, row["lease_id"]),
+                )
+                package_updated = connection.execute(
+                    """UPDATE work_packages
+                       SET status=?, updated_at=?, failure_detail=?
+                       WHERE id=? AND status='ACTIVE'""",
+                    (
+                        next_status.value,
+                        ended_at,
+                        failure_detail,
+                        row["package_id"],
+                    ),
+                ).rowcount
+                if package_updated != 1:
+                    raise RegistryConflict("PACKAGE_NOT_ACTIVE")
+                connection.execute(
+                    "UPDATE workers SET availability='IDLE', updated_at=? WHERE id=?",
+                    (ended_at, row["worker_id"]),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_FINISHED",
+                    ended_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {
+                        "outcome": outcome,
+                        "next_status": next_status.value,
+                        "reason": reason,
+                    },
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def runtime_orphans(
+        self, *, observed_at: str | None = None
+    ) -> Sequence[Mapping[str, Any]]:
+        """Return unresolved runtime ownership without changing it."""
+        observed_at = _normalize_timestamp(observed_at or _utc_now())
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT runtime.*, attempt.package_id, attempt.worker_id,
+                          attempt.ended_at, lease.released_at AS lease_released_at,
+                          lease.expires_at AS lease_expires_at,
+                          worker.availability AS worker_availability
+                   FROM attempt_runtime_ownership AS runtime
+                   JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                   LEFT JOIN leases AS lease ON lease.id=attempt.lease_id
+                   LEFT JOIN workers AS worker ON worker.id=attempt.worker_id
+                   WHERE runtime.released_at IS NULL
+                     AND (attempt.ended_at IS NOT NULL OR lease.id IS NULL
+                          OR lease.released_at IS NOT NULL OR lease.expires_at <= ?
+                          OR worker.availability IN ('OFFLINE', 'CONSTRAINED'))
+                   ORDER BY runtime.attempt_id""",
+                (observed_at,),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
     @staticmethod
     def _bump_revision(connection: sqlite3.Connection) -> int:
         connection.execute(

@@ -107,21 +107,41 @@ The module has no concrete database, queue, process, service, or launchd
 adapter. Importing it cannot start work. That separation is intentional for
 this package because live dispatch remains paused.
 
+## Dormant Registry wiring
+
+The Registry schema now creates a singleton `factory_control` row with the
+fail-closed default `PAUSED` and `kill_switch_engaged=1`. The SQLite adapter
+provides revision-checked mode changes, an unconditional kill-switch operation,
+and read gates intended for both the pre-claim and pre-launch boundaries.
+
+`attempt_runtime_ownership` durably maps a Registry attempt to its runner PID
+and provider PID/process group. Reserving an attempt requires a live control
+row, the expected Registry revision, and a matching unexpired lease. Binding a
+provider process rechecks the live gate and lease. Finishing an attempt updates
+the runtime record, attempt, lease, package, worker, event, and revision in one
+transaction. Expired leases, missing/released leases, terminal attempts, and
+offline or constrained workers remain visible through the orphan query.
+
+`scripts/runner/registry_control.py` is the opt-in runner-facing adapter. An
+absent `registry_database` returns no adapter, preserving the current legacy
+GitHub runner. When explicitly wired later, its `pre_claim` and `pre_launch`
+methods fail closed and its process callback records PID/PGID provenance. The
+adapter is dormant: `runner.py` does not import or call it in this commit.
+
 ## Required follow-up before restart
 
-Create an A4b package with explicit authority to implement and review the live
-adapter. It must:
+The remaining authority-bound runner/service integration must:
 
-1. add the restart phase and kill switch to the authoritative Registry schema;
-2. make the runner check the Registry kill switch immediately before every
+1. make the runner check the Registry kill switch immediately before every
    claim and launch;
-3. map every Registry attempt ID to the runner PID/process group durably;
-4. add a fail-closed launchd operation that unloads live runners and installs
+2. call the dormant attempt lifecycle methods from claim, launch, completion,
+   interruption, and failure paths;
+3. add a fail-closed launchd operation that unloads live runners and installs
    reviewed dry-run definitions without restoring live definitions on error;
-5. preserve the current launchd backup and dry-run inspection behavior;
-6. prove enable, stop, disappearance, lease expiry, rollback, and restart-after-
+4. preserve the current launchd backup and dry-run inspection behavior;
+5. prove enable, stop, disappearance, lease expiry, rollback, and restart-after-
    crash through mock-backed launchctl tests; and
-7. receive independent ASSURANCE before any live invocation.
+6. receive independent ASSURANCE before any live invocation.
 
 The existing installer can promote reviewed dry-run definitions with
 `--live --replace-current`, but there is no corresponding fail-closed pause

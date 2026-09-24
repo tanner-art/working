@@ -7,9 +7,24 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
     ('schema_version', '3'),
+    ('control_schema_version', '1'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
     ('orchestra_reserve_percent', '20');
+
+CREATE TABLE IF NOT EXISTS factory_control (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    dispatch_mode TEXT NOT NULL CHECK(dispatch_mode IN (
+        'PAUSED', 'LIVE', 'STOPPING', 'RECOVERY_REQUIRED'
+    )),
+    kill_switch_engaged INTEGER NOT NULL CHECK(kill_switch_engaged IN (0, 1)),
+    changed_at TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO factory_control
+    (singleton, dispatch_mode, kill_switch_engaged, changed_at, reason)
+VALUES (1, 'PAUSED', 1, '1970-01-01T00:00:00.000000Z', 'fail-closed default');
 
 CREATE TABLE IF NOT EXISTS features (
     id TEXT PRIMARY KEY,
@@ -133,6 +148,21 @@ CREATE TABLE IF NOT EXISTS attempts (
     provider_diagnostics_json TEXT NOT NULL,
     failure_code TEXT,
     failure_detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS attempt_runtime_ownership (
+    attempt_id TEXT PRIMARY KEY REFERENCES attempts(id),
+    runner_pid INTEGER NOT NULL CHECK(runner_pid > 0),
+    agent_pid INTEGER,
+    agent_pgid INTEGER,
+    recorded_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    released_at TEXT,
+    release_reason TEXT,
+    CHECK(agent_pid IS NULL OR agent_pid > 0),
+    CHECK(agent_pgid IS NULL OR agent_pgid > 0),
+    CHECK((released_at IS NULL AND release_reason IS NULL)
+       OR (released_at IS NOT NULL AND release_reason IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
