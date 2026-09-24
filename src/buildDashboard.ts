@@ -1,4 +1,38 @@
-import type { FactoryCapacityScope, FactoryFeature, FactoryPackage } from './factoryControl'
+import type { FactoryCapacityScope, FactoryControlSnapshot, FactoryEvidence, FactoryFeature, FactoryPackage, FactoryWorker, HealthState, ReviewState } from './factoryControl'
+
+export const WORKER_HEARTBEAT_FRESH_SECONDS = 180
+
+export interface WorkerDisplayHealth {
+  state: HealthState
+  reason: string
+}
+
+export interface ReviewDisplayItem {
+  id: string
+  packageId: string
+  implementerWorkerId: string | null
+  eligibleReviewerIds: string[]
+  assignedReviewerId: string | null
+  requestedAt: string | null
+  state: ReviewState
+  findings: string[]
+  changesRequested: string[]
+  approvalEvidence: FactoryEvidence[]
+  source: 'registry_review' | 'package_state'
+}
+
+export interface AttentionDisplayItem {
+  id: string
+  code: string
+  title: string
+  detail: string
+  severity: 'warning' | 'critical'
+  occurredAt: string | null
+  workerId: string | null
+  packageId: string | null
+  requiresHuman: boolean
+  source: 'registry_failure' | 'package_state'
+}
 
 export interface QueueFilters {
   state: string
@@ -37,4 +71,64 @@ export function capacitySummary(scope: FactoryCapacityScope): string {
   if (scope.source === 'inferred' && scope.usedPercent !== null) return `${scope.usedPercent}% used · Factory inference`
   if (scope.source === 'factory_measured') return `${scope.rolling24Hours.outputTokens ?? 'Unknown'} output tokens · measured over 24h`
   return 'Capacity value unknown'
+}
+
+export function effectiveWorkerHealth(worker: FactoryWorker, generatedAt: string): WorkerDisplayHealth {
+  if (worker.health === 'offline') return { state: 'offline', reason: 'Worker reports offline.' }
+  if (worker.serviceState === 'offline') return { state: 'offline', reason: 'Service reports offline.' }
+  if (worker.authenticationState === 'invalid') return { state: 'constrained', reason: 'Authentication is invalid.' }
+  if (worker.serviceState !== 'healthy') return { state: 'constrained', reason: `Service state is ${worker.serviceState}.` }
+  if (worker.authenticationState !== 'valid') return { state: 'constrained', reason: `Authentication state is ${worker.authenticationState}.` }
+  if (worker.heartbeatAt === null) return { state: 'constrained', reason: 'Heartbeat evidence is missing.' }
+
+  const heartbeatAgeSeconds = (Date.parse(generatedAt) - Date.parse(worker.heartbeatAt)) / 1000
+  if (heartbeatAgeSeconds < 0) return { state: 'constrained', reason: 'Heartbeat timestamp is in the future.' }
+  if (heartbeatAgeSeconds > WORKER_HEARTBEAT_FRESH_SECONDS) return { state: 'constrained', reason: `Heartbeat evidence is stale (${Math.floor(heartbeatAgeSeconds)}s old).` }
+  if (worker.health === 'constrained') return { state: 'constrained', reason: 'Worker reports constrained.' }
+  return { state: 'healthy', reason: 'Service, authentication, and heartbeat evidence are current.' }
+}
+
+export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayItem[] {
+  const explicit = snapshot.reviews.map(review => ({ ...review, source: 'registry_review' as const }))
+  const represented = new Set(explicit.map(review => review.packageId))
+  const derived = snapshot.features.flatMap(feature => feature.packages).flatMap(item => {
+    if (item.state !== 'VERIFY_REVIEW' || represented.has(item.id)) return []
+    const latestAttempt = item.attempts.find(attempt => attempt.number === item.attemptNumber) ?? item.attempts.at(-1)
+    return [{
+      id: `package-review-${item.id}`,
+      packageId: item.id,
+      implementerWorkerId: latestAttempt?.workerId ?? item.ownerWorkerId,
+      eligibleReviewerIds: [],
+      assignedReviewerId: null,
+      requestedAt: null,
+      state: item.reviewState ?? 'waiting',
+      findings: [],
+      changesRequested: item.reviewState === 'changes_requested' && item.blockReason ? [item.blockReason] : [],
+      approvalEvidence: item.evidence.filter(evidence => evidence.kind === 'review'),
+      source: 'package_state' as const,
+    }]
+  })
+  return [...explicit, ...derived]
+}
+
+export function visibleAttention(snapshot: FactoryControlSnapshot): AttentionDisplayItem[] {
+  const explicit = snapshot.failures.map(failure => ({ ...failure, source: 'registry_failure' as const }))
+  const represented = new Set(explicit.map(failure => `${failure.packageId ?? ''}:${failure.code}`))
+  const derived = snapshot.features.flatMap(feature => feature.packages).flatMap(item => {
+    const code = item.failureCode ?? (item.reviewState === 'changes_requested' ? 'REVIEW_FAILURE' : null)
+    if (!code || represented.has(`${item.id}:${code}`)) return []
+    return [{
+      id: `package-attention-${item.id}-${code}`,
+      code,
+      title: item.reviewState === 'changes_requested' ? 'Review remediation required' : 'Package requires attention',
+      detail: item.blockReason ?? 'The Registry package state records a failure without a structured failure detail.',
+      severity: 'warning' as const,
+      occurredAt: null,
+      workerId: item.ownerWorkerId,
+      packageId: item.id,
+      requiresHuman: false,
+      source: 'package_state' as const,
+    }]
+  })
+  return [...explicit, ...derived]
 }

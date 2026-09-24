@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { DashboardView, type View } from './PublicBuildDashboard'
 import { factoryControlFixture } from './factoryControl.fixture'
+import { preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
 
 const viewHeadings: Record<View, string> = {
   overview: 'Everyone at a glance',
@@ -19,6 +20,19 @@ describe('Factory Control Center components', () => {
     expect(markup).toContain(`<h2>${heading}</h2>`)
     expect(markup).toContain('<button type="button"')
     expect(markup).toContain('>Refresh</button>')
+  })
+
+  it.each([
+    ['overview', ['Registry revision registry-preserved-soak-001', 'Needs attention', 'Heartbeat evidence is stale', 'Service state is unknown', 'Authentication state is unknown']],
+    ['queue', ['SOAK-001', 'Registry read-only reconciliation canary', 'VERIFY / REVIEW', 'REVIEW_FAILURE']],
+    ['workers', ['Worker diagnostics', 'Heartbeat evidence is stale', 'Service state is unknown', 'Authentication state is unknown']],
+    ['reviews', ['SOAK-001-A', 'changes requested', 'Raw lease and mutation evidence is incomplete.', 'structured review assignment and timing are not present']],
+    ['capacity', ['Capacity scopes', 'Factory-measured consumption', 'Claude invocation ledger']],
+    ['history', ['Feature SOAK-001', 'Package SOAK-001-A', 'attempt-soak-1', 'Canary evidence bundle']],
+    ['failures', ['REVIEW_FAILURE', 'Review remediation required', 'Raw lease and mutation evidence is incomplete.', 'Time not recorded']],
+  ] as Array<[View, string[]]>)('reconciles the preserved canary projection in the %s view', (view, evidence) => {
+    const markup = renderToStaticMarkup(<DashboardView view={view} snapshot={preservedCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
+    for (const value of evidence) expect(markup).toContain(value)
   })
 
   it('renders queue filters as labeled controls and exposes expandable Features', () => {
