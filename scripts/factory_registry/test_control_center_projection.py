@@ -216,6 +216,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         projected_worker = next(item for item in projection["workers"] if item["id"] == worker["id"])
         self.assertEqual(projected_worker["serviceState"], "unknown")
         self.assertEqual(projected_worker["authenticationState"], "unknown")
+        self.assertEqual(projected_worker["health"], "constrained")
         projected_package = projection["features"][0]["packages"][0]
         self.assertIsNone(projected_package["pullRequestUrl"])
         self.assertIsNone(projected_package["evidence"][0]["url"])
@@ -244,6 +245,55 @@ class ControlCenterProjectionTest(unittest.TestCase):
         projection = project_control_center(replace(raw, usage_invocations=(limited,)))
         measured = next(item for item in projection["capacity"] if item["source"] == "factory_measured")
         self.assertEqual(measured["state"], "limited")
+
+    def test_stale_or_unknown_idle_orchestra_constrains_worker_and_factory(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        from scripts.factory_registry.control_center_projection import project_control_center
+        base_orchestra = {
+            "id": "orchestra", "display_name": "Orchestra", "role": "ORCHESTRA",
+            "availability": "IDLE", "capabilities": ("coordination",), "approved_lanes": (),
+            "provider_diagnostics": {
+                "provider": "OpenAI", "model": "Codex",
+                "service_state": "healthy", "authentication_state": "valid",
+            },
+            "last_heartbeat_at": "2026-09-24T19:59:00Z", "usage_state": "GREEN",
+        }
+        healthy = project_control_center(replace(raw, workers=(*raw.workers, base_orchestra)))
+        self.assertEqual(next(item for item in healthy["workers"] if item["id"] == "orchestra")["health"], "healthy")
+        self.assertEqual(healthy["factory"]["health"], "healthy")
+
+        cases = (
+            {"last_heartbeat_at": "2026-09-24T19:50:00Z"},
+            {"provider_diagnostics": {**base_orchestra["provider_diagnostics"], "service_state": "unknown"}},
+            {"provider_diagnostics": {**base_orchestra["provider_diagnostics"], "authentication_state": "unknown"}},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                orchestra = {**base_orchestra, **override}
+                projection = project_control_center(replace(raw, workers=(*raw.workers, orchestra)))
+                worker = next(item for item in projection["workers"] if item["id"] == "orchestra")
+                self.assertEqual(worker["health"], "constrained")
+                self.assertEqual(projection["factory"]["health"], "constrained")
+
+    def test_resolved_critical_failure_does_not_constrain_factory_attention(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        from scripts.factory_registry.control_center_projection import project_control_center
+        orchestra = {
+            "id": "orchestra", "display_name": "Orchestra", "role": "ORCHESTRA",
+            "availability": "IDLE", "capabilities": ("coordination",), "approved_lanes": (),
+            "provider_diagnostics": {
+                "provider": "OpenAI", "model": "Codex",
+                "service_state": "healthy", "authentication_state": "valid",
+            },
+            "last_heartbeat_at": "2026-09-24T19:59:00Z", "usage_state": "GREEN",
+        }
+        recovered = {**raw.failures[0], "code": "AUTH_FAILURE"}
+        projection = project_control_center(replace(
+            raw, workers=(*raw.workers, orchestra), failures=(recovered,),
+        ))
+        self.assertFalse(projection["failures"][0]["requiresHuman"])
+        self.assertEqual(projection["factory"]["attentionCount"], 0)
+        self.assertEqual(projection["factory"]["health"], "healthy")
 
     def test_projection_is_logically_read_only(self) -> None:
         before = self._logical_state()

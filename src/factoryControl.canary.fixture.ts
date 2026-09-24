@@ -11,6 +11,7 @@ export const preservedCanaryProjectionFixture: FactoryControlSnapshot = (() => {
   const snapshot = structuredClone(factoryControlFixture)
   snapshot.registryRevision = 'registry-preserved-soak-001'
   snapshot.source.projectionId = 'projection-preserved-soak-001'
+  snapshot.factory.health = 'constrained'
   snapshot.reviews = snapshot.reviews.filter(review => review.packageId !== 'SOAK-001-A')
   snapshot.failures = snapshot.failures.filter(failure => failure.packageId !== 'SOAK-001-A')
 

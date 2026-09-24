@@ -14,7 +14,7 @@ export interface ReviewDisplayItem {
   eligibleReviewerIds: string[]
   assignedReviewerId: string | null
   requestedAt: string | null
-  state: ReviewState
+  state: ReviewState | 'unrecorded'
   findings: string[]
   changesRequested: string[]
   approvalEvidence: FactoryEvidence[]
@@ -94,6 +94,7 @@ export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayI
   const derived = snapshot.features.flatMap(feature => feature.packages).flatMap(item => {
     if (item.state !== 'VERIFY_REVIEW' || represented.has(item.id)) return []
     const latestAttempt = item.attempts.find(attempt => attempt.number === item.attemptNumber) ?? item.attempts.at(-1)
+    const state: ReviewDisplayItem['state'] = item.reviewState ?? 'unrecorded'
     return [{
       id: `package-review-${item.id}`,
       packageId: item.id,
@@ -101,7 +102,7 @@ export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayI
       eligibleReviewerIds: [],
       assignedReviewerId: null,
       requestedAt: null,
-      state: item.reviewState ?? 'waiting',
+      state,
       findings: [],
       changesRequested: item.reviewState === 'changes_requested' && item.blockReason ? [item.blockReason] : [],
       approvalEvidence: item.evidence.filter(evidence => evidence.kind === 'review'),
@@ -112,8 +113,9 @@ export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayI
 }
 
 export function visibleAttention(snapshot: FactoryControlSnapshot): AttentionDisplayItem[] {
-  const explicit = snapshot.failures.map(failure => ({ ...failure, source: 'registry_failure' as const }))
+  const explicit = snapshot.failures.filter(failure => failure.requiresHuman).map(failure => ({ ...failure, source: 'registry_failure' as const }))
   const represented = new Set(explicit.map(failure => `${failure.packageId ?? ''}:${failure.code}`))
+  const structuredFailureKeys = new Set(snapshot.failures.map(failure => `${failure.packageId ?? ''}:${failure.code}`))
   const packagesWithStructuredReview = new Set(snapshot.reviews.map(review => review.packageId))
   const packagesWithStructuredFailure = new Set(snapshot.failures.flatMap(failure => failure.packageId === null ? [] : [failure.packageId]))
   const derived = snapshot.features.flatMap(feature => feature.packages).flatMap(item => {
@@ -125,7 +127,7 @@ export function visibleAttention(snapshot: FactoryControlSnapshot): AttentionDis
     const code = item.failureCode
       ?? (item.reviewState === 'changes_requested' ? 'REVIEW_FAILURE' : null)
       ?? (reviewStateUnrecorded ? 'REVIEW_STATE_UNRECORDED' : null)
-    if (!code || represented.has(`${item.id}:${code}`)) return []
+    if (!code || represented.has(`${item.id}:${code}`) || structuredFailureKeys.has(`${item.id}:${code}`)) return []
     const missingReviewState = code === 'REVIEW_STATE_UNRECORDED'
     return [{
       id: `package-attention-${item.id}-${code}`,

@@ -22,6 +22,7 @@ _EVENT_KINDS = {
 _CAPACITY_STATES = {"normal", "caution", "checkpoint", "hard_stop", "limited", "unknown"}
 _EVIDENCE_KINDS = {"commit", "check", "test", "review", "artifact", "screenshot"}
 _REVIEW_STATES = {"waiting", "assigned", "changes_requested", "approved"}
+_HEARTBEAT_FRESH_SECONDS = 180
 
 
 class ControlCenterProjectionError(RuntimeError):
@@ -82,6 +83,33 @@ def _health(availability: Any) -> str:
     if availability in {"IDLE", "BUSY"}:
         return "healthy"
     raise ControlCenterProjectionError("worker availability cannot be projected truthfully")
+
+
+def _effective_worker_health(
+    availability: Any,
+    service_state: str,
+    authentication_state: str,
+    heartbeat_at: str | None,
+    observed_at: str,
+) -> str:
+    """Apply the same conservative evidence rules used by worker cards."""
+    availability_health = _health(availability)
+    if availability_health == "offline" or service_state == "offline":
+        return "offline"
+    if authentication_state == "invalid":
+        return "constrained"
+    if service_state != "healthy" or authentication_state != "valid":
+        return "constrained"
+    heartbeat = _iso(heartbeat_at)
+    observed = _iso(observed_at)
+    if heartbeat is None or observed is None:
+        return "constrained"
+    heartbeat_time = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+    observed_time = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    age_seconds = (observed_time - heartbeat_time).total_seconds()
+    if age_seconds < 0 or age_seconds > _HEARTBEAT_FRESH_SECONDS:
+        return "constrained"
+    return "constrained" if availability_health == "constrained" else "healthy"
 
 
 def _capacity_state(value: Any) -> str:
@@ -479,14 +507,20 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         current_attempt = next((index for index, item in enumerate(current_package_attempts, start=1) if item.get("lease_id") == lease.get("id") and item.get("ended_at") is None), None) if lease else None
         capabilities = _strings(worker.get("capabilities"))
         role = "ORCHESTRA" if worker.get("role") == "ORCHESTRA" else "REVIEWER" if "review" in {item.lower() for item in capabilities} else "IMPLEMENTER"
+        service_state = diagnostics.get("service_state") if diagnostics.get("service_state") in {"healthy", "degraded", "offline", "unknown"} else "unknown"
+        authentication_state = diagnostics.get("authentication_state") if diagnostics.get("authentication_state") in {"valid", "invalid", "unknown"} else "unknown"
+        heartbeat_at = _iso(worker.get("last_heartbeat_at"))
         projected_workers.append({
             "id": worker_id, "displayName": str(worker.get("display_name", worker_id)), "role": role,
             "provider": diagnostics.get("provider") if isinstance(diagnostics.get("provider"), str) else None,
             "model": diagnostics.get("model") if isinstance(diagnostics.get("model"), str) else None,
-            "health": _health(worker.get("availability")),
-            "serviceState": diagnostics.get("service_state") if diagnostics.get("service_state") in {"healthy", "degraded", "offline", "unknown"} else "unknown",
-            "authenticationState": diagnostics.get("authentication_state") if diagnostics.get("authentication_state") in {"valid", "invalid", "unknown"} else "unknown",
-            "heartbeatAt": _iso(worker.get("last_heartbeat_at")),
+            "health": _effective_worker_health(
+                worker.get("availability"), service_state, authentication_state,
+                heartbeat_at, snapshot.observed_at,
+            ),
+            "serviceState": service_state,
+            "authenticationState": authentication_state,
+            "heartbeatAt": heartbeat_at,
             "currentPackageId": str(lease.get("package_id")) if lease else None,
             "activeLease": ({
                 "id": str(lease.get("id")), "workerId": worker_id,
@@ -552,7 +586,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
     constrained = (
         reconciliation["status"] == "mismatch"
         or bool(reconciliation["activeStaleLeaseCount"])
-        or any(item["severity"] == "critical" for item in failures)
+        or any(item["severity"] == "critical" and item["requiresHuman"] for item in failures)
         or not orchestra
         or any(item["health"] != "healthy" for item in orchestra)
     )

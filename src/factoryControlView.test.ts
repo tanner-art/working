@@ -44,6 +44,10 @@ describe('Factory Control Center view helpers', () => {
     if (!soak) throw new Error('SOAK-001-A fixture package is missing')
     soak.evidence[0].label = 'This arbitrary label must not determine approve or reject'
 
+    expect(visibleReviews(snapshot).find(review => review.packageId === 'SOAK-001-A')).toMatchObject({
+      state: 'unrecorded', source: 'package_state',
+    })
+
     expect(visibleAttention(snapshot).find(item => item.packageId === 'SOAK-001-A')).toMatchObject({
       code: 'REVIEW_STATE_UNRECORDED',
       title: 'Review outcome is not recorded',
@@ -59,6 +63,13 @@ describe('Factory Control Center view helpers', () => {
   it('does not duplicate package-state fallbacks when structured rows are present', () => {
     expect(visibleReviews(factoryControlFixture).filter(review => review.packageId === 'SOAK-001-A')).toHaveLength(1)
     expect(visibleAttention(factoryControlFixture).filter(item => item.packageId === 'SOAK-001-A' && item.code === 'REVIEW_FAILURE')).toHaveLength(1)
+  })
+
+  it('excludes resolved structured failures from current attention', () => {
+    const snapshot = structuredClone(factoryControlFixture)
+    snapshot.failures[0].requiresHuman = false
+    expect(visibleAttention(snapshot).some(item => item.id === snapshot.failures[0].id)).toBe(false)
+    expect(visibleAttention(snapshot).some(item => item.packageId === snapshot.failures[0].packageId)).toBe(false)
   })
 
   it('does not display stale, future, missing, or unknown worker evidence as healthy', () => {

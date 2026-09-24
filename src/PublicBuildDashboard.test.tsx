@@ -26,7 +26,7 @@ describe('Factory Control Center components', () => {
     ['overview', ['Registry revision registry-preserved-soak-001', 'Needs attention', 'Heartbeat evidence is stale', 'Service state is unknown', 'Authentication state is unknown']],
     ['queue', ['SOAK-001', 'Registry read-only reconciliation canary', 'VERIFY / REVIEW', 'REVIEW_FAILURE']],
     ['workers', ['Worker diagnostics', 'Heartbeat evidence is stale', 'Service state is unknown', 'Authentication state is unknown']],
-    ['reviews', ['SOAK-001-A', 'changes requested', 'Raw lease and mutation evidence is incomplete.', 'structured review assignment and timing are not present']],
+    ['reviews', ['SOAK-001-A', 'changes requested', 'Raw lease and mutation evidence is incomplete.', 'the review outcome, assignment, and timing are not recorded']],
     ['capacity', ['Capacity scopes', 'Factory-measured consumption', 'Claude invocation ledger']],
     ['history', ['Feature SOAK-001', 'Package SOAK-001-A', 'attempt-soak-1', 'Canary evidence bundle']],
     ['failures', ['REVIEW_FAILURE', 'Review remediation required', 'Raw lease and mutation evidence is incomplete.', 'Time not recorded']],
@@ -39,13 +39,42 @@ describe('Factory Control Center components', () => {
     const reviewMarkup = renderToStaticMarkup(<DashboardView view="reviews" snapshot={actualSoakCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
     expect(reviewMarkup).toContain('SOAK-001-A')
     expect(reviewMarkup).toContain('Independent canary review evidence')
-    expect(reviewMarkup).toContain('waiting')
+    expect(reviewMarkup).toContain('Outcome unrecorded')
+    expect(reviewMarkup).toContain('the review outcome, assignment, and timing are not recorded')
 
     const failureMarkup = renderToStaticMarkup(<DashboardView view="failures" snapshot={actualSoakCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
     expect(failureMarkup).toContain('REVIEW_STATE_UNRECORDED')
     expect(failureMarkup).toContain('Review outcome is not recorded')
     expect(failureMarkup).toContain('this Registry revision has no structured review outcome or failure')
     expect(failureMarkup).not.toContain('Review remediation required')
+  })
+
+  it('keeps recovered CI out of current attention while retaining it in provenance', () => {
+    const snapshot = structuredClone(factoryControlFixture)
+    const soak = snapshot.features.find(feature => feature.id === 'SOAK-001')?.packages.find(item => item.id === 'SOAK-001-A')
+    if (!soak) throw new Error('SOAK-001-A fixture package is missing')
+    soak.state = 'DONE'
+    soak.reviewState = 'approved'
+    soak.failureCode = 'CI_FAILURE'
+    soak.blockReason = null
+    const reviewPackage = snapshot.features.find(feature => feature.id === 'SOAK-001')?.packages.find(item => item.id === 'SOAK-001-REVIEW')
+    if (reviewPackage) reviewPackage.reviewState = 'approved'
+    snapshot.factory.attentionCount = 0
+    snapshot.failures = [{
+      id: 'failure-recovered-ci', code: 'CI_FAILURE', title: 'Recovered CI failure',
+      detail: 'The later validation passed.', severity: 'warning', occurredAt: '2026-09-24T18:00:00Z',
+      workerId: 'agent-b', packageId: 'SOAK-001-A', requiresHuman: false,
+    }]
+
+    const overviewMarkup = renderToStaticMarkup(<DashboardView view="overview" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(overviewMarkup).toContain('<span>Needs attention</span><strong>0</strong>')
+    const failureMarkup = renderToStaticMarkup(<DashboardView view="failures" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(failureMarkup).toContain('No failures need attention')
+    expect(failureMarkup).not.toContain('Recovered CI failure')
+    const historyMarkup = renderToStaticMarkup(<DashboardView view="history" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(historyMarkup).toContain('Historical failures')
+    expect(historyMarkup).toContain('Recovered CI failure')
+    expect(historyMarkup).toContain('Historical')
   })
 
   it('renders queue filters as labeled controls and exposes expandable Features', () => {
