@@ -1,0 +1,2 @@
+# The Factory Python suites intentionally use only the Python standard library.
+# Keep this lock file empty unless an exact version and --hash entry are added.
