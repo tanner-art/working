@@ -42,6 +42,19 @@ Usage gating reads `usage.json` from the configured state directory unless `usag
 
 The example policy slows a worker at 70% usage and stops it at 80%. A usage record older than `stale_after_seconds`, missing for its worker/account, or dated in the future is unknown. With `unknown_behavior: "slow"`, unknown and 70–79.99% usage use the configured low-cost fallback command; 80% or more stops dispatch. If the usage file itself is unavailable or malformed, the runner defers work rather than claiming it. A missing fallback command also defers safely.
 
+## Usage-feed refresh
+
+Refresh usage immediately before a runner poll with the runner configuration. The feed discovers every configured OpenAI worker's `env.CODEX_HOME`, account, and model, and treats every configured Claude worker as unknown. The home is passed only to the local Codex app-server process; it is not written to the feed or echoed by the command.
+
+```sh
+python3 scripts/runner/usage_feed.py --config /absolute/config.json \
+  --usage /absolute/state/usage.json
+```
+
+For each Codex home, the feed initializes the installed local `codex app-server`, requests `account/rateLimits/read`, and keeps the highest reported `used_percent` window. It atomically replaces the feed using a private, fsynced temporary file, containing only provider, model, used percentage, observation time, and that window's reset time. A failed, logged-out, malformed, or timed-out observation leaves its prior valid record untouched; normal runner stale policy still makes an old record unknown.
+
+There is no documented authenticated Claude percentage source in this slice. A configured Claude worker is explicitly unknown; it never creates or refreshes a green record. For one-off operation without `--config`, list targets with matching `--codex-home WORKER/ACCOUNT=CODEX_HOME` and `--codex-model WORKER/ACCOUNT=MODEL`, and list Claude with `--claude WORKER/ACCOUNT=unavailable`. Do not substitute scraped CLI output, account data, email addresses, tokens, commands, or raw provider responses. The command prints only update and unknown counts. This slice does not install a launchd job; schedule the operator command through the host's existing operational process.
+
 Run `python3 scripts/runner/runner.py --config /absolute/config.json --dry-run` to inspect the queue without mutation. Run without `--dry-run` for one poll. Install with `python3 scripts/runner/install_launchd.py --config /absolute/config.json`; installation defaults to dry-run. `--live` enables execution explicitly. The default `--mode serial` preserves the one-runner setup. `--mode lanes` installs each agent's configured number of external lanes plus a read-only dashboard bound to `127.0.0.1`; use `--replace-mode` only to explicitly migrate between serial and lanes. To promote installed dry-run services to live services in the same mode, or to apply a reviewed slot-count change, use `--live --replace-current`; it backs up the current plists and restores them if bootstrap fails. These replacement flags cannot be combined. launchd uses the configured PATH and runs at login and every 60 seconds; it does not run while the user is logged out or the Mac is asleep.
 
 Status is in the configured state directory: heartbeat.json, issue-N.json, per-attempt logs, launchd logs. GitHub labels transition ready → running → review or failed. No automatic retry: use `--retry N` after inspecting the failure. Retrying creates a new attempt and retains the old one; inspect existing pushed branches/PRs before retrying a publication failure. A crash leaves a durable starting/running record and is not silently redispatched. Reboot recovery requires inspection and explicit retry after labeling the issue runner:failed. Keep one service/config per repository; the lock coordinates processes sharing that state directory.
