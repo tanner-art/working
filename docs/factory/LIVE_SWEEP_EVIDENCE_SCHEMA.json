@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadline.local/schemas/factory-live-sweep-evidence-v1.json",
+  "title": "Threadline Factory live shadow sweep evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observed_at",
+    "base_snapshot_sha256",
+    "projected_snapshot_sha256",
+    "source_proofs",
+    "preservation",
+    "warnings",
+    "queue_status_counts",
+    "decision",
+    "legacy_comparison",
+    "passed",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "base_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+    "projected_snapshot_sha256": { "$ref": "#/$defs/sha256" },
+    "source_proofs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceProof" }
+    },
+    "preservation": { "$ref": "#/$defs/preservation" },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "queue_status_counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "decision": { "$ref": "SHADOW_DECISION_SCHEMA.json" },
+    "legacy_comparison": { "$ref": "#/$defs/legacyComparison" },
+    "passed": { "type": "boolean" },
+    "failures": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sourceProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "before_sha256",
+        "after_sha256",
+        "volatile",
+        "content_unchanged",
+        "semantic_unchanged"
+      ],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "before_sha256": { "type": "string", "minLength": 1 },
+        "after_sha256": { "type": "string", "minLength": 1 },
+        "volatile": { "type": "boolean" },
+        "content_unchanged": { "type": "boolean" },
+        "semantic_unchanged": { "type": "boolean" }
+      }
+    },
+    "preservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_sha256",
+        "worktree_count",
+        "dirty_worktree_count",
+        "unmerged_branch_count",
+        "unexplained_record_count",
+        "active_lease_count",
+        "active_legacy_record_count",
+        "passed",
+        "failures"
+      ],
+      "properties": {
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "worktree_count": { "type": "integer", "minimum": 0 },
+        "dirty_worktree_count": { "type": "integer", "minimum": 0 },
+        "unmerged_branch_count": { "type": "integer", "minimum": 0 },
+        "unexplained_record_count": { "type": "integer", "minimum": 0 },
+        "active_lease_count": { "type": "integer", "minimum": 0 },
+        "active_legacy_record_count": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "boolean" },
+        "failures": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "legacyComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "legacy_source",
+        "legacy_observed_at",
+        "matched",
+        "gate_passed",
+        "differences"
+      ],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/sha256" },
+        "legacy_source": { "type": "string", "minLength": 1 },
+        "legacy_observed_at": { "type": "string", "format": "date-time" },
+        "matched": { "type": "boolean" },
+        "gate_passed": { "type": "boolean" },
+        "differences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "package_id",
+              "worker_id",
+              "classification",
+              "detail"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
