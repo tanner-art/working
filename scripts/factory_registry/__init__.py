@@ -1,5 +1,21 @@
 """Provider- and backend-neutral Threadline Factory registry boundary."""
 
+from .controlled_restart import (
+    ActiveOwnership,
+    AttemptOutcome,
+    AttemptState,
+    ControlledRestartError,
+    ControlledRestartProcedure,
+    PreservationState,
+    ProcedureResult,
+    RecoveryRequired,
+    RecoveryResult,
+    RestartPhase,
+    RestartRegistry,
+    RestartSnapshot,
+    RestartSupervisor,
+)
+
 from .models import (
     Attempt,
     ControlCenterReadSnapshot,
@@ -79,6 +95,11 @@ from .control_center_projection import (
 
 __all__ = [
     "Attempt",
+    "ActiveOwnership",
+    "AttemptOutcome",
+    "AttemptState",
+    "ControlledRestartError",
+    "ControlledRestartProcedure",
     "Evidence",
     "CAPACITY_SCOPES",
     "ClaudeTelemetryError",
@@ -109,8 +130,16 @@ __all__ = [
     "RegistryNotFound",
     "RejectionCode",
     "PreservationExpectation",
+    "PreservationState",
     "PreservationReconciliation",
+    "ProcedureResult",
     "ProposedObservationPolicy",
+    "RecoveryRequired",
+    "RecoveryResult",
+    "RestartPhase",
+    "RestartRegistry",
+    "RestartSnapshot",
+    "RestartSupervisor",
     "SQLiteRegistry",
     "TaskStatus",
     "UsageLedgerEntry",

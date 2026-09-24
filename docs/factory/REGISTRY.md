@@ -8,6 +8,11 @@ SQLite with WAL is the first migration adapter. It is not a permanent architectu
 
 GitHub issues and pull requests remain collaboration and evidence surfaces. During migration they are imported sources and projections, not an alternate scheduler.
 
+The dormant, provider-neutral restart sequence is specified in
+[`CONTROLLED_RESTART.md`](CONTROLLED_RESTART.md). It does not grant live
+authority; concrete Registry and runtime adapters remain a separately reviewed
+restart gate.
+
 ## Entities
 
 ### Feature
