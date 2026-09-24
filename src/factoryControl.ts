@@ -147,7 +147,7 @@ export interface FactoryUsageInvocation {
   sessionId: string
   packageId: string | null
   attemptId: string | null
-  observationClass: 'AUTONOMOUS' | 'DIAGNOSTIC'
+  observationClass: 'AUTONOMOUS' | 'DIAGNOSTIC' | 'LEGACY_UNCLASSIFIED'
   observedAt: string
   modelDiagnostic: string | null
   inputTokens: number | null
@@ -320,10 +320,10 @@ function parseUsageSource(value: unknown, path: string): FactoryUsageSourceObser
 }
 function parseUsageInvocation(value: unknown, path: string): FactoryUsageInvocation {
   const v = object(value, path)
-  const observationClass = oneOf(v.observationClass, ['AUTONOMOUS', 'DIAGNOSTIC'] as const, `${path}.observationClass`)
+  const observationClass = oneOf(v.observationClass, ['AUTONOMOUS', 'DIAGNOSTIC', 'LEGACY_UNCLASSIFIED'] as const, `${path}.observationClass`)
   const packageId = nullableString(v.packageId, `${path}.packageId`)
   const attemptId = nullableString(v.attemptId, `${path}.attemptId`)
-  if (observationClass === 'AUTONOMOUS' ? (!packageId || !attemptId) : (packageId !== null || attemptId !== null)) throw new Error(`${path} has invalid provenance.`)
+  if ((observationClass === 'AUTONOMOUS' && (!packageId || !attemptId)) || (observationClass === 'DIAGNOSTIC' && (packageId !== null || attemptId !== null))) throw new Error(`${path} has invalid provenance.`)
   const sources = list(v.sources, `${path}.sources`, parseUsageSource)
   if (!sources.length) throw new Error(`${path}.sources must contain an observation.`)
   return { id: string(v.id, `${path}.id`), workerId: string(v.workerId, `${path}.workerId`), accountLabel: string(v.accountLabel, `${path}.accountLabel`), sessionId: string(v.sessionId, `${path}.sessionId`), packageId, attemptId, observationClass, observedAt: timestamp(v.observedAt, `${path}.observedAt`), modelDiagnostic: nullableString(v.modelDiagnostic, `${path}.modelDiagnostic`), inputTokens: nullableNumber(v.inputTokens, `${path}.inputTokens`), outputTokens: nullableNumber(v.outputTokens, `${path}.outputTokens`), cacheReadTokens: nullableNumber(v.cacheReadTokens, `${path}.cacheReadTokens`), cacheWriteTokens: nullableNumber(v.cacheWriteTokens, `${path}.cacheWriteTokens`), durationSeconds: nullableNumber(v.durationSeconds, `${path}.durationSeconds`), outcome: oneOf(v.outcome, ['SUCCEEDED', 'FAILED', 'LIMITED'] as const, `${path}.outcome`), limitSignal: nullableString(v.limitSignal, `${path}.limitSignal`), sources }
@@ -353,18 +353,20 @@ export function parseFactoryProjection(value: unknown): FactoryProjectionPayload
     features: list(v.features, 'snapshot.features', parseFeature), workers: list(v.workers, 'snapshot.workers', parseWorker), reviews: list(v.reviews, 'snapshot.reviews', parseReview), capacity: list(v.capacity, 'snapshot.capacity', parseCapacity), usageInvocations: list(v.usageInvocations, 'snapshot.usageInvocations', parseUsageInvocation), events: list(v.events, 'snapshot.events', parseEvent), failures: list(v.failures, 'snapshot.failures', parseFailure),
   }
   const workers = new Set(projection.workers.map(worker => worker.id))
-  const attemptsByPackage = new Map<string, Set<string>>()
+  const attemptsByPackage = new Map<string, Map<string, string | null>>()
   for (const feature of projection.features) {
     for (const item of feature.packages) {
       if (item.featureId !== feature.id) throw new Error(`snapshot package ${item.id} has invalid Feature provenance.`)
       if (attemptsByPackage.has(item.id)) throw new Error(`snapshot package ID ${item.id} is duplicated.`)
-      attemptsByPackage.set(item.id, new Set(item.attempts.map(attempt => attempt.id)))
+      attemptsByPackage.set(item.id, new Map(item.attempts.map(attempt => [attempt.id, attempt.workerId])))
     }
   }
   for (const invocation of projection.usageInvocations) {
     if (!workers.has(invocation.workerId)) throw new Error(`snapshot usage invocation ${invocation.id} references an unknown worker.`)
-    if (invocation.observationClass === 'AUTONOMOUS' && !attemptsByPackage.get(invocation.packageId!)?.has(invocation.attemptId!)) {
-      throw new Error(`snapshot usage invocation ${invocation.id} references an unknown package attempt.`)
+    if (invocation.observationClass === 'AUTONOMOUS') {
+      const attemptWorkerId = attemptsByPackage.get(invocation.packageId!)?.get(invocation.attemptId!)
+      if (attemptWorkerId === undefined) throw new Error(`snapshot usage invocation ${invocation.id} references an unknown package attempt.`)
+      if (attemptWorkerId !== null && attemptWorkerId !== invocation.workerId) throw new Error(`snapshot usage invocation ${invocation.id} does not match the attempt worker.`)
     }
   }
   return projection

@@ -37,6 +37,16 @@ describe('Factory Control Center snapshot contract', () => {
     const unknownWorker = structuredClone(factoryControlFixture)
     unknownWorker.usageInvocations[0].workerId = 'unknown-worker'
     expect(() => parseFactoryControlSnapshot(unknownWorker)).toThrow('unknown worker')
+    const wrongAttemptWorker = structuredClone(factoryControlFixture)
+    wrongAttemptWorker.usageInvocations[0].workerId = 'agent-b'
+    expect(() => parseFactoryControlSnapshot(wrongAttemptWorker)).toThrow('does not match the attempt worker')
+  })
+
+  it('preserves legacy unclassified usage without claiming task provenance', () => {
+    const parsed = parseFactoryControlSnapshot(factoryControlFixture)
+    expect(parsed.usageInvocations.find(item => item.id === 'usage-claude-legacy')).toMatchObject({
+      observationClass: 'LEGACY_UNCLASSIFIED', packageId: 'SOAK-001-A', attemptId: null,
+    })
   })
 
   it('parses the signed transport payload before API verification metadata is added', () => {

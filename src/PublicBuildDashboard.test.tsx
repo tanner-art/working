@@ -53,6 +53,7 @@ describe('Factory Control Center components', () => {
     expect(markup).toContain('<table>')
     expect(markup).toContain('<th scope="col">Cache read</th>')
     expect(markup).toContain('<th scope="col">Source history</th>')
+    expect(markup).toContain('Legacy unclassified · SOAK-001-A / attempt unknown')
   })
 
   it('keeps unsafe attempt provenance URLs non-clickable', () => {
