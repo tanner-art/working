@@ -99,6 +99,12 @@ provider limit signals. Factory-measured consumption does not become a
 provider-reported quota percentage. See [Claude telemetry](CLAUDE_TELEMETRY.md)
 for the first provider parser and privacy boundary.
 
+Autonomous ledger records require package and attempt provenance, and the
+Registry verifies that the attempt belongs to the package. Unlinked service or
+authentication probes use a distinct `DIAGNOSTIC` observation class. Canonical
+reads reconcile all append-only source observations deterministically, so
+ingestion order cannot hide a later explicit limit signal or completion fact.
+
 ### Events
 
 `task_events` is append-only. SQLite rejects updates and deletes. Other adapters must provide equivalent behavior.

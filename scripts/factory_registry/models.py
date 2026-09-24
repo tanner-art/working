@@ -65,6 +65,13 @@ class UsageSource(StringEnum):
     TRANSCRIPT = "TRANSCRIPT"
 
 
+class UsageObservationClass(StringEnum):
+    """Whether an invocation is production work or an explicit health probe."""
+
+    AUTONOMOUS = "AUTONOMOUS"
+    DIAGNOSTIC = "DIAGNOSTIC"
+
+
 @dataclass(frozen=True)
 class Feature:
     id: str
@@ -134,8 +141,18 @@ class Evidence:
 
 
 @dataclass(frozen=True)
+class Attempt:
+    id: str
+    package_id: str
+    worker_id: str | None
+    started_at: str
+    lease_id: str | None = None
+    provider_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class UsageLedgerEntry:
-    """One autonomous invocation, aggregated once across all observed sources.
+    """One invocation or explicit probe, aggregated across observed sources.
 
     ``invocation_id`` is the cross-source deduplication identity. A runner
     should generate it before launch and pass it to every ingestion path. When
@@ -153,6 +170,7 @@ class UsageLedgerEntry:
     outcome: str
     source_type: UsageSource
     source_identity: str
+    observation_class: UsageObservationClass = UsageObservationClass.AUTONOMOUS
     package_id: str | None = None
     attempt_id: str | None = None
     model_diagnostic: str | None = None

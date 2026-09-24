@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Protocol, Sequence
 
 from .models import (
+    Attempt,
     DispatchSnapshot,
     Evidence,
     Feature,
@@ -92,6 +93,8 @@ class Registry(Protocol):
     ) -> str: ...
 
     def record_evidence(self, evidence: Evidence) -> None: ...
+
+    def register_attempt(self, attempt: Attempt) -> None: ...
 
     def record_usage(self, entry: UsageLedgerEntry) -> UsageLedgerWrite: ...
 

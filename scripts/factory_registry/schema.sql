@@ -6,13 +6,10 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 );
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
-    ('schema_version', '2'),
+    ('schema_version', '3'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
     ('orchestra_reserve_percent', '20');
-
-UPDATE registry_metadata SET value='2'
-WHERE key='schema_version' AND CAST(value AS INTEGER) < 2;
 
 CREATE TABLE IF NOT EXISTS features (
     id TEXT PRIMARY KEY,
@@ -159,6 +156,9 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     account_id TEXT NOT NULL,
     invocation_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
+    observation_class TEXT NOT NULL CHECK(observation_class IN (
+        'AUTONOMOUS', 'DIAGNOSTIC'
+    )),
     package_id TEXT REFERENCES work_packages(id),
     attempt_id TEXT REFERENCES attempts(id),
     observed_at TEXT NOT NULL,
@@ -185,6 +185,10 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     primary_source_identity TEXT NOT NULL UNIQUE,
     primary_source_metadata_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    CHECK(
+        (observation_class='AUTONOMOUS' AND package_id IS NOT NULL AND attempt_id IS NOT NULL)
+        OR (observation_class='DIAGNOSTIC' AND package_id IS NULL AND attempt_id IS NULL)
+    ),
     UNIQUE(provider, worker_id, account_id, invocation_id)
 );
 

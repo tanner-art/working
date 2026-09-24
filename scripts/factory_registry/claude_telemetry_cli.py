@@ -15,6 +15,7 @@ from .claude_telemetry import (
     parse_claude_stream_json,
     parse_claude_transcript,
 )
+from .models import UsageObservationClass
 from .repository import RegistryError
 from .sqlite_registry import SQLiteRegistry
 
@@ -34,6 +35,11 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--invocation-id")
     parser.add_argument("--package-id")
     parser.add_argument("--attempt-id")
+    parser.add_argument(
+        "--diagnostic-health-probe",
+        action="store_true",
+        help="record an unlinked health probe instead of an autonomous task invocation",
+    )
     parser.add_argument("--task-completed", action="store_true")
     parser.add_argument("--review-completed", action="store_true")
 
@@ -45,6 +51,11 @@ def _entry_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "invocation_id": args.invocation_id,
         "package_id": args.package_id,
         "attempt_id": args.attempt_id,
+        "observation_class": (
+            UsageObservationClass.DIAGNOSTIC
+            if args.diagnostic_health_probe
+            else UsageObservationClass.AUTONOMOUS
+        ),
         "task_completed": args.task_completed,
         "review_completed": args.review_completed,
     }

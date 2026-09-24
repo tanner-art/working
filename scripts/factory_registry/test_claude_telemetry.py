@@ -7,13 +7,18 @@ import unittest
 from pathlib import Path
 
 from scripts.factory_registry import (
+    Attempt,
     ClaudeTelemetryError,
+    Feature,
     Lane,
     RegistryConflict,
     SQLiteRegistry,
+    TaskStatus,
     UsageLedgerEntry,
+    UsageObservationClass,
     UsageSource,
     Worker,
+    WorkPackage,
     classify_limit_signal,
     parse_claude_json,
     parse_claude_stream_json,
@@ -74,6 +79,60 @@ class ClaudeParserTest(unittest.TestCase):
         self.assertNotIn("result", entry.source_metadata)
         self.assertIsNone(entry.limit_raw_error)
 
+    def test_parser_metadata_uses_explicit_privacy_allowlists(self) -> None:
+        entry = parse_claude_json(
+            cli_result(
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "private_payload": {"prompt": "do not retain"},
+                },
+                modelUsage={
+                    "claude-sonnet-test": {
+                        "inputTokens": 10,
+                        "private_payload": {"answer": "do not retain"},
+                    }
+                },
+                subagent_stats={"agent": {"prompt": "do not retain"}},
+            ),
+            worker_id="claude",
+            account_id="account",
+            observed_at="2026-09-24T20:00:00Z",
+            package_id="TASK-1",
+            attempt_id="ATTEMPT-1",
+        )
+        metadata = json.dumps(entry.source_metadata)
+        self.assertNotIn("do not retain", metadata)
+        self.assertNotIn("private_payload", metadata)
+        self.assertNotIn("subagent_stats", metadata)
+        self.assertEqual(entry.source_metadata["subagent_count"], 1)
+        with self.assertRaisesRegex(ClaudeTelemetryError, "duration_api_ms"):
+            parse_claude_json(
+                cli_result(duration_api_ms={"private": "value"}),
+                worker_id="claude",
+                account_id="account",
+                observed_at="2026-09-24T20:00:00Z",
+                package_id="TASK-1",
+                attempt_id="ATTEMPT-1",
+            )
+
+    def test_autonomous_provenance_is_required_and_diagnostics_are_explicit(self) -> None:
+        with self.assertRaisesRegex(ClaudeTelemetryError, "package_id and attempt_id"):
+            parse_claude_json(
+                cli_result(),
+                worker_id="claude",
+                account_id="account",
+                observed_at="2026-09-24T20:00:00Z",
+            )
+        diagnostic = parse_claude_json(
+            cli_result(),
+            worker_id="claude",
+            account_id="account",
+            observed_at="2026-09-24T20:00:00Z",
+            observation_class=UsageObservationClass.DIAGNOSTIC,
+        )
+        self.assertEqual(diagnostic.observation_class, UsageObservationClass.DIAGNOSTIC)
+
     def test_explicit_limit_error_is_preserved_for_calibration(self) -> None:
         raw_error = "Rate limit reached; retry after the supplied reset time"
         entry = parse_claude_json(
@@ -86,6 +145,8 @@ class ClaudeParserTest(unittest.TestCase):
             worker_id="claude",
             account_id="account",
             observed_at="2026-09-24T20:00:00Z",
+            package_id="TASK-1",
+            attempt_id="ATTEMPT-1",
         )
         self.assertEqual(entry.outcome, "LIMITED")
         self.assertEqual(entry.limit_signal, "RATE_LIMIT")
@@ -104,6 +165,8 @@ class ClaudeParserTest(unittest.TestCase):
             worker_id="claude",
             account_id="account",
             observed_at="2026-09-24T20:00:00Z",
+            package_id="TASK-1",
+            attempt_id="ATTEMPT-1",
         )
         self.assertEqual(entry.limit_signal, "RATE_LIMIT")
         self.assertEqual(entry.calibration_metadata["provider_retry_after"], 120)
@@ -119,6 +182,8 @@ class ClaudeParserTest(unittest.TestCase):
             worker_id="claude",
             account_id="account",
             observed_at="2026-09-24T20:00:00Z",
+            package_id="TASK-1",
+            attempt_id="ATTEMPT-1",
         )
         self.assertEqual(entry.source_type, UsageSource.CLI_STREAM_JSON)
         self.assertEqual(entry.input_tokens, 10)
@@ -136,6 +201,7 @@ class ClaudeParserTest(unittest.TestCase):
                 "output_tokens": 7,
                 "cache_read_input_tokens": 11,
                 "cache_creation_input_tokens": 13,
+                "private_payload": {"answer": "private usage"},
             }
             assistant = {
                 "type": "assistant",
@@ -162,7 +228,12 @@ class ClaudeParserTest(unittest.TestCase):
                 },
                 assistant,
                 {**assistant, "uuid": "repeated-content-block"},
-                {"type": "cost-state", "sessionId": session_id},
+                {
+                    "type": "cost-state",
+                    "sessionId": session_id,
+                    "total_cost_usd": 0.01,
+                    "private_payload": {"prompt": "private cost state"},
+                },
             ]
             transcript.write_text("\n".join(json.dumps(record) for record in records))
             entry = parse_claude_transcript(
@@ -170,6 +241,8 @@ class ClaudeParserTest(unittest.TestCase):
                 transcript_root=root,
                 worker_id="claude",
                 account_id="account",
+                package_id="TASK-1",
+                attempt_id="ATTEMPT-1",
             )
             self.assertEqual(entry.output_tokens, 7)
             self.assertEqual(entry.duration_ms, 2000)
@@ -189,6 +262,8 @@ class ClaudeParserTest(unittest.TestCase):
                     transcript_root=root,
                     worker_id="claude",
                     account_id="account",
+                    package_id="TASK-1",
+                    attempt_id="ATTEMPT-1",
                 )
 
     def test_transcript_requires_verified_root_and_terminal_record(self) -> None:
@@ -205,6 +280,8 @@ class ClaudeParserTest(unittest.TestCase):
                     transcript_root=root,
                     worker_id="claude",
                     account_id="account",
+                    package_id="TASK-1",
+                    attempt_id="ATTEMPT-1",
                 )
 
 
@@ -224,6 +301,28 @@ class UsageLedgerTest(unittest.TestCase):
                 usage_state="HEALTHY",
             )
         )
+        self.registry.register_feature(Feature("FEATURE", "Telemetry", 1))
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK-1",
+                "FEATURE",
+                "Capture usage",
+                "platform",
+                Lane.ASSURANCE,
+                ("review",),
+                1,
+                ("Usage is attributable",),
+                status=TaskStatus.READY,
+            )
+        )
+        self.registry.register_attempt(
+            Attempt(
+                "ATTEMPT-1",
+                "TASK-1",
+                "claude",
+                "2026-09-22T19:00:00Z",
+            )
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -240,6 +339,9 @@ class UsageLedgerTest(unittest.TestCase):
         task_completed: bool = False,
         review_completed: bool = False,
         limit_signal: str | None = None,
+        model: str | None = "claude-sonnet-test",
+        outcome: str | None = None,
+        observation_class: UsageObservationClass = UsageObservationClass.AUTONOMOUS,
     ) -> UsageLedgerEntry:
         return UsageLedgerEntry(
             id=f"ledger-{invocation}",
@@ -249,9 +351,13 @@ class UsageLedgerTest(unittest.TestCase):
             invocation_id=invocation,
             session_id=f"session-{invocation}",
             observed_at=observed_at,
-            outcome="LIMITED" if limit_signal else "SUCCEEDED",
+            outcome=outcome or ("LIMITED" if limit_signal else "SUCCEEDED"),
             source_type=source,
             source_identity=source_identity or f"source-{invocation}-{source.value}",
+            package_id="TASK-1",
+            attempt_id="ATTEMPT-1",
+            observation_class=observation_class,
+            model_diagnostic=model,
             input_tokens=10,
             output_tokens=output_tokens,
             cache_read_input_tokens=30,
@@ -261,6 +367,13 @@ class UsageLedgerTest(unittest.TestCase):
             review_completed=review_completed,
             limit_signal=limit_signal,
             limit_raw_error="rate limit reached" if limit_signal else None,
+            source_metadata={
+                "duration_basis": (
+                    "first_to_last_timestamp"
+                    if source is UsageSource.TRANSCRIPT
+                    else "provider_result"
+                )
+            },
         )
 
     def test_cross_source_ingestion_counts_invocation_once(self) -> None:
@@ -280,6 +393,69 @@ class UsageLedgerTest(unittest.TestCase):
         entries = self.registry.usage_entries(worker_id="claude")
         self.assertEqual(len(entries), 1)
         self.assertEqual(len(entries[0]["sources"]), 2)
+
+    def test_cross_source_canonicalization_is_order_independent_and_keeps_limits(self) -> None:
+        for invocation, transcript_first in (("first", True), ("second", False)):
+            transcript = self.entry(
+                invocation,
+                "2026-09-24T20:00:01Z",
+                source=UsageSource.TRANSCRIPT,
+                duration_ms=2_000,
+            )
+            cli = self.entry(
+                invocation,
+                "2026-09-24T20:00:02Z",
+                duration_ms=1_000,
+                task_completed=True,
+                limit_signal="RATE_LIMIT",
+            )
+            ordered = (transcript, cli) if transcript_first else (cli, transcript)
+            for value in ordered:
+                self.registry.record_usage(value)
+        entries = {entry["invocation_id"]: entry for entry in self.registry.usage_entries()}
+        for invocation in ("first", "second"):
+            canonical = entries[invocation]
+            self.assertEqual(canonical["outcome"], "LIMITED")
+            self.assertEqual(canonical["limit_signal"], "RATE_LIMIT")
+            self.assertTrue(canonical["task_completed"])
+            self.assertEqual(canonical["duration_ms"], 1_000)
+            self.assertEqual(canonical["duration_basis"], "provider_result")
+
+    def test_cross_source_canonical_identity_fields_conflict(self) -> None:
+        self.registry.record_usage(self.entry("one", "2026-09-24T20:00:00Z"))
+        with self.assertRaisesRegex(
+            RegistryConflict, "USAGE_SOURCE_MISMATCH: model_diagnostic"
+        ):
+            self.registry.record_usage(
+                self.entry(
+                    "one",
+                    "2026-09-24T20:00:01Z",
+                    source=UsageSource.TRANSCRIPT,
+                    model="claude-opus-test",
+                )
+            )
+        with self.assertRaisesRegex(RegistryConflict, "USAGE_SOURCE_MISMATCH: outcome"):
+            self.registry.record_usage(
+                self.entry(
+                    "one",
+                    "2026-09-24T20:00:01Z",
+                    source=UsageSource.TRANSCRIPT,
+                    source_identity="different-outcome-source",
+                    outcome="FAILED",
+                )
+            )
+        with self.assertRaisesRegex(
+            RegistryConflict, "USAGE_SOURCE_MISMATCH: duration_ms"
+        ):
+            self.registry.record_usage(
+                self.entry(
+                    "one",
+                    "2026-09-24T20:00:01Z",
+                    source=UsageSource.CLI_STREAM_JSON,
+                    source_identity="different-duration-source",
+                    duration_ms=2_000,
+                )
+            )
 
     def test_cross_source_measurement_disagreement_fails_closed(self) -> None:
         self.registry.record_usage(self.entry("one", "2026-09-24T20:00:00Z"))
@@ -371,6 +547,53 @@ class UsageLedgerTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RegistryConflict, "INVALID_USAGE_MEASUREMENT"):
             self.registry.record_usage(bad)
+
+    def test_autonomous_attempt_must_belong_to_package_and_diagnostic_is_distinct(self) -> None:
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK-2",
+                "FEATURE",
+                "Other package",
+                "platform",
+                Lane.ASSURANCE,
+                ("review",),
+                1,
+                ("Remain attributable",),
+            )
+        )
+        self.registry.register_attempt(
+            Attempt("ATTEMPT-2", "TASK-2", "claude", "2026-09-24T19:00:00Z")
+        )
+        mismatched = UsageLedgerEntry(
+            **{
+                **self.entry("mismatch", "2026-09-24T20:00:00Z").__dict__,
+                "attempt_id": "ATTEMPT-2",
+            }
+        )
+        with self.assertRaisesRegex(RegistryConflict, "USAGE_ATTEMPT_PACKAGE_MISMATCH"):
+            self.registry.record_usage(mismatched)
+        diagnostic = UsageLedgerEntry(
+            **{
+                **self.entry("probe", "2026-09-24T20:00:00Z").__dict__,
+                "package_id": None,
+                "attempt_id": None,
+                "observation_class": UsageObservationClass.DIAGNOSTIC,
+            }
+        )
+        self.assertTrue(self.registry.record_usage(diagnostic).inserted)
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """INSERT INTO usage_ledger
+                       (id, provider, worker_id, account_id, invocation_id, session_id,
+                        observation_class, observed_at, outcome, task_completed,
+                        review_completed, calibration_metadata_json, primary_source_type,
+                        primary_source_identity, primary_source_metadata_json, created_at)
+                       VALUES ('bad', 'anthropic', 'claude', 'account', 'bad', 'bad',
+                               'AUTONOMOUS', '2026-09-24T20:00:00Z', 'SUCCEEDED', 0,
+                               0, '{}', 'CLI_JSON', 'bad-source', '{}',
+                               '2026-09-24T20:00:00Z')"""
+                )
 
 
 if __name__ == "__main__":

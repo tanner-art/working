@@ -1,6 +1,7 @@
 """Provider- and backend-neutral Threadline Factory registry boundary."""
 
 from .models import (
+    Attempt,
     DispatchSnapshot,
     Evidence,
     FailureCode,
@@ -11,6 +12,7 @@ from .models import (
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
+    UsageObservationClass,
     UsageSource,
     Worker,
     WorkPackage,
@@ -65,6 +67,7 @@ from .shadow_dispatch import (
 from .sqlite_registry import SQLiteRegistry
 
 __all__ = [
+    "Attempt",
     "Evidence",
     "CAPACITY_CLASSES",
     "CAPACITY_SCOPES",
@@ -96,6 +99,7 @@ __all__ = [
     "TaskStatus",
     "UsageLedgerEntry",
     "UsageLedgerWrite",
+    "UsageObservationClass",
     "UsageSource",
     "ShadowDecision",
     "ShadowDispatchError",

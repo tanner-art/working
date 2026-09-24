@@ -38,12 +38,15 @@ These are observations, not a promise that every field is always present.
 The parser treats measurements as optional and rejects malformed numeric
 values rather than treating them as zero.
 
-Alongside normalized totals, source provenance retains the installed CLI's
-available content-free structured metadata: API duration, turns, stop state,
-cost, fast-mode state, queue depth, error flag, per-model usage, detailed usage
-metadata, permission-denial count, and subagent statistics. It excludes the
-ordinary `result` text and permission-denial payloads because those can contain
-conversation or tool-input data.
+Alongside normalized totals, source provenance retains typed, explicitly
+allowlisted content-free metadata: API duration, turn count, stop state, cost,
+fast-mode state, queue depth, error flag, known per-model counters, known cache
+and server-tool counters, permission-denial count, and a subagent count. Unknown
+keys and nested values are not copied. The ordinary `result` text,
+permission-denial payloads, raw subagent structures, unknown model/usage
+members, and unknown cost-state members are excluded because they can contain
+conversation or tool-input data. Present allowlisted fields with the wrong type
+fail ingestion instead of being serialized.
 
 The live probe in the current shell returned exit status 1 with a structured
 result whose `is_error` was true, `terminal_reason` was `api_error`, and error
@@ -94,8 +97,8 @@ attachments, tool inputs, file paths, or rendered context. It reads text only
 on records explicitly marked `isApiErrorMessage`, and retains that text only
 when it contains an explicit rate-limit, exhaustion, or throttling signal.
 Source metadata contains format/version/model sets, counts, a SHA-256 digest,
-the measurement basis, unique per-message usage objects, and the terminal
-content-free cost-state record.
+the measurement basis, per-message normalized token counters keyed by hashed
+message identity, and explicitly allowlisted terminal cost-state counters.
 
 ## Ledger contract
 
@@ -103,7 +106,9 @@ content-free cost-state record.
 `(provider, worker, account, invocation_id)`:
 
 - Registry entry ID, provider, worker/account, invocation ID, and session ID;
-- package and attempt references when supplied by the runner;
+- an observation class: `AUTONOMOUS` or the separate
+  `DIAGNOSTIC` health-probe class;
+- mandatory package and attempt references for every autonomous invocation;
 - observation timestamp and model diagnostic;
 - optional input, output, cache-read, and cache-creation tokens;
 - optional duration, outcome, task completion, and review completion;
@@ -114,11 +119,20 @@ content-free cost-state record.
 `usage_ledger_sources` is also append-only. It records every structured source
 that observed an invocation. A runner-generated invocation ID is the preferred
 deduplication key: JSON/stream output and later transcript ingestion attach to
-one counted ledger row. Without one, the Claude session ID is the conservative
-fallback. Transcript fallback accepts exactly one terminal `cost-state`, so it
-is limited to one completed autonomous invocation per session. Resumed or
-multi-invocation sessions must use the per-invocation CLI JSON/stream result;
-whole-session transcript segmentation is not implemented.
+one counted ledger row. Canonical reads merge those immutable observations in a
+fixed source order, independently of ingestion order. Token/model/identity,
+ordinary outcome, and same-basis duration disagreements fail closed; completion facts are monotonic;
+an explicit limit signal from any source makes the invocation `LIMITED` and is
+never hidden by a transcript observed first. CLI duration wins over the broader
+first-to-last transcript duration. Without a runner ID, the Claude session ID
+is the conservative fallback. Transcript fallback accepts exactly one terminal
+`cost-state`, so it is limited to one completed autonomous invocation per
+session. Resumed or multi-invocation sessions must use the per-invocation CLI
+JSON/stream result; whole-session transcript segmentation is not implemented.
+
+The Registry validates that each autonomous attempt exists and belongs to its
+declared package. Unlinked probes must opt into `DIAGNOSTIC`; diagnostic records
+cannot claim package/attempt provenance or task/review completion.
 
 Transcript files should be ingested only after the terminal record appears.
 Because the canonical ledger row is immutable, a partial transcript is
@@ -145,10 +159,14 @@ explicit `--transcript-root` for the completed matching transcript. Repeating
 the same source is a no-op. Ingesting a second source for the same invocation
 adds provenance without adding consumption.
 
+For a source-free service/authentication probe, omit package and attempt and add
+`--diagnostic-health-probe`. Do not use that class for dispatched Factory work.
+
 ## Migration and rollback
 
-Registry schema version 2 adds `usage_ledger`, `usage_ledger_sources`, their
-indexes, and append-only triggers. Initialization upgrades a version 1
+Registry schema version 3 adds the explicit observation class and autonomous
+provenance constraint to the version-2 `usage_ledger` and
+`usage_ledger_sources` foundation. Initialization upgrades a version 1 or 2
 Registry in place without rewriting existing features, packages, attempts,
 usage observations, failures, or events. Rollback is to stop telemetry
 ingestion and run the previous Registry reader, which ignores these additive

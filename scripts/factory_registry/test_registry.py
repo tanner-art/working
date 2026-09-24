@@ -67,7 +67,7 @@ class SQLiteRegistryTest(unittest.TestCase):
             version = connection.execute(
                 "SELECT value FROM registry_metadata WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(version, "2")
+        self.assertEqual(version, "3")
 
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
         legacy_database = self.root / "legacy.sqlite3"
@@ -89,9 +89,71 @@ class SQLiteRegistryTest(unittest.TestCase):
                 """SELECT count(*) FROM sqlite_master
                    WHERE type='table' AND name IN ('usage_ledger', 'usage_ledger_sources')"""
             ).fetchone()[0]
-        self.assertEqual(metadata["schema_version"], "2")
+        self.assertEqual(metadata["schema_version"], "3")
         self.assertEqual(metadata["legacy_marker"], "preserved")
         self.assertEqual(usage_tables, 2)
+
+    def test_initialize_classifies_version_two_usage_provenance(self) -> None:
+        legacy_database = self.root / "legacy-v2.sqlite3"
+        with sqlite3.connect(legacy_database) as connection:
+            connection.execute(
+                "CREATE TABLE registry_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO registry_metadata(key, value) VALUES ('schema_version', '2')"
+            )
+            connection.execute(
+                """CREATE TABLE usage_ledger (
+                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, worker_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL, invocation_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL, package_id TEXT, attempt_id TEXT,
+                    observed_at TEXT NOT NULL, model_diagnostic TEXT,
+                    input_tokens INTEGER, output_tokens INTEGER,
+                    cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+                    duration_ms REAL, outcome TEXT NOT NULL, task_completed INTEGER NOT NULL,
+                    review_completed INTEGER NOT NULL, limit_signal TEXT,
+                    limit_reset_at TEXT, limit_raw_error TEXT,
+                    calibration_metadata_json TEXT NOT NULL,
+                    primary_source_type TEXT NOT NULL,
+                    primary_source_identity TEXT NOT NULL UNIQUE,
+                    primary_source_metadata_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(provider, worker_id, account_id, invocation_id)
+                )"""
+            )
+            values = (
+                "anthropic", "claude", "account", "2026-09-24T20:00:00Z",
+                "SUCCEEDED", "{}", "CLI_JSON", "{}", "2026-09-24T20:00:00Z",
+            )
+            connection.execute(
+                """INSERT INTO usage_ledger
+                   (id, provider, worker_id, account_id, invocation_id, session_id,
+                    package_id, attempt_id, observed_at, outcome, task_completed,
+                    review_completed, calibration_metadata_json, primary_source_type,
+                    primary_source_identity, primary_source_metadata_json, created_at)
+                   VALUES ('linked', ?, ?, ?, 'linked', 'session-linked', 'TASK',
+                           'ATTEMPT', ?, ?, 0, 0, ?, ?, 'source-linked', ?, ?)""",
+                values,
+            )
+            connection.execute(
+                """INSERT INTO usage_ledger
+                   (id, provider, worker_id, account_id, invocation_id, session_id,
+                    observed_at, outcome, task_completed, review_completed,
+                    calibration_metadata_json, primary_source_type,
+                    primary_source_identity, primary_source_metadata_json, created_at)
+                   VALUES ('probe', ?, ?, ?, 'probe', 'session-probe', ?, ?, 0, 0,
+                           ?, ?, 'source-probe', ?, ?)""",
+                values,
+            )
+        SQLiteRegistry(legacy_database).initialize()
+        with sqlite3.connect(legacy_database) as connection:
+            classes = dict(
+                connection.execute("SELECT id, observation_class FROM usage_ledger")
+            )
+            version = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+        self.assertEqual(classes, {"linked": "AUTONOMOUS", "probe": "DIAGNOSTIC"})
+        self.assertEqual(version, "3")
 
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()

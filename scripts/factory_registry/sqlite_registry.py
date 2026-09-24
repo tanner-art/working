@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .models import (
+    Attempt,
     DispatchSnapshot,
     Evidence,
     Feature,
@@ -23,6 +24,8 @@ from .models import (
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
+    UsageObservationClass,
+    UsageSource,
     Worker,
     WorkPackage,
 )
@@ -83,6 +86,50 @@ class SQLiteRegistry:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
+            usage_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(usage_ledger)")
+            }
+            if "observation_class" not in usage_columns:
+                if connection.execute(
+                    """SELECT 1 FROM usage_ledger
+                       WHERE (package_id IS NULL) <> (attempt_id IS NULL) LIMIT 1"""
+                ).fetchone():
+                    raise RegistryConflict("AMBIGUOUS_USAGE_PROVENANCE_MIGRATION")
+                connection.execute("DROP TRIGGER IF EXISTS usage_ledger_is_append_only_update")
+                connection.execute(
+                    """ALTER TABLE usage_ledger ADD COLUMN observation_class TEXT NOT NULL
+                       DEFAULT 'DIAGNOSTIC' CHECK(observation_class IN (
+                           'AUTONOMOUS', 'DIAGNOSTIC'
+                       ))"""
+                )
+                connection.execute(
+                    """UPDATE usage_ledger SET observation_class=CASE
+                           WHEN package_id IS NOT NULL AND attempt_id IS NOT NULL
+                           THEN 'AUTONOMOUS' ELSE 'DIAGNOSTIC' END"""
+                )
+                connection.execute(
+                    """CREATE TRIGGER usage_ledger_is_append_only_update
+                       BEFORE UPDATE ON usage_ledger BEGIN
+                           SELECT RAISE(ABORT, 'USAGE_LEDGER_APPEND_ONLY');
+                       END"""
+                )
+            connection.execute(
+                """CREATE TRIGGER IF NOT EXISTS usage_ledger_provenance_insert
+                   BEFORE INSERT ON usage_ledger
+                   WHEN NOT (
+                       (NEW.observation_class='AUTONOMOUS'
+                        AND NEW.package_id IS NOT NULL AND NEW.attempt_id IS NOT NULL)
+                       OR (NEW.observation_class='DIAGNOSTIC'
+                           AND NEW.package_id IS NULL AND NEW.attempt_id IS NULL)
+                   )
+                   BEGIN
+                       SELECT RAISE(ABORT, 'USAGE_PROVENANCE_REQUIRED');
+                   END"""
+            )
+            connection.execute(
+                "UPDATE registry_metadata SET value='3' "
+                "WHERE key='schema_version' AND CAST(value AS INTEGER) < 3"
+            )
 
     def journal_mode(self) -> str:
         with self._connection() as connection:
@@ -562,6 +609,65 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def register_attempt(self, attempt: Attempt) -> None:
+        """Append an attempt identity before autonomous invocation telemetry."""
+        started_at = _normalize_timestamp(attempt.started_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                package = connection.execute(
+                    "SELECT 1 FROM work_packages WHERE id=?", (attempt.package_id,)
+                ).fetchone()
+                if package is None:
+                    raise RegistryNotFound(f"work package {attempt.package_id}")
+                if attempt.worker_id is not None and connection.execute(
+                    "SELECT 1 FROM workers WHERE id=?", (attempt.worker_id,)
+                ).fetchone() is None:
+                    raise RegistryNotFound(f"worker {attempt.worker_id}")
+                if attempt.lease_id is not None:
+                    lease = connection.execute(
+                        "SELECT package_id, worker_id FROM leases WHERE id=?",
+                        (attempt.lease_id,),
+                    ).fetchone()
+                    if lease is None:
+                        raise RegistryNotFound(f"lease {attempt.lease_id}")
+                    if lease["package_id"] != attempt.package_id or (
+                        attempt.worker_id is not None
+                        and lease["worker_id"] != attempt.worker_id
+                    ):
+                        raise RegistryConflict("ATTEMPT_LEASE_MISMATCH")
+                connection.execute(
+                    """INSERT INTO attempts
+                       (id, package_id, worker_id, lease_id, started_at,
+                        provider_diagnostics_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        attempt.id,
+                        attempt.package_id,
+                        attempt.worker_id,
+                        attempt.lease_id,
+                        started_at,
+                        _json(attempt.provider_diagnostics),
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_STARTED",
+                    started_at,
+                    attempt.package_id,
+                    attempt.worker_id,
+                    attempt.id,
+                    {"lease_id": attempt.lease_id},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("ATTEMPT_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
     @staticmethod
     def _validate_usage_entry(entry: UsageLedgerEntry) -> None:
         required = {
@@ -577,6 +683,31 @@ class SQLiteRegistry:
         missing = sorted(key for key, value in required.items() if not str(value).strip())
         if missing:
             raise RegistryConflict("INVALID_USAGE_ENTRY", ",".join(missing))
+        if not isinstance(entry.source_type, UsageSource):
+            raise RegistryConflict("INVALID_USAGE_ENTRY", "source_type")
+        if entry.outcome not in {"SUCCEEDED", "FAILED", "LIMITED"}:
+            raise RegistryConflict("INVALID_USAGE_ENTRY", "outcome")
+        if entry.limit_signal not in {None, "RATE_LIMIT", "EXHAUSTION", "THROTTLING"}:
+            raise RegistryConflict("INVALID_USAGE_ENTRY", "limit_signal")
+        if not isinstance(entry.task_completed, bool) or not isinstance(
+            entry.review_completed, bool
+        ):
+            raise RegistryConflict("INVALID_USAGE_ENTRY", "completion flags")
+        if not isinstance(entry.observation_class, UsageObservationClass):
+            raise RegistryConflict("INVALID_USAGE_ENTRY", "observation_class")
+        if entry.observation_class is UsageObservationClass.AUTONOMOUS:
+            if not entry.package_id or not entry.attempt_id:
+                raise RegistryConflict(
+                    "USAGE_PROVENANCE_REQUIRED", "package_id,attempt_id"
+                )
+        elif entry.package_id is not None or entry.attempt_id is not None:
+            raise RegistryConflict(
+                "DIAGNOSTIC_PROVENANCE_FORBIDDEN", "package_id,attempt_id"
+            )
+        if entry.observation_class is UsageObservationClass.DIAGNOSTIC and (
+            entry.task_completed or entry.review_completed
+        ):
+            raise RegistryConflict("DIAGNOSTIC_COMPLETION_FORBIDDEN")
         for key in (
             "input_tokens",
             "output_tokens",
@@ -589,6 +720,96 @@ class SQLiteRegistry:
                 raise RegistryConflict("INVALID_USAGE_MEASUREMENT", key)
         if entry.limit_raw_error and not entry.limit_signal:
             raise RegistryConflict("LIMIT_ERROR_REQUIRES_SIGNAL")
+        if (entry.outcome == "LIMITED") != bool(entry.limit_signal):
+            raise RegistryConflict("LIMIT_OUTCOME_MISMATCH")
+
+    @staticmethod
+    def _usage_observation(
+        entry: UsageLedgerEntry,
+        *,
+        observed_at: str,
+        reset_at: str | None,
+        calibration_metadata: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return {
+            "observation_class": entry.observation_class.value,
+            "package_id": entry.package_id,
+            "attempt_id": entry.attempt_id,
+            "observed_at": observed_at,
+            "model_diagnostic": entry.model_diagnostic,
+            "input_tokens": entry.input_tokens,
+            "output_tokens": entry.output_tokens,
+            "cache_read_input_tokens": entry.cache_read_input_tokens,
+            "cache_creation_input_tokens": entry.cache_creation_input_tokens,
+            "duration_ms": entry.duration_ms,
+            "duration_basis": entry.source_metadata.get(
+                "duration_basis",
+                "provider_result" if entry.source_type is not UsageSource.TRANSCRIPT
+                else "first_to_last_timestamp",
+            ),
+            "outcome": entry.outcome,
+            "task_completed": bool(entry.task_completed),
+            "review_completed": bool(entry.review_completed),
+            "limit_signal": entry.limit_signal,
+            "limit_reset_at": reset_at,
+            "limit_raw_error": entry.limit_raw_error,
+            "calibration_metadata": dict(calibration_metadata),
+        }
+
+    @staticmethod
+    def _validate_usage_merge(
+        existing: sqlite3.Row,
+        sources: Sequence[sqlite3.Row],
+        entry: UsageLedgerEntry,
+        observation: Mapping[str, Any],
+    ) -> None:
+        if existing["observation_class"] != entry.observation_class.value:
+            raise RegistryConflict("USAGE_SOURCE_MISMATCH", "observation_class")
+        for key in ("session_id", "package_id", "attempt_id"):
+            if existing[key] != getattr(entry, key):
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+        observations = [
+            json.loads(source["metadata_json"]).get("observation", {})
+            for source in sources
+        ]
+        for prior in observations:
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ):
+                if (
+                    prior.get(key) is not None
+                    and observation.get(key) is not None
+                    and prior[key] != observation[key]
+                ):
+                    raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+            prior_model = prior.get("model_diagnostic")
+            model = observation.get("model_diagnostic")
+            if prior_model and model and set(prior_model.split(",")) != set(model.split(",")):
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", "model_diagnostic")
+            if (
+                prior.get("duration_basis") == observation.get("duration_basis")
+                and prior.get("duration_ms") is not None
+                and observation.get("duration_ms") is not None
+                and prior["duration_ms"] != observation["duration_ms"]
+            ):
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", "duration_ms")
+            prior_signal = prior.get("limit_signal")
+            signal = observation.get("limit_signal")
+            if prior_signal and signal and prior_signal != signal:
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", "limit_signal")
+            if (
+                prior_signal
+                and signal
+                and prior.get("limit_reset_at") is not None
+                and observation.get("limit_reset_at") is not None
+                and prior["limit_reset_at"] != observation["limit_reset_at"]
+            ):
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", "limit_reset_at")
+            if not prior_signal and not signal and prior.get("outcome") != observation.get("outcome"):
+                raise RegistryConflict("USAGE_SOURCE_MISMATCH", "outcome")
 
     def record_usage(self, entry: UsageLedgerEntry) -> UsageLedgerWrite:
         """Append one invocation and retain secondary source provenance.
@@ -603,10 +824,32 @@ class SQLiteRegistry:
         created_at = _utc_now()
         calibration_metadata = dict(entry.calibration_metadata)
         if entry.limit_signal and "factory_measured_before_limit" not in calibration_metadata:
-            prior = self.usage_analytics(entry.worker_id, observed_at=observed_at)
+            end = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+            prior_rows = [
+                row
+                for row in self.usage_entries(
+                    worker_id=entry.worker_id,
+                    since=_normalize_timestamp((end - timedelta(days=7)).isoformat()),
+                    through=observed_at,
+                )
+                if not (
+                    row["provider"] == entry.provider
+                    and row["account_id"] == entry.account_id
+                    and row["invocation_id"] == entry.invocation_id
+                )
+            ]
             calibration_metadata["factory_measured_before_limit"] = {
-                "rolling_24h": prior["rolling_24h"],
-                "rolling_7d": prior["rolling_7d"],
+                "rolling_24h": self._usage_totals(
+                    [
+                        row
+                        for row in prior_rows
+                        if datetime.fromisoformat(
+                            row["observed_at"].replace("Z", "+00:00")
+                        )
+                        >= end - timedelta(hours=24)
+                    ]
+                ),
+                "rolling_7d": self._usage_totals(prior_rows),
             }
         source_metadata = {
             **entry.source_metadata,
@@ -619,54 +862,78 @@ class SQLiteRegistry:
                 "outcome": entry.outcome,
                 "model_diagnostic": entry.model_diagnostic,
             },
+            "observation": self._usage_observation(
+                entry,
+                observed_at=observed_at,
+                reset_at=reset_at,
+                calibration_metadata=calibration_metadata,
+            ),
         }
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if entry.observation_class is UsageObservationClass.AUTONOMOUS:
+                    attempt = connection.execute(
+                        "SELECT package_id, worker_id FROM attempts WHERE id=?",
+                        (entry.attempt_id,),
+                    ).fetchone()
+                    if attempt is None:
+                        raise RegistryNotFound(f"attempt {entry.attempt_id}")
+                    if attempt["package_id"] != entry.package_id:
+                        raise RegistryConflict("USAGE_ATTEMPT_PACKAGE_MISMATCH")
+                    if (
+                        attempt["worker_id"] is not None
+                        and attempt["worker_id"] != entry.worker_id
+                    ):
+                        raise RegistryConflict("USAGE_ATTEMPT_WORKER_MISMATCH")
                 existing_source = connection.execute(
-                    """SELECT source.ledger_id, ledger.provider, ledger.worker_id,
-                              ledger.account_id, ledger.invocation_id
+                    """SELECT source.ledger_id, source.metadata_json,
+                              ledger.provider, ledger.worker_id,
+                              ledger.account_id, ledger.invocation_id, ledger.session_id,
+                              ledger.package_id, ledger.attempt_id, ledger.observation_class
                        FROM usage_ledger_sources AS source
                        JOIN usage_ledger AS ledger ON ledger.id=source.ledger_id
                        WHERE source.source_identity=?""",
                     (entry.source_identity,),
                 ).fetchone()
                 if existing_source:
-                    for key in ("provider", "worker_id", "account_id", "invocation_id"):
+                    for key in (
+                        "provider", "worker_id", "account_id", "invocation_id",
+                        "session_id", "package_id", "attempt_id",
+                    ):
                         if existing_source[key] != getattr(entry, key):
+                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+                    if existing_source["observation_class"] != entry.observation_class.value:
+                        raise RegistryConflict("USAGE_SOURCE_MISMATCH", "observation_class")
+                    stored_observation = json.loads(
+                        existing_source["metadata_json"]
+                    ).get("observation", {})
+                    for key in (
+                        "model_diagnostic", "input_tokens", "output_tokens",
+                        "cache_read_input_tokens", "cache_creation_input_tokens",
+                        "duration_ms", "duration_basis", "outcome", "task_completed",
+                        "review_completed", "limit_signal", "limit_reset_at",
+                        "limit_raw_error",
+                    ):
+                        if stored_observation.get(key) != source_metadata["observation"].get(key):
                             raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
                     connection.rollback()
                     return UsageLedgerWrite(existing_source["ledger_id"], False, False)
                 existing = connection.execute(
-                    """SELECT id, session_id, package_id, attempt_id,
-                              input_tokens, output_tokens, cache_read_input_tokens,
-                              cache_creation_input_tokens
+                    """SELECT *
                        FROM usage_ledger
                        WHERE provider=? AND worker_id=? AND account_id=? AND invocation_id=?""",
                     (entry.provider, entry.worker_id, entry.account_id, entry.invocation_id),
                 ).fetchone()
                 if existing:
-                    if existing["session_id"] != entry.session_id:
-                        raise RegistryConflict("USAGE_SOURCE_MISMATCH", "session_id")
-                    for key in ("package_id", "attempt_id"):
-                        if (
-                            existing[key] is not None
-                            and getattr(entry, key) is not None
-                            and existing[key] != getattr(entry, key)
-                        ):
-                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
-                    for key in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                    ):
-                        if (
-                            existing[key] is not None
-                            and getattr(entry, key) is not None
-                            and existing[key] != getattr(entry, key)
-                        ):
-                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+                    existing_sources = connection.execute(
+                        "SELECT source_type, metadata_json FROM usage_ledger_sources "
+                        "WHERE ledger_id=? ORDER BY observed_at, id",
+                        (existing["id"],),
+                    ).fetchall()
+                    self._validate_usage_merge(
+                        existing, existing_sources, entry, source_metadata["observation"]
+                    )
                     source_id = str(uuid.uuid4())
                     connection.execute(
                         """INSERT INTO usage_ledger_sources
@@ -699,13 +966,13 @@ class SQLiteRegistry:
                 connection.execute(
                     """INSERT INTO usage_ledger
                        (id, provider, worker_id, account_id, invocation_id, session_id,
-                        package_id, attempt_id, observed_at, model_diagnostic,
+                        observation_class, package_id, attempt_id, observed_at, model_diagnostic,
                         input_tokens, output_tokens, cache_read_input_tokens,
                         cache_creation_input_tokens, duration_ms, outcome,
                         task_completed, review_completed, limit_signal, limit_reset_at,
                         limit_raw_error, calibration_metadata_json, primary_source_type,
                         primary_source_identity, primary_source_metadata_json, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                ?, ?, ?, ?, ?, ?)""",
                     (
                         entry.id,
@@ -714,6 +981,7 @@ class SQLiteRegistry:
                         entry.account_id,
                         entry.invocation_id,
                         entry.session_id,
+                        entry.observation_class.value,
                         entry.package_id,
                         entry.attempt_id,
                         observed_at,
@@ -773,6 +1041,70 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    @staticmethod
+    def _canonical_usage_entry(
+        item: dict[str, Any], sources: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        observations = [
+            (source["source_type"], source["source_identity"], source["metadata"].get("observation"))
+            for source in sources
+            if isinstance(source["metadata"].get("observation"), Mapping)
+        ]
+        if not observations:
+            return item
+        priority = {
+            UsageSource.CLI_JSON.value: 2,
+            UsageSource.CLI_STREAM_JSON.value: 2,
+            UsageSource.TRANSCRIPT.value: 1,
+        }
+        ordered = sorted(
+            observations,
+            key=lambda value: (-priority.get(value[0], 0), value[0], value[1]),
+        )
+        values = [value[2] for value in ordered]
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "model_diagnostic",
+        ):
+            item[key] = next(
+                (value[key] for value in values if value.get(key) is not None), None
+            )
+        duration = next(
+            (value for value in values if value.get("duration_ms") is not None), None
+        )
+        item["duration_ms"] = duration.get("duration_ms") if duration else None
+        item["duration_basis"] = duration.get("duration_basis") if duration else None
+        item["observed_at"] = max(value["observed_at"] for value in values)
+        item["task_completed"] = any(bool(value.get("task_completed")) for value in values)
+        item["review_completed"] = any(bool(value.get("review_completed")) for value in values)
+        limited = [value for value in values if value.get("limit_signal")]
+        if limited:
+            item["outcome"] = "LIMITED"
+            for key in ("limit_signal", "limit_reset_at", "limit_raw_error"):
+                item[key] = next(
+                    (value[key] for value in limited if value.get(key) is not None),
+                    None,
+                )
+            item["calibration_metadata"] = dict(
+                next(
+                    (
+                        value["calibration_metadata"]
+                        for value in limited
+                        if value.get("calibration_metadata")
+                    ),
+                    {},
+                )
+            )
+        else:
+            item["outcome"] = values[0].get("outcome", item["outcome"])
+            item["limit_signal"] = None
+            item["limit_reset_at"] = None
+            item["limit_raw_error"] = None
+        return item
+
     def usage_entries(
         self,
         *,
@@ -785,12 +1117,8 @@ class SQLiteRegistry:
         if worker_id is not None:
             clauses.append("worker_id=?")
             parameters.append(worker_id)
-        if since is not None:
-            clauses.append("observed_at>=?")
-            parameters.append(_normalize_timestamp(since))
-        if through is not None:
-            clauses.append("observed_at<=?")
-            parameters.append(_normalize_timestamp(through))
+        normalized_since = _normalize_timestamp(since) if since is not None else None
+        normalized_through = _normalize_timestamp(through) if through is not None else None
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connection() as connection:
             rows = connection.execute(
@@ -822,8 +1150,13 @@ class SQLiteRegistry:
                 item.pop("primary_source_metadata_json")
             )
             item["sources"] = by_ledger.get(item["id"], [])
+            item = self._canonical_usage_entry(item, item["sources"])
+            if normalized_since is not None and item["observed_at"] < normalized_since:
+                continue
+            if normalized_through is not None and item["observed_at"] > normalized_through:
+                continue
             entries.append(item)
-        return entries
+        return sorted(entries, key=lambda value: (value["observed_at"], value["id"]))
 
     @staticmethod
     def _usage_totals(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
