@@ -22,6 +22,9 @@ DEFAULT_STALE_AFTER_SECONDS = 180
 DEFAULT_UTILIZATION_WINDOW_DAYS = 9
 DEFAULT_UTILIZATION_TARGET_WORKERS = 2.5
 DEFAULT_UTILIZATION_TOTAL_WORKERS = 3
+ACTIVE_EVENT_STATUSES = {'starting', 'agent', 'validation'}
+BLOCKED_EVENT_STATUS = 'blocked'
+TERMINAL_EVENT_STATUSES = {'review', 'failed', 'idle', 'stale_claim_recovery'}
 
 ISSUE_RECORD_RE = re.compile(r'^issue-(\d+)\.json$')
 
@@ -249,6 +252,98 @@ def issue_record_summary(state_dir):
     return {'total_records': total, 'corrupt_records': corrupt, 'by_status': by_status, 'by_agent': by_agent}
 
 
+def load_events(state_dir):
+    """Read the append-only ledger, retaining legacy records and skipping bad lines."""
+    path = state_dir / 'events.jsonl'
+    if not path.is_file():
+        return {'found': False, 'error': None, 'events': [], 'corrupt_lines': 0}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        return {'found': True, 'error': f'unreadable: {type(exc).__name__}', 'events': [], 'corrupt_lines': 0}
+    events, corrupt = [], 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+            timestamp = item.get('timestamp')
+            status = item.get('status')
+            if not isinstance(item, dict) or isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not isinstance(status, str) or not status:
+                raise ValueError
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            corrupt += 1
+            continue
+        event = dict(item)
+        event['timestamp'] = float(timestamp)
+        events.append(event)
+    events.sort(key=lambda event: event['timestamp'])
+    return {'found': True, 'error': None, 'events': events, 'corrupt_lines': corrupt}
+
+
+def runtime_metrics(events_result, now, window_start=None, window_end=None):
+    """Compute parent/child active and blocked time without estimating unknown providers."""
+    if not events_result.get('found'):
+        return {'events_found': False, 'events_corrupt_lines': 0, 'parent_active_hours': None,
+                'parent_blocked_hours': None, 'child_lane_active_hours': None,
+                'child_lane_blocked_hours': None, 'average_active_parent_agents': None,
+                'average_active_child_lanes': None, 'combined_utilization': None,
+                'blocked_reason_totals': {}, 'native_provider_time': 'unknown'}
+    events = events_result.get('events', [])
+    if not events:
+        return {'events_found': True, 'events_corrupt_lines': events_result.get('corrupt_lines', 0),
+                'parent_active_hours': 0.0, 'parent_blocked_hours': 0.0,
+                'child_lane_active_hours': 0.0, 'child_lane_blocked_hours': 0.0,
+                'average_active_parent_agents': 0.0, 'average_active_child_lanes': 0.0,
+                'combined_utilization': 0.0, 'blocked_reason_totals': {},
+                'native_provider_time': 'unknown'}
+    start = max(min(event['timestamp'] for event in events), window_start) if window_start is not None else min(event['timestamp'] for event in events)
+    end = now if window_end is None else window_end
+    duration = max(0.0, end - start)
+    groups = {}
+    for event in events:
+        executor = event.get('executor_kind')
+        if executor == 'native_subagent' or executor == 'native_subagent_unknown':
+            continue
+        identity = event.get('attempt_id') or event.get('worker') or event.get('agent')
+        if identity:
+            groups.setdefault(identity, []).append(event)
+    totals = {'parent_active': 0.0, 'parent_blocked': 0.0, 'child_active': 0.0, 'child_blocked': 0.0}
+    reasons = {}
+    for timeline in groups.values():
+        timeline.sort(key=lambda event: event['timestamp'])
+        for index, event in enumerate(timeline):
+            s = max(start, event['timestamp'])
+            e = min(end, timeline[index + 1]['timestamp'] if index + 1 < len(timeline) else end)
+            seconds = max(0.0, e - s)
+            kind = event.get('executor_kind')
+            if kind not in {'parent_lane', 'child_lane'}:
+                slot = event.get('slot')
+                kind = 'parent_lane' if slot in (None, 1) else 'child_lane'
+            prefix = 'parent' if kind == 'parent_lane' else 'child'
+            if event.get('status') in ACTIVE_EVENT_STATUSES:
+                totals[f'{prefix}_active'] += seconds
+            elif event.get('status') == BLOCKED_EVENT_STATUS or event.get('status') == 'waiting':
+                totals[f'{prefix}_blocked'] += seconds
+                reason = event.get('blocked_reason') or 'unknown'
+                reasons[reason] = reasons.get(reason, 0.0) + seconds / 3600
+    parent_hours = totals['parent_active'] / 3600
+    child_hours = totals['child_active'] / 3600
+    parent_blocked = totals['parent_blocked'] / 3600
+    child_blocked = totals['child_blocked'] / 3600
+    parent_avg = totals['parent_active'] / duration if duration else 0.0
+    child_avg = totals['child_active'] / duration if duration else 0.0
+    lanes = len({event.get('worker') or event.get('agent') for event in events if event.get('worker') or event.get('agent')})
+    combined = ((totals['parent_active'] + totals['child_active']) / (duration * lanes)
+                if duration and lanes else 0.0)
+    return {'events_found': True, 'events_corrupt_lines': events_result.get('corrupt_lines', 0),
+            'parent_active_hours': parent_hours, 'parent_blocked_hours': parent_blocked,
+            'child_lane_active_hours': child_hours, 'child_lane_blocked_hours': child_blocked,
+            'average_active_parent_agents': parent_avg, 'average_active_child_lanes': child_avg,
+            'combined_utilization': combined, 'blocked_reason_totals': reasons,
+            'native_provider_time': 'unknown'}
+
+
 def utilization_section(config, window_days, target_workers):
     lanes = configured_lane_keys(config)
     total_workers = len(lanes) if lanes else DEFAULT_UTILIZATION_TOTAL_WORKERS
@@ -271,6 +366,8 @@ def build_report(config_path, config, now=None, stale_after_seconds=DEFAULT_STAL
                   utilization_target_workers=DEFAULT_UTILIZATION_TARGET_WORKERS):
     now = time.time() if now is None else now
     state_dir = pathlib.Path(config['state'])
+    events = load_events(state_dir)
+    runtime = runtime_metrics(events, now)
     capacity = capacity_status(state_dir, config, stale_after_seconds, now)
     report = {
         'generated_at': iso(now),
@@ -279,7 +376,7 @@ def build_report(config_path, config, now=None, stale_after_seconds=DEFAULT_STAL
         'state_dir_found': state_dir.is_dir(),
         'heartbeat': heartbeat_status(state_dir, stale_after_seconds, now),
         'issues': issue_record_summary(state_dir),
-        'utilization': utilization_section(config, utilization_window_days, utilization_target_workers),
+        'utilization': {**utilization_section(config, utilization_window_days, utilization_target_workers), **runtime},
         'capacity': capacity,
         'capacity_note': capacity['note'],
     }
@@ -319,6 +416,15 @@ def format_text(report):
         f"over a {util['window_days']}-day window"
     )
     lines.append(f"  observed utilization: {util['observed_utilization']} ({util['observed_utilization_reason']})")
+    lines.append(f"  parent active hours: {util.get('parent_active_hours')}")
+    lines.append(f"  parent blocked hours: {util.get('parent_blocked_hours')}")
+    lines.append(f"  child-lane active hours: {util.get('child_lane_active_hours')}")
+    lines.append(f"  child-lane blocked hours: {util.get('child_lane_blocked_hours')}")
+    lines.append(f"  average active parent agents: {util.get('average_active_parent_agents')}")
+    lines.append(f"  average active child lanes: {util.get('average_active_child_lanes')}")
+    lines.append(f"  combined utilization: {util.get('combined_utilization')}")
+    lines.append(f"  native provider subagent time: {util.get('native_provider_time', 'unknown')}")
+    lines.append(f"  blocked reason totals: {util.get('blocked_reason_totals', {})}")
     lines.append('')
     lines.append('Capacity note:')
     lines.append(f"  {report['capacity_note']}")

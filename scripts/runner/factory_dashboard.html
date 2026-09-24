@@ -354,6 +354,16 @@
     }
     kpi('Total utilization', util.total);
     kpi('Last ' + util.window_days + '-day utilization', util.nine_day);
+    function hours(label, value) {
+      kpis.appendChild(el('div', { class: 'kpi' }, [
+        el('div', { class: 'value', text: value == null ? 'Unknown' : value.toFixed(2) + 'h' }),
+        el('div', { class: 'label', text: label })
+      ]));
+    }
+    hours('Parent active', util.parent_active_hours);
+    hours('Parent blocked', util.parent_blocked_hours);
+    hours('Child-lane active', util.child_lane_active_hours);
+    hours('Child-lane blocked', util.child_lane_blocked_hours);
     kpis.appendChild(el('div', { class: 'kpi' }, [
       el('div', { class: 'value', text: String(util.total_workers) }),
       el('div', { class: 'label', text: 'Configured workers' })
@@ -368,6 +378,10 @@
     }
     if (util.events_found && util.events_corrupt_lines) {
       lb.appendChild(el('div', { class: 'note', text: util.events_corrupt_lines + ' corrupt line(s) in events.jsonl were skipped.' }));
+    }
+    if (util.blocked_reason_totals) {
+      var reasons = Object.keys(util.blocked_reason_totals).sort();
+      if (reasons.length) lb.appendChild(el('div', { class: 'note', text: 'Blocked hours by reason: ' + reasons.map(function (r) { return r + ' ' + util.blocked_reason_totals[r].toFixed(2) + 'h'; }).join(', ') }));
     }
   }
 
