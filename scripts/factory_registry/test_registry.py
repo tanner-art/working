@@ -307,7 +307,7 @@ class SQLiteRegistryTest(unittest.TestCase):
 
     def test_initialize_reads_active_wal_before_opening_source(self) -> None:
         cases = (
-            ("newer-active", "3", "SCHEMA_VERSION_UNSUPPORTED: 3"),
+            ("newer-active", "4", "SCHEMA_VERSION_UNSUPPORTED: 4"),
             ("malformed-active", "future", "SCHEMA_VERSION_INVALID: future"),
         )
         for label, wal_version, error in cases:
