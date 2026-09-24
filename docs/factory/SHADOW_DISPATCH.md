@@ -61,6 +61,11 @@ refuses to overwrite prior evidence. This is the callable output boundary for
 the eventual live three-sweep observation; it is not a registry or runner
 write.
 
+Real runner files enter through the separate read-only boundary documented in
+[`LIVE_OBSERVATION.md`](LIVE_OBSERVATION.md). That adapter produces a copied
+`DispatchSnapshot`; the scheduler remains unaware of filesystem paths, runner
+configuration, provider identities, and storage backends.
+
 ## Conservative capacity rule
 
 Usage observations are normalized before entering the snapshot and may carry a

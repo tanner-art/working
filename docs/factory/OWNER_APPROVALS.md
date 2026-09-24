@@ -34,6 +34,15 @@ These decisions do not block the registry foundation, importer, lane skeletons, 
 - Approve or delegate the live-policy freshness windows. Shadow defaults are a
   180-second heartbeat window, 900-second usage window, and 900-second sweep
   interval with 60 seconds of scheduling tolerance.
+- Ratify the provider-neutral scope names `short_window`, `weekly_window`, and
+  optional `billing_budget`, then approve the explicit mapping from each real
+  usage source to one scope. The current legacy feed retains only its most
+  constrained window, so missing windows remain constrained.
+- Ratify the package capacity classes `FULL_CAPABILITY_REQUIRED` (default) and
+  `ECONOMY_ELIGIBLE` (explicit). Until then, every package requires fresh
+  `GREEN` capacity and `SLOW` remains ineligible.
+- Approve the proposed 60-second legacy-observation alignment tolerance in
+  addition to the heartbeat, usage, and sweep tolerances above.
 
 ## Current technical defaults that do not require product approval
 
