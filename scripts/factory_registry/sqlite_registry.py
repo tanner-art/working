@@ -11,11 +11,21 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from .models import DispatchSnapshot, Evidence, Feature, Lease, TaskStatus, Worker, WorkPackage
+from .models import (
+    DispatchSnapshot,
+    Evidence,
+    Feature,
+    Lease,
+    TaskStatus,
+    UsageLedgerEntry,
+    UsageLedgerWrite,
+    Worker,
+    WorkPackage,
+)
 from .repository import RegistryConflict, RegistryNotFound
 
 
@@ -551,6 +561,373 @@ class SQLiteRegistry:
             except Exception:
                 connection.rollback()
                 raise
+
+    @staticmethod
+    def _validate_usage_entry(entry: UsageLedgerEntry) -> None:
+        required = {
+            "id": entry.id,
+            "provider": entry.provider,
+            "worker_id": entry.worker_id,
+            "account_id": entry.account_id,
+            "invocation_id": entry.invocation_id,
+            "session_id": entry.session_id,
+            "outcome": entry.outcome,
+            "source_identity": entry.source_identity,
+        }
+        missing = sorted(key for key, value in required.items() if not str(value).strip())
+        if missing:
+            raise RegistryConflict("INVALID_USAGE_ENTRY", ",".join(missing))
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "duration_ms",
+        ):
+            value = getattr(entry, key)
+            if value is not None and (isinstance(value, bool) or value < 0):
+                raise RegistryConflict("INVALID_USAGE_MEASUREMENT", key)
+        if entry.limit_raw_error and not entry.limit_signal:
+            raise RegistryConflict("LIMIT_ERROR_REQUIRES_SIGNAL")
+
+    def record_usage(self, entry: UsageLedgerEntry) -> UsageLedgerWrite:
+        """Append one invocation and retain secondary source provenance.
+
+        The provider/worker/account/invocation tuple is the counting identity.
+        A transcript observed after its CLI result adds a source row but never a
+        second counted invocation.
+        """
+        self._validate_usage_entry(entry)
+        observed_at = _normalize_timestamp(entry.observed_at)
+        reset_at = _normalize_timestamp(entry.limit_reset_at) if entry.limit_reset_at else None
+        created_at = _utc_now()
+        calibration_metadata = dict(entry.calibration_metadata)
+        if entry.limit_signal and "factory_measured_before_limit" not in calibration_metadata:
+            prior = self.usage_analytics(entry.worker_id, observed_at=observed_at)
+            calibration_metadata["factory_measured_before_limit"] = {
+                "rolling_24h": prior["rolling_24h"],
+                "rolling_7d": prior["rolling_7d"],
+            }
+        source_metadata = {
+            **entry.source_metadata,
+            "observed_measurements": {
+                "input_tokens": entry.input_tokens,
+                "output_tokens": entry.output_tokens,
+                "cache_read_input_tokens": entry.cache_read_input_tokens,
+                "cache_creation_input_tokens": entry.cache_creation_input_tokens,
+                "duration_ms": entry.duration_ms,
+                "outcome": entry.outcome,
+                "model_diagnostic": entry.model_diagnostic,
+            },
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing_source = connection.execute(
+                    """SELECT source.ledger_id, ledger.provider, ledger.worker_id,
+                              ledger.account_id, ledger.invocation_id
+                       FROM usage_ledger_sources AS source
+                       JOIN usage_ledger AS ledger ON ledger.id=source.ledger_id
+                       WHERE source.source_identity=?""",
+                    (entry.source_identity,),
+                ).fetchone()
+                if existing_source:
+                    for key in ("provider", "worker_id", "account_id", "invocation_id"):
+                        if existing_source[key] != getattr(entry, key):
+                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+                    connection.rollback()
+                    return UsageLedgerWrite(existing_source["ledger_id"], False, False)
+                existing = connection.execute(
+                    """SELECT id, session_id, package_id, attempt_id,
+                              input_tokens, output_tokens, cache_read_input_tokens,
+                              cache_creation_input_tokens
+                       FROM usage_ledger
+                       WHERE provider=? AND worker_id=? AND account_id=? AND invocation_id=?""",
+                    (entry.provider, entry.worker_id, entry.account_id, entry.invocation_id),
+                ).fetchone()
+                if existing:
+                    if existing["session_id"] != entry.session_id:
+                        raise RegistryConflict("USAGE_SOURCE_MISMATCH", "session_id")
+                    for key in ("package_id", "attempt_id"):
+                        if (
+                            existing[key] is not None
+                            and getattr(entry, key) is not None
+                            and existing[key] != getattr(entry, key)
+                        ):
+                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+                    for key in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    ):
+                        if (
+                            existing[key] is not None
+                            and getattr(entry, key) is not None
+                            and existing[key] != getattr(entry, key)
+                        ):
+                            raise RegistryConflict("USAGE_SOURCE_MISMATCH", key)
+                    source_id = str(uuid.uuid4())
+                    connection.execute(
+                        """INSERT INTO usage_ledger_sources
+                           (id, ledger_id, source_type, source_identity, observed_at, metadata_json)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            source_id,
+                            existing["id"],
+                            entry.source_type.value,
+                            entry.source_identity,
+                            observed_at,
+                            _json(source_metadata),
+                        ),
+                    )
+                    self._insert_event(
+                        connection,
+                        "USAGE_SOURCE_DEDUPLICATED",
+                        observed_at,
+                        entry.package_id,
+                        entry.worker_id,
+                        entry.attempt_id,
+                        {
+                            "ledger_id": existing["id"],
+                            "source_type": entry.source_type.value,
+                        },
+                    )
+                    self._bump_revision(connection)
+                    connection.commit()
+                    return UsageLedgerWrite(existing["id"], False, True)
+                connection.execute(
+                    """INSERT INTO usage_ledger
+                       (id, provider, worker_id, account_id, invocation_id, session_id,
+                        package_id, attempt_id, observed_at, model_diagnostic,
+                        input_tokens, output_tokens, cache_read_input_tokens,
+                        cache_creation_input_tokens, duration_ms, outcome,
+                        task_completed, review_completed, limit_signal, limit_reset_at,
+                        limit_raw_error, calibration_metadata_json, primary_source_type,
+                        primary_source_identity, primary_source_metadata_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry.id,
+                        entry.provider,
+                        entry.worker_id,
+                        entry.account_id,
+                        entry.invocation_id,
+                        entry.session_id,
+                        entry.package_id,
+                        entry.attempt_id,
+                        observed_at,
+                        entry.model_diagnostic,
+                        entry.input_tokens,
+                        entry.output_tokens,
+                        entry.cache_read_input_tokens,
+                        entry.cache_creation_input_tokens,
+                        entry.duration_ms,
+                        entry.outcome,
+                        int(entry.task_completed),
+                        int(entry.review_completed),
+                        entry.limit_signal,
+                        reset_at,
+                        entry.limit_raw_error,
+                        _json(calibration_metadata),
+                        entry.source_type.value,
+                        entry.source_identity,
+                        _json(source_metadata),
+                        created_at,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO usage_ledger_sources
+                       (id, ledger_id, source_type, source_identity, observed_at, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()),
+                        entry.id,
+                        entry.source_type.value,
+                        entry.source_identity,
+                        observed_at,
+                        _json(source_metadata),
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "USAGE_RECORDED",
+                    observed_at,
+                    entry.package_id,
+                    entry.worker_id,
+                    entry.attempt_id,
+                    {
+                        "ledger_id": entry.id,
+                        "provider": entry.provider,
+                        "outcome": entry.outcome,
+                        "limit_signal": entry.limit_signal,
+                    },
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return UsageLedgerWrite(entry.id, True, True)
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("USAGE_LEDGER_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    def usage_entries(
+        self,
+        *,
+        worker_id: str | None = None,
+        since: str | None = None,
+        through: str | None = None,
+    ) -> Sequence[Mapping[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if worker_id is not None:
+            clauses.append("worker_id=?")
+            parameters.append(worker_id)
+        if since is not None:
+            clauses.append("observed_at>=?")
+            parameters.append(_normalize_timestamp(since))
+        if through is not None:
+            clauses.append("observed_at<=?")
+            parameters.append(_normalize_timestamp(through))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM usage_ledger {where} ORDER BY observed_at, id", parameters
+            ).fetchall()
+            sources = connection.execute(
+                """SELECT ledger_id, source_type, source_identity, observed_at, metadata_json
+                   FROM usage_ledger_sources ORDER BY observed_at, id"""
+            ).fetchall()
+        by_ledger: dict[str, list[Mapping[str, Any]]] = {}
+        for source in sources:
+            by_ledger.setdefault(source["ledger_id"], []).append(
+                {
+                    "source_type": source["source_type"],
+                    "source_identity": source["source_identity"],
+                    "observed_at": source["observed_at"],
+                    "metadata": json.loads(source["metadata_json"]),
+                }
+            )
+        entries = []
+        for row in rows:
+            item = dict(row)
+            item["task_completed"] = bool(item["task_completed"])
+            item["review_completed"] = bool(item["review_completed"])
+            item["calibration_metadata"] = json.loads(
+                item.pop("calibration_metadata_json")
+            )
+            item["primary_source_metadata"] = json.loads(
+                item.pop("primary_source_metadata_json")
+            )
+            item["sources"] = by_ledger.get(item["id"], [])
+            entries.append(item)
+        return entries
+
+    @staticmethod
+    def _usage_totals(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+        token_fields = (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+        totals: dict[str, Any] = {"invocations": len(rows)}
+        for field in token_fields:
+            values = [row[field] for row in rows if row[field] is not None]
+            totals[field] = sum(values) if values else None
+        measured = [
+            sum(row[field] or 0 for field in token_fields)
+            for row in rows
+            if any(row[field] is not None for field in token_fields)
+        ]
+        totals["measured_tokens"] = sum(measured) if measured else None
+        durations = [row["duration_ms"] for row in rows if row["duration_ms"] is not None]
+        totals["productive_runtime_seconds"] = (
+            sum(durations) / 1000 if durations else None
+        )
+        totals["tasks_completed"] = sum(bool(row["task_completed"]) for row in rows)
+        totals["review_throughput"] = sum(bool(row["review_completed"]) for row in rows)
+        return totals
+
+    def usage_analytics(
+        self,
+        worker_id: str,
+        *,
+        observed_at: str,
+    ) -> Mapping[str, Any]:
+        observed_at = _normalize_timestamp(observed_at)
+        end = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        start_7d = end - timedelta(days=7)
+        start_24h = end - timedelta(hours=24)
+        rows = list(
+            self.usage_entries(
+                worker_id=worker_id,
+                since=_normalize_timestamp(start_7d.isoformat()),
+                through=observed_at,
+            )
+        )
+        rows_24h = [
+            row
+            for row in rows
+            if datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00")) >= start_24h
+        ]
+        totals_24h = dict(self._usage_totals(rows_24h))
+        totals_7d = dict(self._usage_totals(rows))
+        runtime_hours = (totals_7d["productive_runtime_seconds"] or 0) / 3600
+        output_tokens = totals_7d["output_tokens"]
+        output_per_hour = (
+            output_tokens / runtime_hours
+            if output_tokens is not None and runtime_hours > 0
+            else None
+        )
+        completed_tasks = totals_7d["tasks_completed"]
+        average_tokens = (
+            totals_7d["measured_tokens"] / completed_tasks
+            if totals_7d["measured_tokens"] is not None and completed_tasks > 0
+            else None
+        )
+        by_day = []
+        for offset in range(6, -1, -1):
+            day = (end - timedelta(days=offset)).date()
+            day_rows = [
+                row
+                for row in rows
+                if datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00")).date()
+                == day
+            ]
+            by_day.append(
+                {
+                    "date": day.isoformat(),
+                    "tasks_completed": sum(bool(row["task_completed"]) for row in day_rows),
+                    "reviews_completed": sum(bool(row["review_completed"]) for row in day_rows),
+                }
+            )
+        limits = [
+            {
+                "observed_at": row["observed_at"],
+                "signal": row["limit_signal"],
+                "reset_at": row["limit_reset_at"],
+                "raw_error": row["limit_raw_error"],
+                "rolling_consumption": row["calibration_metadata"],
+            }
+            for row in rows
+            if row["limit_signal"]
+        ]
+        return {
+            "worker_id": worker_id,
+            "observed_at": observed_at,
+            "measurement_kind": "FACTORY_MEASURED_CONSUMPTION",
+            "provider_reported_percent": None,
+            "inferred_capacity_percent": None,
+            "rolling_24h": totals_24h,
+            "rolling_7d": totals_7d,
+            "tasks_completed_by_day": by_day,
+            "average_measured_tokens_per_completed_task_7d": average_tokens,
+            "output_tokens_per_productive_hour_7d": output_per_hour,
+            "limit_events_7d": limits,
+        }
 
     def import_preservation_snapshot(
         self,

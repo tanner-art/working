@@ -9,6 +9,9 @@ from .models import (
     Lease,
     PackageKind,
     TaskStatus,
+    UsageLedgerEntry,
+    UsageLedgerWrite,
+    UsageSource,
     Worker,
     WorkPackage,
 )
@@ -32,6 +35,13 @@ from .live_observation import (
     validate_evidence_destination,
     verify_source_proofs,
     write_live_sweep_evidence,
+)
+from .claude_telemetry import (
+    ClaudeTelemetryError,
+    classify_limit_signal,
+    parse_claude_json,
+    parse_claude_stream_json,
+    parse_claude_transcript,
 )
 from .repository import Registry, RegistryConflict, RegistryError, RegistryNotFound
 from .shadow_dispatch import (
@@ -58,6 +68,7 @@ __all__ = [
     "Evidence",
     "CAPACITY_CLASSES",
     "CAPACITY_SCOPES",
+    "ClaudeTelemetryError",
     "Assignment",
     "DifferenceClassification",
     "DispatchSnapshot",
@@ -83,6 +94,9 @@ __all__ = [
     "ProposedObservationPolicy",
     "SQLiteRegistry",
     "TaskStatus",
+    "UsageLedgerEntry",
+    "UsageLedgerWrite",
+    "UsageSource",
     "ShadowDecision",
     "ShadowDispatchError",
     "ShadowHarnessEvidence",
@@ -93,9 +107,13 @@ __all__ = [
     "WorkerObservationBinding",
     "capture_live_observation",
     "compare_with_legacy",
+    "classify_limit_signal",
     "decide_shadow",
     "dispatch_snapshot_from_mapping",
     "project_live_observation",
+    "parse_claude_json",
+    "parse_claude_stream_json",
+    "parse_claude_transcript",
     "reconcile_preservation",
     "run_live_shadow_sweep",
     "run_required_shadow_harness",

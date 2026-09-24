@@ -57,6 +57,14 @@ class FailureCode(StringEnum):
     ORCHESTRA_CAPACITY_RISK = "ORCHESTRA_CAPACITY_RISK"
 
 
+class UsageSource(StringEnum):
+    """Structured origins accepted by the provider-neutral usage ledger."""
+
+    CLI_JSON = "CLI_JSON"
+    CLI_STREAM_JSON = "CLI_STREAM_JSON"
+    TRANSCRIPT = "TRANSCRIPT"
+
+
 @dataclass(frozen=True)
 class Feature:
     id: str
@@ -123,6 +131,52 @@ class Evidence:
     summary: str
     recorded_at: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UsageLedgerEntry:
+    """One autonomous invocation, aggregated once across all observed sources.
+
+    ``invocation_id`` is the cross-source deduplication identity. A runner
+    should generate it before launch and pass it to every ingestion path. When
+    that is not possible, provider session identity is the conservative
+    fallback used by the Claude parser.
+    """
+
+    id: str
+    provider: str
+    worker_id: str
+    account_id: str
+    invocation_id: str
+    session_id: str
+    observed_at: str
+    outcome: str
+    source_type: UsageSource
+    source_identity: str
+    package_id: str | None = None
+    attempt_id: str | None = None
+    model_diagnostic: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    duration_ms: float | None = None
+    task_completed: bool = False
+    review_completed: bool = False
+    limit_signal: str | None = None
+    limit_reset_at: str | None = None
+    limit_raw_error: str | None = None
+    calibration_metadata: Mapping[str, Any] = field(default_factory=dict)
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UsageLedgerWrite:
+    """Outcome of idempotent usage ingestion."""
+
+    entry_id: str
+    inserted: bool
+    source_added: bool
 
 
 @dataclass(frozen=True)

@@ -6,10 +6,13 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 );
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
-    ('schema_version', '1'),
+    ('schema_version', '2'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
     ('orchestra_reserve_percent', '20');
+
+UPDATE registry_metadata SET value='2'
+WHERE key='schema_version' AND CAST(value AS INTEGER) < 2;
 
 CREATE TABLE IF NOT EXISTS features (
     id TEXT PRIMARY KEY,
@@ -149,6 +152,77 @@ CREATE TABLE IF NOT EXISTS usage_observations (
     provider_diagnostics_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS usage_ledger (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    worker_id TEXT NOT NULL REFERENCES workers(id),
+    account_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    package_id TEXT REFERENCES work_packages(id),
+    attempt_id TEXT REFERENCES attempts(id),
+    observed_at TEXT NOT NULL,
+    model_diagnostic TEXT,
+    input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+    cache_read_input_tokens INTEGER CHECK(
+        cache_read_input_tokens IS NULL OR cache_read_input_tokens >= 0
+    ),
+    cache_creation_input_tokens INTEGER CHECK(
+        cache_creation_input_tokens IS NULL OR cache_creation_input_tokens >= 0
+    ),
+    duration_ms REAL CHECK(duration_ms IS NULL OR duration_ms >= 0),
+    outcome TEXT NOT NULL,
+    task_completed INTEGER NOT NULL DEFAULT 0 CHECK(task_completed IN (0, 1)),
+    review_completed INTEGER NOT NULL DEFAULT 0 CHECK(review_completed IN (0, 1)),
+    limit_signal TEXT,
+    limit_reset_at TEXT,
+    limit_raw_error TEXT,
+    calibration_metadata_json TEXT NOT NULL,
+    primary_source_type TEXT NOT NULL CHECK(primary_source_type IN (
+        'CLI_JSON', 'CLI_STREAM_JSON', 'TRANSCRIPT'
+    )),
+    primary_source_identity TEXT NOT NULL UNIQUE,
+    primary_source_metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(provider, worker_id, account_id, invocation_id)
+);
+
+CREATE TABLE IF NOT EXISTS usage_ledger_sources (
+    id TEXT PRIMARY KEY,
+    ledger_id TEXT NOT NULL REFERENCES usage_ledger(id),
+    source_type TEXT NOT NULL CHECK(source_type IN (
+        'CLI_JSON', 'CLI_STREAM_JSON', 'TRANSCRIPT'
+    )),
+    source_identity TEXT NOT NULL UNIQUE,
+    observed_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS usage_ledger_is_append_only_update
+BEFORE UPDATE ON usage_ledger
+BEGIN
+    SELECT RAISE(ABORT, 'USAGE_LEDGER_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS usage_ledger_is_append_only_delete
+BEFORE DELETE ON usage_ledger
+BEGIN
+    SELECT RAISE(ABORT, 'USAGE_LEDGER_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS usage_ledger_sources_are_append_only_update
+BEFORE UPDATE ON usage_ledger_sources
+BEGIN
+    SELECT RAISE(ABORT, 'USAGE_LEDGER_SOURCES_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS usage_ledger_sources_are_append_only_delete
+BEFORE DELETE ON usage_ledger_sources
+BEGIN
+    SELECT RAISE(ABORT, 'USAGE_LEDGER_SOURCES_APPEND_ONLY');
+END;
+
 CREATE TABLE IF NOT EXISTS failure_observations (
     id TEXT PRIMARY KEY,
     package_id TEXT REFERENCES work_packages(id),
@@ -206,6 +280,10 @@ CREATE INDEX IF NOT EXISTS work_packages_queue_order
     ON work_packages(status, priority, ready_at, created_at, id);
 CREATE INDEX IF NOT EXISTS work_packages_feature
     ON work_packages(feature_id, status);
+CREATE INDEX IF NOT EXISTS usage_ledger_worker_time
+    ON usage_ledger(worker_id, observed_at);
+CREATE INDEX IF NOT EXISTS usage_ledger_package_time
+    ON usage_ledger(package_id, observed_at);
 CREATE UNIQUE INDEX IF NOT EXISTS work_packages_source
     ON work_packages(source_system, source_ref)
     WHERE source_system IS NOT NULL AND source_ref IS NOT NULL;

@@ -90,6 +90,15 @@ new observation.
 
 Attempts retain each execution rather than overwriting retry history. Evidence records commits, checks, tests, reviews, and external artifacts. Usage observations are timestamped and preserve unknown or stale states. Failures store a normalized code and human-readable detail.
 
+Invocation consumption is stored separately in the append-only usage ledger.
+Each provider/worker/account/invocation tuple is counted once, while a linked
+append-only source table retains CLI JSON, stream JSON, and transcript
+observations without double-counting. The ledger records measurable token
+components, duration, outcome, completion/review throughput, and explicit
+provider limit signals. Factory-measured consumption does not become a
+provider-reported quota percentage. See [Claude telemetry](CLAUDE_TELEMETRY.md)
+for the first provider parser and privacy boundary.
+
 ### Events
 
 `task_events` is append-only. SQLite rejects updates and deletes. Other adapters must provide equivalent behavior.

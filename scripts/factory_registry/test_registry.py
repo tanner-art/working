@@ -67,7 +67,31 @@ class SQLiteRegistryTest(unittest.TestCase):
             version = connection.execute(
                 "SELECT value FROM registry_metadata WHERE key='schema_version'"
             ).fetchone()[0]
-        self.assertEqual(version, "1")
+        self.assertEqual(version, "2")
+
+    def test_initialize_additively_upgrades_version_one_registry(self) -> None:
+        legacy_database = self.root / "legacy.sqlite3"
+        with sqlite3.connect(legacy_database) as connection:
+            connection.execute(
+                "CREATE TABLE registry_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO registry_metadata(key, value) VALUES ('schema_version', '1')"
+            )
+            connection.execute(
+                "INSERT INTO registry_metadata(key, value) VALUES ('legacy_marker', 'preserved')"
+            )
+        legacy = SQLiteRegistry(legacy_database)
+        legacy.initialize()
+        with sqlite3.connect(legacy_database) as connection:
+            metadata = dict(connection.execute("SELECT key, value FROM registry_metadata"))
+            usage_tables = connection.execute(
+                """SELECT count(*) FROM sqlite_master
+                   WHERE type='table' AND name IN ('usage_ledger', 'usage_ledger_sources')"""
+            ).fetchone()[0]
+        self.assertEqual(metadata["schema_version"], "2")
+        self.assertEqual(metadata["legacy_marker"], "preserved")
+        self.assertEqual(usage_tables, 2)
 
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()

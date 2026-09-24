@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol, Sequence
 
-from .models import DispatchSnapshot, Evidence, Feature, Lease, TaskStatus, Worker, WorkPackage
+from .models import (
+    DispatchSnapshot,
+    Evidence,
+    Feature,
+    Lease,
+    TaskStatus,
+    UsageLedgerEntry,
+    UsageLedgerWrite,
+    Worker,
+    WorkPackage,
+)
 
 
 class RegistryError(RuntimeError):
@@ -82,6 +92,23 @@ class Registry(Protocol):
     ) -> str: ...
 
     def record_evidence(self, evidence: Evidence) -> None: ...
+
+    def record_usage(self, entry: UsageLedgerEntry) -> UsageLedgerWrite: ...
+
+    def usage_entries(
+        self,
+        *,
+        worker_id: str | None = None,
+        since: str | None = None,
+        through: str | None = None,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    def usage_analytics(
+        self,
+        worker_id: str,
+        *,
+        observed_at: str,
+    ) -> Mapping[str, Any]: ...
 
     def import_preservation_snapshot(
         self,
