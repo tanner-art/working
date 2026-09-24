@@ -66,7 +66,7 @@ Real runner files enter through the separate read-only boundary documented in
 `DispatchSnapshot`; the scheduler remains unaware of filesystem paths, runner
 configuration, provider identities, and storage backends.
 
-## Conservative capacity rule
+## Staged capacity rule
 
 Usage observations are normalized before entering the snapshot and may carry a
 provider-neutral `capacity_scope`. Workers declare their expected normalized
@@ -81,11 +81,17 @@ ignored because they have no configured authority over that worker. A new real
 usage window must first be normalized and added to worker configuration; a
 fresh observation alone cannot silently change scheduling policy.
 
-Only normalized `GREEN` worker capacity is eligible in this unit. Although the
-legacy runner can route a `SLOW` account to a provider-specific fallback model,
-the registry does not yet identify which work packages are approved low-cost
-work. Shadow mode therefore refuses `SLOW` instead of treating every package as
-safe fallback work.
+Percentage observations produce `NORMAL`, `CAUTION`, `CHECKPOINT`, or
+`HARD_STOP` at 90%, 95%, and 98%. At caution and checkpoint, explicit small,
+bounded work may start while substantial or uncertain parents are rejected.
+Hard stop admits only emergency recovery or very small bounded ASSURANCE work.
+Provider/model choice does not change these decisions.
+
+Workers in `provider_signal` mode require a fresh healthy service, valid auth,
+a successful live invocation, and no explicit provider limit signal. No
+percentage is required or inferred. Actual rate-limit, exhaustion, throttling,
+or provider-capacity launch failures reject the worker and remain observable.
+See [CAPACITY_POLICY.md](CAPACITY_POLICY.md).
 
 The initial shadow policy treats a heartbeat as fresh for 180 seconds, usage as
 fresh for 900 seconds, and scheduled sweeps as 900 seconds apart with 60 seconds
@@ -103,9 +109,9 @@ create apparent capacity. A worker holding a non-expired lease is ineligible
 even if its projected availability incorrectly says `IDLE`. A `READY` package
 whose `ready_at` is later than the snapshot observation time is also ineligible.
 
-Which real provider/account windows map into these normalized Orchestra scopes
-remains an owner decision. Until it is resolved, the strict rule evaluates every
-declared scope independently and does not infer spare capacity.
+Every declared percentage scope is evaluated independently. The most
+restrictive worker scope governs dispatch, and each Orchestra scope must retain
+the 20% reserve. Missing mappings do not imply spare capacity.
 
 ## Acceptance criteria
 

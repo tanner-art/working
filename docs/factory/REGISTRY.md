@@ -36,6 +36,12 @@ A bounded package records:
 - normalized failure code and human detail;
 - test and review evidence.
 
+Capacity-sensitive dispatch uses explicit package data rather than provider or
+model identity: `capacity_size` is `VERY_SMALL`, `SMALL`, or `SUBSTANTIAL`, and
+`capacity_risk` is `BOUNDED`, `UNCERTAIN`, or `EMERGENCY_RECOVERY`. Existing or
+imported packages default conservatively to `SUBSTANTIAL` and `UNCERTAIN` until
+classified.
+
 Provider/model diagnostics never grant eligibility. A legacy import may have no lane; that makes it ineligible until the Orchestra decomposes and assigns it deliberately.
 
 ### Worker
@@ -85,6 +91,15 @@ Observations for scopes absent from that configuration—whether historical or
 fresh—do not influence eligibility. Adding a real capacity window therefore
 requires an explicit worker-configuration change rather than merely emitting a
 new observation.
+
+Percentage-observed workers follow the staged policy in
+[CAPACITY_POLICY.md](CAPACITY_POLICY.md): below 90% normal, 90–95% caution,
+95–98% checkpoint, and 98% hard stop with only the documented small exceptions.
+A healthy active lease is not revoked merely because usage crosses 95%.
+Workers without percentage telemetry may instead declare `provider_signal`
+mode. Fresh healthy service/auth/live-invocation evidence with no explicit
+limit signal is eligible; observed rate, exhaustion, throttle, or
+capacity-launch failures constrain the worker without inventing a percentage.
 
 ### Attempt, evidence, usage, and failure
 

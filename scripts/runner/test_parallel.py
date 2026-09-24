@@ -114,11 +114,12 @@ class ParallelDispatchTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     configured_slots(config, 'codex-a')
 
-    def test_extra_slot_requires_fresh_green_usage(self):
+    def test_extra_slot_requires_fresh_eligible_capacity(self):
         self.assertTrue(child_slot_allowed(1, False, 'unknown'))
-        self.assertTrue(child_slot_allowed(2, True, 'green'))
-        for enabled, state in ((False, 'green'), (True, 'unknown'),
-                               (True, 'slow'), (True, 'stop')):
+        for state in ('normal', 'caution', 'checkpoint'):
+            self.assertTrue(child_slot_allowed(2, True, state))
+        for enabled, state in ((False, 'normal'), (True, 'unknown'),
+                               (True, 'hard_stop')):
             with self.subTest(enabled=enabled, state=state):
                 self.assertFalse(child_slot_allowed(2, enabled, state))
 

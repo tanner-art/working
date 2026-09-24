@@ -12,6 +12,8 @@ from scripts.factory_registry import (
     Attempt,
     Feature,
     Lane,
+    PackageCapacityRisk,
+    PackageCapacitySize,
     RegistryConflict,
     SQLiteRegistry,
     TaskStatus,
@@ -90,9 +92,44 @@ class SQLiteRegistryTest(unittest.TestCase):
                 """SELECT count(*) FROM sqlite_master
                    WHERE type='table' AND name IN ('usage_ledger', 'usage_ledger_sources')"""
             ).fetchone()[0]
+            package_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(work_packages)")
+            }
         self.assertEqual(metadata["schema_version"], "3")
         self.assertEqual(metadata["legacy_marker"], "preserved")
         self.assertEqual(usage_tables, 2)
+        self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))
+
+    def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
+        legacy_database = self.root / "legacy-capacity.sqlite3"
+        with sqlite3.connect(legacy_database) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE registry_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO registry_metadata(key, value) VALUES
+                    ('schema_version', '1'), ('revision', '0'),
+                    ('active_parent_limit', '3'), ('orchestra_reserve_percent', '20');
+                CREATE TABLE work_packages (
+                    id TEXT PRIMARY KEY, feature_id TEXT NOT NULL, status TEXT NOT NULL,
+                    priority INTEGER NOT NULL, ready_at TEXT, created_at TEXT NOT NULL,
+                    kind TEXT NOT NULL, source_system TEXT, source_ref TEXT
+                );
+                INSERT INTO work_packages
+                    (id, feature_id, status, priority, created_at, kind)
+                    VALUES ('legacy', 'feature', 'READY', 1, '2026-09-24T00:00:00Z', 'PARENT');
+                """
+            )
+        legacy = SQLiteRegistry(legacy_database)
+        legacy.initialize()
+        with sqlite3.connect(legacy_database) as connection:
+            row = connection.execute(
+                "SELECT capacity_size, capacity_risk FROM work_packages WHERE id='legacy'"
+            ).fetchone()
+            version = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+        self.assertEqual(row, ("SUBSTANTIAL", "UNCERTAIN"))
+        self.assertEqual(version, "3")
 
     def test_initialize_classifies_version_two_usage_provenance(self) -> None:
         legacy_database = self.root / "legacy-v2.sqlite3"
@@ -656,10 +693,28 @@ class SQLiteRegistryTest(unittest.TestCase):
         self.assertEqual(snapshot.active_parent_limit, 3)
         self.assertEqual(snapshot.orchestra_reserve_percent, 20)
         self.assertEqual(snapshot.work_packages[0]["ready_at"] is not None, True)
+        self.assertEqual(snapshot.work_packages[0]["capacity_size"], "SUBSTANTIAL")
+        self.assertEqual(snapshot.work_packages[0]["capacity_risk"], "UNCERTAIN")
         self.assertEqual(snapshot.workers[0]["availability"], "IDLE")
         self.assertEqual(snapshot.workers[0]["capabilities"], ["registry"])
         self.assertEqual(snapshot.dependencies, ())
         self.assertEqual(snapshot.active_leases, ())
+
+    def test_package_capacity_classification_is_registry_data(self) -> None:
+        self.feature()
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK", "FEATURE-1", "Task", "ASSURANCE", Lane.ASSURANCE,
+                ("review",), 1, ("complete",), status=TaskStatus.READY,
+                capacity_size=PackageCapacitySize.VERY_SMALL,
+                capacity_risk=PackageCapacityRisk.BOUNDED,
+            )
+        )
+        package = self.registry.dispatch_snapshot(
+            observed_at="2026-09-24T10:00:00Z"
+        ).work_packages[0]
+        self.assertEqual(package["capacity_size"], "VERY_SMALL")
+        self.assertEqual(package["capacity_risk"], "BOUNDED")
 
     def test_provider_metadata_does_not_grant_lane_or_capability(self) -> None:
         self.feature()

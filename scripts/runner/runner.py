@@ -373,6 +373,20 @@ def select(issue, allowed):
     deps = body.get('depends_on',[])
     if not isinstance(deps,list) or any(type(n) is not int or n <= 0 for n in deps):
         raise ValueError('Dependencies must be positive issue numbers')
+    capacity_size = str(body.get('capacity_size', 'SUBSTANTIAL')).upper()
+    capacity_risk = str(body.get('capacity_risk', 'UNCERTAIN')).upper()
+    lane = str(body.get('lane', 'FEATURE')).upper()
+    kind = str(body.get('kind', 'PARENT')).upper()
+    if capacity_size not in {'VERY_SMALL', 'SMALL', 'SUBSTANTIAL'}:
+        raise ValueError('capacity_size must be VERY_SMALL, SMALL, or SUBSTANTIAL')
+    if capacity_risk not in {'BOUNDED', 'UNCERTAIN', 'EMERGENCY_RECOVERY'}:
+        raise ValueError('capacity_risk must be BOUNDED, UNCERTAIN, or EMERGENCY_RECOVERY')
+    if lane not in {'FEATURE', 'PLATFORM', 'ASSURANCE'}:
+        raise ValueError('lane must be FEATURE, PLATFORM, or ASSURANCE')
+    if kind not in {'PARENT', 'TEST', 'REVIEW', 'EVALUATION'}:
+        raise ValueError('kind must be PARENT, TEST, REVIEW, or EVALUATION')
+    body.update(capacity_size=capacity_size, capacity_risk=capacity_risk,
+                lane=lane, kind=kind)
     return next(iter(agents)).split(':')[1], body
 
 
@@ -432,8 +446,10 @@ def lane_key(agent, slot):
 
 
 def child_slot_allowed(slot, usage_enabled, usage_state):
-    """Extra provider capacity requires a fresh below-slowdown usage signal."""
-    return slot == 1 or (usage_enabled and usage_state == 'green')
+    """Extra lanes require fresh eligible capacity; package policy is separate."""
+    return slot == 1 or (
+        usage_enabled and usage_state in ('normal', 'caution', 'checkpoint')
+    )
 
 
 def refresh_queue_snapshot(state, fetch_open_issues):
@@ -515,9 +531,10 @@ def main():
                     print(json.dumps({'issue': issue['number'], 'skip': usage_error}))
                     continue
                 settings = agent_settings(c, agent)
-                decision = (dispatch_decision(c, usage, agent, settings['account'])
+                decision = (dispatch_decision(
+                                c, usage, agent, settings['account'], package=body)
                             if usage_enabled else
-                            {'state': 'green', 'decision': 'allow',
+                            {'state': 'normal', 'decision': 'allow',
                              'effective_model': settings['model']})
                 if not usage_enabled:
                     decision['command'] = settings['command']
@@ -573,7 +590,7 @@ def main():
                 continue
             settings = agent_settings(c, agent)
             if not usage_enabled:
-                usage_decision = {'state': 'green', 'decision': 'allow',
+                usage_decision = {'state': 'normal', 'decision': 'allow',
                                   'effective_model': settings['model'],
                                   'command': settings['command']}
                 if usage_decision['command'] is None:
@@ -582,7 +599,9 @@ def main():
             else:
                 try:
                     usage = validate_usage(json.loads(usage_path.read_text()))
-                    usage_decision = dispatch_decision(c, usage, agent, settings['account'])
+                    usage_decision = dispatch_decision(
+                        c, usage, agent, settings['account'], package=body
+                    )
                 except (OSError, json.JSONDecodeError, UsagePolicyError) as exc:
                     print(json.dumps({'issue': n, 'status': 'defer',
                                       'reason': 'usage policy unavailable or invalid'}))

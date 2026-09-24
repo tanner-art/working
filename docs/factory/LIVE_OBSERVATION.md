@@ -68,31 +68,25 @@ fails comparison. Because sanitized `queue.json` intentionally excludes issue
 bodies and task IDs, a ready queue entry is recorded as unresolved rather than
 being guessed into a work-package assignment.
 
-## Capacity policy proposals
-
-These names are proposed normalized control-plane concepts. They are not yet
-approved live-dispatch policy:
+## Capacity policy
 
 - `short_window`: a provider's short rolling request/token window;
 - `weekly_window`: the provider/account weekly allocation;
 - `billing_budget`: an optional explicit spend budget.
+- `provider_signal`: health/auth/live-invocation and actual limit signals for a
+  worker without percentage telemetry.
 
-Every worker declares the scopes it requires, and every legacy usage source is
-mapped explicitly to at most one scope. The current usage feed stores only the
-single most-constrained provider window, so it cannot reconstruct both short
-and weekly observations. The observer never clones one percentage into several
-scopes or guesses the scope from provider/model identity. Missing or unmapped
-scopes remain missing and therefore constrained.
+Every worker declares the scopes it requires. One account record may carry
+separate named observations for short and weekly windows; each scope is mapped
+explicitly. The observer never clones one percentage into several scopes or
+guesses scope from provider/model identity. A legacy flat record can supply only
+one mapped scope. Missing or unmapped scopes remain constrained.
 
-Proposed package capacity classes are:
-
-- `FULL_CAPABILITY_REQUIRED` — default; fresh `GREEN` capacity is required;
-- `ECONOMY_ELIGIBLE` — explicit only; may eventually use approved low-cost
-  routing after owner ratification.
-
-This unit does not make `SLOW` eligible. `FULL_CAPABILITY_REQUIRED` remains the
-effective behavior for every package until the capacity-class schema and owner
-policy are approved.
+Packages carry explicit `capacity_size` (`VERY_SMALL`, `SMALL`, or
+`SUBSTANTIAL`) and `capacity_risk` (`BOUNDED`, `UNCERTAIN`, or
+`EMERGENCY_RECOVERY`). Percentage observations normalize at the ratified
+90/95/98 thresholds. Provider-signal observations normalize actual health and
+limit evidence without fabricating a provider percentage.
 
 Recommended shadow tolerances are:
 

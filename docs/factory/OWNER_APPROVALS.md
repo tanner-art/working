@@ -20,27 +20,16 @@ These decisions do not block the registry foundation, importer, lane skeletons, 
 
 ## Before capacity enforcement
 
-- Identify which provider/account usage window constitutes Orchestra capacity when the coordinating session and implementation workers share or change accounts.
-- Decide whether the 20% reserve applies independently to each relevant usage window or to the most constrained current window. Until approved, the stricter interpretation wins.
-- Map each real Orchestra provider/account usage window to the normalized
-  `capacity_scope` identifiers supplied to `DispatchSnapshot`. Shadow mode
-  requires every declared scope and evaluates each independently until this is
-  approved.
-- Approve the reporting precision for reserve thresholds. The implementation default will compare unrounded values and round only dashboard display values.
-- Define a provider-neutral low-cost work-package classification before `SLOW`
-  capacity can receive work. Until then, shadow dispatch accepts only fresh
-  normalized `GREEN` capacity; it does not assume every package can use a
-  fallback model safely.
+- Map each real Orchestra provider/account percentage window to the normalized
+  `capacity_scope` identifiers supplied to `DispatchSnapshot`. Every declared
+  Orchestra scope independently retains the ratified 20% reserve.
+- Approve the reporting precision for reserve thresholds. The implementation compares unrounded values and rounds only dashboard display values.
 - Approve or delegate the live-policy freshness windows. Shadow defaults are a
   180-second heartbeat window, 900-second usage window, and 900-second sweep
   interval with 60 seconds of scheduling tolerance.
-- Ratify the provider-neutral scope names `short_window`, `weekly_window`, and
-  optional `billing_budget`, then approve the explicit mapping from each real
-  usage source to one scope. The current legacy feed retains only its most
-  constrained window, so missing windows remain constrained.
-- Ratify the package capacity classes `FULL_CAPABILITY_REQUIRED` (default) and
-  `ECONOMY_ELIGIBLE` (explicit). Until then, every package requires fresh
-  `GREEN` capacity and `SLOW` remains ineligible.
+- Complete the explicit mapping from each real percentage source to
+  `short_window`, `weekly_window`, or optional `billing_budget`. A
+  non-percentage worker instead uses the ratified `provider_signal` mode.
 - Approve the proposed 60-second legacy-observation alignment tolerance in
   addition to the heartbeat, usage, and sweep tolerances above.
 

@@ -40,6 +40,18 @@ class PackageKind(StringEnum):
     EVALUATION = "EVALUATION"
 
 
+class PackageCapacitySize(StringEnum):
+    VERY_SMALL = "VERY_SMALL"
+    SMALL = "SMALL"
+    SUBSTANTIAL = "SUBSTANTIAL"
+
+
+class PackageCapacityRisk(StringEnum):
+    BOUNDED = "BOUNDED"
+    UNCERTAIN = "UNCERTAIN"
+    EMERGENCY_RECOVERY = "EMERGENCY_RECOVERY"
+
+
 class FailureCode(StringEnum):
     UNDERUTILIZED_SESSION = "UNDERUTILIZED_SESSION"
     WEEKLY_CAPACITY_UNUSED = "WEEKLY_CAPACITY_UNUSED"
@@ -94,6 +106,8 @@ class WorkPackage:
     acceptance_criteria: tuple[str, ...]
     status: TaskStatus = TaskStatus.ON_DECK
     kind: PackageKind = PackageKind.PARENT
+    capacity_size: PackageCapacitySize = PackageCapacitySize.SUBSTANTIAL
+    capacity_risk: PackageCapacityRisk = PackageCapacityRisk.UNCERTAIN
     dependency_ids: tuple[str, ...] = ()
     provider_diagnostics: Mapping[str, Any] = field(default_factory=dict)
     branch: str | None = None

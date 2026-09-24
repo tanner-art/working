@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS work_packages (
     category TEXT NOT NULL,
     lane TEXT CHECK(lane IN ('FEATURE', 'PLATFORM', 'ASSURANCE')),
     kind TEXT NOT NULL CHECK(kind IN ('PARENT', 'TEST', 'REVIEW', 'EVALUATION')),
+    capacity_size TEXT NOT NULL DEFAULT 'SUBSTANTIAL' CHECK(capacity_size IN (
+        'VERY_SMALL', 'SMALL', 'SUBSTANTIAL'
+    )),
+    capacity_risk TEXT NOT NULL DEFAULT 'UNCERTAIN' CHECK(capacity_risk IN (
+        'BOUNDED', 'UNCERTAIN', 'EMERGENCY_RECOVERY'
+    )),
     required_capabilities_json TEXT NOT NULL,
     priority INTEGER NOT NULL,
     acceptance_criteria_json TEXT NOT NULL,

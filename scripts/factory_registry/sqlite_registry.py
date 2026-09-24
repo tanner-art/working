@@ -86,6 +86,21 @@ class SQLiteRegistry:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
+            package_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(work_packages)")
+            }
+            if "capacity_size" not in package_columns:
+                connection.execute(
+                    "ALTER TABLE work_packages ADD COLUMN capacity_size TEXT NOT NULL "
+                    "DEFAULT 'SUBSTANTIAL' CHECK(capacity_size IN "
+                    "('VERY_SMALL','SMALL','SUBSTANTIAL'))"
+                )
+            if "capacity_risk" not in package_columns:
+                connection.execute(
+                    "ALTER TABLE work_packages ADD COLUMN capacity_risk TEXT NOT NULL "
+                    "DEFAULT 'UNCERTAIN' CHECK(capacity_risk IN "
+                    "('BOUNDED','UNCERTAIN','EMERGENCY_RECOVERY'))"
+                )
             usage_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(usage_ledger)")
             }
@@ -209,16 +224,17 @@ class SQLiteRegistry:
         )
         connection.execute(
             """INSERT INTO work_packages
-                (id, feature_id, title, category, lane, kind,
+                (id, feature_id, title, category, lane, kind, capacity_size, capacity_risk,
                  required_capabilities_json, priority, acceptance_criteria_json,
                  status, provider_diagnostics_json, branch, pr_url, ready_at, started_at,
                  last_heartbeat_at, runtime_seconds, usage_consumption_json,
                  failure_code, failure_detail, source_system, source_ref,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 package.id, package.feature_id, package.title, package.category,
                 package.lane.value if package.lane else None, package.kind.value,
+                package.capacity_size.value, package.capacity_risk.value,
                 _json(package.required_capabilities), package.priority,
                 _json(package.acceptance_criteria), package.status.value,
                 _json(package.provider_diagnostics), package.branch, package.pr_url,

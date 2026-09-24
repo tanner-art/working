@@ -44,7 +44,11 @@ The merged code and Factory documents show that the installed runner remains the
 
 The material invariants in item 4 are now recorded in D-012 through D-014. The dispatch ordering rule is recorded in D-015.
 
-Some implemented values remain defaults or migration mechanics rather than accepted live policy. The legacy runner currently slows at 70% usage, stops at 80%, and may use a configured provider-specific fallback. The shadow implementation requires `GREEN`, defaults heartbeat freshness to 180 seconds and usage freshness to 900 seconds, and samples on a 900-second cadence with tolerance. OD-011 keeps those mappings, thresholds, timing values, and any economy eligibility pending owner approval; the legacy fallback is not silently promoted into provider-neutral registry policy.
+The earlier 70/80 fallback behavior was superseded by the owner-ratified staged
+capacity policy in [CAPACITY_POLICY.md](CAPACITY_POLICY.md). Source mappings and
+freshness values remain explicit configuration; missing percentage scopes stay
+constrained, provider-signal workers require observed health, and the 20%
+Orchestra reserve remains authoritative.
 
 The registry also reserves normalized failure codes, while [REGISTRY.md](REGISTRY.md) explicitly defers their transition rules and telemetry integration. Proposed follow-up: define and review that bounded failure-policy package before live cutover relies on the taxonomy. It does not block this documentation reconciliation, but the reserved list must not be represented as a complete enforced failure policy.
 

@@ -105,7 +105,7 @@ def current_dispatchable_lane_keys(config, state_dir, now):
             slots = 1
         # Preserve read-only status compatibility with historical minimal
         # configs that omitted commands; they can describe slot-one capacity
-        # but cannot prove a child slot's green-only authorization.
+        # but cannot prove a child slot's fresh capacity authorization.
         if not usage_enabled and 'command' not in value:
             result.add(agent)
             continue
@@ -115,15 +115,15 @@ def current_dispatchable_lane_keys(config, state_dir, now):
                 decision = dispatch_decision(config, usage, agent, settings['account'], decision_now)
             else:
                 decision = {
-                    'state': 'green',
+                    'state': 'normal',
                     'decision': 'allow' if settings['command'] is not None else 'defer',
                 }
         except (KeyError, UsagePolicyError, ValueError, TypeError):
             continue
-        if decision.get('decision') not in ('allow', 'fallback'):
+        if decision.get('decision') != 'allow':
             continue
         result.add(agent)
-        if usage_enabled and decision.get('state') == 'green':
+        if usage_enabled and decision.get('state') in ('normal', 'caution', 'checkpoint'):
             result.update(f'{agent}-{slot}' for slot in range(2, slots + 1))
     return result
 

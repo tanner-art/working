@@ -7,20 +7,27 @@ A single Mac polls authorized GitHub issues every minute through launchd. It run
 Create an issue authored by an allowed account with labels `runner:ready` and exactly one of `agent:codex-a`, `agent:codex-b`, `agent:claude`. Its entire body is JSON:
 
 ```json
-{"task":"TASK-016","paths":["docs/RUNNER_SMOKE.md"],"instructions":"Create a short note explaining that PRs require human review.","depends_on":[]}
+{"task":"TASK-016","paths":["docs/RUNNER_SMOKE.md"],"instructions":"Create a short note explaining that PRs require human review.","depends_on":[],"lane":"ASSURANCE","kind":"REVIEW","capacity_size":"VERY_SMALL","capacity_risk":"BOUNDED"}
 ```
 
-Paths are exact files, not directories or globs. Dependencies are issue numbers which must be closed. Only explicitly approved tasks belong in this queue. The runner does not infer readiness from TASKS.md or dispatch product backlog automatically.
+Paths are exact files, not directories or globs. Dependencies are issue numbers which must be closed. `lane` is `FEATURE`, `PLATFORM`, or `ASSURANCE`; `kind` is `PARENT`, `TEST`, `REVIEW`, or `EVALUATION`. Capacity size is `VERY_SMALL`, `SMALL`, or `SUBSTANTIAL`, and risk is `BOUNDED`, `UNCERTAIN`, or `EMERGENCY_RECOVERY`. Missing classification defaults conservatively to a substantial, uncertain FEATURE parent. Only explicitly approved tasks belong in this queue. The runner does not infer readiness from TASKS.md or dispatch product backlog automatically.
 
 ## Setup and operation
 
 Copy and edit `config.example.json` for the host. Every path, repository owner, account name, executable, and model name in that file is a placeholder; replace it before use. Keep credentials in the installed CLI’s authenticated profile or host keychain, never in this JSON file. `github.py` uses the existing Git credential for GitHub only, with no token file or logging. Headless Codex follows its workspace sandbox; Claude has only file tools and the runner performs validation. Agent CLI auth must already exist.
 
-Each agent needs `provider`, `account`, `model`, `command`, `fallback_model`, and `fallback_command`. It may also set `slots` from 1 through 3; omission preserves the original single lane. The example uses two Codex A slots, one Codex B slot, and two Claude slots. Slot one preserves the existing service label, arguments, and log names. Additional services use labels such as `life.threadline.runner.codex-a-2`, pass `--slot 2`, and write logs such as `launchd-codex-a-2.log`.
+Each agent needs `provider`, `account`, `model`, and `command`. Legacy
+`fallback_model` and `fallback_command` values may remain configured, but the
+staged capacity policy does not select them. An agent may also set `slots` from
+1 through 3; omission preserves the original single lane. The example uses two
+Codex A slots, one Codex B slot, and two Claude slots. Slot one preserves the
+existing service label, arguments, and log names. Additional services use
+labels such as `life.threadline.runner.codex-a-2`, pass `--slot 2`, and write
+logs such as `launchd-codex-a-2.log`.
 
 Slots are external, runner-controlled provider child lanes and are the only production fan-out mechanism initially. Every slot launches a foreground CLI process in the runner-created task worktree, so scope locks, process-group termination, validation serialization, and preserved failures remain visible to the factory. Runner installation rejects primary or fallback Codex commands that do not explicitly disable `multi_agent`, and rejects Claude commands without an explicit tool allowlist or with `Agent` in that allowlist. Do not start detached provider jobs such as `claude --background` from a lane: detached work can escape task ownership, timeout handling, and dashboard accounting. Native provider subagents are a later option and should initially be limited to read-only review; writing remains owned by the runner lane.
 
-All slots for an agent use the same configured `account` and therefore share that account's credentials, quota, and single usage record. Extra lanes do not create extra provider capacity. Configure more than one slot only when that exact worker/account has a fresh green usage observation below 70%; slow, stopped, missing, and stale usage do not authorize fan-out. The 70% slowdown and 80% stop thresholds apply to the shared account across its slots. The installer does not read provider credentials or perform authentication probes. Before installing extra Claude slots, the operator must run a successful non-interactive authentication check in the same `HOME` and keychain context that launchd will use. Never copy credentials into this file or weaken TLS.
+All slots for an agent use the same configured `account` and therefore share that account's credentials and capacity observations. Extra lanes do not create extra provider capacity. Extra lanes require fresh eligible capacity, and every candidate still passes its package size/risk gate. Missing and stale telemetry do not authorize fan-out. The installer does not read provider credentials or perform authentication probes. Before installing extra Claude slots, the operator must run a successful non-interactive authentication check in the same `HOME` and keychain context that launchd will use. Never copy credentials into this file or weaken TLS.
 
 The example uses Terra as the primary Codex tier with Luna as its lower-cost fallback, and Sonnet with Haiku for Claude. These are replaceable, model-agnostic examples: choose model names and command flags supported by the installed CLI on the host. Use distinct account names and authentication homes only when workers truly have separate provider budgets.
 
@@ -32,15 +39,58 @@ Usage gating reads `usage.json` from the configured state directory unless `usag
     "openai-account-a": {
       "provider": "openai",
       "model": "gpt-5.6-terra",
-      "used_percent": 42.5,
-      "observed_at": "2026-09-22T10:00:00Z",
-      "reset_at": "2026-09-22T15:00:00Z"
+      "capacity_mode": "percentage",
+      "scopes": {
+        "short_window": {
+          "used_percent": 0,
+          "observed_at": "2026-09-24T19:00:00Z",
+          "reset_at": "2026-09-25T00:00:00Z"
+        },
+        "weekly_window": {
+          "used_percent": 73,
+          "observed_at": "2026-09-24T19:00:00Z",
+          "reset_at": "2026-09-29T00:00:00Z"
+        }
+      }
     }
   }
 }
 ```
 
-The example policy slows a worker at 70% usage and stops it at 80%. A usage record older than `stale_after_seconds`, missing for its worker/account, or dated in the future is unknown. With `unknown_behavior: "slow"`, unknown and 70–79.99% usage use the configured low-cost fallback command; 80% or more stops dispatch. If the usage file itself is unavailable or malformed, the runner defers work rather than claiming it. A missing fallback command also defers safely.
+Every configured percentage scope must be present and fresh; the most
+restrictive scope controls dispatch. A fresh short window and 73% weekly usage
+is therefore normal. Percentage records use the ratified stages: below 90%
+normal; 90–95% caution; 95–98% checkpoint; and 98% hard stop. Caution and
+checkpoint reject substantial or uncertain parents. Hard stop permits only
+emergency recovery or very small bounded ASSURANCE work. Crossing 95% never
+terminates a healthy invocation; it reaches a clean checkpoint and prevents
+another substantial dispatch. A scope older than `stale_after_seconds`,
+missing, or dated in the future constrains the worker and defers work by
+default. Capacity stages do not select a fallback model.
+
+Workers without provider percentages use a structured `provider_signal` record:
+
+```json
+{
+  "claude": {
+    "anthropic-account-a": {
+      "provider": "anthropic",
+      "model": "claude-sonnet",
+      "capacity_mode": "provider_signal",
+      "service_state": "healthy",
+      "authentication_state": "valid",
+      "live_invocation_state": "succeeded",
+      "limit_signal": "NONE",
+      "observed_at": "2026-09-24T19:00:00Z"
+    }
+  }
+}
+```
+
+The allowed actual limit signals are `RATE_LIMIT`, `EXHAUSTION`, `THROTTLING`,
+and `CAPACITY_LAUNCH_FAILURE`. They constrain the worker and remain available
+for calibration. `NONE` with fresh healthy service/auth/live-invocation
+evidence keeps the worker normally eligible without inventing a percentage.
 
 Run `python3 scripts/runner/runner.py --config /absolute/config.json --dry-run` to inspect the queue without mutation. Run without `--dry-run` for one poll. Install with `python3 scripts/runner/install_launchd.py --config /absolute/config.json`; installation defaults to dry-run. `--live` enables execution explicitly. The default `--mode serial` preserves the one-runner setup. `--mode lanes` installs each agent's configured number of external lanes plus a read-only dashboard bound to `127.0.0.1`; use `--replace-mode` only to explicitly migrate between serial and lanes. To promote installed dry-run services to live services in the same mode, or to apply a reviewed slot-count change, use `--live --replace-current`; it backs up the current plists and restores them if bootstrap fails. These replacement flags cannot be combined. launchd uses the configured PATH and runs at login and every 60 seconds; it does not run while the user is logged out or the Mac is asleep.
 
