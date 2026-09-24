@@ -305,6 +305,93 @@ class SQLiteRegistryTest(unittest.TestCase):
                 self.assertEqual(after_bytes, before_bytes)
                 self.assertEqual(after_files, before_files)
 
+    def test_initialize_reads_active_wal_before_opening_source(self) -> None:
+        cases = (
+            ("newer-active", "3", "SCHEMA_VERSION_UNSUPPORTED: 3"),
+            ("malformed-active", "future", "SCHEMA_VERSION_INVALID: future"),
+        )
+        for label, wal_version, error in cases:
+            with self.subTest(label=label):
+                database = self.root / f"{label}.sqlite3"
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute(
+                        "CREATE TABLE registry_metadata "
+                        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO registry_metadata(key, value) "
+                        "VALUES ('schema_version', '1')"
+                    )
+                    connection.execute(
+                        "CREATE TABLE active_wal_marker "
+                        "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO active_wal_marker(value) VALUES ('main')"
+                    )
+                    connection.commit()
+                    self.assertEqual(
+                        connection.execute("PRAGMA journal_mode = WAL").fetchone()[0],
+                        "wal",
+                    )
+                    connection.execute("PRAGMA wal_autocheckpoint = 0")
+                    connection.execute(
+                        "UPDATE registry_metadata SET value=? WHERE key='schema_version'",
+                        (wal_version,),
+                    )
+                    connection.execute(
+                        "UPDATE active_wal_marker SET value='active-wal' WHERE id=1"
+                    )
+                    connection.commit()
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                        ).fetchone()[0],
+                        wal_version,
+                    )
+
+                    immutable_uri = (
+                        f"{database.resolve().as_uri()}?mode=ro&immutable=1"
+                    )
+                    immutable = sqlite3.connect(immutable_uri, uri=True)
+                    try:
+                        self.assertEqual(
+                            immutable.execute(
+                                "SELECT value FROM registry_metadata "
+                                "WHERE key='schema_version'"
+                            ).fetchone()[0],
+                            "1",
+                        )
+                    finally:
+                        immutable.close()
+
+                    source_paths = tuple(
+                        Path(f"{database}{suffix}") for suffix in ("", "-wal", "-shm")
+                    )
+                    self.assertTrue(all(path.exists() for path in source_paths))
+                    before = {path.name: path.read_bytes() for path in source_paths}
+
+                    with self.assertRaisesRegex(RegistryConflict, error):
+                        SQLiteRegistry(database).initialize()
+
+                    after = {path.name: path.read_bytes() for path in source_paths}
+                    self.assertEqual(after, before)
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                        ).fetchone()[0],
+                        wal_version,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM active_wal_marker WHERE id=1"
+                        ).fetchone()[0],
+                        "active-wal",
+                    )
+                finally:
+                    connection.close()
+
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()
         for number in range(1, 5):

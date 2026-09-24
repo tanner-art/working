@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -88,42 +89,73 @@ class SQLiteRegistry:
         """Validate an existing Registry without opening it read-write.
 
         A normal connection to a WAL-mode database may create ``-wal`` or
-        ``-shm`` sidecars before the first statement. Immutable read-only mode
-        keeps malformed or unsupported registries byte-for-byte untouched.
+        ``-shm`` sidecars before the first statement. SQLite's immutable mode
+        avoids that mutation but ignores an active WAL. Instead, copy a stable
+        main/WAL/SHM file set and let SQLite inspect only the temporary copy.
         """
         if not self.database.exists() or self.database.stat().st_size == 0:
             return None
-        uri = f"{self.database.resolve().as_uri()}?mode=ro&immutable=1"
-        try:
-            connection = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
-        except sqlite3.Error as error:
-            raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
-        try:
-            connection.row_factory = sqlite3.Row
-            if not connection.execute(
-                "SELECT 1 FROM sqlite_schema "
-                "WHERE type='table' AND name='registry_metadata'"
-            ).fetchone():
-                raise RegistryConflict("SCHEMA_VERSION_MISSING")
+        sources = tuple(
+            Path(f"{self.database}{suffix}") for suffix in ("", "-wal", "-shm")
+        )
+        captured: dict[str, bytes] | None = None
+        for _attempt in range(3):
             try:
-                row = connection.execute(
-                    "SELECT value FROM registry_metadata WHERE key='schema_version'"
-                ).fetchone()
+                before = {
+                    str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in sources if path.exists()
+                }
+                candidate = {
+                    str(path): path.read_bytes() for path in sources if path.exists()
+                }
+                after = {
+                    str(path): (path.stat().st_size, path.stat().st_mtime_ns)
+                    for path in sources if path.exists()
+                }
+            except OSError:
+                continue
+            if before == after and set(candidate) == set(after):
+                captured = candidate
+                break
+        if captured is None:
+            raise RegistryConflict("SCHEMA_SNAPSHOT_UNSTABLE")
+
+        with tempfile.TemporaryDirectory(prefix="factory-registry-preflight-") as temporary:
+            snapshot = Path(temporary) / self.database.name
+            for source_name, content in captured.items():
+                source = Path(source_name)
+                suffix = source.name.removeprefix(self.database.name)
+                Path(f"{snapshot}{suffix}").write_bytes(content)
+            try:
+                connection = sqlite3.connect(snapshot, timeout=10, isolation_level=None)
             except sqlite3.Error as error:
                 raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
-            if row is None:
-                raise RegistryConflict("SCHEMA_VERSION_MISSING")
-            raw_version = row[0]
-            if not isinstance(raw_version, str) or not raw_version.isdecimal():
-                raise RegistryConflict("SCHEMA_VERSION_INVALID", str(raw_version))
-            version = int(raw_version)
-            if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= version <= CURRENT_SCHEMA_VERSION:
-                raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
-            return version
-        except sqlite3.Error as error:
-            raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
-        finally:
-            connection.close()
+            try:
+                connection.row_factory = sqlite3.Row
+                if not connection.execute(
+                    "SELECT 1 FROM sqlite_schema "
+                    "WHERE type='table' AND name='registry_metadata'"
+                ).fetchone():
+                    raise RegistryConflict("SCHEMA_VERSION_MISSING")
+                try:
+                    row = connection.execute(
+                        "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                    ).fetchone()
+                except sqlite3.Error as error:
+                    raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+                if row is None:
+                    raise RegistryConflict("SCHEMA_VERSION_MISSING")
+                raw_version = row[0]
+                if not isinstance(raw_version, str) or not raw_version.isdecimal():
+                    raise RegistryConflict("SCHEMA_VERSION_INVALID", str(raw_version))
+                version = int(raw_version)
+                if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= version <= CURRENT_SCHEMA_VERSION:
+                    raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
+                return version
+            except sqlite3.Error as error:
+                raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+            finally:
+                connection.close()
 
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
