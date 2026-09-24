@@ -88,7 +88,6 @@ class SQLiteRegistry:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
         with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
             existing_version: int | None = None
             if connection.execute(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='registry_metadata'"
@@ -107,6 +106,7 @@ class SQLiteRegistry:
                 existing_version = int(raw_version)
                 if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= existing_version <= CURRENT_SCHEMA_VERSION:
                     raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
             package_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(work_packages)")

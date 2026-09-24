@@ -232,29 +232,64 @@ class SQLiteRegistryTest(unittest.TestCase):
         )
         self.assertEqual(version, "3")
 
-    def test_initialize_never_downgrades_a_newer_schema(self) -> None:
-        with sqlite3.connect(self.database) as connection:
-            connection.execute(
-                "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
-            )
+    def test_initialize_rejects_invalid_versions_without_mutating_database(self) -> None:
+        cases = (
+            ("newer", "4", "SCHEMA_VERSION_UNSUPPORTED: 4"),
+            ("malformed", "future", "SCHEMA_VERSION_INVALID: future"),
+        )
+        for label, version, error in cases:
+            with self.subTest(label=label):
+                database = self.root / f"{label}.sqlite3"
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "CREATE TABLE registry_metadata "
+                        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO registry_metadata(key, value) "
+                        "VALUES ('schema_version', ?)",
+                        (version,),
+                    )
+                    connection.execute(
+                        "CREATE TABLE future_schema_marker "
+                        "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO future_schema_marker(value) VALUES ('preserve')"
+                    )
+                    self.assertEqual(
+                        connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0],
+                        "delete",
+                    )
 
-        with self.assertRaisesRegex(RegistryConflict, "SCHEMA_VERSION_UNSUPPORTED: 4"):
-            self.registry.initialize()
+                before_bytes = database.read_bytes()
+                before_files = sorted(path.name for path in self.root.glob(f"{database.name}*"))
+                with sqlite3.connect(database) as connection:
+                    before_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                    before_schema = tuple(connection.execute(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                        "ORDER BY type, name"
+                    ))
 
-        with sqlite3.connect(self.database) as connection:
-            version = connection.execute(
-                "SELECT value FROM registry_metadata WHERE key='schema_version'"
-            ).fetchone()[0]
-        self.assertEqual(version, "4")
+                with self.assertRaisesRegex(RegistryConflict, error):
+                    SQLiteRegistry(database).initialize()
 
-    def test_initialize_rejects_malformed_schema_version(self) -> None:
-        with sqlite3.connect(self.database) as connection:
-            connection.execute(
-                "UPDATE registry_metadata SET value='future' WHERE key='schema_version'"
-            )
+                with sqlite3.connect(database) as connection:
+                    after_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                    after_schema = tuple(connection.execute(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                        "ORDER BY type, name"
+                    ))
+                    stored_version = connection.execute(
+                        "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                    ).fetchone()[0]
+                after_files = sorted(path.name for path in self.root.glob(f"{database.name}*"))
 
-        with self.assertRaisesRegex(RegistryConflict, "SCHEMA_VERSION_INVALID: future"):
-            self.registry.initialize()
+                self.assertEqual(stored_version, version)
+                self.assertEqual(after_mode, before_mode)
+                self.assertEqual(after_schema, before_schema)
+                self.assertEqual(database.read_bytes(), before_bytes)
+                self.assertEqual(after_files, before_files)
 
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()
