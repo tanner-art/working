@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://threadline.local/schemas/factory-shadow-decision-v1.json",
+  "title": "Threadline Factory shadow decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "registry_revision",
+    "decided_at",
+    "mode",
+    "global_rejections",
+    "worker_evaluations",
+    "package_evaluations",
+    "pair_evaluations",
+    "ordered_package_ids",
+    "proposed_assignments",
+    "active_parent_count",
+    "active_parent_limit",
+    "orchestra_reserve_percent"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "decision_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "registry_revision": { "type": "integer", "minimum": 0 },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "mode": { "const": "SHADOW" },
+    "global_rejections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/reason" }
+    },
+    "worker_evaluations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entityEvaluation" }
+    },
+    "package_evaluations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entityEvaluation" }
+    },
+    "pair_evaluations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pairEvaluation" }
+    },
+    "ordered_package_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "proposed_assignments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assignment" }
+    },
+    "active_parent_count": { "type": "integer", "minimum": 0 },
+    "active_parent_limit": { "type": "integer", "minimum": 1 },
+    "orchestra_reserve_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+  },
+  "$defs": {
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" }
+      }
+    },
+    "entityEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "eligible", "reasons"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "eligible": { "type": "boolean" },
+        "reasons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reason" }
+        }
+      }
+    },
+    "pairEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package_id", "worker_id", "eligible", "capability_surplus", "reasons"],
+      "properties": {
+        "package_id": { "type": "string", "minLength": 1 },
+        "worker_id": { "type": "string", "minLength": 1 },
+        "eligible": { "type": "boolean" },
+        "capability_surplus": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reason" }
+        }
+      }
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package_id", "worker_id"],
+      "properties": {
+        "package_id": { "type": "string", "minLength": 1 },
+        "worker_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
