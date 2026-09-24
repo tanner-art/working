@@ -6,6 +6,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 from .models import (
     Attempt,
+    ControlCenterReadSnapshot,
     DispatchSnapshot,
     Evidence,
     Feature,
@@ -125,3 +126,5 @@ class Registry(Protocol):
     def feature_queue(self) -> Sequence[Mapping[str, Any]]: ...
 
     def dispatch_snapshot(self, *, observed_at: str) -> DispatchSnapshot: ...
+
+    def control_center_snapshot(self, *, observed_at: str) -> ControlCenterReadSnapshot: ...

@@ -226,3 +226,32 @@ class DispatchSnapshot:
     workers: tuple[Mapping[str, Any], ...]
     active_leases: tuple[Mapping[str, Any], ...]
     usage_observations: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ControlCenterReadSnapshot:
+    """One backend-neutral, consistent Registry read for UI projection.
+
+    These are authoritative Registry records, not dashboard-shaped state. The
+    Control Center projector is responsible for sanitizing and translating the
+    records without acquiring write authority or opening a second store.
+    """
+
+    revision: int
+    observed_at: str
+    active_parent_limit: int
+    orchestra_reserve_percent: float
+    features: tuple[Mapping[str, Any], ...]
+    work_packages: tuple[Mapping[str, Any], ...]
+    dependencies: tuple[Mapping[str, Any], ...]
+    workers: tuple[Mapping[str, Any], ...]
+    leases: tuple[Mapping[str, Any], ...]
+    attempts: tuple[Mapping[str, Any], ...]
+    evidence: tuple[Mapping[str, Any], ...]
+    usage_observations: tuple[Mapping[str, Any], ...]
+    usage_invocations: tuple[Mapping[str, Any], ...]
+    usage_sources: tuple[Mapping[str, Any], ...]
+    failures: tuple[Mapping[str, Any], ...]
+    events: tuple[Mapping[str, Any], ...]
+    preservation_imports: tuple[Mapping[str, Any], ...]
+    preserved_artifacts: tuple[Mapping[str, Any], ...]

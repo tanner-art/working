@@ -2,6 +2,7 @@
 
 from .models import (
     Attempt,
+    ControlCenterReadSnapshot,
     DispatchSnapshot,
     Evidence,
     FailureCode,
@@ -68,6 +69,13 @@ from .shadow_dispatch import (
     write_shadow_harness_evidence,
 )
 from .sqlite_registry import SQLiteRegistry
+from .control_center_projection import (
+    ControlCenterProjectionError,
+    build_control_center_projection,
+    project_control_center,
+    serialize_control_center_projection,
+    validate_control_center_projection,
+)
 
 __all__ = [
     "Attempt",
@@ -79,6 +87,8 @@ __all__ = [
     "Assignment",
     "DifferenceClassification",
     "DispatchSnapshot",
+    "ControlCenterReadSnapshot",
+    "ControlCenterProjectionError",
     "FailureCode",
     "Feature",
     "Lane",
@@ -116,6 +126,7 @@ __all__ = [
     "WorkPackage",
     "WorkerObservationBinding",
     "capture_live_observation",
+    "build_control_center_projection",
     "compare_with_legacy",
     "classify_limit_signal",
     "decide_shadow",
@@ -124,12 +135,15 @@ __all__ = [
     "parse_claude_json",
     "parse_claude_stream_json",
     "parse_claude_transcript",
+    "project_control_center",
     "reconcile_preservation",
     "run_live_shadow_sweep",
     "run_required_shadow_harness",
     "simulate_outcome",
+    "serialize_control_center_projection",
     "snapshot_fingerprint",
     "validate_evidence_destination",
+    "validate_control_center_projection",
     "verify_source_proofs",
     "write_live_sweep_evidence",
     "write_shadow_harness_evidence",

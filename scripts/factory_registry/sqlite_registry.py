@@ -18,6 +18,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .models import (
     Attempt,
+    ControlCenterReadSnapshot,
     DispatchSnapshot,
     Evidence,
     Feature,
@@ -1695,3 +1696,114 @@ class SQLiteRegistry:
             active_leases=tuple(leases),
             usage_observations=tuple(usage),
         )
+
+    def control_center_snapshot(self, *, observed_at: str) -> ControlCenterReadSnapshot:
+        """Read every Control Center source at one revision without mutation."""
+        observed_at = _normalize_timestamp(observed_at)
+        with self._connection() as connection:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            metadata = {
+                row["key"]: row["value"]
+                for row in connection.execute("SELECT key, value FROM registry_metadata")
+            }
+
+            def decoded_rows(query: str, json_fields: Sequence[str] = ()) -> tuple[Mapping[str, Any], ...]:
+                records = []
+                for row in connection.execute(query).fetchall():
+                    item = dict(row)
+                    for field in json_fields:
+                        item[field.removesuffix("_json")] = json.loads(item.pop(field))
+                    records.append(item)
+                return tuple(records)
+
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            usage_invocations = (
+                decoded_rows(
+                    "SELECT * FROM usage_ledger ORDER BY observed_at, id",
+                    (
+                        "calibration_metadata_json",
+                        "primary_source_metadata_json",
+                    ),
+                )
+                if "usage_ledger" in tables else ()
+            )
+            usage_sources = (
+                decoded_rows(
+                    "SELECT * FROM usage_ledger_sources ORDER BY observed_at, id",
+                    ("metadata_json",),
+                )
+                if "usage_ledger_sources" in tables else ()
+            )
+            snapshot = ControlCenterReadSnapshot(
+                revision=int(metadata["revision"]),
+                observed_at=observed_at,
+                active_parent_limit=int(metadata["active_parent_limit"]),
+                orchestra_reserve_percent=float(metadata["orchestra_reserve_percent"]),
+                features=decoded_rows(
+                    "SELECT * FROM features ORDER BY priority DESC, created_at, id"
+                ),
+                work_packages=decoded_rows(
+                    "SELECT * FROM work_packages "
+                    "ORDER BY priority DESC, COALESCE(ready_at, created_at), id",
+                    (
+                        "required_capabilities_json",
+                        "acceptance_criteria_json",
+                        "provider_diagnostics_json",
+                        "usage_consumption_json",
+                    ),
+                ),
+                dependencies=decoded_rows(
+                    "SELECT package_id, dependency_id FROM task_dependencies "
+                    "ORDER BY package_id, dependency_id"
+                ),
+                workers=decoded_rows(
+                    "SELECT * FROM workers ORDER BY id",
+                    (
+                        "capabilities_json",
+                        "approved_lanes_json",
+                        "provider_diagnostics_json",
+                    ),
+                ),
+                leases=decoded_rows(
+                    "SELECT * FROM leases ORDER BY acquired_at, id"
+                ),
+                attempts=decoded_rows(
+                    "SELECT * FROM attempts ORDER BY started_at, id",
+                    ("provider_diagnostics_json",),
+                ),
+                evidence=decoded_rows(
+                    "SELECT * FROM evidence ORDER BY recorded_at, id",
+                    ("metadata_json",),
+                ),
+                usage_observations=decoded_rows(
+                    "SELECT * FROM usage_observations ORDER BY observed_at, id",
+                    ("provider_diagnostics_json",),
+                ),
+                usage_invocations=usage_invocations,
+                usage_sources=usage_sources,
+                failures=decoded_rows(
+                    "SELECT * FROM failure_observations ORDER BY observed_at, id",
+                    ("metadata_json",),
+                ),
+                events=decoded_rows(
+                    "SELECT * FROM task_events ORDER BY recorded_at, id",
+                    ("detail_json",),
+                ),
+                preservation_imports=decoded_rows(
+                    "SELECT id, source_sha256, imported_at, reconciliation_json "
+                    "FROM preservation_imports ORDER BY imported_at, id",
+                    ("reconciliation_json",),
+                ),
+                preserved_artifacts=decoded_rows(
+                    "SELECT * FROM preserved_artifacts ORDER BY kind, external_identity, id",
+                    ("metadata_json",),
+                ),
+            )
+            connection.commit()
+        return snapshot

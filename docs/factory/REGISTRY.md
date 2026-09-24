@@ -82,6 +82,8 @@ cannot create a lease or launch work.
 
 `dispatch_snapshot(observed_at)` returns a consistent read at one monotonically increasing registry revision. It includes features; complete work-package state and `ready_at`; dependencies; workers, roles, availability, capabilities, and approved lanes; unreleased leases and expiry state; usage observations; the active-parent limit; and the Orchestra reserve percentage. Both shadow and live schedulers consume this contract. They do not query SQLite directly.
 
+The read-only Control Center export is documented in [CONTROL_CENTER_PROJECTION.md](CONTROL_CENTER_PROJECTION.md). It reads one Registry revision through the backend-neutral `Registry.control_center_snapshot()` contract and does not create a dashboard database or grant write authority.
+
 Capacity observations may include a provider-neutral `capacity_scope`, and
 worker configuration may declare expected `capacity_scopes`. This is part of
 the read contract rather than provider/model ownership. Until the owner maps
