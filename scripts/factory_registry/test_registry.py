@@ -240,7 +240,12 @@ class SQLiteRegistryTest(unittest.TestCase):
         for label, version, error in cases:
             with self.subTest(label=label):
                 database = self.root / f"{label}.sqlite3"
-                with sqlite3.connect(database) as connection:
+                connection = sqlite3.connect(database)
+                try:
+                    self.assertEqual(
+                        connection.execute("PRAGMA journal_mode = WAL").fetchone()[0],
+                        "wal",
+                    )
                     connection.execute(
                         "CREATE TABLE registry_metadata "
                         "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -257,38 +262,47 @@ class SQLiteRegistryTest(unittest.TestCase):
                     connection.execute(
                         "INSERT INTO future_schema_marker(value) VALUES ('preserve')"
                     )
-                    self.assertEqual(
-                        connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0],
-                        "delete",
-                    )
+                    connection.commit()
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                finally:
+                    connection.close()
+                for suffix in ("-wal", "-shm"):
+                    Path(f"{database}{suffix}").unlink(missing_ok=True)
+
+                def immutable_state() -> tuple[str, tuple[tuple[object, ...], ...]]:
+                    uri = f"{database.resolve().as_uri()}?mode=ro&immutable=1"
+                    readonly = sqlite3.connect(uri, uri=True)
+                    try:
+                        stored_version = readonly.execute(
+                            "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                        ).fetchone()[0]
+                        schema = tuple(readonly.execute(
+                            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                            "ORDER BY type, name"
+                        ))
+                        return stored_version, schema
+                    finally:
+                        readonly.close()
 
                 before_bytes = database.read_bytes()
                 before_files = sorted(path.name for path in self.root.glob(f"{database.name}*"))
-                with sqlite3.connect(database) as connection:
-                    before_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-                    before_schema = tuple(connection.execute(
-                        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
-                        "ORDER BY type, name"
-                    ))
+                before_version, before_schema = immutable_state()
+                before_journal_header = before_bytes[18:20]
+                self.assertEqual(before_journal_header, b"\x02\x02")
+                self.assertEqual(before_files, [database.name])
 
                 with self.assertRaisesRegex(RegistryConflict, error):
                     SQLiteRegistry(database).initialize()
 
-                with sqlite3.connect(database) as connection:
-                    after_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-                    after_schema = tuple(connection.execute(
-                        "SELECT type, name, tbl_name, sql FROM sqlite_schema "
-                        "ORDER BY type, name"
-                    ))
-                    stored_version = connection.execute(
-                        "SELECT value FROM registry_metadata WHERE key='schema_version'"
-                    ).fetchone()[0]
+                stored_version, after_schema = immutable_state()
                 after_files = sorted(path.name for path in self.root.glob(f"{database.name}*"))
+                after_bytes = database.read_bytes()
 
                 self.assertEqual(stored_version, version)
-                self.assertEqual(after_mode, before_mode)
+                self.assertEqual(before_version, version)
+                self.assertEqual(after_bytes[18:20], before_journal_header)
                 self.assertEqual(after_schema, before_schema)
-                self.assertEqual(database.read_bytes(), before_bytes)
+                self.assertEqual(after_bytes, before_bytes)
                 self.assertEqual(after_files, before_files)
 
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:

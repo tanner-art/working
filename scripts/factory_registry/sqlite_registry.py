@@ -84,28 +84,52 @@ class SQLiteRegistry:
         finally:
             connection.close()
 
+    def _preflight_schema_version(self) -> int | None:
+        """Validate an existing Registry without opening it read-write.
+
+        A normal connection to a WAL-mode database may create ``-wal`` or
+        ``-shm`` sidecars before the first statement. Immutable read-only mode
+        keeps malformed or unsupported registries byte-for-byte untouched.
+        """
+        if not self.database.exists() or self.database.stat().st_size == 0:
+            return None
+        uri = f"{self.database.resolve().as_uri()}?mode=ro&immutable=1"
+        try:
+            connection = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
+        except sqlite3.Error as error:
+            raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+        try:
+            connection.row_factory = sqlite3.Row
+            if not connection.execute(
+                "SELECT 1 FROM sqlite_schema "
+                "WHERE type='table' AND name='registry_metadata'"
+            ).fetchone():
+                raise RegistryConflict("SCHEMA_VERSION_MISSING")
+            try:
+                row = connection.execute(
+                    "SELECT value FROM registry_metadata WHERE key='schema_version'"
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+            if row is None:
+                raise RegistryConflict("SCHEMA_VERSION_MISSING")
+            raw_version = row[0]
+            if not isinstance(raw_version, str) or not raw_version.isdecimal():
+                raise RegistryConflict("SCHEMA_VERSION_INVALID", str(raw_version))
+            version = int(raw_version)
+            if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= version <= CURRENT_SCHEMA_VERSION:
+                raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
+            return version
+        except sqlite3.Error as error:
+            raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
+        finally:
+            connection.close()
+
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
+        existing_version = self._preflight_schema_version()
         with self._connection() as connection:
-            existing_version: int | None = None
-            if connection.execute(
-                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='registry_metadata'"
-            ).fetchone():
-                try:
-                    row = connection.execute(
-                        "SELECT value FROM registry_metadata WHERE key='schema_version'"
-                    ).fetchone()
-                except sqlite3.Error as error:
-                    raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
-                if row is None:
-                    raise RegistryConflict("SCHEMA_VERSION_MISSING")
-                raw_version = row[0]
-                if not isinstance(raw_version, str) or not raw_version.isdecimal():
-                    raise RegistryConflict("SCHEMA_VERSION_INVALID", str(raw_version))
-                existing_version = int(raw_version)
-                if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= existing_version <= CURRENT_SCHEMA_VERSION:
-                    raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
             package_columns = {
