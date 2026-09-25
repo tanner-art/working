@@ -19,6 +19,9 @@ DASHBOARD_LABEL = 'life.threadline.factory-dashboard'
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 SERVICE_UMASK = 0o077
+CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
+CLAUDE_SETUP_TOKEN_MARKER = 'sk-ant-oat'
+_OPERATOR_INSTALL_CAPABILITY = object()
 
 
 def service_environment(path):
@@ -166,6 +169,25 @@ def _claude_tools(command):
     return tools if found else None
 
 
+def validate_agent_environment(agent, value):
+    """Reject Claude credentials stored directly in runner configuration."""
+    configured_env = value.get('env', {})
+    if not isinstance(configured_env, dict):
+        raise ValueError(f'{agent} env must be an object')
+    if not all(
+        isinstance(key, str) and isinstance(candidate, str)
+        for key, candidate in configured_env.items()
+    ):
+        raise ValueError(f'{agent} env keys and values must be strings')
+    if CLAUDE_TOKEN_ENV in configured_env:
+        raise ValueError(f'{agent} env must not configure {CLAUDE_TOKEN_ENV}')
+    if any(
+        CLAUDE_SETUP_TOKEN_MARKER in candidate.lower()
+        for item in configured_env.items() for candidate in item
+    ):
+        raise ValueError(f'{agent} env must not contain a raw Claude setup token')
+
+
 def validate_runner_commands(agent, value):
     """Reject commands that could hide provider-native child agents."""
     for field in ('command', 'fallback_command'):
@@ -198,6 +220,7 @@ def service_plan(config, config_path, root, mode='serial', live=False, dashboard
         for agent in LANE_AGENTS:
             value = agents.get(agent)
             if isinstance(value, dict) and 'command' in value:
+                validate_agent_environment(agent, value)
                 validate_runner_commands(agent, value)
     if mode == 'serial':
         return [(SERIAL_LABEL, runner_data(SERIAL_LABEL, common, root, state, config['path'], 'launchd.log', 'launchd-error.log'))]
@@ -353,14 +376,25 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
     return {'backup_dir': backup_dir, 'destinations': destinations}
 
 
-def install(plan, *, mode, replace_mode, state, replace_current=False, home=None, run=subprocess.run, uid=None):
+def install(
+        plan, *, mode, replace_mode, state, replace_current=False, home=None,
+        run=subprocess.run, uid=None, _operator_capability=None):
     """Install one serial service or the lane set; rollback only this invocation."""
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
+    plan = tuple(plan)
     destinations = {label: label_path(label, home) for label, _ in plan}
     target_labels = tuple(destinations)
     if replace_mode and replace_current:
         raise ValueError('--replace-mode and --replace-current cannot be combined')
+    live_runner = any(
+        label != DASHBOARD_LABEL and '--dry-run' not in data.get('ProgramArguments', ())
+        for label, data in plan
+    )
+    if (live_runner or replace_current) and _operator_capability is not _OPERATOR_INSTALL_CAPABILITY:
+        raise ValueError(
+            'live or replace-current installation requires the reviewed Registry operator'
+        )
     old_mode = 'lanes' if mode == 'serial' else 'serial'
     old_labels = labels_for_mode(old_mode)
     current_labels = labels_for_mode(mode)
@@ -467,6 +501,11 @@ def install(plan, *, mode, replace_mode, state, replace_current=False, home=None
     return destinations
 
 
+def install_operator_plan(plan, **kwargs):
+    """Install a plan authorized by the reviewed Registry operator gates."""
+    return install(plan, _operator_capability=_OPERATOR_INSTALL_CAPABILITY, **kwargs)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
@@ -481,6 +520,10 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.live or args.replace_current:
+            raise ValueError(
+                '--live and --replace-current require the reviewed Registry operator'
+            )
         config_path = pathlib.Path(args.config).resolve()
         config = load_config(config_path)
         state = pathlib.Path(config['state'])

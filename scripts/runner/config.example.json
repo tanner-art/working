@@ -46,8 +46,8 @@
       "capacity_scopes": ["provider_signal"],
       "slots": 2,
       "model": "claude-sonnet", "fallback_model": "claude-haiku",
-      "command": ["/absolute/path/to/claude", "-p", "--model", "claude-sonnet", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
-      "fallback_command": ["/absolute/path/to/claude", "-p", "--model", "claude-haiku", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
+      "command": ["/absolute/path/to/python3", "/absolute/path/to/threadline-repository/scripts/runner/claude_keychain.py", "exec", "/absolute/path/to/claude", "-p", "--model", "claude-sonnet", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
+      "fallback_command": ["/absolute/path/to/python3", "/absolute/path/to/threadline-repository/scripts/runner/claude_keychain.py", "exec", "/absolute/path/to/claude", "-p", "--model", "claude-haiku", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],
       "env": {}
     }
   }

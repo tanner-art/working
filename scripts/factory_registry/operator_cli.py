@@ -11,6 +11,11 @@ import sys
 from typing import Any
 
 
+# A reviewed release must remain byte-for-byte identical while the operator
+# imports its control modules from that release directory.
+sys.dont_write_bytecode = True
+
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -22,6 +27,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_canary_spec,
     preflight,
     prepare_dry_run,
+    record_review_decision,
     reconcile,
     return_paused,
     status,
@@ -110,6 +116,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--package", required=True)
     command.add_argument("--reason", required=True)
     command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "record-review-outcome",
+        help="Atomically bind reviewer evidence and a structured review outcome",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
 
     command = subparsers.add_parser("return-paused", help="CAS drained STOPPING state to PAUSED")
     _context(command)
@@ -217,6 +230,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "previous_revision": args.expect_revision,
             "revision": revision,
         }
+    if args.command == "record-review-outcome":
+        return dict(record_review_decision(
+            args.database,
+            args.config,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.expect_revision,
+            _load_object(args.spec, "review outcome spec"),
+        ))
     if args.command == "return-paused":
         preflight(**_preflight_args(
             args,

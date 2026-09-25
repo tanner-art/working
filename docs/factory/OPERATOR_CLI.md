@@ -42,9 +42,10 @@ Status is read-only and does not require a revision:
 ```
 
 Preflight verifies SQLite integrity and foreign keys, WAL mode, PAUSED control,
-the preservation source hash and imported counts, empty lease/attempt/runtime
-ownership, the release commit and manifest, the reviewed configuration, and
-private/immutable filesystem modes:
+the preservation source hash and the actual imported artifact/package/worker
+rows, empty lease/attempt/runtime ownership, the release commit and a complete
+manifest covering every release file and runtime dependency, the reviewed
+configuration, and private/immutable filesystem modes:
 
 ```sh
 "$PYTHON" -m scripts.factory_registry.operator_cli preflight \
@@ -206,7 +207,9 @@ dependency must be the implementation task number.
 Registration is atomic and requires PAUSED, empty ownership, no other READY or
 ACTIVE package, healthy worker gates, and a distinct eligible reviewer. A
 review dependency becomes eligible when its implementation reaches
-VERIFY_REVIEW; normal dependencies still require DONE.
+VERIFY_REVIEW; normal dependencies still require DONE. Both pre-claim and the
+atomic lease acquisition read the successful implementation attempt and reject
+that exact worker as the reviewer.
 
 ## Enable only the reviewed canary
 
@@ -228,6 +231,10 @@ ACTIVE packages, promotes the current reviewed dry-run definitions while the
 Registry remains PAUSED, and finally compare-and-swaps that exact revision to
 LIVE. If the final compare-and-swap fails, it engages the kill switch and uses
 the controlled pause chain to restore dry-run definitions.
+
+The generic `install_launchd.py` command cannot install LIVE definitions or use
+`--replace-current`. Those operations require the in-process capability used by
+this reviewed operator after its Registry gates pass.
 
 ## Stop, reconcile, retry, and return PAUSED
 
@@ -267,6 +274,26 @@ lease, events, and evidence remain unchanged:
   --expect-revision REVISION \
   --package TASK-NUMBER \
   --reason "reviewed deterministic canary retry"
+```
+
+Record the independent reviewer decision only after the reviewer attempt has
+finished and the Factory has returned to PAUSED. The spec contains one review
+evidence object and one schema-v4 review outcome. The evidence must name the
+review package, use kind `review`, and bind `metadata.attempt_id` to the actual
+successful reviewer attempt. An approval must name exactly that evidence ID.
+The Registry atomically stores and validates both records against the actual
+implementation worker, reviewer worker, review interval, dependency, and
+attempt provenance:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli record-review-outcome \
+  --database "$DATABASE" \
+  --config "$CONFIG" \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION \
+  --spec /absolute/path/to/review-outcome.json
 ```
 
 Return STOPPING or RECOVERY_REQUIRED to PAUSED only after reconciliation and a

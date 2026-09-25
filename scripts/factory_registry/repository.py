@@ -11,6 +11,7 @@ from .models import (
     Evidence,
     Feature,
     Lease,
+    ReviewOutcome,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -82,6 +83,8 @@ class Registry(Protocol):
         changed_at: str,
         reason: str,
     ) -> int: ...
+
+    def review_implementer_worker(self, review_package_id: str) -> str: ...
 
     def acquire_lease(
         self,
@@ -158,6 +161,14 @@ class Registry(Protocol):
     ) -> str: ...
 
     def record_evidence(self, evidence: Evidence) -> None: ...
+
+    def record_review_outcome(
+        self,
+        outcome: ReviewOutcome,
+        *,
+        evidence: Evidence | None = None,
+        expected_revision: int | None = None,
+    ) -> int: ...
 
     def register_attempt(self, attempt: Attempt) -> None: ...
 

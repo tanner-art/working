@@ -365,22 +365,120 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
         if "review" in {capability.lower() for capability in _strings(worker.get("capabilities"))}
         or "ASSURANCE" in _strings(worker.get("approved_lanes"))
     ]
+    evidence_by_id = {str(item.get("id")): item for item in snapshot.evidence}
+    represented_review_packages: set[str] = set()
+    for outcome in snapshot.review_outcomes:
+        review_package_id = str(outcome.get("review_package_id", ""))
+        target_id = str(outcome.get("target_package_id", ""))
+        implementer = str(outcome.get("implementer_worker_id", ""))
+        reviewer = str(outcome.get("reviewer_worker_id", ""))
+        state = {
+            "APPROVED": "approved",
+            "CHANGES_REQUESTED": "changes_requested",
+        }.get(outcome.get("state"))
+        requested_at = _iso(outcome.get("requested_at"))
+        decided_at = _iso(outcome.get("decided_at"))
+        if not state or requested_at is None or decided_at is None:
+            raise ControlCenterProjectionError("structured review outcome is invalid")
+        target_attempts = attempts.get(target_id, [])
+        completed_implementations = [
+            attempt for attempt in target_attempts
+            if attempt.get("worker_id") is not None
+            and attempt.get("outcome") == "SUCCEEDED"
+            and _iso(attempt.get("ended_at")) is not None
+            and _iso(attempt.get("ended_at")) <= requested_at
+        ]
+        if not completed_implementations:
+            raise ControlCenterProjectionError("structured review implementer provenance is missing")
+        actual_implementation = max(
+            completed_implementations,
+            key=lambda attempt: (
+                str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
+                str(attempt.get("id")),
+            ),
+        )
+        if actual_implementation.get("worker_id") != implementer:
+            raise ControlCenterProjectionError("structured review implementer is invalid")
+        if any(attempt.get("worker_id") == reviewer for attempt in target_attempts):
+            raise ControlCenterProjectionError("structured review independence is invalid")
+        if any(
+            _iso(attempt.get("started_at")) is not None
+            and str(_iso(attempt.get("started_at"))) <= decided_at
+            and (
+                _iso(attempt.get("ended_at")) is None
+                or str(_iso(attempt.get("ended_at"))) > requested_at
+            )
+            for attempt in target_attempts
+        ):
+            raise ControlCenterProjectionError("structured review target changed during review")
+        reviewer_attempts = [
+            attempt for attempt in attempts.get(review_package_id, [])
+            if attempt.get("worker_id") == reviewer
+            and attempt.get("outcome") == "SUCCEEDED"
+            and _iso(attempt.get("ended_at")) is not None
+            and _iso(attempt.get("started_at")) is not None
+            and str(_iso(attempt.get("started_at"))) >= requested_at
+            and str(_iso(attempt.get("ended_at"))) <= decided_at
+        ]
+        if not reviewer_attempts:
+            raise ControlCenterProjectionError("structured review attempt is missing")
+        reviewer_attempt = max(
+            reviewer_attempts,
+            key=lambda attempt: (
+                str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
+                str(attempt.get("id")),
+            ),
+        )
+        evidence_ids = _strings(outcome.get("approval_evidence_ids"))
+        approval_evidence = []
+        for evidence_id in evidence_ids:
+            item = evidence_by_id.get(evidence_id)
+            metadata = _mapping(item.get("metadata")) if item is not None else {}
+            if (
+                item is None
+                or str(item.get("kind", "")).lower() != "review"
+                or item.get("package_id") != review_package_id
+                or metadata.get("attempt_id") != reviewer_attempt.get("id")
+                or _iso(item.get("recorded_at")) is None
+                or str(_iso(item.get("recorded_at"))) < str(_iso(reviewer_attempt.get("started_at")))
+                or str(_iso(item.get("recorded_at"))) > decided_at
+            ):
+                raise ControlCenterProjectionError("structured review evidence is missing")
+            approval_evidence.append(_evidence(item))
+        reviews.append({
+            "id": str(outcome.get("id", "")),
+            "packageId": target_id,
+            "implementerWorkerId": implementer,
+            "eligibleReviewerIds": [worker_id for worker_id in reviewer_ids if worker_id != implementer],
+            "assignedReviewerId": reviewer,
+            "requestedAt": requested_at,
+            "state": state,
+            "findings": _strings(outcome.get("findings")),
+            "changesRequested": _strings(outcome.get("changes_requested")),
+            "approvalEvidence": approval_evidence,
+        })
+        represented_review_packages.add(review_package_id)
     for package in snapshot.work_packages:
-        if package.get("kind") != "REVIEW" or package.get("status") not in {"READY", "ACTIVE"}:
+        review_package_id = str(package.get("id", ""))
+        if (
+            package.get("kind") != "REVIEW"
+            or package.get("status") not in {"READY", "ACTIVE"}
+            or review_package_id in represented_review_packages
+        ):
             continue
-        target_id = next(iter(dependencies.get(str(package.get("id")), [])), None)
+        target_id = next(iter(dependencies.get(review_package_id, [])), None)
         target_attempts = attempts.get(target_id or "", [])
         implementer = target_attempts[-1].get("worker_id") if target_attempts else None
         state = "assigned" if package.get("status") == "ACTIVE" else "waiting"
         requested_at = _iso(package.get("ready_at")) or _iso(package.get("created_at"))
         eligible = [worker_id for worker_id in reviewer_ids if worker_id != implementer]
-        lease = active_leases.get(str(package.get("id")))
+        lease = active_leases.get(review_package_id)
         assigned = str(lease.get("worker_id")) if lease else None
         if requested_at is None or not isinstance(implementer, str):
             continue
         reviews.append({
-            "id": f"review:{package.get('id')}",
-            "packageId": str(package.get("id", "")),
+            "id": f"review:{review_package_id}",
+            "packageId": target_id,
             "implementerWorkerId": implementer,
             "eligibleReviewerIds": eligible,
             "assignedReviewerId": assigned,
@@ -400,6 +498,8 @@ def _event_kind(item: Mapping[str, Any]) -> str | None:
         return "CLAIMED"
     if value == "LEASE_RENEWED":
         return "HEARTBEAT"
+    if value == "REVIEW_OUTCOME_RECORDED":
+        return "REVIEW"
     if value == "PACKAGE_STATUS_CHANGED":
         target = _mapping(item.get("detail")).get("to")
         return {"READY": "READY", "VERIFY_REVIEW": "VALIDATION", "BLOCKED": "FAILURE", "DONE": "DONE"}.get(target)
@@ -408,6 +508,20 @@ def _event_kind(item: Mapping[str, Any]) -> str | None:
 
 def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any]:
     """Translate an immutable Registry read into schema-v2 dashboard JSON."""
+    feature_ids = {str(feature.get("id", "")) for feature in snapshot.features}
+    package_ids = [str(package.get("id", "")) for package in snapshot.work_packages]
+    if len(feature_ids) != len(snapshot.features):
+        raise ControlCenterProjectionError("Registry read contains duplicate Feature IDs")
+    if len(set(package_ids)) != len(package_ids):
+        raise ControlCenterProjectionError("Registry read contains duplicate package IDs")
+    orphaned = [
+        package_id for package_id, package in zip(package_ids, snapshot.work_packages)
+        if str(package.get("feature_id", "")) not in feature_ids
+    ]
+    if orphaned:
+        raise ControlCenterProjectionError(
+            f"Registry packages are absent from the queue projection: {', '.join(orphaned)}"
+        )
     packages_by_feature: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for package in snapshot.work_packages:
         packages_by_feature[str(package.get("feature_id"))].append(package)
@@ -468,6 +582,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             projected = {
                 "id": package_id, "featureId": feature_id,
                 "title": str(package.get("title", "")),
+                "kind": str(package.get("kind", "")),
                 "priority": int(_nonnegative(package.get("priority"))),
                 "lane": package.get("lane") if isinstance(package.get("lane"), str) else None,
                 "state": package.get("status"), "dependencies": dependencies.get(package_id, []),
@@ -559,7 +674,10 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "workerId": None, "packageId": None, "requiresHuman": True,
         })
 
-    structured_review_packages = {str(item["packageId"]) for item in projected_reviews}
+    structured_review_packages = {
+        str(item["packageId"]) for item in projected_reviews
+        if item["state"] in {"approved", "changes_requested"}
+    }
     current_failure_keys = {
         (item["packageId"], item["code"]) for item in failures if item["requiresHuman"]
     }
@@ -689,6 +807,11 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
         if not isinstance(value.get(collection), list):
             raise ControlCenterProjectionError(f"{collection} must be a list")
     worker_ids = {item.get("id") for item in value.get("workers", []) if isinstance(item, Mapping)}
+    if len(worker_ids) != len(value.get("workers", [])):
+        raise ControlCenterProjectionError("worker identity is duplicated")
+    feature_ids: set[str] = set()
+    package_ids: set[str] = set()
+    state_counts = {state: 0 for state in _STATES}
     attempts_by_package: dict[str, dict[str, Any]] = {}
     for feature in value.get("features", []):
         if (
@@ -698,15 +821,25 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             or not isinstance(feature.get("packages"), list)
         ):
             raise ControlCenterProjectionError("feature is invalid")
+        feature_id = str(feature.get("id"))
+        if feature_id in feature_ids:
+            raise ControlCenterProjectionError("feature identity is duplicated")
+        feature_ids.add(feature_id)
         for package in feature.get("packages", []):
             if (
                 not isinstance(package, Mapping) or package.get("state") not in _STATES
                 or package.get("featureId") != feature.get("id")
                 or not all(isinstance(package.get(field), str) for field in ("id", "title"))
+                or package.get("kind") not in {"PARENT", "TEST", "REVIEW", "EVALUATION"}
                 or _finite_number(package.get("priority")) is None
                 or not all(isinstance(package.get(field), list) for field in ("dependencies", "requiredCapabilities", "acceptanceCriteria", "evidence", "attempts"))
             ):
                 raise ControlCenterProjectionError("package is invalid")
+            package_id = str(package.get("id"))
+            if package_id in package_ids:
+                raise ControlCenterProjectionError("package identity is duplicated")
+            package_ids.add(package_id)
+            state_counts[str(package.get("state"))] += 1
             lease = package.get("currentLease")
             if lease is not None and (
                 not isinstance(lease, Mapping)
@@ -736,6 +869,31 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
                     raise ControlCenterProjectionError("attempt is invalid")
                 for item in attempt.get("evidence", []):
                     _validate_evidence(item)
+    for feature in value.get("features", []):
+        for package in feature.get("packages", []):
+            if any(dependency not in package_ids for dependency in package.get("dependencies", [])):
+                raise ControlCenterProjectionError("package dependency is absent from this Registry revision")
+            if package.get("ownerWorkerId") is not None and package.get("ownerWorkerId") not in worker_ids:
+                raise ControlCenterProjectionError("package owner is absent from this Registry revision")
+            lease = package.get("currentLease")
+            if isinstance(lease, Mapping) and lease.get("workerId") not in worker_ids:
+                raise ControlCenterProjectionError("package lease worker is absent from this Registry revision")
+    expected_counts = {
+        "activeParentCount": sum(
+            1 for feature in value.get("features", [])
+            for package in feature.get("packages", [])
+            if package.get("kind") == "PARENT" and package.get("state") == "ACTIVE"
+        ),
+        "readyCount": state_counts["READY"],
+        "verifyReviewCount": state_counts["VERIFY_REVIEW"],
+        "blockedCount": state_counts["BLOCKED"],
+        "attentionCount": sum(
+            1 for failure in value.get("failures", [])
+            if isinstance(failure, Mapping) and failure.get("requiresHuman") is True
+        ),
+    }
+    if any(factory.get(field) != expected for field, expected in expected_counts.items()):
+        raise ControlCenterProjectionError("factory counts do not match this Registry revision")
     for worker in value.get("workers", []):
         if (
             not isinstance(worker, Mapping)
@@ -748,6 +906,8 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             or not all(isinstance(worker.get(field), list) for field in ("approvedCapabilities", "approvedLanes", "recentTaskIds", "recentFailureIds"))
         ):
             raise ControlCenterProjectionError("worker is invalid")
+        if worker.get("currentPackageId") is not None and worker.get("currentPackageId") not in package_ids:
+            raise ControlCenterProjectionError("worker package is absent from this Registry revision")
     for scope in value.get("capacity", []):
         if (
             not isinstance(scope, Mapping)
@@ -756,6 +916,8 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             or scope.get("state") not in _CAPACITY_STATES
         ):
             raise ControlCenterProjectionError("capacity scope is invalid")
+        if scope.get("workerId") not in worker_ids:
+            raise ControlCenterProjectionError("capacity worker is absent from this Registry revision")
         _validate_measurement(scope.get("rolling24Hours"))
         _validate_measurement(scope.get("rolling7Days"))
     for invocation in value.get("usageInvocations", []):
@@ -792,6 +954,20 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             or not all(isinstance(review.get(field), list) for field in ("eligibleReviewerIds", "findings", "changesRequested", "approvalEvidence"))
         ):
             raise ControlCenterProjectionError("review is invalid")
+        if review.get("packageId") not in package_ids:
+            raise ControlCenterProjectionError("review package is absent from this Registry revision")
+        review_workers = [review.get("implementerWorkerId"), review.get("assignedReviewerId")]
+        review_workers.extend(review.get("eligibleReviewerIds", []))
+        if any(worker_id is not None and worker_id not in worker_ids for worker_id in review_workers):
+            raise ControlCenterProjectionError("review worker is absent from this Registry revision")
+        if review.get("assignedReviewerId") == review.get("implementerWorkerId"):
+            raise ControlCenterProjectionError("review independence is invalid")
+        if review.get("state") == "approved" and (
+            review.get("assignedReviewerId") is None or not review.get("approvalEvidence")
+        ):
+            raise ControlCenterProjectionError("review approval evidence is invalid")
+        if review.get("state") == "changes_requested" and not review.get("changesRequested"):
+            raise ControlCenterProjectionError("review requested changes are invalid")
         for item in review.get("approvalEvidence", []):
             _validate_evidence(item)
     for failure in value.get("failures", []):
@@ -803,6 +979,10 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             or not isinstance(failure.get("requiresHuman"), bool)
         ):
             raise ControlCenterProjectionError("failure is invalid")
+        if failure.get("packageId") is not None and failure.get("packageId") not in package_ids:
+            raise ControlCenterProjectionError("failure package is absent from this Registry revision")
+        if failure.get("workerId") is not None and failure.get("workerId") not in worker_ids:
+            raise ControlCenterProjectionError("failure worker is absent from this Registry revision")
 
 
 def _validate_evidence(value: Any) -> None:

@@ -21,11 +21,14 @@ from scripts.runner.registry_control import RunnerRegistryControl, queue_contrac
 
 from .models import (
     DispatchSnapshot,
+    Evidence,
     Feature,
     Lane,
     PackageCapacityRisk,
     PackageCapacitySize,
     PackageKind,
+    ReviewOutcome,
+    ReviewOutcomeState,
     TaskStatus,
     Worker,
     WorkPackage,
@@ -45,6 +48,36 @@ EXPECTED_USAGE_POLICY = {
 HEARTBEAT_FRESH_SECONDS = 180
 USAGE_FRESH_SECONDS = 900
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
+REQUIRED_RELEASE_FILES = frozenset({
+    "scripts/factory_registry/__init__.py",
+    "scripts/factory_registry/claude_telemetry.py",
+    "scripts/factory_registry/claude_telemetry_cli.py",
+    "scripts/factory_registry/control_center_projection.py",
+    "scripts/factory_registry/control_center_server.py",
+    "scripts/factory_registry/controlled_restart.py",
+    "scripts/factory_registry/live_observation.py",
+    "scripts/factory_registry/live_observation_cli.py",
+    "scripts/factory_registry/models.py",
+    "scripts/factory_registry/operator.py",
+    "scripts/factory_registry/operator_cli.py",
+    "scripts/factory_registry/preservation_import.py",
+    "scripts/factory_registry/repository.py",
+    "scripts/factory_registry/schema.sql",
+    "scripts/factory_registry/shadow_dispatch.py",
+    "scripts/factory_registry/sqlite_registry.py",
+    "scripts/runner/claude_keychain.py",
+    "scripts/runner/factory_dashboard.html",
+    "scripts/runner/factory_dashboard.py",
+    "scripts/runner/factory_status.py",
+    "scripts/runner/github.py",
+    "scripts/runner/install_launchd.py",
+    "scripts/runner/provider_barrier.py",
+    "scripts/runner/queue_snapshot.py",
+    "scripts/runner/registry_control.py",
+    "scripts/runner/review_queue.py",
+    "scripts/runner/runner.py",
+    "scripts/runner/usage_policy.py",
+})
 
 
 class OperatorError(RuntimeError):
@@ -145,16 +178,31 @@ def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
         if actual != digest:
             raise OperatorError(f"release manifest mismatch: {relative}")
         checked.append(relative)
-    required = {
-        "scripts/runner/runner.py",
-        "scripts/runner/install_launchd.py",
-        "scripts/factory_registry/sqlite_registry.py",
-        "scripts/factory_registry/operator.py",
-        "scripts/factory_registry/operator_cli.py",
-    }
-    # An older staged release can be inspected but cannot be used by this new
-    # operator package. The release builder must include the operator itself.
-    missing = sorted(required - set(checked))
+    if len(checked) != len(set(checked)):
+        raise OperatorError("release manifest contains duplicate paths")
+    manifested = set(checked)
+    release_files = set()
+    for target in release.rglob("*"):
+        if target.is_symlink():
+            raise OperatorError(f"release contains a symlink: {target}")
+        if target.is_file():
+            relative = target.relative_to(release).as_posix()
+            if relative not in {"COMMIT", "MANIFEST.sha1"}:
+                release_files.add(relative)
+    unmanifested = sorted(release_files - manifested)
+    nonexistent = sorted(manifested - release_files)
+    if unmanifested or nonexistent:
+        raise OperatorError(
+            "release manifest is incomplete: "
+            + json.dumps(
+                {"unmanifested": unmanifested, "nonexistent": nonexistent},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+    # Complete coverage cannot reveal a runtime dependency omitted from both
+    # the release and its manifest, so keep the reviewed closure explicit.
+    missing = sorted(REQUIRED_RELEASE_FILES - manifested)
     if missing:
         raise OperatorError("release manifest missing operator files: " + ",".join(missing))
     return {
@@ -179,12 +227,20 @@ def verify_preservation(
     if len(matching) != 1:
         raise OperatorError("preservation SHA-256 does not match exactly one Registry import")
     source = _load_object(preservation_path, "preservation snapshot")
+    import_id = matching[0].get("id")
+    if not isinstance(import_id, str) or not import_id:
+        raise OperatorError("matching preservation import has no identity")
     reconciliation = dict(matching[0].get("reconciliation") or {})
+    tasks = source.get("open_task_mapping", ())
+    worktrees = source.get("worktrees", ())
+    branches = source.get("unmerged_local_branches", ())
+    services = source.get("services") or {}
+    heartbeats = services.get("heartbeats", {}) if isinstance(services, Mapping) else {}
     expected = {
-        "expected_worktrees": len(source.get("worktrees", ())),
-        "expected_branches": len(source.get("unmerged_local_branches", ())),
-        "expected_tasks": len(source.get("open_task_mapping", ())),
-        "expected_workers": len((source.get("services") or {}).get("heartbeats", {})),
+        "expected_worktrees": len(worktrees),
+        "expected_branches": len(branches),
+        "expected_tasks": len(tasks),
+        "expected_workers": len(heartbeats),
         "unexplained_records": 0,
     }
     mismatches = {
@@ -192,8 +248,129 @@ def verify_preservation(
         for key, value in expected.items()
         if reconciliation.get(key) != value
     }
+    for kind in ("tasks", "workers", "worktrees", "branches"):
+        expected_key = f"expected_{kind}"
+        imported_key = f"imported_{kind}"
+        if reconciliation.get(imported_key) != expected[expected_key]:
+            mismatches[imported_key] = {
+                "expected": expected[expected_key],
+                "registry": reconciliation.get(imported_key),
+            }
+
+    expected_artifacts = {
+        ("WORKTREE", str(item["worktree"])): {
+            "dirty": bool(item.get("dirty")),
+            "metadata": dict(item),
+        }
+        for item in worktrees
+    }
+    expected_artifacts.update({
+        ("BRANCH", str(branch)): {
+            "dirty": False,
+            "metadata": {"identity": str(branch), "branch": str(branch)},
+        }
+        for branch in branches
+    })
+    actual_artifacts = {
+        (str(item.get("kind")), str(item.get("external_identity"))): {
+            "dirty": bool(item.get("dirty")),
+            "metadata": dict(item.get("metadata") or {}),
+        }
+        for item in registry_snapshot.preserved_artifacts
+        if item.get("import_id") == import_id
+    }
+    if actual_artifacts != expected_artifacts:
+        mismatches["actual_preserved_artifacts"] = {
+            "expected": sorted(f"{kind}:{identity}" for kind, identity in expected_artifacts),
+            "registry": sorted(f"{kind}:{identity}" for kind, identity in actual_artifacts),
+        }
+
+    expected_packages = {}
+    for item in tasks:
+        status_text = str(item.get("status", "ON DECK")).upper()
+        status = (
+            "VERIFY_REVIEW" if "VERIFY" in status_text or "REVIEW" in status_text
+            else "BLOCKED" if any(
+                marker in status_text for marker in ("BLOCKED", "FAILED", "ACTIVE")
+            )
+            else "DONE" if "DONE" in status_text
+            else "READY" if "READY" in status_text
+            else "ON_DECK"
+        )
+        task_id = str(item["task"])
+        expected_packages[task_id] = {
+            "id": task_id,
+            "feature_id": "FACTORY-LIVE-STATE-PRESERVATION",
+            "title": str(item.get("title") or task_id),
+            "category": "LEGACY_IMPORT",
+            "lane": None,
+            "status": status,
+            "branch": item.get("branch"),
+            "pr_url": (
+                f"https://github.com/tanner-art/working/pull/{item['pr']}"
+                if item.get("pr") else None
+            ),
+            "source_system": "github_issue",
+            "source_ref": str(item.get("issue")),
+            "provider_diagnostics": {
+                "legacy_worker": item.get("worker"),
+                "legacy_worker_hint": item.get("worker_hint"),
+                "legacy_issue": item.get("issue"),
+                "legacy_status": status_text,
+                "preservation_import_id": import_id,
+            },
+        }
+    actual_packages = {
+        str(item.get("id")): {
+            key: item.get(key)
+            for key in (
+                "id", "feature_id", "title", "category", "lane", "status",
+                "branch", "pr_url", "source_system", "source_ref",
+                "provider_diagnostics",
+            )
+        }
+        for item in registry_snapshot.work_packages
+        if (item.get("provider_diagnostics") or {}).get("preservation_import_id")
+        == import_id
+    }
+    if actual_packages != expected_packages:
+        mismatches["actual_preserved_packages"] = {
+            "expected": expected_packages,
+            "registry": actual_packages,
+        }
+
+    expected_workers = {
+        f"legacy-worker:{name}": {
+            "id": f"legacy-worker:{name}",
+            "display_name": f"Preserved {name}",
+            "role": "WORKER",
+            "availability": "PRESERVED",
+            "capabilities": [],
+            "approved_lanes": [],
+            "provider_diagnostics": {"legacy_worker": name},
+            "usage_state": "UNKNOWN",
+        }
+        for name in heartbeats
+    }
+    actual_workers = {
+        str(item.get("id")): {
+            key: item.get(key)
+            for key in (
+                "id", "display_name", "role", "availability", "capabilities",
+                "approved_lanes", "provider_diagnostics", "usage_state",
+            )
+        }
+        for item in registry_snapshot.workers
+        if str(item.get("id", "")).startswith("legacy-worker:")
+        or item.get("availability") == "PRESERVED"
+    }
+    if actual_workers != expected_workers:
+        mismatches["actual_preserved_workers"] = {
+            "expected": expected_workers,
+            "registry": actual_workers,
+        }
     if source.get("dirty_worktree_count") != sum(
-        1 for value in source.get("worktrees", ()) if value.get("dirty")
+        1 for value in worktrees if value.get("dirty")
     ):
         mismatches["dirty_worktree_count"] = "snapshot-internal-mismatch"
     if mismatches:
@@ -259,6 +436,8 @@ def status(database: Path, *, observed_at: str | None = None) -> Mapping[str, An
             "features": len(snapshot.features),
             "packages": len(snapshot.work_packages),
             "workers": len(snapshot.workers),
+            "evidence": len(snapshot.evidence),
+            "review_outcomes": len(snapshot.review_outcomes),
             "preservation_imports": len(snapshot.preservation_imports),
             "active_leases": len(active_leases),
             "active_attempts": len(active_attempts),
@@ -778,6 +957,108 @@ def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, W
     return feature, implementation, review
 
 
+def parse_review_outcome_spec(
+    value: Mapping[str, Any],
+) -> tuple[Evidence, ReviewOutcome]:
+    sensitive = _sensitive_paths(value)
+    if sensitive:
+        raise OperatorError(
+            "review outcome contains secret-shaped fields: " + ",".join(sensitive)
+        )
+    raw_evidence = value.get("evidence")
+    raw_outcome = value.get("outcome")
+    if not isinstance(raw_evidence, Mapping) or not isinstance(raw_outcome, Mapping):
+        raise OperatorError("review outcome spec requires evidence and outcome objects")
+    try:
+        evidence = Evidence(
+            id=str(raw_evidence["id"]),
+            package_id=str(raw_evidence["package_id"]),
+            kind=str(raw_evidence["kind"]),
+            uri=(str(raw_evidence["uri"]) if raw_evidence.get("uri") else None),
+            summary=str(raw_evidence["summary"]),
+            recorded_at=str(raw_evidence["recorded_at"]),
+            metadata=dict(raw_evidence.get("metadata") or {}),
+        )
+        outcome = ReviewOutcome(
+            id=str(raw_outcome["id"]),
+            review_package_id=str(raw_outcome["review_package_id"]),
+            target_package_id=str(raw_outcome["target_package_id"]),
+            implementer_worker_id=str(raw_outcome["implementer_worker_id"]),
+            reviewer_worker_id=str(raw_outcome["reviewer_worker_id"]),
+            requested_at=str(raw_outcome["requested_at"]),
+            decided_at=str(raw_outcome["decided_at"]),
+            state=ReviewOutcomeState(str(raw_outcome["state"])),
+            findings=tuple(str(item) for item in raw_outcome.get("findings", ())),
+            changes_requested=tuple(
+                str(item) for item in raw_outcome.get("changes_requested", ())
+            ),
+            approval_evidence_ids=tuple(
+                str(item) for item in raw_outcome.get("approval_evidence_ids", ())
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise OperatorError("review outcome spec is invalid") from error
+    attempt_id = evidence.metadata.get("attempt_id")
+    if (
+        not evidence.id
+        or evidence.package_id != outcome.review_package_id
+        or evidence.kind.lower() != "review"
+        or not evidence.summary
+        or not isinstance(attempt_id, str)
+        or not attempt_id
+    ):
+        raise OperatorError("review evidence must bind the review package and attempt")
+    requested_at = _parse_time(outcome.requested_at, "review requested_at")
+    recorded_at = _parse_time(evidence.recorded_at, "review evidence recorded_at")
+    decided_at = _parse_time(outcome.decided_at, "review decided_at")
+    if not requested_at <= recorded_at <= decided_at:
+        raise OperatorError("review evidence timestamp is outside the review interval")
+    if outcome.state is ReviewOutcomeState.APPROVED:
+        if outcome.approval_evidence_ids != (evidence.id,):
+            raise OperatorError("approval must name exactly the bound review evidence")
+    elif outcome.approval_evidence_ids:
+        raise OperatorError("changes-requested outcome cannot name approval evidence")
+    return evidence, outcome
+
+
+def record_review_decision(
+    database: Path,
+    config_path: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+    spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    evidence, outcome = parse_review_outcome_spec(spec)
+    preflight(
+        database,
+        config_path,
+        release,
+        preservation_path,
+        expected_commit,
+        expected_revision,
+    )
+    revision = SQLiteRegistry(database).record_review_outcome(
+        outcome,
+        evidence=evidence,
+        expected_revision=expected_revision,
+    )
+    return {
+        "kind": "threadline-factory-record-review-outcome",
+        "passed": True,
+        "review_outcome_id": outcome.id,
+        "review_package_id": outcome.review_package_id,
+        "target_package_id": outcome.target_package_id,
+        "reviewer_worker_id": outcome.reviewer_worker_id,
+        "reviewer_attempt_id": evidence.metadata["attempt_id"],
+        "evidence_id": evidence.id,
+        "state": outcome.state.value,
+        "previous_revision": expected_revision,
+        "revision": revision,
+    }
+
+
 def _atomic_write_config(config_path: Path, value: Mapping[str, Any], state: Path) -> Path:
     backup_dir = state / "config-backups"
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -955,7 +1236,7 @@ def enable_live(
     _verify_installed_dry_run(
         dry_plan, home=home, run=effective_run, uid=effective_uid
     )
-    install_launchd.install(
+    install_launchd.install_operator_plan(
         live_plan, mode=mode, replace_mode=False, replace_current=True,
         state=Path(config["state"]), home=home, uid=uid, **kwargs,
     )

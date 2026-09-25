@@ -98,11 +98,14 @@ class RunnerRegistryControl:
             raise ValueError("package_id and worker_id are required together")
         observed_at = utc_now()
         snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        package = next(
+            (
+                value for value in getattr(snapshot, "work_packages", ())
+                if value.get("id") == package_id
+            ),
+            None,
+        )
         if task_contract is not None:
-            package = next(
-                (value for value in snapshot.work_packages if value.get("id") == package_id),
-                None,
-            )
             expected = (
                 package.get("provider_diagnostics", {}).get("queue_contract_sha256")
                 if package is not None else None
@@ -110,6 +113,13 @@ class RunnerRegistryControl:
             actual = queue_contract_digest(task_contract)
             if not isinstance(expected, str) or expected != actual:
                 raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
+        if package is not None and package.get("kind") == "REVIEW":
+            implementer = self.registry.review_implementer_worker(package_id)
+            if implementer == worker_id:
+                raise RegistryConflict(
+                    "REVIEW_INDEPENDENCE_REQUIRED",
+                    f"{worker_id} implemented the target package",
+                )
         decision = decide_shadow(snapshot)
         assignment = (package_id, worker_id)
         eligible = {

@@ -41,6 +41,7 @@ export interface FactoryPackage {
   id: string
   featureId: string
   title: string
+  kind: 'PARENT' | 'TEST' | 'REVIEW' | 'EVALUATION'
   priority: number
   lane: string | null
   state: FactoryState
@@ -289,7 +290,7 @@ function parseAttempt(value: unknown, path: string): FactoryAttempt {
 function parsePackage(value: unknown, path: string): FactoryPackage {
   const v = object(value, path)
   return {
-    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence), attempts: list(v.attempts, `${path}.attempts`, parseAttempt),
+    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), kind: oneOf(v.kind, ['PARENT', 'TEST', 'REVIEW', 'EVALUATION'] as const, `${path}.kind`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence), attempts: list(v.attempts, `${path}.attempts`, parseAttempt),
   }
 }
 function parseFeature(value: unknown, path: string): FactoryFeature {
@@ -353,14 +354,47 @@ export function parseFactoryProjection(value: unknown): FactoryProjectionPayload
     features: list(v.features, 'snapshot.features', parseFeature), workers: list(v.workers, 'snapshot.workers', parseWorker), reviews: list(v.reviews, 'snapshot.reviews', parseReview), capacity: list(v.capacity, 'snapshot.capacity', parseCapacity), usageInvocations: list(v.usageInvocations, 'snapshot.usageInvocations', parseUsageInvocation), events: list(v.events, 'snapshot.events', parseEvent), failures: list(v.failures, 'snapshot.failures', parseFailure),
   }
   const workers = new Set(projection.workers.map(worker => worker.id))
+  if (workers.size !== projection.workers.length) throw new Error('snapshot worker IDs must be unique.')
+  const featureIds = new Set<string>()
+  const packageIds = new Set<string>()
   const attemptsByPackage = new Map<string, Map<string, string | null>>()
   for (const feature of projection.features) {
+    if (featureIds.has(feature.id)) throw new Error(`snapshot Feature ID ${feature.id} is duplicated.`)
+    featureIds.add(feature.id)
     for (const item of feature.packages) {
       if (item.featureId !== feature.id) throw new Error(`snapshot package ${item.id} has invalid Feature provenance.`)
-      if (attemptsByPackage.has(item.id)) throw new Error(`snapshot package ID ${item.id} is duplicated.`)
+      if (packageIds.has(item.id)) throw new Error(`snapshot package ID ${item.id} is duplicated.`)
+      packageIds.add(item.id)
       attemptsByPackage.set(item.id, new Map(item.attempts.map(attempt => [attempt.id, attempt.workerId])))
     }
   }
+  const packages = projection.features.flatMap(feature => feature.packages)
+  for (const item of packages) {
+    for (const dependency of item.dependencies) if (!packageIds.has(dependency)) throw new Error(`snapshot package ${item.id} references unknown dependency ${dependency}.`)
+    if (item.ownerWorkerId !== null && !workers.has(item.ownerWorkerId)) throw new Error(`snapshot package ${item.id} references an unknown owner.`)
+    if (item.currentLease !== null && !workers.has(item.currentLease.workerId)) throw new Error(`snapshot package ${item.id} lease references an unknown worker.`)
+  }
+  for (const worker of projection.workers) {
+    if (worker.currentPackageId !== null && !packageIds.has(worker.currentPackageId)) throw new Error(`snapshot worker ${worker.id} references an unknown package.`)
+  }
+  for (const review of projection.reviews) {
+    if (!packageIds.has(review.packageId)) throw new Error(`snapshot review ${review.id} references an unknown package.`)
+    if (!workers.has(review.implementerWorkerId) || (review.assignedReviewerId !== null && !workers.has(review.assignedReviewerId)) || review.eligibleReviewerIds.some(id => !workers.has(id))) throw new Error(`snapshot review ${review.id} references an unknown worker.`)
+    if (review.assignedReviewerId === review.implementerWorkerId) throw new Error(`snapshot review ${review.id} violates review independence.`)
+    if (review.state === 'approved' && (review.assignedReviewerId === null || review.approvalEvidence.length === 0)) throw new Error(`snapshot review ${review.id} is missing approval evidence.`)
+    if (review.state === 'changes_requested' && review.changesRequested.length === 0) throw new Error(`snapshot review ${review.id} is missing requested changes.`)
+  }
+  for (const scope of projection.capacity) if (!workers.has(scope.workerId)) throw new Error(`snapshot capacity scope ${scope.id} references an unknown worker.`)
+  for (const failure of projection.failures) {
+    if (failure.packageId !== null && !packageIds.has(failure.packageId)) throw new Error(`snapshot failure ${failure.id} references an unknown package.`)
+    if (failure.workerId !== null && !workers.has(failure.workerId)) throw new Error(`snapshot failure ${failure.id} references an unknown worker.`)
+  }
+  const count = (state: FactoryState) => packages.filter(item => item.state === state).length
+  if (projection.factory.activeParentCount !== packages.filter(item => item.kind === 'PARENT' && item.state === 'ACTIVE').length) throw new Error('snapshot.factory.activeParentCount does not match this Registry revision.')
+  if (projection.factory.readyCount !== count('READY')) throw new Error('snapshot.factory.readyCount does not match this Registry revision.')
+  if (projection.factory.verifyReviewCount !== count('VERIFY_REVIEW')) throw new Error('snapshot.factory.verifyReviewCount does not match this Registry revision.')
+  if (projection.factory.blockedCount !== count('BLOCKED')) throw new Error('snapshot.factory.blockedCount does not match this Registry revision.')
+  if (projection.factory.attentionCount !== projection.failures.filter(failure => failure.requiresHuman).length) throw new Error('snapshot.factory.attentionCount does not match this Registry revision.')
   for (const invocation of projection.usageInvocations) {
     if (!workers.has(invocation.workerId)) throw new Error(`snapshot usage invocation ${invocation.id} references an unknown worker.`)
     if (invocation.observationClass === 'AUTONOMOUS') {

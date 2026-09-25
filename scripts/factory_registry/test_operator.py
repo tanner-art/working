@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -15,12 +16,14 @@ from pathlib import Path
 from scripts.factory_registry.models import Lane, TaskStatus
 from scripts.factory_registry.operator import (
     OperatorError,
+    REQUIRED_RELEASE_FILES,
     canary_worker_gate,
     enable_live,
     harden_paths,
     parse_canary_spec,
     preflight,
     prepare_dry_run,
+    record_review_decision,
     utc_now,
     validate_telemetry_payload,
 )
@@ -49,7 +52,14 @@ class OperatorFixture(unittest.TestCase):
                 "path": "/preserved/canonical",
             },
             "services": {"heartbeats": {"codex-a": {"time": 1000, "status": "idle"}}},
-            "open_task_mapping": [],
+            "open_task_mapping": [
+                {
+                    "issue": 101,
+                    "task": "TASK-PRESERVED",
+                    "title": "Preserved completed task",
+                    "status": "DONE",
+                }
+            ],
             "worktrees": [
                 {
                     "worktree": "/preserved/worktree",
@@ -91,16 +101,8 @@ class OperatorFixture(unittest.TestCase):
 
     def _release(self):
         source_root = Path(__file__).resolve().parents[2]
-        files = (
-            "scripts/runner/runner.py",
-            "scripts/runner/install_launchd.py",
-            "scripts/runner/factory_dashboard.py",
-            "scripts/factory_registry/sqlite_registry.py",
-            "scripts/factory_registry/operator.py",
-            "scripts/factory_registry/operator_cli.py",
-        )
         manifest = []
-        for relative in files:
+        for relative in sorted(REQUIRED_RELEASE_FILES):
             source = source_root / relative
             destination = self.release / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +308,79 @@ class OperatorFixture(unittest.TestCase):
         )
         self.assertEqual(evidence["worker_gate"]["independent_pairs"], [["codex-a", "claude"]])
 
+    def test_preservation_gate_recomputes_actual_imported_rows(self):
+        deletions = (
+            "DELETE FROM preserved_artifacts WHERE kind='WORKTREE'",
+            "DELETE FROM work_packages WHERE id='TASK-PRESERVED'",
+            "DELETE FROM workers WHERE id='legacy-worker:codex-a'",
+            "UPDATE preserved_artifacts SET dirty=0 WHERE kind='WORKTREE'",
+            "UPDATE work_packages SET status='READY' WHERE id='TASK-PRESERVED'",
+            "UPDATE workers SET availability='IDLE' WHERE id='legacy-worker:codex-a'",
+        )
+        for statement in deletions:
+            with self.subTest(statement=statement):
+                copy = self.root / f"copy-{hashlib.sha256(statement.encode()).hexdigest()}.sqlite3"
+                with sqlite3.connect(self.database) as source, sqlite3.connect(copy) as target:
+                    source.backup(target)
+                with sqlite3.connect(copy) as connection:
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    connection.execute(statement)
+                with self.assertRaisesRegex(OperatorError, "actual_preserved"):
+                    preflight(
+                        copy,
+                        self.config_path,
+                        self.release,
+                        self.preservation,
+                        COMMIT,
+                        self.registry.dispatch_control()["revision"],
+                        require_config=False,
+                        require_permissions_gate=False,
+                    )
+
+    def test_release_gate_rejects_unmanifested_or_omitted_runtime_files(self):
+        runtime = self.release / "scripts" / "runner" / "registry_control.py"
+        original = runtime.read_bytes()
+        runtime.write_bytes(original + b"\n# unreviewed change\n")
+        with self.assertRaisesRegex(OperatorError, "manifest mismatch"):
+            preflight(
+                self.database,
+                self.config_path,
+                self.release,
+                self.preservation,
+                COMMIT,
+                self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+        runtime.write_bytes(original)
+        extra = self.release / "scripts" / "runner" / "unreviewed.py"
+        extra.write_text("raise RuntimeError('must not execute')\n")
+        with self.assertRaisesRegex(OperatorError, "manifest is incomplete"):
+            preflight(
+                self.database,
+                self.config_path,
+                self.release,
+                self.preservation,
+                COMMIT,
+                self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+        extra.unlink()
+        manifest = self.release / "MANIFEST.sha1"
+        manifest.write_text("\n".join(
+            line for line in manifest.read_text().splitlines()
+            if not line.endswith("  scripts/runner/registry_control.py")
+        ) + "\n")
+        with self.assertRaisesRegex(OperatorError, "manifest is incomplete"):
+            preflight(
+                self.database,
+                self.config_path,
+                self.release,
+                self.preservation,
+                COMMIT,
+                self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+
     def test_canary_registration_gate_rejects_missing_capability(self):
         now = utc_now()
         self.sync_workers(now)
@@ -357,6 +432,120 @@ class OperatorFixture(unittest.TestCase):
             RunnerRegistryControl(self.database).pre_claim(
                 "TASK-201", "codex-a", task_contract=body
             )
+
+    def test_review_outcome_is_bound_to_reviewer_attempt_and_evidence(self):
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        revision = self.registry.dispatch_control()["revision"]
+        self.registry.register_canary_bundle(
+            feature,
+            implementation,
+            review,
+            expected_revision=revision,
+            recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at=(now + timedelta(seconds=1)).isoformat(),
+            reason="fixture review lifecycle",
+        )
+        implementation_lease = self.registry.acquire_lease(
+            "TASK-201",
+            "codex-a",
+            acquired_at=(now + timedelta(seconds=2)).isoformat(),
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "implementation-attempt",
+            package_id="TASK-201",
+            worker_id="codex-a",
+            runner_pid=os.getpid(),
+            started_at=(now + timedelta(seconds=3)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "implementation-attempt",
+            ended_at=(now + timedelta(seconds=4)).isoformat(),
+            outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW,
+            reason="implementation ready for review",
+        )
+        self.assertEqual(implementation_lease.package_id, "TASK-201")
+        self.assertEqual(
+            self.registry.review_implementer_worker("TASK-202"), "codex-a"
+        )
+        self.registry.acquire_lease(
+            "TASK-202",
+            "claude",
+            acquired_at=(now + timedelta(seconds=5)).isoformat(),
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "review-attempt",
+            package_id="TASK-202",
+            worker_id="claude",
+            runner_pid=os.getpid(),
+            started_at=(now + timedelta(seconds=6)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "review-attempt",
+            ended_at=(now + timedelta(seconds=8)).isoformat(),
+            outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW,
+            reason="independent review completed",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=(now + timedelta(seconds=9)).isoformat(),
+            reason="record reviewed canary while paused",
+        )
+        RunnerRegistryControl(self.database).finalize_paused(reason="review ownership drained")
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        harden_paths(self.database, self.config_path, self.release)
+        revision = self.registry.dispatch_control()["revision"]
+        evidence = record_review_decision(
+            self.database,
+            self.config_path,
+            self.release,
+            self.preservation,
+            COMMIT,
+            revision,
+            {
+                "evidence": {
+                    "id": "review-evidence",
+                    "package_id": "TASK-202",
+                    "kind": "review",
+                    "uri": "https://example.invalid/review",
+                    "summary": "Independent review approved the bounded canary.",
+                    "recorded_at": (now + timedelta(seconds=7)).isoformat(),
+                    "metadata": {"attempt_id": "review-attempt"},
+                },
+                "outcome": {
+                    "id": "review-outcome",
+                    "review_package_id": "TASK-202",
+                    "target_package_id": "TASK-201",
+                    "implementer_worker_id": "codex-a",
+                    "reviewer_worker_id": "claude",
+                    "requested_at": (now + timedelta(seconds=5)).isoformat(),
+                    "decided_at": (now + timedelta(seconds=9)).isoformat(),
+                    "state": "APPROVED",
+                    "findings": [],
+                    "changes_requested": [],
+                    "approval_evidence_ids": ["review-evidence"],
+                },
+            },
+        )
+        self.assertEqual(evidence["reviewer_attempt_id"], "review-attempt")
+        snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
+        self.assertEqual(snapshot.review_outcomes[0]["state"], "APPROVED")
+        self.assertEqual(snapshot.evidence[0]["metadata"]["attempt_id"], "review-attempt")
 
     def test_requeue_preserves_failed_attempt_and_requires_current_revision(self):
         now = utc_now()

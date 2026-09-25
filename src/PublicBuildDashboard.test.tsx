@@ -91,6 +91,31 @@ describe('Factory Control Center components', () => {
     expect(markup).toContain('<summary>')
   })
 
+  it('shows every Registry queue state including proposed work and readiness detail', () => {
+    const snapshot = structuredClone(factoryControlFixture)
+    snapshot.features[0].packages.push({
+      ...structuredClone(snapshot.features[0].packages[1]),
+      id: 'CONTROL-PROPOSED', title: 'Suggested follow-up', state: 'ON_DECK',
+      dependencies: ['CONTROL-UI'], reviewState: null,
+    })
+    const markup = renderToStaticMarkup(<DashboardView view="queue" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    for (const state of ['Proposed / on deck', 'READY', 'ACTIVE', 'VERIFY / REVIEW', 'BLOCKED', 'DONE']) expect(markup).toContain(state)
+    for (const detail of ['CONTROL-PROPOSED', 'Suggested follow-up', 'Feature / parent', 'Assigned worker', 'Why not READY', 'CONTROL-UI · ACTIVE']) expect(markup).toContain(detail)
+  })
+
+  it('renders Overview counts as drill-down controls when navigation is available', () => {
+    const markup = renderToStaticMarkup(<DashboardView view="overview" snapshot={factoryControlFixture} refreshing={false} onRefresh={() => undefined} onNavigate={() => undefined} />)
+    expect(markup.match(/View matching records/g)).toHaveLength(5)
+    expect(markup).toContain('Constrained workers')
+  })
+
+  it('renders non-healthy worker and failure inspection details', () => {
+    const workerMarkup = renderToStaticMarkup(<DashboardView view="workers" snapshot={preservedCanaryProjectionFixture} refreshing={false} onRefresh={() => undefined} />)
+    for (const detail of ['SERVICE_UNKNOWN', 'AUTH_UNKNOWN', 'HEARTBEAT_STALE', 'Next action:', 'Last successful heartbeat', 'Last capacity observation']) expect(workerMarkup).toContain(detail)
+    const failureMarkup = renderToStaticMarkup(<DashboardView view="failures" snapshot={factoryControlFixture} refreshing={false} onRefresh={() => undefined} />)
+    for (const detail of ['Classification', 'Affected worker', 'Affected package', 'Owner action required', 'Recommended next action', 'Triggering event', 'Relevant evidence']) expect(failureMarkup).toContain(detail)
+  })
+
   it('renders unsafe evidence and pull-request URLs as text instead of links', () => {
     const snapshot = structuredClone(factoryControlFixture)
     snapshot.features[0].packages[0].pullRequestUrl = 'javascript:alert(1)'
