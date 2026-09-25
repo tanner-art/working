@@ -24,14 +24,17 @@ from scripts.factory_registry.operator import (  # noqa: E402
     OperatorError,
     canary_worker_gate,
     enable_live,
+    migrate_registry_v3_to_v4,
     parse_canary_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
     reconcile,
     return_paused,
+    restore_registry_v3_backup,
     status,
     stop,
+    store_preservation_evidence,
     utc_now,
     validate_telemetry_payload,
     _load_object,
@@ -70,6 +73,38 @@ def _parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("status", help="Read Registry control and ownership state")
     command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "install-preservation", help="Copy the approved snapshot into Registry evidence storage"
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--source", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "migrate-registry-v4", help="Atomically migrate a quiescent PAUSED Registry from v3 to v4"
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--backup", type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "restore-registry-v3", help="Restore the verified v3 backup while cutover remains quiescent"
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--backup", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser("preflight", help="Verify the complete restart gate")
@@ -134,6 +169,35 @@ def _parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "status":
         return dict(status(args.database, observed_at=args.observed_at))
+    if args.command == "install-preservation":
+        return dict(store_preservation_evidence(
+            args.database,
+            args.source,
+            args.release,
+            args.release_commit,
+            args.expect_revision,
+            observed_at=args.observed_at,
+        ))
+    if args.command == "migrate-registry-v4":
+        return dict(migrate_registry_v3_to_v4(
+            args.database,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.expect_revision,
+            backup_path=args.backup,
+            observed_at=args.observed_at,
+        ))
+    if args.command == "restore-registry-v3":
+        return dict(restore_registry_v3_backup(
+            args.database,
+            args.backup,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.expect_revision,
+            observed_at=args.observed_at,
+        ))
     if args.command == "preflight":
         return dict(preflight(
             **_preflight_args(

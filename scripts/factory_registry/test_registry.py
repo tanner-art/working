@@ -105,7 +105,7 @@ class SQLiteRegistryTest(unittest.TestCase):
         self.assertEqual(usage_tables, 2)
         self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))
 
-    def test_initialize_additively_upgrades_pre_control_schema_version_three(self) -> None:
+    def test_initialize_refuses_unreviewed_schema_version_three_migration(self) -> None:
         database = self.root / "pre-a4b-v3.sqlite3"
         legacy = SQLiteRegistry(database)
         legacy.initialize()
@@ -121,17 +121,16 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "DELETE FROM registry_metadata WHERE key='control_schema_version'"
             )
 
-        legacy.initialize()
+        with self.assertRaisesRegex(
+            RegistryConflict, "REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED"
+        ):
+            legacy.initialize()
 
         with sqlite3.connect(database) as connection:
             metadata = dict(connection.execute(
                 "SELECT key, value FROM registry_metadata "
                 "WHERE key IN ('schema_version', 'control_schema_version')"
             ))
-            control = connection.execute(
-                "SELECT dispatch_mode, kill_switch_engaged FROM factory_control "
-                "WHERE singleton=1"
-            ).fetchone()
             preserved = connection.execute(
                 "SELECT title FROM features WHERE id='PRESERVED'"
             ).fetchone()[0]
@@ -145,12 +144,11 @@ class SQLiteRegistryTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(
             metadata,
-            {"schema_version": "4", "control_schema_version": "1"},
+            {"schema_version": "3"},
         )
-        self.assertEqual(control, ("PAUSED", 1))
         self.assertEqual(preserved, "Preserved feature")
-        self.assertEqual(runtime_table, 1)
-        self.assertEqual(review_outcome_table, 1)
+        self.assertEqual(runtime_table, 0)
+        self.assertEqual(review_outcome_table, 0)
 
     def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
         legacy_database = self.root / "legacy-capacity.sqlite3"

@@ -17,7 +17,7 @@ PYTHON=/Library/Developer/CommandLineTools/usr/bin/python3
 RELEASE="/absolute/path/to/the/reviewed/release"
 DATABASE="/absolute/path/to/factory-registry.sqlite3"
 CONFIG="/absolute/path/to/config.factory.json"
-PRESERVATION="/absolute/path/to/preservation_snapshot.json"
+PRESERVATION="/absolute/path/to/registry/evidence/preservation_snapshot_2026-09-24.json"
 COMMIT="the-full-reviewed-release-commit"
 ```
 
@@ -29,8 +29,58 @@ cd "$RELEASE"
 ```
 
 Do not use an operator script from a source checkout against an installed
-Registry. The release `COMMIT` and every file in `MANIFEST.sha1` are checked
-before a controlled mutation.
+Registry. `MANIFEST.sha1` must name `COMMIT` and the exact set of regular files
+in the release. Every entry is checked before a controlled mutation; duplicate,
+missing, extra, changed, symlink, and special-file payloads are rejected.
+
+## Install preservation evidence and migrate schema v3
+
+The only accepted preservation snapshot has SHA-256
+`7d47f980d66bf84676cb6d0c24a7eeab0efe40bbe2451d7b27dfd1d6ed94fce6`.
+It records 33 worktrees, 8 dirty worktrees, 7 unmerged branches, no unexplained
+records, and no unreleased live leases. Its source must already be owned by the
+current user with mode `0600`. Install its exact bytes into the Registry's
+owner-only evidence directory before using it operationally:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli install-preservation \
+  --database "$DATABASE" \
+  --source /absolute/path/to/the/approved-preservation-snapshot.json \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --expect-revision REVISION
+```
+
+For a schema-v3 Registry, read `status`, confirm the reported revision, and run
+the reviewed migration while it is PAUSED, kill-engaged, and has no lease,
+attempt, runtime, orphan, or unbound ownership:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli migrate-registry-v4 \
+  --database "$DATABASE" \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION
+```
+
+The migration creates and verifies a consistent owner-only v3 backup, applies
+the v4 review-outcome table and append-only triggers in one immediate
+transaction, and checks integrity, foreign keys, unchanged control and
+revision, empty review outcomes, and exact preservation afterward. A
+transaction failure rolls back. A post-commit verification failure restores
+the v3 backup automatically. Before any v4 review outcome is recorded, an
+operator can explicitly restore the reported backup:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli restore-registry-v3 \
+  --database "$DATABASE" \
+  --backup /absolute/path/from-the-migration-evidence.sqlite3 \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION
+```
 
 ## Evidence-only status and preflight
 
@@ -66,10 +116,14 @@ reviewer pair with different worker identities.
 
 ## Prepare PAUSED dry-run services
 
-The migration file may set only `capacity_mode` and `capacity_scopes` for every
-already configured agent. The command supplies the reviewed Registry path,
-2,100-second lease, 30-second renewal, and 90/95/98/defer capacity policy.
-It preserves every other configuration value and rejects secret-shaped fields.
+The migration file may set only `capacity_mode` and `capacity_scopes` for the
+exact `codex-a`, `codex-b`, and `claude` agents. The command fixes each agent at
+one slot; supplies the reviewed Registry path, 2,100-second lease, 30-second
+renewal, and 90/95/98/defer capacity policy; points `gh` to `github.py` in the
+selected immutable release; and wraps Claude with that release's
+`claude_keychain.py` using the operator's Python interpreter. Old-release,
+source-worktree, temporary, and arbitrary command paths are rejected, as are
+secret-shaped fields.
 
 ```json
 {

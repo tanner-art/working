@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -45,6 +46,43 @@ EXPECTED_USAGE_POLICY = {
     "stale_after_seconds": 3600,
     "unknown_behavior": "defer",
 }
+APPROVED_PRESERVATION_SHA256 = (
+    "7d47f980d66bf84676cb6d0c24a7eeab0efe40bbe2451d7b27dfd1d6ed94fce6"
+)
+APPROVED_PRESERVATION_COUNTS = {
+    "worktrees": 33,
+    "dirty_worktrees": 8,
+    "unmerged_branches": 7,
+    "unexplained_records": 0,
+    "unreleased_live_leases": 0,
+}
+REQUIRED_AGENT_IDS = frozenset({"codex-a", "codex-b", "claude"})
+PRESERVATION_EVIDENCE_NAME = "preservation_snapshot_2026-09-24.json"
+V3_TO_V4_STATEMENTS = (
+    """CREATE TABLE review_outcomes (
+        id TEXT PRIMARY KEY,
+        review_package_id TEXT NOT NULL UNIQUE REFERENCES work_packages(id),
+        target_package_id TEXT NOT NULL REFERENCES work_packages(id),
+        implementer_worker_id TEXT NOT NULL REFERENCES workers(id),
+        reviewer_worker_id TEXT NOT NULL REFERENCES workers(id),
+        requested_at TEXT NOT NULL,
+        decided_at TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('CHANGES_REQUESTED', 'APPROVED')),
+        findings_json TEXT NOT NULL,
+        changes_requested_json TEXT NOT NULL,
+        approval_evidence_ids_json TEXT NOT NULL,
+        CHECK(implementer_worker_id <> reviewer_worker_id),
+        CHECK(decided_at >= requested_at)
+    )""",
+    """CREATE TRIGGER review_outcomes_are_append_only_update
+       BEFORE UPDATE ON review_outcomes BEGIN
+           SELECT RAISE(ABORT, 'REVIEW_OUTCOMES_APPEND_ONLY');
+       END""",
+    """CREATE TRIGGER review_outcomes_are_append_only_delete
+       BEFORE DELETE ON review_outcomes BEGIN
+           SELECT RAISE(ABORT, 'REVIEW_OUTCOMES_APPEND_ONLY');
+       END""",
+)
 HEARTBEAT_FRESH_SECONDS = 180
 USAGE_FRESH_SECONDS = 900
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
@@ -146,9 +184,9 @@ def _sensitive_paths(value: Any, prefix: str = "") -> tuple[str, ...]:
 
 
 def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
-    release = release.resolve()
-    if not release.is_dir() or release.is_symlink():
+    if release.is_symlink() or not release.is_dir():
         raise OperatorError("release must be an existing non-symlink directory")
+    release = release.resolve()
     commit_path = release / "COMMIT"
     manifest_path = release / "MANIFEST.sha1"
     try:
@@ -172,7 +210,11 @@ def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise OperatorError("release manifest path escapes the release")
         target = release / relative_path
-        if target.is_symlink() or not target.is_file():
+        try:
+            target_mode = target.lstat().st_mode
+        except OSError as error:
+            raise OperatorError(f"release manifest target invalid: {relative}") from error
+        if not stat.S_ISREG(target_mode):
             raise OperatorError(f"release manifest target invalid: {relative}")
         actual = hashlib.sha1(target.read_bytes()).hexdigest()  # nosec - release manifest format
         if actual != digest:
@@ -183,12 +225,15 @@ def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
     manifested = set(checked)
     release_files = set()
     for target in release.rglob("*"):
-        if target.is_symlink():
+        target_mode = target.lstat().st_mode
+        if stat.S_ISLNK(target_mode):
             raise OperatorError(f"release contains a symlink: {target}")
-        if target.is_file():
+        if stat.S_ISREG(target_mode):
             relative = target.relative_to(release).as_posix()
-            if relative not in {"COMMIT", "MANIFEST.sha1"}:
+            if relative != "MANIFEST.sha1":
                 release_files.add(relative)
+        elif not stat.S_ISDIR(target_mode):
+            raise OperatorError(f"release contains a special file: {target}")
     unmanifested = sorted(release_files - manifested)
     nonexistent = sorted(manifested - release_files)
     if unmanifested or nonexistent:
@@ -202,7 +247,7 @@ def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
         )
     # Complete coverage cannot reveal a runtime dependency omitted from both
     # the release and its manifest, so keep the reviewed closure explicit.
-    missing = sorted(REQUIRED_RELEASE_FILES - manifested)
+    missing = sorted((REQUIRED_RELEASE_FILES | {"COMMIT"}) - manifested)
     if missing:
         raise OperatorError("release manifest missing operator files: " + ",".join(missing))
     return {
@@ -219,7 +264,14 @@ def verify_preservation(
 ) -> Mapping[str, Any]:
     if not preservation_path.is_absolute() or not preservation_path.is_file():
         raise OperatorError("preservation snapshot must be an existing absolute file")
+    metadata = preservation_path.lstat()
+    if preservation_path.is_symlink() or metadata.st_uid != os.getuid():
+        raise OperatorError("preservation snapshot must be an owner-controlled regular file")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise OperatorError("preservation snapshot mode must be 0600")
     digest = _sha256_file(preservation_path)
+    if digest != APPROVED_PRESERVATION_SHA256:
+        raise OperatorError("preservation SHA-256 is not the approved cutover snapshot")
     imports = tuple(registry_snapshot.preservation_imports)
     if not imports:
         raise OperatorError("Registry has no preservation import")
@@ -243,6 +295,23 @@ def verify_preservation(
         "expected_workers": len(heartbeats),
         "unexplained_records": 0,
     }
+    approved_counts = {
+        "worktrees": expected["expected_worktrees"],
+        "dirty_worktrees": source.get("dirty_worktree_count"),
+        "unmerged_branches": expected["expected_branches"],
+        "unexplained_records": reconciliation.get("unexplained_records"),
+        "unreleased_live_leases": sum(
+            1 for lease in registry_snapshot.leases if lease.get("released_at") is None
+        ),
+    }
+    if approved_counts != APPROVED_PRESERVATION_COUNTS:
+        raise OperatorError(
+            "preservation snapshot does not match approved cutover counts: "
+            + json.dumps(
+                {"expected": APPROVED_PRESERVATION_COUNTS, "actual": approved_counts},
+                sort_keys=True,
+            )
+        )
     mismatches = {
         key: {"expected": value, "registry": reconciliation.get(key)}
         for key, value in expected.items()
@@ -384,11 +453,114 @@ def verify_preservation(
         "tasks": expected["expected_tasks"],
         "workers": expected["expected_workers"],
         "unexplained_records": 0,
+        "unreleased_live_leases": 0,
+        "approved_counts": dict(APPROVED_PRESERVATION_COUNTS),
     }
 
 
-def _database_checks(database: Path) -> Mapping[str, Any]:
-    uri = f"{database.resolve().as_uri()}?mode=ro"
+def store_preservation_evidence(
+    database: Path,
+    source: Path,
+    release: Path,
+    expected_commit: str,
+    expected_revision: int,
+    *,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Install the one approved preservation snapshot into owner-only storage."""
+    if not database.is_absolute() or not source.is_absolute() or not source.is_file():
+        raise OperatorError("database and preservation source must be existing absolute paths")
+    verify_release(release, expected_commit)
+    permission_failures = _release_permission_failures(release)
+    if permission_failures:
+        raise OperatorError(
+            "private/immutable release gate failed: " + ",".join(permission_failures)
+        )
+    if (
+        _path_mode(database.parent) != 0o700
+        or _path_mode(database) != 0o600
+        or database.is_symlink()
+        or database.stat().st_uid != os.getuid()
+    ):
+        raise OperatorError("preservation install requires an owner-controlled 0600 database")
+    observed_at = observed_at or utc_now()
+    current = status(database, observed_at=observed_at)
+    if current["database_checks"]["control_schema_version"] != str(CONTROL_SCHEMA_VERSION):
+        raise OperatorError("preservation install requires reviewed control schema 1")
+    control = current["control"]
+    if control["revision"] != expected_revision:
+        raise OperatorError(
+            f"Registry revision mismatch: expected {expected_revision}, got {control['revision']}"
+        )
+    if control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+        raise OperatorError("preservation install requires PAUSED with the kill switch engaged")
+    source_metadata = source.lstat()
+    if (
+        source.is_symlink()
+        or not stat.S_ISREG(source_metadata.st_mode)
+        or source_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(source_metadata.st_mode) != 0o600
+    ):
+        raise OperatorError("preservation source must be an owner-controlled 0600 regular file")
+    digest = _sha256_file(source)
+    if digest != APPROVED_PRESERVATION_SHA256:
+        raise OperatorError("preservation SHA-256 is not the approved cutover snapshot")
+    evidence_directory = database.parent / "evidence"
+    evidence_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    install_launchd._set_owner_only(evidence_directory, 0o700)
+    destination = evidence_directory / PRESERVATION_EVIDENCE_NAME
+    if destination.exists() or destination.is_symlink():
+        destination_metadata = destination.lstat()
+        if (
+            destination.is_symlink()
+            or not stat.S_ISREG(destination_metadata.st_mode)
+            or _sha256_file(destination) != digest
+        ):
+            raise OperatorError("existing preservation evidence does not match the approved snapshot")
+    elif source.resolve() != destination.resolve():
+        temporary = evidence_directory / f".{destination.name}.{os.getpid()}.tmp"
+        try:
+            with source.open("rb") as input_file, temporary.open("xb") as output_file:
+                os.fchmod(output_file.fileno(), 0o600)
+                shutil.copyfileobj(input_file, output_file)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            if _sha256_file(temporary) != digest:
+                raise OperatorError("preservation evidence copy hash mismatch")
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    install_launchd._set_owner_only(destination, 0o600)
+    installed_metadata = destination.lstat()
+    if (
+        installed_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(installed_metadata.st_mode) != 0o600
+        or _sha256_file(destination) != digest
+    ):
+        raise OperatorError("installed preservation evidence verification failed")
+    reconciliation = verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at),
+        destination,
+    )
+    return {
+        "kind": "threadline-factory-preservation-evidence",
+        "passed": True,
+        "source": str(source),
+        "path": str(destination),
+        "sha256": digest,
+        "directory_mode": "0700",
+        "file_mode": "0600",
+        "revision": expected_revision,
+        "counts": dict(APPROVED_PRESERVATION_COUNTS),
+        "reconciliation": reconciliation,
+    }
+
+
+def _database_checks(
+    database: Path, *, immutable: bool = False, require_wal: bool = True
+) -> Mapping[str, Any]:
+    suffix = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    uri = f"{database.resolve().as_uri()}{suffix}"
     try:
         connection = sqlite3.connect(uri, uri=True)
         try:
@@ -402,7 +574,7 @@ def _database_checks(database: Path) -> Mapping[str, Any]:
         raise OperatorError(f"Registry database check failed: {error}") from error
     if integrity != ("ok",) or foreign_keys:
         raise OperatorError("Registry integrity or foreign-key check failed")
-    if journal_mode != "wal":
+    if require_wal and journal_mode != "wal":
         raise OperatorError(f"Registry journal mode must be WAL, got {journal_mode}")
     return {
         "integrity": "ok",
@@ -410,6 +582,71 @@ def _database_checks(database: Path) -> Mapping[str, Any]:
         "journal_mode": journal_mode,
         "schema_version": metadata.get("schema_version"),
         "control_schema_version": metadata.get("control_schema_version"),
+        "revision": metadata.get("revision"),
+    }
+
+
+def _status_without_control_metadata(
+    database: Path, checks: Mapping[str, Any], observed_at: str
+) -> Mapping[str, Any]:
+    """Report a legacy v3 database without pretending its control plane is usable."""
+    uri = f"{database.resolve().as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type='table'"
+                )
+            }
+
+            def count(table: str, where: str = "") -> int | None:
+                if table not in tables:
+                    return None
+                return int(connection.execute(
+                    f"SELECT count(*) FROM {table} {where}"
+                ).fetchone()[0])
+
+            raw_control = None
+            if "factory_control" in tables:
+                row = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged, changed_at, reason "
+                    "FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if row is not None:
+                    raw_control = dict(row)
+                    raw_control["kill_switch_engaged"] = bool(
+                        raw_control["kill_switch_engaged"]
+                    )
+    except sqlite3.Error as error:
+        raise OperatorError(f"Registry v3 observation failed: {error}") from error
+    return {
+        "kind": "threadline-factory-operator-status",
+        "observed_at": observed_at,
+        "database": str(database),
+        "database_checks": checks,
+        "control": {
+            "available": False,
+            "revision": int(checks["revision"]) if str(checks.get("revision", "")).isdigit() else None,
+            "raw": raw_control,
+            "reason": "CONTROL_SCHEMA_METADATA_MISSING",
+        },
+        "counts": {
+            "features": count("features"),
+            "packages": count("work_packages"),
+            "workers": count("workers"),
+            "evidence": count("evidence"),
+            "review_outcomes": count("review_outcomes") or 0,
+            "preservation_imports": count("preservation_imports"),
+            "active_leases": count("leases", "WHERE released_at IS NULL"),
+            "active_attempts": count("attempts", "WHERE ended_at IS NULL"),
+            "active_runtimes": count(
+                "attempt_runtime_ownership", "WHERE released_at IS NULL"
+            ),
+            "active_unbound_leases": None,
+            "runtime_orphans": None,
+        },
+        "workers": [],
     }
 
 
@@ -417,8 +654,13 @@ def status(database: Path, *, observed_at: str | None = None) -> Mapping[str, An
     if not database.is_absolute() or not database.is_file():
         raise OperatorError("--database must be an existing absolute Registry path")
     observed_at = observed_at or utc_now()
-    registry = SQLiteRegistry(database)
     checks = _database_checks(database)
+    if (
+        checks["schema_version"] == "3"
+        and checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION)
+    ):
+        return _status_without_control_metadata(database, checks, observed_at)
+    registry = SQLiteRegistry(database)
     control = dict(registry.dispatch_control())
     snapshot = registry.control_center_snapshot(observed_at=observed_at)
     active_leases = [value for value in snapshot.leases if value.get("released_at") is None]
@@ -458,7 +700,337 @@ def status(database: Path, *, observed_at: str | None = None) -> Mapping[str, An
     }
 
 
-def _validate_config(config: Mapping[str, Any], database: Path) -> None:
+def _require_installed_preservation(database: Path, preservation_path: Path) -> None:
+    expected = database.parent / "evidence" / PRESERVATION_EVIDENCE_NAME
+    if preservation_path.resolve() != expected.resolve():
+        raise OperatorError(
+            "preservation snapshot must use the reviewed Registry evidence path"
+        )
+
+
+def _total_ownership_counts(
+    database: Path, *, immutable: bool = False
+) -> Mapping[str, int]:
+    suffix = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    uri = f"{database.resolve().as_uri()}{suffix}"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            return {
+                "leases": int(connection.execute("SELECT count(*) FROM leases").fetchone()[0]),
+                "attempts": int(connection.execute("SELECT count(*) FROM attempts").fetchone()[0]),
+                "runtimes": int(connection.execute(
+                    "SELECT count(*) FROM attempt_runtime_ownership"
+                ).fetchone()[0]),
+            }
+    except sqlite3.Error as error:
+        raise OperatorError(f"Registry ownership check failed: {error}") from error
+
+
+def _require_migration_state(
+    current: Mapping[str, Any], *, expected_schema: int, expected_revision: int
+) -> None:
+    checks = current["database_checks"]
+    if checks["schema_version"] != str(expected_schema):
+        raise OperatorError(
+            f"Registry migration requires schema {expected_schema}, got "
+            f"{checks['schema_version']}"
+        )
+    if checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION):
+        raise OperatorError("Registry migration requires reviewed control schema 1")
+    control = current["control"]
+    if control["revision"] != expected_revision:
+        raise OperatorError(
+            f"Registry revision mismatch: expected {expected_revision}, got {control['revision']}"
+        )
+    if control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+        raise OperatorError("Registry migration requires PAUSED with the kill switch engaged")
+    if any(current["counts"][key] for key in (
+        "active_leases", "active_attempts", "active_runtimes",
+        "active_unbound_leases", "runtime_orphans",
+    )):
+        raise OperatorError("Registry migration requires empty active ownership")
+
+
+def _create_verified_registry_backup(
+    database: Path,
+    backup: Path,
+    preservation_path: Path,
+    *,
+    expected_revision: int,
+    observed_at: str,
+) -> Mapping[str, Any]:
+    evidence_directory = database.parent / "evidence"
+    if (
+        not backup.is_absolute()
+        or backup.exists()
+        or backup.parent.resolve() != evidence_directory.resolve()
+    ):
+        raise OperatorError(
+            "Registry backup must be a new absolute file in Registry evidence storage"
+        )
+    backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    install_launchd._set_owner_only(backup.parent, 0o700)
+    source_uri = f"{database.resolve().as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(source_uri, uri=True) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+            target.execute("PRAGMA journal_mode=DELETE")
+    except sqlite3.Error as error:
+        backup.unlink(missing_ok=True)
+        raise OperatorError(f"cannot create Registry v3 backup: {error}") from error
+    install_launchd._set_owner_only(backup, 0o600)
+    checks = _database_checks(backup, immutable=True, require_wal=False)
+    if (
+        checks["schema_version"] != "3"
+        or checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION)
+    ):
+        raise OperatorError("Registry backup schema metadata mismatch")
+    backup_control = SQLiteRegistry(backup).dispatch_control()
+    if (
+        backup_control["revision"] != expected_revision
+        or backup_control["dispatch_mode"] != "PAUSED"
+        or not backup_control["kill_switch_engaged"]
+    ):
+        raise OperatorError("Registry backup control mismatch")
+    if _total_ownership_counts(backup, immutable=True) != {
+        "leases": 0, "attempts": 0, "runtimes": 0,
+    }:
+        raise OperatorError("Registry v3 backup contains ownership history")
+    preservation = verify_preservation(
+        SQLiteRegistry(backup).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+    return {
+        "path": str(backup),
+        "sha256": _sha256_file(backup),
+        "integrity": checks["integrity"],
+        "schema_version": checks["schema_version"],
+        "control_schema_version": checks["control_schema_version"],
+        "revision": expected_revision,
+        "mode": "0600",
+        "preservation_sha256": preservation["sha256"],
+    }
+
+
+def _restore_database_from_backup(database: Path, backup: Path) -> None:
+    source_uri = f"{backup.resolve().as_uri()}?mode=ro"
+    try:
+        with sqlite3.connect(source_uri, uri=True) as source, sqlite3.connect(database) as target:
+            source.backup(target)
+            target.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error as error:
+        raise OperatorError(f"cannot restore Registry backup: {error}") from error
+
+
+def migrate_registry_v3_to_v4(
+    database: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+    *,
+    backup_path: Path | None = None,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Perform the reviewed v3-to-v4 schema change with backup and rollback."""
+    observed_at = observed_at or utc_now()
+    verify_release(release, expected_commit)
+    permission_failures = _release_permission_failures(release)
+    if permission_failures:
+        raise OperatorError(
+            "private/immutable release gate failed: " + ",".join(permission_failures)
+        )
+    if (
+        _path_mode(database.parent) != 0o700
+        or _path_mode(database) != 0o600
+        or database.is_symlink()
+        or database.stat().st_uid != os.getuid()
+    ):
+        raise OperatorError("Registry migration requires an owner-controlled 0600 database")
+    _require_installed_preservation(database, preservation_path)
+    current = status(database, observed_at=observed_at)
+    _require_migration_state(current, expected_schema=3, expected_revision=expected_revision)
+    if _total_ownership_counts(database) != {"leases": 0, "attempts": 0, "runtimes": 0}:
+        raise OperatorError("Registry migration requires zero leases, attempts, and runtimes")
+    registry = SQLiteRegistry(database)
+    before_snapshot = registry.control_center_snapshot(observed_at=observed_at)
+    preservation = verify_preservation(before_snapshot, preservation_path)
+    control_before = dict(current["control"])
+    backup_path = backup_path or (
+        database.parent
+        / "evidence"
+        / f"registry-v3-revision-{expected_revision}-{time.time_ns()}.sqlite3"
+    )
+    backup_evidence = _create_verified_registry_backup(
+        database,
+        backup_path,
+        preservation_path,
+        expected_revision=expected_revision,
+        observed_at=observed_at,
+    )
+    try:
+        with sqlite3.connect(database, timeout=10, isolation_level=None) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                metadata = dict(connection.execute(
+                    "SELECT key, value FROM registry_metadata"
+                ))
+                if metadata.get("schema_version") != "3":
+                    raise OperatorError("Registry schema changed before migration")
+                if metadata.get("control_schema_version") != str(CONTROL_SCHEMA_VERSION):
+                    raise OperatorError("Registry control schema changed before migration")
+                if metadata.get("revision") != str(expected_revision):
+                    raise OperatorError("Registry revision changed before migration")
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged, changed_at, reason "
+                    "FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control[0] != "PAUSED" or control[1] != 1:
+                    raise OperatorError("Registry control changed before migration")
+                if any(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                       for table in ("leases", "attempts", "attempt_runtime_ownership")):
+                    raise OperatorError("Registry ownership appeared before migration")
+                for statement in V3_TO_V4_STATEMENTS:
+                    connection.execute(statement)
+                connection.execute(
+                    "UPDATE registry_metadata SET value='4' "
+                    "WHERE key='schema_version' AND value='3'"
+                )
+                if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise OperatorError("Registry schema version compare-and-swap failed")
+                foreign_keys = tuple(connection.execute("PRAGMA foreign_key_check"))
+                if foreign_keys:
+                    raise OperatorError("Registry migration introduced foreign-key violations")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        final = status(database, observed_at=observed_at)
+        _require_migration_state(final, expected_schema=4, expected_revision=expected_revision)
+        if final["control"] != control_before:
+            raise OperatorError("Registry migration changed dispatch control")
+        if final["counts"]["review_outcomes"] != 0:
+            raise OperatorError("Registry migration did not create an empty review outcome store")
+        if _total_ownership_counts(database) != {"leases": 0, "attempts": 0, "runtimes": 0}:
+            raise OperatorError("Registry migration created ownership records")
+        after_snapshot = SQLiteRegistry(database).control_center_snapshot(
+            observed_at=observed_at
+        )
+        preservation_after = verify_preservation(after_snapshot, preservation_path)
+    except Exception:
+        # A transaction failure is already rolled back. A post-commit verification
+        # failure restores the consistent v3 image before surfacing the error.
+        if _database_checks(database)["schema_version"] == "4":
+            _restore_database_from_backup(database, backup_path)
+            restored = status(database, observed_at=observed_at)
+            _require_migration_state(
+                restored, expected_schema=3, expected_revision=expected_revision
+            )
+            verify_preservation(
+                SQLiteRegistry(database).control_center_snapshot(
+                    observed_at=observed_at
+                ),
+                preservation_path,
+            )
+        raise
+    return {
+        "kind": "threadline-factory-registry-migration",
+        "passed": True,
+        "source_schema": 3,
+        "schema_version": 4,
+        "control": final["control"],
+        "backup": backup_evidence,
+        "preservation_before": preservation,
+        "preservation_after": preservation_after,
+        "review_outcomes": 0,
+    }
+
+
+def restore_registry_v3_backup(
+    database: Path,
+    backup_path: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+    *,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Restore a reviewed v3 backup after a v4 cutover rollback decision."""
+    observed_at = observed_at or utc_now()
+    verify_release(release, expected_commit)
+    permission_failures = _release_permission_failures(release)
+    if permission_failures:
+        raise OperatorError(
+            "private/immutable release gate failed: " + ",".join(permission_failures)
+        )
+    if (
+        _path_mode(database.parent) != 0o700
+        or _path_mode(database) != 0o600
+        or database.is_symlink()
+        or database.stat().st_uid != os.getuid()
+    ):
+        raise OperatorError("Registry restore requires an owner-controlled 0600 database")
+    _require_installed_preservation(database, preservation_path)
+    if backup_path.parent.resolve() != (database.parent / "evidence").resolve():
+        raise OperatorError("Registry backup must come from Registry evidence storage")
+    backup_metadata = backup_path.lstat()
+    if (
+        backup_path.is_symlink()
+        or backup_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(backup_metadata.st_mode) != 0o600
+    ):
+        raise OperatorError("Registry backup must be an owner-controlled 0600 file")
+    backup_checks = _database_checks(
+        backup_path, immutable=True, require_wal=False
+    )
+    if (
+        backup_checks["schema_version"] != "3"
+        or backup_checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION)
+    ):
+        raise OperatorError("Registry backup schema metadata mismatch")
+    backup_control = SQLiteRegistry(backup_path).dispatch_control()
+    if (
+        backup_control["revision"] != expected_revision
+        or backup_control["dispatch_mode"] != "PAUSED"
+        or not backup_control["kill_switch_engaged"]
+    ):
+        raise OperatorError("Registry backup control mismatch")
+    if _total_ownership_counts(backup_path, immutable=True) != {
+        "leases": 0, "attempts": 0, "runtimes": 0,
+    }:
+        raise OperatorError("Registry backup contains ownership records")
+    verify_preservation(
+        SQLiteRegistry(backup_path).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+    current = status(database, observed_at=observed_at)
+    _require_migration_state(current, expected_schema=4, expected_revision=expected_revision)
+    if current["counts"]["review_outcomes"] != 0:
+        raise OperatorError("cannot restore v3 after review outcomes have been recorded")
+    if _total_ownership_counts(database) != {"leases": 0, "attempts": 0, "runtimes": 0}:
+        raise OperatorError("cannot restore v3 while ownership records exist")
+    _restore_database_from_backup(database, backup_path)
+    restored = status(database, observed_at=observed_at)
+    _require_migration_state(restored, expected_schema=3, expected_revision=expected_revision)
+    verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+    return {
+        "kind": "threadline-factory-registry-restore",
+        "passed": True,
+        "schema_version": 3,
+        "revision": expected_revision,
+        "backup": str(backup_path),
+        "backup_sha256": _sha256_file(backup_path),
+        "control": restored["control"],
+    }
+
+
+def _validate_config(config: Mapping[str, Any], database: Path, release: Path) -> None:
     if config.get("registry_database") != str(database):
         raise OperatorError("config registry_database does not name the authoritative Registry")
     if config.get("registry_lease_seconds") != 2100:
@@ -471,12 +1043,19 @@ def _validate_config(config: Mapping[str, Any], database: Path) -> None:
         value = config.get(field)
         if not isinstance(value, str) or not Path(value).is_absolute():
             raise OperatorError(f"config {field} must be an absolute path")
+    release = release.resolve()
+    expected_github = release / "scripts" / "runner" / "github.py"
+    expected_claude_wrapper = release / "scripts" / "runner" / "claude_keychain.py"
+    if config.get("gh") != str(expected_github):
+        raise OperatorError("config gh must name github.py in the selected immutable release")
     agents = config.get("agents")
-    if not isinstance(agents, Mapping) or not agents:
-        raise OperatorError("config agents must be a non-empty object")
+    if not isinstance(agents, Mapping) or set(agents) != REQUIRED_AGENT_IDS:
+        raise OperatorError("config agents must be exactly codex-a, codex-b, and claude")
     for worker_id, value in agents.items():
         if not isinstance(value, Mapping):
             raise OperatorError(f"config agent {worker_id} must be an object")
+        if value.get("slots") != 1:
+            raise OperatorError(f"config agent {worker_id} must have exactly one slot")
         mode = value.get("capacity_mode")
         scopes = value.get("capacity_scopes")
         if mode == "provider_signal":
@@ -485,19 +1064,63 @@ def _validate_config(config: Mapping[str, Any], database: Path) -> None:
             valid = mode == "percentage" and isinstance(scopes, list) and bool(scopes) and "provider_signal" not in scopes
         if not valid or len(scopes) != len(set(scopes)):
             raise OperatorError(f"config agent {worker_id} has invalid capacity mode/scopes")
+        commands = ("command", "fallback_command") if "fallback_command" in value else ("command",)
+        for command_field in commands:
+            command = value.get(command_field)
+            if not isinstance(command, list) or not command or not all(
+                isinstance(token, str) and token for token in command
+            ):
+                raise OperatorError(f"config agent {worker_id} has an invalid {command_field}")
+            forbidden_roots = tuple(
+                Path(str(config[field])).resolve()
+                for field in ("repo", "state", "worktrees")
+            ) + (release, Path(tempfile.gettempdir()).resolve())
+            if worker_id.startswith("codex-"):
+                executable = Path(command[0])
+                resolved_executable = executable.resolve()
+                if (
+                    not executable.is_absolute()
+                    or executable.name != "codex"
+                    or any(
+                        resolved_executable == root or root in resolved_executable.parents
+                        for root in forbidden_roots
+                    )
+                ):
+                    raise OperatorError(f"config agent {worker_id} must invoke codex")
+            else:
+                if len(command) < 4:
+                    raise OperatorError("Claude command must use the reviewed Keychain wrapper")
+                python = Path(command[0])
+                wrapper = Path(command[1])
+                claude = Path(command[3])
+                if (
+                    not python.is_absolute()
+                    or python.resolve() != Path(sys.executable).resolve()
+                    or wrapper != expected_claude_wrapper
+                    or command[2] != "exec"
+                    or not claude.is_absolute()
+                    or claude.name != "claude"
+                    or any(
+                        claude.resolve() == root or root in claude.resolve().parents
+                        for root in forbidden_roots
+                    )
+                ):
+                    raise OperatorError("Claude command must use claude_keychain.py from the selected release")
     sensitive = _sensitive_paths(config)
     if sensitive:
         raise OperatorError("config contains secret-shaped fields: " + ",".join(sensitive))
 
 
 def migrate_config(
-    config: Mapping[str, Any], database: Path, migration: Mapping[str, Any]
+    config: Mapping[str, Any], database: Path, release: Path, migration: Mapping[str, Any]
 ) -> dict[str, Any]:
     result = json.loads(json.dumps(config))
     agents = result.get("agents")
     migration_agents = migration.get("agents")
     if not isinstance(agents, dict) or not isinstance(migration_agents, Mapping):
         raise OperatorError("config migration requires an agents mapping")
+    if set(agents) != REQUIRED_AGENT_IDS:
+        raise OperatorError("config migration requires exactly codex-a, codex-b, and claude")
     if set(agents) != set(migration_agents):
         raise OperatorError("config migration must explicitly cover every configured agent")
     for worker_id, requested in migration_agents.items():
@@ -509,11 +1132,29 @@ def migrate_config(
             )
         agents[worker_id]["capacity_mode"] = requested["capacity_mode"]
         agents[worker_id]["capacity_scopes"] = requested["capacity_scopes"]
+        agents[worker_id]["slots"] = 1
+    release = release.resolve()
+    result["gh"] = str(release / "scripts" / "runner" / "github.py")
+    claude = agents["claude"]
+    wrapper = str(release / "scripts" / "runner" / "claude_keychain.py")
+    for field in ("command", "fallback_command"):
+        if field not in claude:
+            continue
+        command = claude[field]
+        if not isinstance(command, list) or not command:
+            raise OperatorError(f"config agent claude has an invalid {field}")
+        if len(command) >= 4 and Path(str(command[1])).name == "claude_keychain.py" and command[2] == "exec":
+            command = [command[0], wrapper, "exec", *command[3:]]
+        elif Path(str(command[0])).name == "claude":
+            command = [sys.executable, wrapper, "exec", *command]
+        else:
+            raise OperatorError("Claude migration source command must invoke claude directly or through claude_keychain.py")
+        claude[field] = command
     result["registry_database"] = str(database)
     result["registry_lease_seconds"] = 2100
     result["registry_renew_interval_seconds"] = 30
     result["usage_policy"] = dict(EXPECTED_USAGE_POLICY)
-    _validate_config(result, database)
+    _validate_config(result, database, release)
     return result
 
 
@@ -544,6 +1185,19 @@ def verify_permissions(
         path = Path(value)
         if _path_mode(path) != 0o700:
             failures.append(f"{path}:expected-0700")
+    failures.extend(_release_permission_failures(release))
+    if failures:
+        raise OperatorError("private/immutable permission gate failed: " + ",".join(failures))
+    return {
+        "registry_directory_mode": "0700",
+        "database_mode": "0600",
+        "config_mode": "0600",
+        "release_write_bits": 0,
+    }
+
+
+def _release_permission_failures(release: Path) -> list[str]:
+    failures = []
     release_mode = _path_mode(release)
     if release_mode is None or release_mode & 0o222 or release_mode & 0o077:
         failures.append(f"{release}:release-root-not-private-immutable")
@@ -555,14 +1209,7 @@ def verify_permissions(
             failures.append(f"{path}:writable")
         elif stat.S_IMODE(metadata.st_mode) & 0o077:
             failures.append(f"{path}:group-or-world-access")
-    if failures:
-        raise OperatorError("private/immutable permission gate failed: " + ",".join(failures))
-    return {
-        "registry_directory_mode": "0700",
-        "database_mode": "0600",
-        "config_mode": "0600",
-        "release_write_bits": 0,
-    }
+    return failures
 
 
 def harden_paths(database: Path, config_path: Path, release: Path) -> None:
@@ -752,11 +1399,12 @@ def preflight(
         raise OperatorError("active or orphaned Registry ownership is present")
     registry = SQLiteRegistry(database)
     snapshot = registry.control_center_snapshot(observed_at=observed_at)
+    _require_installed_preservation(database, preservation_path)
     preservation = verify_preservation(snapshot, preservation_path)
     release_evidence = verify_release(release, expected_commit)
     config = _load_object(config_path, "runner config")
     if require_config:
-        _validate_config(config, database)
+        _validate_config(config, database, release)
     permissions = (
         verify_permissions(database, config_path, release)
         if require_permissions_gate else {"gate": "deferred-to-prepare-dry-run"}
@@ -1154,7 +1802,7 @@ def prepare_dry_run(
     ):
         raise OperatorError("PAUSED dry-run preparation requires the kill switch")
     source_config = _load_object(config_path, "runner config")
-    migrated = migrate_config(source_config, database, migration)
+    migrated = migrate_config(source_config, database, release, migration)
     root = release / "scripts" / "runner"
     plan = install_launchd.service_plan(
         migrated, config_path.resolve(), root, mode, False, dashboard_port

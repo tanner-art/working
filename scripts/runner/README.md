@@ -38,6 +38,10 @@ existing service label, arguments, and log names. Additional services use
 labels such as `life.threadline.runner.codex-a-2`, pass `--slot 2`, and write
 logs such as `launchd-codex-a-2.log`.
 
+The reviewed Phase A5 operator profile is deliberately narrower: it requires
+exactly `codex-a`, `codex-b`, and `claude`, with one slot each. The generic
+runner's wider slot range is not authorized for that cutover.
+
 Slots are external, runner-controlled provider child lanes and are the only production fan-out mechanism initially. Every slot launches a foreground CLI process in the runner-created task worktree, so scope locks, process-group termination, validation serialization, and preserved failures remain visible to the factory. Runner installation rejects primary or fallback Codex commands that do not explicitly disable `multi_agent`, and rejects Claude commands without an explicit tool allowlist or with `Agent` in that allowlist. Do not start detached provider jobs such as `claude --background` from a lane: detached work can escape task ownership, timeout handling, and dashboard accounting. Native provider subagents are a later option and should initially be limited to read-only review; writing remains owned by the runner lane.
 
 All slots for an agent use the same configured `account` and therefore share that account's credentials and capacity observations. Extra lanes do not create extra provider capacity. Extra lanes require fresh eligible capacity, and every candidate still passes its package size/risk gate. Missing and stale telemetry do not authorize fan-out. The installer does not read provider credentials or perform authentication probes. Before installing extra Claude slots, the operator must run the configured wrapper with `auth status` and a minimal non-interactive invocation in the same `HOME`, `USER`, `TMPDIR`, `PATH`, and keychain context that launchd will use. Never copy credentials into this file or weaken TLS.

@@ -6,26 +6,35 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 
+import scripts.factory_registry.operator as operator_module
 from scripts.factory_registry.models import Lane, TaskStatus
 from scripts.factory_registry.operator import (
+    APPROVED_PRESERVATION_SHA256,
     OperatorError,
     REQUIRED_RELEASE_FILES,
     canary_worker_gate,
     enable_live,
     harden_paths,
+    migrate_registry_v3_to_v4,
     parse_canary_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
+    restore_registry_v3_backup,
+    status,
+    store_preservation_evidence,
     utc_now,
     validate_telemetry_payload,
+    verify_preservation,
 )
 from scripts.factory_registry.operator_cli import main as operator_main
 from scripts.factory_registry.repository import RegistryConflict
@@ -44,7 +53,10 @@ class OperatorFixture(unittest.TestCase):
         self.database.parent.mkdir()
         self.registry = SQLiteRegistry(self.database)
         self.registry.initialize()
-        self.preservation = self.root / "preservation.json"
+        self.preservation = (
+            self.database.parent / "evidence" / "preservation_snapshot_2026-09-24.json"
+        )
+        self.preservation.parent.mkdir(mode=0o700)
         snapshot = {
             "snapshot_version": 1,
             "canonical_repository": {
@@ -71,7 +83,24 @@ class OperatorFixture(unittest.TestCase):
             "unmerged_local_branches": ["preserved abc123"],
         }
         self.preservation.write_text(json.dumps(snapshot, sort_keys=True))
+        self.preservation.chmod(0o600)
         digest = hashlib.sha256(self.preservation.read_bytes()).hexdigest()
+        self.approved_hash = mock.patch.object(
+            operator_module, "APPROVED_PRESERVATION_SHA256", digest
+        )
+        self.approved_counts = mock.patch.object(
+            operator_module,
+            "APPROVED_PRESERVATION_COUNTS",
+            {
+                "worktrees": 1,
+                "dirty_worktrees": 1,
+                "unmerged_branches": 1,
+                "unexplained_records": 0,
+                "unreleased_live_leases": 0,
+            },
+        )
+        self.approved_hash.start()
+        self.approved_counts.start()
         self.registry.import_preservation_snapshot(
             snapshot,
             source_uri=str(self.preservation),
@@ -97,6 +126,8 @@ class OperatorFixture(unittest.TestCase):
                     path.chmod(0o700 if path.is_dir() else 0o600)
                 except FileNotFoundError:
                     pass
+        self.approved_counts.stop()
+        self.approved_hash.stop()
         self.temporary.cleanup()
 
     def _release(self):
@@ -109,6 +140,9 @@ class OperatorFixture(unittest.TestCase):
             shutil.copy2(source, destination)
             manifest.append(f"{hashlib.sha1(destination.read_bytes()).hexdigest()}  {relative}")
         (self.release / "COMMIT").write_text(COMMIT + "\n")
+        manifest.append(
+            f"{hashlib.sha1((self.release / 'COMMIT').read_bytes()).hexdigest()}  COMMIT"
+        )
         (self.release / "MANIFEST.sha1").write_text("\n".join(manifest) + "\n")
 
     def config(self, *, strict):
@@ -118,7 +152,8 @@ class OperatorFixture(unittest.TestCase):
             "state": str(self.state),
             "worktrees": str(self.worktrees),
             "path": "/usr/bin:/bin",
-            "gh": "/usr/bin/true",
+            "gh": str(self.release.resolve() / "scripts" / "runner" / "github.py") if strict
+            else "/old/release/scripts/runner/github.py",
             "git": "/usr/bin/git",
             "pnpm": "/usr/bin/true",
             "allowed_authors": ["owner"],
@@ -127,19 +162,31 @@ class OperatorFixture(unittest.TestCase):
                 "codex-a": {
                     "provider": "openai", "account": "a", "slots": 1,
                     "model": "model",
-                    "command": ["/usr/bin/true", "--disable", "multi_agent"],
+                    "command": ["/opt/homebrew/bin/codex", "exec", "--disable", "multi_agent"],
                     "env": {},
                 },
                 "codex-b": {
                     "provider": "openai", "account": "b", "slots": 1,
                     "model": "model",
-                    "command": ["/usr/bin/true", "--disable", "multi_agent"],
+                    "command": ["/opt/homebrew/bin/codex", "exec", "--disable", "multi_agent"],
                     "env": {},
                 },
                 "claude": {
                     "provider": "anthropic", "account": "c", "slots": 1,
                     "model": "model",
-                    "command": ["/usr/bin/true", "--tools", "Read,Edit,Write,Glob,Grep"],
+                    "command": (
+                        [
+                            sys.executable,
+                            str(self.release.resolve() / "scripts" / "runner" / "claude_keychain.py"),
+                            "exec",
+                            "/opt/homebrew/bin/claude",
+                            "-p",
+                            "--tools",
+                            "Read,Edit,Write,Glob,Grep",
+                        ]
+                        if strict else
+                        ["/opt/homebrew/bin/claude", "-p", "--tools", "Read,Edit,Write,Glob,Grep"]
+                    ),
                     "env": {},
                 },
             },
@@ -319,7 +366,7 @@ class OperatorFixture(unittest.TestCase):
         )
         for statement in deletions:
             with self.subTest(statement=statement):
-                copy = self.root / f"copy-{hashlib.sha256(statement.encode()).hexdigest()}.sqlite3"
+                copy = self.database.parent / f"copy-{hashlib.sha256(statement.encode()).hexdigest()}.sqlite3"
                 with sqlite3.connect(self.database) as source, sqlite3.connect(copy) as target:
                     source.backup(target)
                 with sqlite3.connect(copy) as connection:
@@ -380,6 +427,184 @@ class OperatorFixture(unittest.TestCase):
                 self.registry.dispatch_control()["revision"],
                 require_permissions_gate=False,
             )
+
+    def test_release_manifest_includes_commit_and_rejects_duplicate(self):
+        manifest = self.release / "MANIFEST.sha1"
+        lines = manifest.read_text().splitlines()
+        self.assertTrue(any(line.endswith("  COMMIT") for line in lines))
+        manifest.write_text("\n".join([*lines, lines[0]]) + "\n")
+        with self.assertRaisesRegex(OperatorError, "duplicate paths"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+
+    def test_release_gate_rejects_symlink_and_special_file(self):
+        link = self.release / "unreviewed-link"
+        link.symlink_to(self.release / "COMMIT")
+        with self.assertRaisesRegex(OperatorError, "symlink"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+        link.unlink()
+        fifo = self.release / "unreviewed-fifo"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(OperatorError, "special file"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                require_permissions_gate=False,
+            )
+
+    def test_preservation_is_pinned_and_installed_owner_only(self):
+        self.assertEqual(
+            APPROVED_PRESERVATION_SHA256,
+            "7d47f980d66bf84676cb6d0c24a7eeab0efe40bbe2451d7b27dfd1d6ed94fce6",
+        )
+        source = self.root / "approved-preservation.json"
+        source.write_bytes(self.preservation.read_bytes())
+        harden_paths(self.database, self.config_path, self.release)
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(OperatorError, "0600"):
+            store_preservation_evidence(
+                self.database, source, self.release, COMMIT, revision
+            )
+        source.chmod(0o600)
+        evidence = store_preservation_evidence(
+            self.database, source, self.release, COMMIT, revision
+        )
+        self.assertEqual(evidence["sha256"], operator_module.APPROVED_PRESERVATION_SHA256)
+        self.assertEqual(stat.S_IMODE(Path(evidence["path"]).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(Path(evidence["path"]).parent.stat().st_mode), 0o700)
+        source.write_bytes(source.read_bytes() + b"\n")
+        source.chmod(0o600)
+        with self.assertRaisesRegex(OperatorError, "not the approved"):
+            store_preservation_evidence(
+                self.database, source, self.release, COMMIT, revision
+            )
+
+    def test_config_gate_rejects_slots_and_unreviewed_commands(self):
+        cases = []
+        slots = self.config(strict=True)
+        slots["agents"]["codex-a"]["slots"] = 2
+        cases.append((slots, "exactly one slot"))
+        github = self.config(strict=True)
+        github["gh"] = "/old/release/scripts/runner/github.py"
+        cases.append((github, "selected immutable release"))
+        codex = self.config(strict=True)
+        codex["agents"]["codex-a"]["command"][0] = "/usr/bin/true"
+        cases.append((codex, "must invoke codex"))
+        claude = self.config(strict=True)
+        claude["agents"]["claude"]["command"][1] = "/tmp/claude_keychain.py"
+        cases.append((claude, "selected release"))
+        arbitrary_claude = self.config(strict=True)
+        arbitrary_claude["agents"]["claude"]["command"][3] = "/usr/bin/true"
+        cases.append((arbitrary_claude, "selected release"))
+        for value, message in cases:
+            with self.subTest(message=message):
+                self.config_path.write_text(json.dumps(value))
+                with self.assertRaisesRegex(OperatorError, message):
+                    preflight(
+                        self.database, self.config_path, self.release, self.preservation,
+                        COMMIT, self.registry.dispatch_control()["revision"],
+                        require_permissions_gate=False,
+                    )
+
+    def _downgrade_fixture_to_v3(self) -> int:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("DROP TRIGGER review_outcomes_are_append_only_update")
+            connection.execute("DROP TRIGGER review_outcomes_are_append_only_delete")
+            connection.execute("DROP TABLE review_outcomes")
+            connection.execute(
+                "UPDATE registry_metadata SET value='3' WHERE key='schema_version'"
+            )
+        harden_paths(self.database, self.config_path, self.release)
+        return self.registry.dispatch_control()["revision"]
+
+    def test_reviewed_registry_migration_and_restore(self):
+        revision = self._downgrade_fixture_to_v3()
+        observed = status(self.database)
+        self.assertEqual(observed["database_checks"]["schema_version"], "3")
+        self.assertEqual(observed["counts"]["review_outcomes"], 0)
+        with self.assertRaisesRegex(OperatorError, "schema version"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, revision, require_permissions_gate=False,
+            )
+        result = migrate_registry_v3_to_v4(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["schema_version"], 4)
+        backup = Path(result["backup"]["path"])
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+        self.assertEqual(status(self.database)["control"], observed["control"])
+        restored = restore_registry_v3_backup(
+            self.database, backup, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(restored["passed"])
+        self.assertEqual(status(self.database)["database_checks"]["schema_version"], "3")
+
+    def test_status_safely_observes_v3_without_control_metadata(self):
+        revision = self._downgrade_fixture_to_v3()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DELETE FROM registry_metadata WHERE key='control_schema_version'"
+            )
+        observed = status(self.database)
+        self.assertFalse(observed["control"]["available"])
+        self.assertEqual(observed["control"]["revision"], revision)
+        self.assertEqual(
+            observed["control"]["reason"], "CONTROL_SCHEMA_METADATA_MISSING"
+        )
+        with self.assertRaisesRegex(OperatorError, "schema version"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, revision, require_permissions_gate=False,
+            )
+        with self.assertRaisesRegex(OperatorError, "control schema"):
+            migrate_registry_v3_to_v4(
+                self.database, self.release, self.preservation, COMMIT, revision
+            )
+
+    def test_registry_migration_failure_rolls_back_atomic_transaction(self):
+        revision = self._downgrade_fixture_to_v3()
+        with mock.patch.object(
+            operator_module,
+            "V3_TO_V4_STATEMENTS",
+            (*operator_module.V3_TO_V4_STATEMENTS, "INVALID SQL"),
+        ):
+            with self.assertRaises(sqlite3.Error):
+                migrate_registry_v3_to_v4(
+                    self.database, self.release, self.preservation, COMMIT, revision
+                )
+        self.assertEqual(status(self.database)["database_checks"]["schema_version"], "3")
+        with sqlite3.connect(self.database) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='review_outcomes'"
+            ).fetchone())
+
+    def test_registry_post_verify_failure_restores_v3_backup(self):
+        revision = self._downgrade_fixture_to_v3()
+        original = operator_module.verify_preservation
+        calls = 0
+
+        def fail_after_commit(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OperatorError("injected post-verify failure")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(operator_module, "verify_preservation", fail_after_commit):
+            with self.assertRaisesRegex(OperatorError, "post-verify"):
+                migrate_registry_v3_to_v4(
+                    self.database, self.release, self.preservation, COMMIT, revision
+                )
+        self.assertEqual(status(self.database)["database_checks"]["schema_version"], "3")
 
     def test_canary_registration_gate_rejects_missing_capability(self):
         now = utc_now()
@@ -627,6 +852,15 @@ class OperatorFixture(unittest.TestCase):
         config = json.loads(self.config_path.read_text())
         self.assertEqual(config["registry_database"], str(self.database))
         self.assertEqual(config["usage_policy"]["hard_stop_percent"], 98)
+        self.assertEqual(set(config["agents"]), {"codex-a", "codex-b", "claude"})
+        self.assertTrue(all(value["slots"] == 1 for value in config["agents"].values()))
+        self.assertEqual(
+            config["gh"], str(self.release.resolve() / "scripts" / "runner" / "github.py")
+        )
+        self.assertEqual(
+            config["agents"]["claude"]["command"][1],
+            str(self.release.resolve() / "scripts" / "runner" / "claude_keychain.py"),
+        )
         self.assertEqual(stat.S_IMODE(self.database.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.database.stat().st_mode), 0o600)
         self.assertFalse(any(path.stat().st_mode & 0o222 for path in self.release.rglob("*")))

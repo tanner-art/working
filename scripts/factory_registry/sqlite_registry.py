@@ -186,7 +186,9 @@ class SQLiteRegistry:
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
-        self._preflight_schema_version()
+        existing_version = self._preflight_schema_version()
+        if existing_version == 3:
+            raise RegistryConflict("REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED")
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
@@ -3311,12 +3313,15 @@ class SQLiteRegistry:
                     "SELECT * FROM evidence ORDER BY recorded_at, id",
                     ("metadata_json",),
                 ),
-                review_outcomes=decoded_rows(
-                    "SELECT * FROM review_outcomes ORDER BY decided_at, id",
-                    (
-                        "findings_json", "changes_requested_json",
-                        "approval_evidence_ids_json",
-                    ),
+                review_outcomes=(
+                    decoded_rows(
+                        "SELECT * FROM review_outcomes ORDER BY decided_at, id",
+                        (
+                            "findings_json", "changes_requested_json",
+                            "approval_evidence_ids_json",
+                        ),
+                    )
+                    if "review_outcomes" in tables else ()
                 ),
                 usage_observations=decoded_rows(
                     "SELECT * FROM usage_observations ORDER BY observed_at, id",

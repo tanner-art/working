@@ -145,7 +145,11 @@ class LaunchdInstallerTests(unittest.TestCase):
         )
         self.assertEqual(
             {agent: value['slots'] for agent, value in example['agents'].items()},
-            {'codex-a': 2, 'codex-b': 1, 'claude': 2},
+            {'codex-a': 1, 'codex-b': 1, 'claude': 1},
+        )
+        self.assertEqual(
+            example['gh'],
+            '/absolute/path/to/reviewed-release/scripts/runner/github.py',
         )
         for agent in ('codex-a', 'codex-b'):
             for command_name in ('command', 'fallback_command'):
@@ -155,7 +159,10 @@ class LaunchdInstallerTests(unittest.TestCase):
         for command_name in ('command', 'fallback_command'):
             command = example['agents']['claude'][command_name]
             self.assertEqual(command[2:4], ['exec', '/absolute/path/to/claude'])
-            self.assertTrue(command[1].endswith('/scripts/runner/claude_keychain.py'))
+            self.assertEqual(
+                command[1],
+                '/absolute/path/to/reviewed-release/scripts/runner/claude_keychain.py',
+            )
             tools = command[command.index('--tools') + 1].split(',')
             self.assertNotIn('Agent', tools)
         self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', json.dumps(example))
