@@ -24,8 +24,10 @@ from scripts.factory_registry.operator import (  # noqa: E402
     OperatorError,
     canary_worker_gate,
     enable_live,
+    followup_review_worker_gate,
     migrate_registry_v3_to_v4,
     parse_canary_spec,
+    parse_followup_review_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
@@ -128,6 +130,14 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser("register-canary", help="Register one bounded implementation/review pair")
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "register-followup-review",
+        help="Register one bounded review retry after changes were requested",
+    )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
     command.add_argument("--observed-at")
@@ -270,6 +280,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.release_commit, args.expect_revision, args.canary_feature,
             mode=args.mode, dashboard_port=args.dashboard_port,
         ))
+    if args.command == "register-followup-review":
+        observed_at = args.observed_at or utc_now()
+        preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
+        review = parse_followup_review_spec(
+            _load_object(args.spec, "follow-up review spec")
+        )
+        registry = SQLiteRegistry(args.database)
+        worker_gate = followup_review_worker_gate(
+            registry.dispatch_snapshot(observed_at=observed_at),
+            review,
+            implementer_worker_id=registry.successful_package_worker(
+                review.dependency_ids[0]
+            ),
+            observed_at=observed_at,
+        )
+        revision = registry.register_followup_review(
+            review,
+            expected_revision=args.expect_revision,
+            recorded_at=observed_at,
+        )
+        return {
+            "kind": "threadline-factory-register-followup-review",
+            "passed": True,
+            "review_package_id": review.id,
+            "target_package_id": review.dependency_ids[0],
+            "previous_revision": args.expect_revision,
+            "revision": revision,
+            "worker_gate": worker_gate,
+        }
     if args.command == "stop":
         return dict(stop(args.database, args.reason))
     if args.command == "reconcile":

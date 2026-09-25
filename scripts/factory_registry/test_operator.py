@@ -16,16 +16,27 @@ from io import StringIO
 from pathlib import Path
 
 import scripts.factory_registry.operator as operator_module
-from scripts.factory_registry.models import Feature, Lane, TaskStatus
+from scripts.factory_registry.models import (
+    Evidence,
+    Feature,
+    Lane,
+    PackageKind,
+    ReviewOutcome,
+    ReviewOutcomeState,
+    TaskStatus,
+    WorkPackage,
+)
 from scripts.factory_registry.operator import (
     APPROVED_PRESERVATION_SHA256,
     OperatorError,
     REQUIRED_RELEASE_FILES,
     canary_worker_gate,
     enable_live,
+    followup_review_worker_gate,
     harden_paths,
     migrate_registry_v3_to_v4,
     parse_canary_spec,
+    parse_followup_review_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
@@ -328,6 +339,35 @@ class OperatorFixture(unittest.TestCase):
                 "capacity_size": "VERY_SMALL", "capacity_risk": "BOUNDED",
                 "dependency_ids": ["TASK-201"], "queue_contract": review_contract,
             },
+        }
+
+    def followup_review(self):
+        contract = {
+            "task": "TASK-203",
+            "paths": ["docs/factory/A5_CANARY_REVIEW_RETRY.md"],
+            "instructions": "Independently re-review the preserved canary implementation.",
+            "depends_on": [201],
+            "lane": "ASSURANCE",
+            "kind": "REVIEW",
+            "capacity_size": "VERY_SMALL",
+            "capacity_risk": "BOUNDED",
+        }
+        return {
+            "review": {
+                "id": "TASK-203",
+                "feature_id": "A5-CANARY",
+                "title": "Canary follow-up review",
+                "category": "ASSURANCE",
+                "lane": "ASSURANCE",
+                "kind": "REVIEW",
+                "required_capabilities": ["independent-review"],
+                "priority": 98,
+                "acceptance_criteria": ["Reviewer differs from implementer"],
+                "capacity_size": "VERY_SMALL",
+                "capacity_risk": "BOUNDED",
+                "dependency_ids": ["TASK-201"],
+                "queue_contract": contract,
+            }
         }
 
     def test_telemetry_canary_and_worker_gate_are_revision_checked(self):
@@ -821,6 +861,25 @@ class OperatorFixture(unittest.TestCase):
                 require_workers=True, canary_feature_id="A5-CANARY",
             )
 
+    def test_worker_gate_rejects_extra_same_feature_dispatchable_package(self):
+        now = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.sync_workers(now)
+        self._pause_canary_after_successful_implementation(observed_at=now)
+        self.registry.register_work_package(WorkPackage(
+            "TASK-203", "A5-CANARY", "Unexpected canary test", "OPERATIONS",
+            Lane.PLATFORM, ("documentation",), 98,
+            ("This package must not dispatch during the review canary.",),
+            status=TaskStatus.READY, kind=PackageKind.TEST,
+        ))
+
+        with self.assertRaisesRegex(OperatorError, "REVIEW packages only"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                observed_at=utc_now(), require_permissions_gate=False,
+                require_workers=True, canary_feature_id="A5-CANARY",
+            )
+
     def test_status_cli_emits_structured_evidence(self):
         output = StringIO()
         with redirect_stdout(output):
@@ -971,6 +1030,171 @@ class OperatorFixture(unittest.TestCase):
         snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
         self.assertEqual(snapshot.review_outcomes[0]["state"], "APPROVED")
         self.assertEqual(snapshot.evidence[0]["metadata"]["attempt_id"], "review-attempt")
+        self.assertEqual(
+            {
+                item["id"]: item["status"] for item in snapshot.work_packages
+                if item["feature_id"] == "A5-CANARY"
+            },
+            {"TASK-201": "DONE", "TASK-202": "DONE"},
+        )
+        self.assertEqual(
+            next(item for item in snapshot.features if item["id"] == "A5-CANARY")["status"],
+            "DONE",
+        )
+
+    def test_changes_requested_can_register_fresh_review_and_approval_finishes_feature(self):
+        now = datetime.now(timezone.utc) - timedelta(minutes=5)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature,
+            implementation,
+            review,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=(now + timedelta(seconds=1)).isoformat(),
+            reason="fixture lifecycle",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", "codex-a",
+            acquired_at=(now + timedelta(seconds=2)).isoformat(),
+            expires_at=(now + timedelta(minutes=1)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "implementation-attempt", package_id="TASK-201", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=(now + timedelta(seconds=3)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "implementation-attempt", ended_at=(now + timedelta(seconds=4)).isoformat(),
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
+            reason="implementation ready for review",
+        )
+        self.registry.acquire_lease(
+            "TASK-202", "claude",
+            acquired_at=(now + timedelta(seconds=5)).isoformat(),
+            expires_at=(now + timedelta(minutes=1)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "review-attempt-1", package_id="TASK-202", worker_id="claude",
+            runner_pid=os.getpid(), started_at=(now + timedelta(seconds=6)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "review-attempt-1", ended_at=(now + timedelta(seconds=8)).isoformat(),
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
+            reason="first review completed",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=(now + timedelta(seconds=9)).isoformat(), reason="review decision",
+        )
+        RunnerRegistryControl(self.database).finalize_paused(reason="ownership drained")
+        followup = parse_followup_review_spec(self.followup_review())
+        with self.assertRaisesRegex(
+            RegistryConflict, "CHANGES_REQUESTED_REVIEW_REQUIRED"
+        ):
+            self.registry.register_followup_review(
+                followup,
+                expected_revision=self.registry.dispatch_control()["revision"],
+                recorded_at=(now + timedelta(seconds=10)).isoformat(),
+            )
+        self.registry.record_review_outcome(
+            ReviewOutcome(
+                id="review-outcome-1", review_package_id="TASK-202",
+                target_package_id="TASK-201", implementer_worker_id="codex-a",
+                reviewer_worker_id="claude",
+                requested_at=(now + timedelta(seconds=5)).isoformat(),
+                decided_at=(now + timedelta(seconds=9)).isoformat(),
+                state=ReviewOutcomeState.CHANGES_REQUESTED,
+                findings=("Review targeted the wrong pull request.",),
+                changes_requested=("Run a fresh review against the bound canary commit.",),
+            ),
+            evidence=Evidence(
+                "review-evidence-1", "TASK-202", "review",
+                "https://example.invalid/review-1", "Wrong target recorded safely.",
+                (now + timedelta(seconds=8)).isoformat(),
+                {"attempt_id": "review-attempt-1"},
+            ),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+
+        gate = followup_review_worker_gate(
+            self.registry.dispatch_snapshot(
+                observed_at=(now + timedelta(seconds=10)).isoformat()
+            ),
+            followup,
+            implementer_worker_id=self.registry.successful_package_worker("TASK-201"),
+            observed_at=(now + timedelta(seconds=10)).isoformat(),
+        )
+        self.assertEqual(gate["independent_pairs"], [["codex-a", "claude"]])
+        self.registry.register_followup_review(
+            followup,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=(now + timedelta(seconds=10)).isoformat(),
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=(now + timedelta(seconds=11)).isoformat(),
+            reason="fresh independent review",
+        )
+        self.registry.acquire_lease(
+            "TASK-203", "claude",
+            acquired_at=(now + timedelta(seconds=12)).isoformat(),
+            expires_at=(now + timedelta(minutes=2)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "review-attempt-2", package_id="TASK-203", worker_id="claude",
+            runner_pid=os.getpid(), started_at=(now + timedelta(seconds=13)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "review-attempt-2", ended_at=(now + timedelta(seconds=15)).isoformat(),
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
+            reason="fresh review completed",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=(now + timedelta(seconds=16)).isoformat(), reason="approval decision",
+        )
+        RunnerRegistryControl(self.database).finalize_paused(reason="ownership drained")
+        self.registry.record_review_outcome(
+            ReviewOutcome(
+                id="review-outcome-2", review_package_id="TASK-203",
+                target_package_id="TASK-201", implementer_worker_id="codex-a",
+                reviewer_worker_id="claude",
+                requested_at=(now + timedelta(seconds=12)).isoformat(),
+                decided_at=(now + timedelta(seconds=16)).isoformat(),
+                state=ReviewOutcomeState.APPROVED,
+                findings=("Bound canary commit passes review.",),
+                approval_evidence_ids=("review-evidence-2",),
+            ),
+            evidence=Evidence(
+                "review-evidence-2", "TASK-203", "review",
+                "https://example.invalid/review-2", "Fresh bound approval.",
+                (now + timedelta(seconds=15)).isoformat(),
+                {"attempt_id": "review-attempt-2"},
+            ),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
+        self.assertEqual(
+            {
+                item["id"]: item["status"] for item in snapshot.work_packages
+                if item["feature_id"] == "A5-CANARY"
+            },
+            {"TASK-201": "DONE", "TASK-202": "DONE", "TASK-203": "DONE"},
+        )
+        self.assertEqual(
+            next(item for item in snapshot.features if item["id"] == "A5-CANARY")["status"],
+            "DONE",
+        )
 
     def test_requeue_preserves_failed_attempt_and_requires_current_revision(self):
         now = utc_now()

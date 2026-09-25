@@ -1345,12 +1345,31 @@ def _worker_gate(
             value for value in snapshot.work_packages
             if value.get("feature_id") == canary_feature_id
         ]
-        if len(packages) != 2:
-            raise OperatorError("canary feature must contain exactly two packages")
-        implementation = next((value for value in packages if value.get("kind") == "PARENT"), None)
-        review = next((value for value in packages if value.get("kind") == "REVIEW"), None)
-        if implementation is None or review is None:
-            raise OperatorError("canary feature requires one PARENT and one REVIEW package")
+        implementations = [value for value in packages if value.get("kind") == "PARENT"]
+        invalid_packages = [
+            value for value in packages
+            if value.get("kind") not in {"PARENT", "REVIEW"}
+        ]
+        ready_reviews = [
+            value for value in packages
+            if value.get("kind") == "REVIEW" and value.get("status") == "READY"
+        ]
+        active_reviews = [
+            value for value in packages
+            if value.get("kind") == "REVIEW" and value.get("status") == "ACTIVE"
+        ]
+        if (
+            len(implementations) != 1
+            or len(ready_reviews) != 1
+            or active_reviews
+            or invalid_packages
+        ):
+            raise OperatorError(
+                "canary feature requires one PARENT, REVIEW packages only, "
+                "and exactly one dispatchable READY REVIEW package"
+            )
+        implementation = implementations[0]
+        review = ready_reviews[0]
         canary_ids = [str(implementation["id"]), str(review["id"])]
         unrelated = [
             str(value.get("id")) for value in snapshot.work_packages
@@ -1459,6 +1478,56 @@ def canary_worker_gate(
         usage_observations=snapshot.usage_observations,
     )
     return _worker_gate(candidate, canary_feature_id=implementation.feature_id)
+
+
+def followup_review_worker_gate(
+    snapshot: DispatchSnapshot,
+    review: WorkPackage,
+    *,
+    implementer_worker_id: str,
+    observed_at: str,
+) -> Mapping[str, Any]:
+    """Evaluate an unregistered follow-up review without mutating the Registry."""
+    candidate = DispatchSnapshot(
+        revision=snapshot.revision,
+        observed_at=snapshot.observed_at,
+        active_parent_limit=snapshot.active_parent_limit,
+        orchestra_reserve_percent=snapshot.orchestra_reserve_percent,
+        features=snapshot.features,
+        work_packages=(
+            *snapshot.work_packages,
+            {
+                "id": review.id,
+                "feature_id": review.feature_id,
+                "title": review.title,
+                "category": review.category,
+                "lane": review.lane.value,
+                "required_capabilities": list(review.required_capabilities),
+                "priority": review.priority,
+                "acceptance_criteria": list(review.acceptance_criteria),
+                "status": review.status.value,
+                "kind": review.kind.value,
+                "capacity_size": review.capacity_size.value,
+                "capacity_risk": review.capacity_risk.value,
+                "provider_diagnostics": dict(review.provider_diagnostics),
+                "usage_consumption": dict(review.usage_consumption),
+                "created_at": observed_at,
+                "ready_at": observed_at,
+            },
+        ),
+        dependencies=(
+            *snapshot.dependencies,
+            {"package_id": review.id, "dependency_id": review.dependency_ids[0]},
+        ),
+        workers=snapshot.workers,
+        active_leases=snapshot.active_leases,
+        usage_observations=snapshot.usage_observations,
+    )
+    return _worker_gate(
+        candidate,
+        canary_feature_id=review.feature_id,
+        review_implementer_worker=lambda _package_id: implementer_worker_id,
+    )
 
 
 def preflight(
@@ -1712,6 +1781,60 @@ def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, W
     if review_contract.get("depends_on") != [implementation_issue]:
         raise OperatorError("review queue contract must depend on the implementation issue")
     return feature, implementation, review
+
+
+def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
+    sensitive = _sensitive_paths(value)
+    if sensitive:
+        raise OperatorError(
+            "follow-up review spec contains secret-shaped fields: " + ",".join(sensitive)
+        )
+    raw_review = value.get("review")
+    if not isinstance(raw_review, Mapping):
+        raise OperatorError("follow-up review spec requires a review object")
+    contract = raw_review.get("queue_contract")
+    if not isinstance(contract, Mapping):
+        raise OperatorError("follow-up review requires a normalized queue_contract")
+    review = _package(raw_review, queue_contract=contract)
+    expected = {
+        "task": review.id,
+        "lane": review.lane.value,
+        "kind": review.kind.value,
+        "capacity_size": review.capacity_size.value,
+        "capacity_risk": review.capacity_risk.value,
+    }
+    mismatched = [
+        key for key, expected_value in expected.items()
+        if contract.get(key) != expected_value
+    ]
+    paths = contract.get("paths")
+    if mismatched:
+        raise OperatorError("queue contract/package mismatch: " + ",".join(mismatched))
+    dependency_id = review.dependency_ids[0] if len(review.dependency_ids) == 1 else ""
+    dependency_task_number = (
+        int(dependency_id.removeprefix("TASK-"))
+        if re.fullmatch(r"TASK-\d+", dependency_id)
+        else None
+    )
+    if (
+        review.kind is not PackageKind.REVIEW
+        or review.lane is not Lane.ASSURANCE
+        or len(review.dependency_ids) != 1
+        or contract.get("depends_on") != [dependency_task_number]
+        or not re.fullmatch(r"TASK-\d+", review.id)
+        or not isinstance(paths, list)
+        or not paths
+        or any(
+            not isinstance(path, str)
+            or path.startswith(("/", "."))
+            or ".." in Path(path).parts
+            for path in paths
+        )
+        or not isinstance(contract.get("instructions"), str)
+        or not contract["instructions"].strip()
+    ):
+        raise OperatorError("follow-up review spec is invalid")
+    return review
 
 
 def parse_review_outcome_spec(

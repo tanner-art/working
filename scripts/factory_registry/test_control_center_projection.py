@@ -159,6 +159,13 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 "UPDATE registry_metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'"
             )
 
+    def _mark_review_complete(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE work_packages SET status='VERIFY_REVIEW' "
+                "WHERE id IN ('PACKAGE-1', 'REVIEW-1')"
+            )
+
     def _logical_state(self) -> dict[str, object]:
         with sqlite3.connect(self.database) as connection:
             tables = [
@@ -193,6 +200,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.assertEqual(projection["failures"][0]["code"], "CI_FAILURE")
 
     def test_explicit_review_outcome_survives_completed_review_with_typed_evidence(self) -> None:
+        self._mark_review_complete()
         self.registry.record_evidence(Evidence(
             "review-approval", "REVIEW-1", "review", "https://example.test/review",
             "Independent approval record", "2026-09-24T19:54:00Z",
@@ -251,6 +259,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_review_outcome_rejects_forged_implementer_and_reviewer_provenance(self) -> None:
+        self._mark_review_complete()
         self.registry.register_worker(Worker(
             "agent-a", "Agent A", ("platform",), (Lane.PLATFORM,), usage_state="GREEN",
         ))
@@ -301,6 +310,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_review_outcome_rejects_evidence_not_bound_to_reviewer_attempt(self) -> None:
+        self._mark_review_complete()
         self.registry.record_evidence(Evidence(
             "forged-review-evidence", "REVIEW-1", "review", None,
             "Claims approval but names the implementation attempt",
@@ -316,6 +326,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_review_outcome_requires_reviewer_owned_review_attempt(self) -> None:
+        self._mark_review_complete()
         self.registry.register_worker(Worker(
             "agent-c", "Agent C", ("review",), (Lane.ASSURANCE,), usage_state="GREEN",
         ))
@@ -329,6 +340,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_review_outcome_rejects_target_attempt_finishing_after_review_request(self) -> None:
+        self._mark_review_complete()
         with sqlite3.connect(self.database) as connection:
             connection.execute(
                 """INSERT INTO attempts
@@ -351,6 +363,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_review_outcome_rejects_active_target_attempt_at_review_request(self) -> None:
+        self._mark_review_complete()
         with sqlite3.connect(self.database) as connection:
             connection.execute(
                 """INSERT INTO attempts
@@ -372,6 +385,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             ))
 
     def test_projection_rejects_target_attempts_overlapping_recorded_review(self) -> None:
+        self._mark_review_complete()
         self.registry.record_evidence(Evidence(
             "review-overlap-evidence", "REVIEW-1", "review", None,
             "Bound reviewer evidence", "2026-09-24T19:54:00Z",

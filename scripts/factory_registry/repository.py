@@ -75,6 +75,14 @@ class Registry(Protocol):
         recorded_at: str,
     ) -> int: ...
 
+    def register_followup_review(
+        self,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
     def requeue_failed_package(
         self,
         package_id: str,
@@ -85,6 +93,8 @@ class Registry(Protocol):
     ) -> int: ...
 
     def review_implementer_worker(self, review_package_id: str) -> str: ...
+
+    def successful_package_worker(self, package_id: str) -> str: ...
 
     def acquire_lease(
         self,

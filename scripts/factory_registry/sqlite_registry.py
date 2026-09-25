@@ -1577,6 +1577,97 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def register_followup_review(
+        self,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int:
+        """Register one review retry after an evidence-bound changes request."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        if (
+            review.kind != PackageKind.REVIEW
+            or review.status != TaskStatus.READY
+            or review.lane != Lane.ASSURANCE
+            or len(review.dependency_ids) != 1
+            or not {value.lower() for value in review.required_capabilities}
+            & {"review", "independent-review"}
+        ):
+            raise RegistryConflict("INVALID_FOLLOWUP_REVIEW")
+        target_id = review.dependency_ids[0]
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if (
+                    control is None
+                    or control["dispatch_mode"] != "PAUSED"
+                    or not control["kill_switch_engaged"]
+                ):
+                    raise RegistryConflict("FOLLOWUP_REVIEW_REQUIRES_PAUSED")
+                if connection.execute(
+                    "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                ).fetchone() or connection.execute(
+                    "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                ).fetchone() or connection.execute(
+                    "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1"
+                ).fetchone():
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                if connection.execute(
+                    "SELECT 1 FROM work_packages WHERE status IN ('READY', 'ACTIVE') LIMIT 1"
+                ).fetchone():
+                    raise RegistryConflict("CANARY_NOT_EXCLUSIVE")
+                target = connection.execute(
+                    "SELECT feature_id, kind, status FROM work_packages WHERE id=?",
+                    (target_id,),
+                ).fetchone()
+                if target is None:
+                    raise RegistryNotFound(f"work package {target_id}")
+                if (
+                    target["feature_id"] != review.feature_id
+                    or target["kind"] != PackageKind.PARENT.value
+                    or target["status"] != TaskStatus.VERIFY_REVIEW.value
+                ):
+                    raise RegistryConflict("FOLLOWUP_REVIEW_TARGET_INVALID")
+                prior = connection.execute(
+                    """SELECT 1 FROM review_outcomes
+                       WHERE target_package_id=? AND state='CHANGES_REQUESTED'
+                       LIMIT 1""",
+                    (target_id,),
+                ).fetchone()
+                if prior is None:
+                    raise RegistryConflict("CHANGES_REQUESTED_REVIEW_REQUIRED")
+                self._insert_package(connection, review, recorded_at)
+                connection.execute(
+                    "INSERT INTO task_dependencies(package_id, dependency_id) VALUES (?, ?)",
+                    (review.id, target_id),
+                )
+                self._insert_event(
+                    connection,
+                    "FOLLOWUP_REVIEW_REGISTERED",
+                    recorded_at,
+                    review.id,
+                    None,
+                    None,
+                    {"feature_id": review.feature_id, "target_package_id": target_id},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict(
+                    "FOLLOWUP_REVIEW_REGISTRATION_CONFLICT", str(error)
+                ) from error
+            except Exception:
+                connection.rollback()
+                raise
+
     def requeue_failed_package(
         self,
         package_id: str,
@@ -1663,15 +1754,25 @@ class SQLiteRegistry:
             ).fetchall()
             if len(targets) != 1:
                 raise RegistryConflict("REVIEW_TARGET_MISMATCH")
+            target_id = str(targets[0]["dependency_id"])
+        return self.successful_package_worker(target_id)
+
+    def successful_package_worker(self, package_id: str) -> str:
+        """Return the worker from the latest completed successful package attempt."""
+        with self._connection() as connection:
+            if connection.execute(
+                "SELECT 1 FROM work_packages WHERE id=?", (package_id,)
+            ).fetchone() is None:
+                raise RegistryNotFound(f"work package {package_id}")
             attempt = connection.execute(
                 """SELECT worker_id FROM attempts
                    WHERE package_id=? AND outcome='SUCCEEDED'
                      AND ended_at IS NOT NULL AND worker_id IS NOT NULL
                    ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
-                (targets[0]["dependency_id"],),
+                (package_id,),
             ).fetchone()
         if attempt is None:
-            raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+            raise RegistryConflict("SUCCESSFUL_PACKAGE_PROVENANCE_REQUIRED")
         return str(attempt["worker_id"])
 
     @staticmethod
@@ -2107,10 +2208,12 @@ class SQLiteRegistry:
                         ),
                     )
                 review_package = connection.execute(
-                    "SELECT kind FROM work_packages WHERE id=?", (outcome.review_package_id,)
+                    "SELECT feature_id, kind, status FROM work_packages WHERE id=?",
+                    (outcome.review_package_id,),
                 ).fetchone()
                 target_package = connection.execute(
-                    "SELECT 1 FROM work_packages WHERE id=?", (outcome.target_package_id,)
+                    "SELECT feature_id, status FROM work_packages WHERE id=?",
+                    (outcome.target_package_id,),
                 ).fetchone()
                 if review_package is None:
                     raise RegistryNotFound(f"work package {outcome.review_package_id}")
@@ -2118,6 +2221,12 @@ class SQLiteRegistry:
                     raise RegistryNotFound(f"work package {outcome.target_package_id}")
                 if review_package["kind"] != "REVIEW":
                     raise RegistryConflict("REVIEW_PACKAGE_REQUIRED")
+                if (
+                    review_package["status"] != TaskStatus.VERIFY_REVIEW.value
+                    or target_package["status"] != TaskStatus.VERIFY_REVIEW.value
+                    or review_package["feature_id"] != target_package["feature_id"]
+                ):
+                    raise RegistryConflict("REVIEW_OUTCOME_STATUS_INVALID")
                 dependency = connection.execute(
                     "SELECT 1 FROM task_dependencies WHERE package_id=? AND dependency_id=?",
                     (outcome.review_package_id, outcome.target_package_id),
@@ -2216,6 +2325,33 @@ class SQLiteRegistry:
                         _json(outcome.approval_evidence_ids),
                     ),
                 )
+                connection.execute(
+                    "UPDATE work_packages SET status='DONE', updated_at=? WHERE id=?",
+                    (decided_at, outcome.review_package_id),
+                )
+                if outcome.state is ReviewOutcomeState.APPROVED:
+                    connection.execute(
+                        "UPDATE work_packages SET status='DONE', updated_at=? WHERE id=?",
+                        (decided_at, outcome.target_package_id),
+                    )
+                    connection.execute(
+                        """UPDATE work_packages SET status='DONE', updated_at=?
+                           WHERE kind='REVIEW' AND status='VERIFY_REVIEW'
+                             AND id IN (
+                               SELECT review_package_id FROM review_outcomes
+                               WHERE target_package_id=?
+                             )""",
+                        (decided_at, outcome.target_package_id),
+                    )
+                    remaining = connection.execute(
+                        "SELECT 1 FROM work_packages WHERE feature_id=? AND status!='DONE' LIMIT 1",
+                        (review_package["feature_id"],),
+                    ).fetchone()
+                    if remaining is None:
+                        connection.execute(
+                            "UPDATE features SET status='DONE', updated_at=? WHERE id=?",
+                            (decided_at, review_package["feature_id"]),
+                        )
                 self._insert_event(
                     connection, "REVIEW_OUTCOME_RECORDED", decided_at,
                     outcome.target_package_id, outcome.reviewer_worker_id, None,
