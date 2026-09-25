@@ -1,9 +1,11 @@
-export type AppSurface = 'app' | 'settings' | 'landing-preview' | 'tutorial-preview' | 'dashboard'
-
-export function appSurfaceForPath(pathname: string): AppSurface {
-  if (pathname === '/dashboard') return 'dashboard'
-  if (pathname === '/settings') return 'settings'
-  if (pathname === '/preview/landing') return 'landing-preview'
-  if (pathname === '/preview/tutorial') return 'tutorial-preview'
-  return 'app'
-}
+// Compatibility entry point for existing route consumers. Surface discovery
+// and validation live behind the public composition boundary.
+export {
+  appSurfaceForPath,
+  appSurfaceDefinitionForPath,
+  appSurfaceRegistry,
+  defaultAppSurface,
+  type AppSurface,
+  type AppSurfaceDefinition,
+  type SurfacePersistence,
+} from './surfaces'

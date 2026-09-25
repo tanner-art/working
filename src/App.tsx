@@ -26,7 +26,7 @@ import { bankFolders, bankObjects, reviewObjects, canvasObjectDraft, confirmObje
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
-import { appSurfaceForPath } from './appRoutes'
+import { appSurfaceDefinitionForPath } from './surfaces'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 
@@ -54,7 +54,7 @@ type CloudWorkspace = { session: AccountSession; state: AppState; data: AccountD
 type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
-  const surface = appSurfaceForPath(window.location.pathname)
+  const surface = appSurfaceDefinitionForPath(window.location.pathname)
   const [landingDismissed, setLandingDismissed] = useState(() => {
     try { return localStorage.getItem(BETA_LANDING_DISMISSED_KEY) === 'dismissed' } catch { return false }
   })
@@ -87,8 +87,8 @@ export function App() {
   }
   const landingInput = readBetaLandingInput(localStorage, account.state)
   const landingVisibility = betaLandingVisibility({ ...landingInput, dismissed: landingDismissed || landingInput.dismissed })
-  if (surface === 'tutorial-preview') return <TutorialPreview />
-  if (surface === 'landing-preview') return <BetaLanding preview state={account.state} onContinue={() => window.location.assign('/preview/tutorial')} />
+  if (surface.id === 'tutorial-preview') return <TutorialPreview />
+  if (surface.id === 'landing-preview') return <BetaLanding preview state={account.state} onContinue={() => window.location.assign('/preview/tutorial')} />
   if (landingVisibility === 'loading') return <main className="beta-loading" role="status"><p>Checking your account…</p></main>
   if (landingVisibility === 'landing') return <BetaLanding state={account.state} onContinue={() => {
     try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Continue remains available for this visit. */ }
@@ -172,7 +172,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   }
 // The secondary home is reviewable by URL without changing anyone's saved/default start page.
   const [view, setView] = useState<View>(() => previewStartView(window.location.search,
-    appSurfaceForPath(window.location.pathname) === 'settings' ? 'settings' : preferences.value.startPage))
+    appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
