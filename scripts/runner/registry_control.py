@@ -7,6 +7,8 @@ authoritative Registry and attempt/process provenance is persisted there.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import pathlib
 import signal
@@ -27,6 +29,16 @@ from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E40
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def queue_contract_digest(value) -> str:
+    """Hash the normalized queue body without persisting its instructions."""
+    if not isinstance(value, dict):
+        raise ValueError("queue contract must be an object")
+    encoded = json.dumps(
+        value, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def terminate_recorded_process_group(pgid: int, timeout: float = 10) -> None:
@@ -72,7 +84,13 @@ class RunnerRegistryControl:
             raise ValueError("registry_database must be a non-empty absolute path")
         return cls(pathlib.Path(database))
 
-    def pre_claim(self, package_id: str | None = None, worker_id: str | None = None) -> int:
+    def pre_claim(
+        self,
+        package_id: str | None = None,
+        worker_id: str | None = None,
+        *,
+        task_contract=None,
+    ) -> int:
         """Return a revision only when the requested Registry pair is dispatchable."""
         if package_id is None and worker_id is None:
             return self.registry.require_live_dispatch()
@@ -80,6 +98,18 @@ class RunnerRegistryControl:
             raise ValueError("package_id and worker_id are required together")
         observed_at = utc_now()
         snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        if task_contract is not None:
+            package = next(
+                (value for value in snapshot.work_packages if value.get("id") == package_id),
+                None,
+            )
+            expected = (
+                package.get("provider_diagnostics", {}).get("queue_contract_sha256")
+                if package is not None else None
+            )
+            actual = queue_contract_digest(task_contract)
+            if not isinstance(expected, str) or expected != actual:
+                raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
         decision = decide_shadow(snapshot)
         assignment = (package_id, worker_id)
         eligible = {

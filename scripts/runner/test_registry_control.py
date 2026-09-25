@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from registry_control import RunnerRegistryControl
+from registry_control import RunnerRegistryControl, queue_contract_digest
 from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry import (
     Feature,
@@ -103,6 +103,35 @@ class RunnerRegistryControlTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RegistryConflict, "PAIR_NOT_FOUND"):
                 control.pre_claim("TASK-1", "worker-a")
+
+    def test_pre_claim_pins_the_normalized_queue_contract(self):
+        body = {
+            "task": "TASK-1", "paths": ["docs/canary.md"],
+            "instructions": "Write the canary.", "depends_on": [],
+            "lane": "PLATFORM", "kind": "PARENT",
+            "capacity_size": "VERY_SMALL", "capacity_risk": "BOUNDED",
+        }
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=({
+                "id": "TASK-1",
+                "provider_diagnostics": {
+                    "queue_contract_sha256": queue_contract_digest(body),
+                },
+            },),
+        )
+        control.registry.require_live_dispatch.return_value = 17
+        eligible = SimpleNamespace(package_id="TASK-1", worker_id="worker-a")
+        decision = SimpleNamespace(proposed_assignments=(eligible,), pair_evaluations=())
+        with patch("registry_control.decide_shadow", return_value=decision):
+            self.assertEqual(
+                control.pre_claim("TASK-1", "worker-a", task_contract=body), 17
+            )
+            changed = dict(body, instructions="Different work")
+            with self.assertRaisesRegex(RegistryConflict, "QUEUE_CONTRACT_MISMATCH"):
+                control.pre_claim("TASK-1", "worker-a", task_contract=changed)
 
     def test_claim_package_pins_dispatch_revision(self):
         control = RunnerRegistryControl(self.database)

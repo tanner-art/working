@@ -14,6 +14,11 @@ Paths are exact files, not directories or globs. Dependencies are issue numbers 
 
 ## Setup and operation
 
+For Registry cutover, dry-run loading, worker telemetry, canary registration,
+LIVE enablement, stop/reconciliation, and failed-attempt recovery, follow the
+reviewed [Factory Registry operator runbook](../../docs/factory/OPERATOR_CLI.md).
+Do not use the generic installer to bypass those gates.
+
 Copy and edit `config.example.json` for the host. Every path, repository owner, account name, executable, and model name in that file is a placeholder; replace it before use. `registry_database` enables the authoritative Registry path; live runners then require an eligible Registry package/worker pair and a LIVE revision before claiming, acquire a revision-pinned lease, and reserve the attempt. `registry_renew_interval_seconds` must be shorter than `registry_lease_seconds`; the main runner thread renews ownership during setup, provider work, validation, push, and PR creation. Provider code waits behind an exec gate until its PID/PGID is durably bound. Keep credentials in the installed CLI’s authenticated profile or host keychain, never in this JSON file. `github.py` uses the existing Git credential for GitHub only, with no token file or logging. Headless Codex follows its workspace sandbox; Claude has only file tools and the runner performs validation. Agent CLI auth must already exist.
 
 Each agent needs `provider`, `account`, `model`, and `command`. Legacy

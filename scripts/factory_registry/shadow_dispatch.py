@@ -536,7 +536,13 @@ def _package_reasons(
         dependency = package_by_id.get(dependency_id)
         if dependency is None:
             reasons.append(_reason(RejectionCode.DEPENDENCY_MISSING, dependency_id))
-        elif dependency.get("status") != "DONE":
+        elif (
+            package.get("kind") == "REVIEW"
+            and dependency.get("status") not in {"VERIFY_REVIEW", "DONE"}
+        ) or (
+            package.get("kind") != "REVIEW"
+            and dependency.get("status") != "DONE"
+        ):
             reasons.append(
                 _reason(
                     RejectionCode.DEPENDENCY_BLOCKED,

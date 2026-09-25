@@ -495,7 +495,7 @@ class LifecycleTests(unittest.TestCase):
             snapshot = (patch.object(runner, 'write_queue_snapshot', side_effect=OSError('secret snapshot output'))
                         if snapshot_failure else contextlib.nullcontext())
             registry = Mock()
-            registry.pre_claim.side_effect = lambda *args: (
+            registry.pre_claim.side_effect = lambda *args, **kwargs: (
                 calls.append(['registry', 'pre-claim']) or 1
             )
             registry.claim_package.side_effect = lambda *args, **kwargs: (

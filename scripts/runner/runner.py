@@ -790,7 +790,7 @@ def main():
                                   'usage_state': usage_decision['state']}))
                 continue
             registry_revision = (
-                registry_control.pre_claim(body['task'], lane)
+                registry_control.pre_claim(body['task'], lane, task_contract=body)
                 if registry_control is not None else None
             )
             data = claim(state, issue, agent, body, args.retry, stale_claim_seconds,

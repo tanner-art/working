@@ -260,7 +260,7 @@ def bootout(label, uid, run=subprocess.run):
 
 
 def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
-                     run=subprocess.run, uid=None):
+                     run=subprocess.run, uid=None, after_reconcile=None):
     """Replace live definitions with reviewed dry-run plists without live rollback."""
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
@@ -322,6 +322,13 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
         raise RuntimeError(
             'runtime reconciliation incomplete: ' + ', '.join(unresolved)
         )
+
+    # Operators may need to commit a prepared, atomic configuration migration
+    # after live ownership is drained but before any replacement definition is
+    # written or bootstrapped.  A failure here deliberately leaves the
+    # Registry STOPPING and the old definitions unloaded.
+    if after_reconcile is not None:
+        after_reconcile()
 
     for label, data in plan:
         atomic_write_plist(destinations[label], data)

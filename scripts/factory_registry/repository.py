@@ -55,6 +55,34 @@ class Registry(Protocol):
 
     def register_worker(self, worker: Worker) -> None: ...
 
+    def sync_worker_telemetry(
+        self,
+        worker: Worker,
+        usage_observations: Sequence[Mapping[str, Any]],
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
+    def register_canary_bundle(
+        self,
+        feature: Feature,
+        implementation: WorkPackage,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
+    def requeue_failed_package(
+        self,
+        package_id: str,
+        *,
+        expected_revision: int,
+        changed_at: str,
+        reason: str,
+    ) -> int: ...
+
     def acquire_lease(
         self,
         package_id: str,

@@ -473,6 +473,43 @@ class LaunchdInstallerTests(unittest.TestCase):
             self.assertTrue((result['backup_dir'] / lane_destination.name).exists())
             self.assertFalse(lane_destination.exists())
 
+    def test_pause_configuration_callback_runs_after_reconcile_and_before_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            live_plan = self.plan(state, mode='serial', live=True)
+            dry_plan = self.plan(state, mode='serial', live=False)
+            destination = installer.label_path(installer.SERIAL_LABEL, home)
+            installer.atomic_write_plist(destination, live_plan[0][1])
+            original = destination.read_bytes()
+            events = []
+
+            class Control:
+                def engage_stop(self, reason):
+                    events.append('stop')
+                def reconcile_stopping_runtimes(self):
+                    events.append('reconcile')
+                    return {'resolved': (), 'unresolved': ()}
+                def finalize_paused(self, *, reason):
+                    events.append('paused')
+
+            def run(args, **kwargs):
+                return subprocess.CompletedProcess(args, 0 if args[1] != 'print' else 1)
+
+            def fail_configuration():
+                events.append('configuration')
+                self.assertEqual(destination.read_bytes(), original)
+                raise RuntimeError('atomic configuration failed')
+
+            with self.assertRaisesRegex(RuntimeError, 'atomic configuration failed'):
+                installer.pause_to_dry_run(
+                    dry_plan, mode='serial', registry_control=Control(), state=state,
+                    home=home, run=run, uid=1, after_reconcile=fail_configuration,
+                )
+
+            self.assertEqual(events, ['stop', 'reconcile', 'configuration'])
+            self.assertEqual(destination.read_bytes(), original)
+
     def test_pause_refuses_loaded_service_without_reversible_definition(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
