@@ -154,8 +154,11 @@ class LaunchdInstallerTests(unittest.TestCase):
                 self.assertEqual(command[index + 1], 'multi_agent')
         for command_name in ('command', 'fallback_command'):
             command = example['agents']['claude'][command_name]
+            self.assertEqual(command[2:4], ['exec', '/absolute/path/to/claude'])
+            self.assertTrue(command[1].endswith('/scripts/runner/claude_keychain.py'))
             tools = command[command.index('--tools') + 1].split(',')
             self.assertNotIn('Agent', tools)
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', json.dumps(example))
 
     def test_lane_plan_rejects_commands_that_allow_hidden_native_agents(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,6 +189,26 @@ class LaunchdInstallerTests(unittest.TestCase):
                 installer.service_plan(
                     config, state / 'config.json', pathlib.Path(__file__).parent, 'serial'
                 )
+
+    def test_plan_rejects_claude_credentials_from_real_config_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            for agent, configured_env, message in (
+                ('claude', {'CLAUDE_CODE_OAUTH_TOKEN': 'not-a-token'},
+                 'CLAUDE_CODE_OAUTH_TOKEN'),
+                ('claude', {'RENAMED_SECRET': 'sk-ant-oat01-not-a-real-token'},
+                 'raw Claude setup token'),
+                ('codex-a', {'PROVIDER_SECRET': 'prefix-sk-ant-oat01-not-a-real-token'},
+                 'raw Claude setup token'),
+            ):
+                with self.subTest(agent=agent, configured_env=configured_env):
+                    config = self.config(state)
+                    config['agents'][agent]['env'] = configured_env
+                    with self.assertRaisesRegex(ValueError, message):
+                        installer.service_plan(
+                            config, state / 'config.json',
+                            pathlib.Path(__file__).parent, 'lanes',
+                        )
 
     def test_private_storage_hardens_managed_paths_without_truncating_or_changing_owner(self):
         with tempfile.TemporaryDirectory() as directory:
