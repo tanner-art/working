@@ -403,8 +403,11 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
             raise ControlCenterProjectionError("structured review independence is invalid")
         if any(
             _iso(attempt.get("started_at")) is not None
-            and str(_iso(attempt.get("started_at"))) > requested_at
             and str(_iso(attempt.get("started_at"))) <= decided_at
+            and (
+                _iso(attempt.get("ended_at")) is None
+                or str(_iso(attempt.get("ended_at"))) > requested_at
+            )
             for attempt in target_attempts
         ):
             raise ControlCenterProjectionError("structured review target changed during review")

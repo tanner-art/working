@@ -1785,8 +1785,11 @@ class SQLiteRegistry:
                 ):
                     raise RegistryConflict("REVIEWER_IMPLEMENTED_TARGET")
                 if any(
-                    attempt["started_at"] > requested_at
-                    and attempt["started_at"] <= decided_at
+                    attempt["started_at"] <= decided_at
+                    and (
+                        attempt["ended_at"] is None
+                        or attempt["ended_at"] > requested_at
+                    )
                     for attempt in target_attempts
                 ):
                     raise RegistryConflict("REVIEW_TARGET_CHANGED_DURING_REVIEW")

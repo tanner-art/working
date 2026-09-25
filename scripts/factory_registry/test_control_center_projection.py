@@ -328,6 +328,86 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 approval_evidence_ids=("evidence-1",),
             ))
 
+    def test_review_outcome_rejects_target_attempt_finishing_after_review_request(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 120, 0, '{}')""",
+                (
+                    "overlapping-target-attempt", "PACKAGE-1", "agent-b",
+                    "2026-09-24T19:50:30.000000Z", "2026-09-24T19:52:30.000000Z",
+                    "FAILED",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_TARGET_CHANGED_DURING_REVIEW"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="stale-overlap", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_review_outcome_rejects_active_target_attempt_at_review_request(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, NULL, NULL, 0, 0, '{}')""",
+                (
+                    "active-overlapping-target-attempt", "PACKAGE-1", "agent-b",
+                    "2026-09-24T19:50:30.000000Z",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_TARGET_CHANGED_DURING_REVIEW"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="stale-active-overlap", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_projection_rejects_target_attempts_overlapping_recorded_review(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "review-overlap-evidence", "REVIEW-1", "review", None,
+            "Bound reviewer evidence", "2026-09-24T19:54:00Z",
+            {"attempt_id": "review-attempt-1"},
+        ))
+        self.registry.record_review_outcome(ReviewOutcome(
+            id="outcome-overlap-check", review_package_id="REVIEW-1",
+            target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+            reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+            decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+            approval_evidence_ids=("review-overlap-evidence",),
+        ))
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        target_attempt = next(item for item in raw.attempts if item["id"] == "attempt-1")
+        overlaps = (
+            {
+                **target_attempt, "id": "forged-completed-overlap",
+                "started_at": "2026-09-24T19:50:30Z",
+                "ended_at": "2026-09-24T19:52:30Z", "outcome": "FAILED",
+            },
+            {
+                **target_attempt, "id": "forged-active-overlap",
+                "started_at": "2026-09-24T19:50:30Z",
+                "ended_at": None, "outcome": None,
+            },
+        )
+        from scripts.factory_registry.control_center_projection import project_control_center
+        for overlapping_attempt in overlaps:
+            with self.subTest(attempt_id=overlapping_attempt["id"]):
+                with self.assertRaisesRegex(
+                    ControlCenterProjectionError, "target changed during review",
+                ):
+                    project_control_center(replace(
+                        raw, attempts=(*raw.attempts, overlapping_attempt),
+                    ))
+
     def test_projection_rejects_packages_missing_from_feature_queue(self) -> None:
         raw = self.registry.control_center_snapshot(observed_at=NOW)
         orphan = {**raw.work_packages[0], "id": "ORPHAN", "feature_id": "MISSING"}
