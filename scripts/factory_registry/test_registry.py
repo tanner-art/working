@@ -1011,6 +1011,49 @@ class SQLiteRegistryTest(unittest.TestCase):
         )
         self.assertEqual(self.registry.require_live_dispatch(), revision)
 
+    def test_revision_pinned_lease_claim_rechecks_live_gate_atomically(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at="2026-09-25T10:00:01Z", reason="operator stop"
+        )
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_NOT_AUTHORIZED"):
+            self.registry.acquire_lease(
+                "TASK", "worker",
+                acquired_at="2026-09-25T10:00:02Z",
+                expires_at="2026-09-25T10:10:02Z",
+                expected_dispatch_revision=live_revision,
+            )
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-25T10:00:02Z")
+        self.assertEqual(snapshot.active_leases, ())
+        self.assertEqual(snapshot.work_packages[0]["status"], "READY")
+
+    def test_dispatch_snapshot_projects_worker_capacity_mode_for_live_gate(self) -> None:
+        self.registry.register_worker(
+            Worker(
+                "claude", "Claude", ("registry",), (Lane.ASSURANCE,),
+                provider_diagnostics={
+                    "capacity_mode": "provider_signal",
+                    "capacity_scopes": ["provider_signal"],
+                },
+                usage_state="NORMAL",
+            )
+        )
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-25T10:00:00Z")
+        worker = snapshot.workers[0]
+        self.assertEqual(worker["capacity_mode"], "provider_signal")
+        self.assertEqual(worker["capacity_scopes"], ["provider_signal"])
+
     def test_dispatch_control_enforces_complete_phase_transition_table(self) -> None:
         legal = {
             ("PAUSED", "LIVE"),

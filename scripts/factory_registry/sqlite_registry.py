@@ -926,6 +926,7 @@ class SQLiteRegistry:
         *,
         acquired_at: str,
         expires_at: str,
+        expected_dispatch_revision: int | None = None,
     ) -> Lease:
         acquired_at = _normalize_timestamp(acquired_at)
         expires_at = _normalize_timestamp(expires_at)
@@ -936,6 +937,21 @@ class SQLiteRegistry:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if expected_dispatch_revision is not None:
+                    control = connection.execute(
+                        """SELECT control.dispatch_mode, control.kill_switch_engaged,
+                                  metadata.value AS revision
+                           FROM factory_control AS control
+                           JOIN registry_metadata AS metadata ON metadata.key='revision'
+                           WHERE control.singleton=1"""
+                    ).fetchone()
+                    if (
+                        control is None
+                        or control["dispatch_mode"] != "LIVE"
+                        or control["kill_switch_engaged"]
+                        or int(control["revision"]) != expected_dispatch_revision
+                    ):
+                        raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
                 package = connection.execute(
                     "SELECT * FROM work_packages WHERE id=?", (package_id,)
                 ).fetchone()
@@ -2167,6 +2183,9 @@ class SQLiteRegistry:
                     "capabilities_json", "approved_lanes_json", "provider_diagnostics_json",
                 ):
                     item[key.removesuffix("_json")] = json.loads(item.pop(key))
+                diagnostics = item["provider_diagnostics"]
+                item["capacity_mode"] = diagnostics.get("capacity_mode", "percentage")
+                item["capacity_scopes"] = diagnostics.get("capacity_scopes", ("default",))
                 workers.append(item)
             leases = []
             for row in connection.execute(
@@ -2181,6 +2200,13 @@ class SQLiteRegistry:
             ).fetchall():
                 item = dict(row)
                 item["provider_diagnostics"] = json.loads(item.pop("provider_diagnostics_json"))
+                diagnostics = item["provider_diagnostics"]
+                for key in (
+                    "capacity_mode", "capacity_scope", "service_state",
+                    "authentication_state", "live_invocation_state", "limit_signal",
+                ):
+                    if key in diagnostics:
+                        item[key] = diagnostics[key]
                 usage.append(item)
             connection.commit()
         return DispatchSnapshot(

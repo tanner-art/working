@@ -62,6 +62,7 @@ class Registry(Protocol):
         *,
         acquired_at: str,
         expires_at: str,
+        expected_dispatch_revision: int | None = None,
     ) -> Lease: ...
 
     def renew_lease(self, lease_id: str, *, now: str, expires_at: str) -> Lease: ...

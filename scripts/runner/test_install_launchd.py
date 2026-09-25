@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import install_launchd as installer
 
@@ -411,6 +411,126 @@ class LaunchdInstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cannot be combined'):
                 installer.install(self.plan(root / 'state'), mode='serial', replace_mode=True, replace_current=True,
                                   state=root / 'state', home=root / 'home', run=self.absent_run([]), uid=1)
+
+    def test_pause_to_dry_run_is_kill_first_and_keeps_reversible_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            live_plan = self.plan(state, mode='serial', live=True)
+            dry_plan = self.plan(state, mode='serial', live=False)
+            destination = installer.label_path(installer.SERIAL_LABEL, home)
+            installer.atomic_write_plist(destination, live_plan[0][1])
+            events = []
+
+            class Control:
+                def engage_stop(self, reason):
+                    events.append('registry:stop')
+                def finalize_paused(self, *, reason):
+                    events.append('registry:paused')
+
+            def run(args, **kwargs):
+                operation = args[1]
+                if operation == 'print':
+                    return subprocess.CompletedProcess(args, 0)
+                if operation == 'bootout':
+                    events.append('launchctl:bootout')
+                    current = plistlib.loads(destination.read_bytes())
+                    self.assertNotIn('--dry-run', current['ProgramArguments'])
+                    return subprocess.CompletedProcess(args, 0)
+                if operation == 'bootstrap':
+                    events.append('launchctl:bootstrap')
+                    return subprocess.CompletedProcess(args, 0)
+                raise AssertionError(args)
+
+            result = installer.pause_to_dry_run(
+                dry_plan, mode='serial', registry_control=Control(), state=state,
+                home=home, run=run, uid=1,
+            )
+
+            self.assertLess(events.index('registry:stop'), events.index('launchctl:bootout'))
+            self.assertLess(events.index('launchctl:bootout'), events.index('registry:paused'))
+            self.assertLess(events.index('registry:paused'), events.index('launchctl:bootstrap'))
+            paused = plistlib.loads(destination.read_bytes())
+            self.assertIn('--dry-run', paused['ProgramArguments'])
+            backup = result['backup_dir'] / destination.name
+            self.assertNotIn('--dry-run', plistlib.loads(backup.read_bytes())['ProgramArguments'])
+
+    def test_pause_refuses_loaded_service_without_reversible_definition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            control = Mock()
+            calls = []
+
+            def run(args, **kwargs):
+                calls.append(args)
+                loaded = args[1] == 'print' and args[-1].endswith(
+                    installer.SERIAL_LABEL
+                )
+                return subprocess.CompletedProcess(args, 0 if loaded else 1)
+
+            with self.assertRaisesRegex(ValueError, 'without plist backups'):
+                installer.pause_to_dry_run(
+                    self.plan(state), mode='serial', registry_control=control,
+                    state=state, home=home, run=run, uid=1,
+                )
+            control.engage_stop.assert_called_once()
+            control.finalize_paused.assert_not_called()
+            self.assertFalse(any(call[1] in ('bootout', 'bootstrap') for call in calls))
+            self.assertFalse((state / 'launchd-backups').exists())
+
+    def test_pause_stop_failure_never_bootstraps_or_restores_live_definition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            live_plan = self.plan(state, mode='serial', live=True)
+            destination = installer.label_path(installer.SERIAL_LABEL, home)
+            installer.atomic_write_plist(destination, live_plan[0][1])
+            control = Mock()
+            calls = []
+
+            def run(args, **kwargs):
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0 if args[1] == 'print' else 1)
+
+            with self.assertRaisesRegex(RuntimeError, 'could not stop live services'):
+                installer.pause_to_dry_run(
+                    self.plan(state), mode='serial', registry_control=control,
+                    state=state, home=home, run=run, uid=1,
+                )
+            control.engage_stop.assert_called_once()
+            control.finalize_paused.assert_not_called()
+            self.assertFalse(any(call[1] == 'bootstrap' for call in calls))
+            self.assertNotIn(
+                '--dry-run', plistlib.loads(destination.read_bytes())['ProgramArguments']
+            )
+
+    def test_pause_bootstrap_failure_retains_paused_dry_run_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            destination = installer.label_path(installer.SERIAL_LABEL, home)
+            installer.atomic_write_plist(
+                destination, self.plan(state, mode='serial', live=True)[0][1]
+            )
+            control = Mock()
+
+            def run(args, **kwargs):
+                if args[1] == 'print':
+                    return subprocess.CompletedProcess(args, 0)
+                if args[1] == 'bootstrap':
+                    raise subprocess.CalledProcessError(1, args)
+                return subprocess.CompletedProcess(args, 0)
+
+            with self.assertRaisesRegex(RuntimeError, 'dry-run bootstrap failed'):
+                installer.pause_to_dry_run(
+                    self.plan(state), mode='serial', registry_control=control,
+                    state=state, home=home, run=run, uid=1,
+                )
+            control.finalize_paused.assert_called_once()
+            self.assertIn(
+                '--dry-run', plistlib.loads(destination.read_bytes())['ProgramArguments']
+            )
 
     def test_migration_refuses_loaded_service_without_a_recoverable_plist(self):
         with tempfile.TemporaryDirectory() as directory:

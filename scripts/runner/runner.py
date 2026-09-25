@@ -3,6 +3,52 @@
 import argparse, contextlib, fcntl, json, os, pathlib, pwd, re, signal, subprocess, sys, time
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 from queue_snapshot import write_queue_snapshot
+from registry_control import RunnerRegistryControl
+
+
+def terminate_process_group(process, timeout=10):
+    """Synchronously reap a new-session child and every surviving descendant."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    # The direct child may exit while a descendant keeps the process group alive.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+class RegistryAttemptLifecycle:
+    """Issue at most one authoritative terminal mutation for an attempt."""
+
+    def __init__(self, control, attempt_id):
+        self.control = control
+        self.attempt_id = attempt_id
+        self.finish_attempted = False
+        self.finish_completed = False
+
+    def succeed(self):
+        return self._finish(self.control.succeed)
+
+    def fail(self, detail):
+        return self._finish(self.control.fail, detail)
+
+    def _finish(self, callback, *args):
+        if self.finish_attempted:
+            return False
+        self.finish_attempted = True
+        callback(self.attempt_id, *args)
+        self.finish_completed = True
+        return True
 
 
 def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
@@ -12,16 +58,7 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
                                start_new_session=True)
     previous = {}
     def stop(signum, frame):
-        try: os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError: pass
-        try: process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
-            process.wait()
-        # A descendant may ignore TERM even after its direct parent has exited.
-        try: os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
+        terminate_process_group(process)
         raise SystemExit(128+signum)
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous[sig]=signal.signal(sig,stop)
@@ -30,13 +67,7 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
             try:
                 on_start(process.pid)
             except BaseException:
-                try: os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError: pass
-                try: process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    try: os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError: pass
-                    process.wait()
+                terminate_process_group(process)
                 raise
         output, _ = process.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -290,7 +321,7 @@ def _process_group_alive(pgid):
     return True
 
 
-def recover_stale_claims(state, stale_claim_seconds):
+def recover_stale_claims(state, stale_claim_seconds, on_stale_attempt=None):
     """Archive abandoned local claims without touching their work artifacts."""
     now = time.time()
     for record in state.glob('issue-*.json'):
@@ -315,6 +346,13 @@ def recover_stale_claims(state, stale_claim_seconds):
             process_group_alive = _process_group_alive(data.get('agent_pgid'))
             if process_group_alive is not False:
                 continue
+        if on_stale_attempt is not None and data.get('registry_attempt_id'):
+            try:
+                on_stale_attempt(data)
+            except Exception:
+                data['registry_recovery_required'] = True
+                save_record(record, data)
+                continue
         data.update(status='failed', preserved=True,
                     error='stale local claim recovered; explicit retry required')
         save_record(record, data)
@@ -323,12 +361,12 @@ def recover_stale_claims(state, stale_claim_seconds):
 
 
 def claim(state, issue, agent, body, retry=False, stale_claim_seconds=1860,
-          worker=None, slot=1):
+          worker=None, slot=1, on_stale_attempt=None):
     """Atomically reserve an issue and its exact paths under the short claim lock."""
     number = issue['number']
     record = state / f'issue-{number}.json'
     with file_lock(state / 'claims.lock'):
-        recover_stale_claims(state, stale_claim_seconds)
+        recover_stale_claims(state, stale_claim_seconds, on_stale_attempt)
         if record.exists():
             current = json.loads(record.read_text())
             if not (retry and current.get('status') == 'failed'):
@@ -483,6 +521,9 @@ def main():
                     help='Runner-controlled child lane number for --agent (1-3)')
     args=ap.parse_args()
     c=json.loads(pathlib.Path(args.config).read_text())
+    registry_control = RunnerRegistryControl.from_config(c)
+    if not args.dry_run and registry_control is None:
+        raise ValueError('live runner requires registry_database')
     if args.slot != 1 and not args.agent:
         raise ValueError('--slot requires --agent')
     if args.agent:
@@ -575,10 +616,21 @@ def main():
         cwd=repo, env=env, timeout=10))
     write_heartbeat(state, status='polling', agent=heartbeat_agent,
                     worker=worker)
+    def close_disappeared_registry_attempt(stale):
+        if registry_control is not None:
+            registry_control.fail_if_active(
+                stale['registry_attempt_id'], 'runner worker disappeared'
+            )
+    recover_stale_claims(
+        state, stale_claim_seconds,
+        close_disappeared_registry_attempt if registry_control is not None else None,
+    )
     for issue in sorted(issues,key=lambda i:i['number']):
         n=issue['number']; record=state/f'issue-{n}.json'; data=None
         body={}; agent=None
         started_at = None
+        registry_lease_id = None
+        registry_lifecycle = None
         try:
             agent,body=select(issue,c['allowed_authors'])
             if args.agent and agent != args.agent: continue
@@ -615,13 +667,38 @@ def main():
                 print(json.dumps({'issue': n, 'status': usage_decision['decision'],
                                   'usage_state': usage_decision['state']}))
                 continue
+            registry_revision = (
+                registry_control.pre_claim(body['task'], lane)
+                if registry_control is not None else None
+            )
             data = claim(state, issue, agent, body, args.retry, stale_claim_seconds,
-                         worker=lane, slot=args.slot)
+                         worker=lane, slot=args.slot,
+                         on_stale_attempt=(close_disappeared_registry_attempt
+                                           if registry_control is not None else None))
             if data == 'deferred':
                 print(json.dumps({'issue':n,'status':'deferred','reason':'overlapping active paths'}))
                 continue
             if data is None: continue
             started_at = data['time']
+            attempt=str(time.time_ns())
+            if registry_control is not None:
+                registry_lease_id = registry_control.claim_package(
+                    body['task'], worker_id=lane,
+                    expected_revision=registry_revision,
+                    lease_seconds=c.get('registry_lease_seconds',
+                                        c.get('agent_timeout', 1800) + 300),
+                )
+                reserve_revision = registry_control.pre_launch()
+                registry_control.reserve_attempt(
+                    attempt, package_id=body['task'], worker_id=lane,
+                    expected_revision=reserve_revision,
+                )
+                registry_lifecycle = RegistryAttemptLifecycle(
+                    registry_control, attempt
+                )
+                data.update(registry_attempt_id=attempt,
+                            registry_lease_id=registry_lease_id)
+                save_record(record, data)
             write_heartbeat(state, status='starting', issue=n,
                             task_id=body['task'], start_time=started_at,
                             agent=heartbeat_agent, worker=worker,
@@ -636,7 +713,7 @@ def main():
             with file_lock(state / 'git.lock'):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
                 g('fetch','origin','main');base=g('rev-parse','origin/main')
-            attempt=str(time.time_ns());branch=f'runner/{body["task"].lower()}-{n}-{attempt}'
+            branch=f'runner/{body["task"].lower()}-{n}-{attempt}'
             wt=pathlib.Path(c['worktrees'])/agent/f'issue-{n}-{attempt}'
             wt.parent.mkdir(parents=True,exist_ok=True)
             log=state/f'issue-{n}-{attempt}.log'
@@ -672,9 +749,15 @@ def main():
                 except ProcessLookupError:
                     data['agent_process_group_state'] = 'unknown'
                     save_record(record, data)
-                    return
+                    raise RuntimeError('provider exited before PID/PGID binding')
+                if registry_control is not None:
+                    registry_control.record_process(
+                        attempt, pid=pid, pgid=data['agent_pgid']
+                    )
                 data['agent_process_group_state'] = 'recorded'
                 save_record(record, data)
+            if registry_control is not None:
+                registry_control.pre_launch()
             run(usage_decision['command'],cwd=wt,env=agentenv,
                 timeout=c.get('agent_timeout',1800),log=log,input=prompt,
                 on_start=record_agent_process_group)
@@ -714,6 +797,9 @@ def main():
             g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
+            if registry_lifecycle is not None:
+                registry_lifecycle.succeed()
+                data['registry_runtime_finished'] = True
             save_record(record, data, 'review')
             telemetry_errors = publish_completion_telemetry(
                 state, issue=n, task_id=body['task'], title=issue.get('title'),
@@ -732,14 +818,35 @@ def main():
                 save_record(record, data)
             print(json.dumps(data));break
         except (SystemExit, KeyboardInterrupt) as exc:
-            # run() deliberately raises SystemExit for an interrupted child. Preserve
-            # the attempt before allowing the original exit status to escape.
-            if data is not None and started_at is not None and not data.get('pr'):
-                preserve_interrupted_attempt(
-                    state, record, data, issue=n, task_id=body.get('task'),
-                    title=issue.get('title'), agent=agent,
-                    heartbeat_agent=heartbeat_agent, worker=worker,
-                    started_at=started_at, slot=args.slot, error=str(exc))
+            # run() deliberately raises SystemExit for an interrupted child. Close
+            # Registry ownership before allowing the original exit status to escape.
+            if data is not None and started_at is not None:
+                if registry_lifecycle is not None:
+                    try:
+                        finished = (
+                            registry_lifecycle.succeed()
+                            if data.get('pr')
+                            else registry_lifecycle.fail(str(exc))
+                        )
+                        if finished or registry_lifecycle.finish_completed:
+                            data['registry_runtime_finished'] = True
+                        else:
+                            data['registry_recovery_required'] = True
+                    except Exception:
+                        data['registry_recovery_required'] = True
+                elif registry_control is not None and registry_lease_id is not None:
+                    try:
+                        registry_control.abort_claim(
+                            registry_lease_id, 'runner interrupted before attempt reservation'
+                        )
+                    except Exception:
+                        data['registry_recovery_required'] = True
+                if not data.get('pr'):
+                    preserve_interrupted_attempt(
+                        state, record, data, issue=n, task_id=body.get('task'),
+                        title=issue.get('title'), agent=agent,
+                        heartbeat_agent=heartbeat_agent, worker=worker,
+                        started_at=started_at, slot=args.slot, error=str(exc))
             try:
                 if args.agent:
                     lane_lock.__exit__(None, None, None)
@@ -753,6 +860,22 @@ def main():
             if data is None:
                 data={'issue':n, 'status':'failed', 'time':time.time()}
             data.update(status='failed',error=str(e),time=time.time())
+            if registry_lifecycle is not None:
+                try:
+                    finished = registry_lifecycle.fail(str(e))
+                    if finished or registry_lifecycle.finish_completed:
+                        data['registry_runtime_finished'] = True
+                    else:
+                        data['registry_recovery_required'] = True
+                except Exception:
+                    data['registry_recovery_required'] = True
+            elif registry_control is not None and registry_lease_id is not None:
+                try:
+                    registry_control.abort_claim(
+                        registry_lease_id, 'runner failed before attempt reservation'
+                    )
+                except Exception:
+                    data['registry_recovery_required'] = True
             if claimed:
                 save_record(record, data)
             if claimed and started_at is not None:

@@ -259,6 +259,71 @@ def bootout(label, uid, run=subprocess.run):
     return run(['launchctl', 'bootout', f'gui/{uid}/{label}'], check=False).returncode == 0
 
 
+def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
+                     run=subprocess.run, uid=None):
+    """Replace live definitions with reviewed dry-run plists without live rollback."""
+    uid = os.getuid() if uid is None else uid
+    state = pathlib.Path(state)
+    plan = tuple(plan)
+    destinations = {label: label_path(label, home) for label, _ in plan}
+    current_labels = labels_for_mode(mode)
+    if not plan or any(
+        label != DASHBOARD_LABEL and '--dry-run' not in data.get('ProgramArguments', ())
+        for label, data in plan
+    ):
+        raise ValueError('pause replacement requires a reviewed dry-run plan')
+    if registry_control is None:
+        raise ValueError('pause replacement requires Registry control')
+
+    # Persist the kill switch before asking launchd to terminate any runner.
+    registry_control.engage_stop('operator requested live-to-dry-run replacement')
+    existing = {
+        label: label_path(label, home)
+        for label in current_labels
+        if label_path(label, home).exists()
+    }
+    loaded = [label for label in current_labels if is_loaded(label, uid, run)]
+    missing_backups = [label for label in loaded if label not in existing]
+    if missing_backups:
+        # The kill switch remains engaged, but no service is stopped unless its
+        # exact installed definition can be retained for operator recovery.
+        raise ValueError(
+            'cannot safely pause without plist backups: ' + ', '.join(missing_backups)
+        )
+
+    backup_dir = state / 'launchd-backups' / f'paused-{time.time_ns()}'
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    for source in existing.values():
+        shutil.copy2(source, backup_dir / source.name)
+
+    failed = [label for label in loaded if not bootout(label, uid, run)]
+    if failed:
+        # Registry stays STOPPING and no definition is reloaded or restored.
+        raise RuntimeError('could not stop live services: ' + ', '.join(failed))
+
+    for label, data in plan:
+        atomic_write_plist(destinations[label], data)
+    for label, source in existing.items():
+        if label not in destinations:
+            source.unlink(missing_ok=True)
+
+    registry_control.finalize_paused(reason='live services stopped; dry-run definitions written')
+    bootstrapped = []
+    try:
+        for label, _ in plan:
+            run(
+                ['launchctl', 'bootstrap', f'gui/{uid}', str(destinations[label])],
+                check=True,
+            )
+            bootstrapped.append(label)
+    except Exception as error:
+        for label in reversed(bootstrapped):
+            bootout(label, uid, run)
+        # Keep PAUSED and keep dry-run definitions. Never restore a live plist.
+        raise RuntimeError(f'dry-run bootstrap failed: {error}') from error
+    return {'backup_dir': backup_dir, 'destinations': destinations}
+
+
 def install(plan, *, mode, replace_mode, state, replace_current=False, home=None, run=subprocess.run, uid=None):
     """Install one serial service or the lane set; rollback only this invocation."""
     uid = os.getuid() if uid is None else uid

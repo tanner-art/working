@@ -110,7 +110,7 @@ The module has no concrete database, queue, process, service, or launchd
 adapter. Importing it cannot start work. That separation is intentional for
 this package because live dispatch remains paused.
 
-## Dormant Registry wiring
+## Concrete Registry wiring
 
 The Registry schema now creates a singleton `factory_control` row with the
 fail-closed default `PAUSED` and `kill_switch_engaged=1`. The SQLite adapter
@@ -130,33 +130,30 @@ the runtime record, attempt, lease, package, worker, event, and revision in one
 transaction. Expired leases, missing/released leases, terminal attempts, and
 offline or constrained workers remain visible through the orphan query.
 
-`scripts/runner/registry_control.py` is the opt-in runner-facing adapter. An
-absent `registry_database` returns no adapter, preserving the current legacy
-GitHub runner. When explicitly wired later, its `pre_claim` and `pre_launch`
-methods fail closed and its process callback records PID/PGID provenance. The
-adapter is dormant: `runner.py` does not import or call it in this commit.
-Because that wiring remains unapproved, there is still a launch-to-PID binding
-race between provider process creation and durable PID/PGID recording. This
-limitation blocks restart until the required follow-up closes and tests that
-window.
+`scripts/runner/registry_control.py` is wired into every non-dry-run poll. A
+live runner refuses to start without `registry_database`. Before its local
+claim, it requires the exact package/worker pair in the Registry scheduler's
+current eligible assignments and pins that revision through atomic lease
+acquisition. It reserves the attempt before setup and rechecks LIVE immediately
+before provider launch. The process-start callback records PID/PGID before the
+runner accepts the launch; a rejected bind synchronously terminates the new
+process group. Success, failure, timeout, interruption, and stale-worker
+recovery issue at most one terminal ownership mutation.
+
+`pause_to_dry_run` in `scripts/runner/install_launchd.py` is an injected,
+non-CLI helper. It engages the Registry kill switch first, boots out every
+loaded service in the selected mode, writes only reviewed dry-run definitions,
+commits PAUSED after ownership drains, and then bootstraps the dry-run services.
+It retains live plist backups for explicit recovery but never automatically
+restores or reloads a live definition after a stop or dry-run bootstrap failure.
+This package does not call the helper or touch installed services.
 
 ## Required follow-up before restart
 
-The remaining authority-bound runner/service integration must:
-
-1. make the runner check the Registry kill switch immediately before every
-   claim and launch;
-2. call the dormant attempt lifecycle methods from claim, launch, completion,
-   interruption, and failure paths;
-3. add a fail-closed launchd operation that unloads live runners and installs
-   reviewed dry-run definitions without restoring live definitions on error;
-4. preserve the current launchd backup and dry-run inspection behavior;
-5. prove enable, stop, disappearance, lease expiry, rollback, and restart-after-
-   crash through mock-backed launchctl tests; and
-6. receive independent ASSURANCE before any live invocation.
-
-The existing installer can promote reviewed dry-run definitions with
-`--live --replace-current`, but there is no corresponding fail-closed pause
-primitive and legacy runner records do not carry a Registry attempt ID. Those
-gaps block a safe concrete cutover and must not be papered over by this
-procedure contract.
+The remaining restart work is operational: independent ASSURANCE must approve
+this wiring, the reviewed configuration must name the authoritative Registry,
+and an owner-approved A5 canary must exercise it. `pause_to_dry_run` remains
+deliberately unavailable from the installer CLI until that review; operators
+cannot invoke it accidentally through an existing service command. No service
+installation, LIVE transition, queue claim, or provider invocation occurred in
+this package.
