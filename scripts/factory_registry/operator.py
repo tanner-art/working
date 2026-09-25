@@ -15,7 +15,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest
@@ -34,7 +34,7 @@ from .models import (
     Worker,
     WorkPackage,
 )
-from .repository import RegistryConflict
+from .repository import RegistryConflict, RegistryError
 from .shadow_dispatch import decide_shadow
 from .sqlite_registry import CONTROL_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, SQLiteRegistry
 
@@ -1311,7 +1311,12 @@ def harden_paths(database: Path, config_path: Path, release: Path) -> None:
     install_launchd._set_owner_only(release, 0o500)
 
 
-def _worker_gate(snapshot: Any, *, canary_feature_id: str | None = None) -> Mapping[str, Any]:
+def _worker_gate(
+    snapshot: Any,
+    *,
+    canary_feature_id: str | None = None,
+    review_implementer_worker: Callable[[str], str] | None = None,
+) -> Mapping[str, Any]:
     decision = decide_shadow(snapshot)
     if decision.global_rejections:
         raise OperatorError(
@@ -1333,6 +1338,7 @@ def _worker_gate(snapshot: Any, *, canary_feature_id: str | None = None) -> Mapp
         )
     }
     implementers = set(eligible)
+    review_pairs: set[str] | None = None
     canary_ids = []
     if canary_feature_id is not None:
         packages = [
@@ -1353,11 +1359,28 @@ def _worker_gate(snapshot: Any, *, canary_feature_id: str | None = None) -> Mapp
         ]
         if unrelated:
             raise OperatorError("unrelated dispatchable packages present: " + ",".join(unrelated))
-        implementation_pairs = {
-            value.worker_id for value in decision.pair_evaluations
-            if value.package_id == implementation["id"] and value.eligible
-        }
-        implementers &= implementation_pairs
+        if (
+            implementation.get("status") == TaskStatus.VERIFY_REVIEW.value
+            and review.get("status") == TaskStatus.READY.value
+        ):
+            if review_implementer_worker is None:
+                raise OperatorError("review implementer provenance is required")
+            try:
+                implementers = {review_implementer_worker(str(review["id"]))}
+            except RegistryError as error:
+                raise OperatorError(
+                    f"review implementer provenance gate failed: {error}"
+                ) from error
+            review_pairs = {
+                value.worker_id for value in decision.pair_evaluations
+                if value.package_id == review["id"] and value.eligible
+            }
+        else:
+            implementation_pairs = {
+                value.worker_id for value in decision.pair_evaluations
+                if value.package_id == implementation["id"] and value.eligible
+            }
+            implementers &= implementation_pairs
         review_required = {str(value) for value in review.get("required_capabilities", ())}
         review_lane = review.get("lane")
         reviewers = {
@@ -1365,6 +1388,8 @@ def _worker_gate(snapshot: Any, *, canary_feature_id: str | None = None) -> Mapp
             if review_lane in worker_by_id[worker_id].get("approved_lanes", ())
             and review_required <= set(worker_by_id[worker_id].get("capabilities", ()))
         }
+        if review_pairs is not None:
+            reviewers &= review_pairs
     if not implementers:
         raise OperatorError("no eligible implementation worker")
     if not reviewers:
@@ -1496,6 +1521,7 @@ def preflight(
         _worker_gate(
             registry.dispatch_snapshot(observed_at=observed_at),
             canary_feature_id=canary_feature_id,
+            review_implementer_worker=registry.review_implementer_worker,
         )
         if require_workers else {"gate": "not-requested"}
     )
