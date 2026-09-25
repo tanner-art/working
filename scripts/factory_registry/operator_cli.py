@@ -101,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     command.add_argument("--database", required=True, type=pathlib.Path)
     command.add_argument("--backup", required=True, type=pathlib.Path)
+    command.add_argument("--backup-sha256", required=True)
     command.add_argument("--release", required=True, type=pathlib.Path)
     command.add_argument("--release-commit", required=True)
     command.add_argument("--preservation", required=True, type=pathlib.Path)
@@ -195,6 +196,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.release,
             args.preservation,
             args.release_commit,
+            args.backup_sha256,
             args.expect_revision,
             observed_at=args.observed_at,
         ))

@@ -70,12 +70,15 @@ transaction, and checks integrity, foreign keys, unchanged control and
 revision, empty review outcomes, and exact preservation afterward. A
 transaction failure rolls back. A post-commit verification failure restores
 the v3 backup automatically. Before any v4 review outcome is recorded, an
-operator can explicitly restore the reported backup:
+operator can explicitly restore the reported backup by supplying the exact
+SHA-256 emitted in the migration evidence. Any changed backup is rejected even
+when its schema and control metadata still look valid:
 
 ```sh
 "$PYTHON" -m scripts.factory_registry.operator_cli restore-registry-v3 \
   --database "$DATABASE" \
   --backup /absolute/path/from-the-migration-evidence.sqlite3 \
+  --backup-sha256 SHA256_FROM_MIGRATION_EVIDENCE \
   --release "$RELEASE" \
   --release-commit "$COMMIT" \
   --preservation "$PRESERVATION" \

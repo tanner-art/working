@@ -16,7 +16,7 @@ from io import StringIO
 from pathlib import Path
 
 import scripts.factory_registry.operator as operator_module
-from scripts.factory_registry.models import Lane, TaskStatus
+from scripts.factory_registry.models import Feature, Lane, TaskStatus
 from scripts.factory_registry.operator import (
     APPROVED_PRESERVATION_SHA256,
     OperatorError,
@@ -543,10 +543,42 @@ class OperatorFixture(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
         self.assertEqual(status(self.database)["control"], observed["control"])
         restored = restore_registry_v3_backup(
-            self.database, backup, self.release, self.preservation, COMMIT, revision
+            self.database,
+            backup,
+            self.release,
+            self.preservation,
+            COMMIT,
+            result["backup"]["sha256"],
+            revision,
         )
         self.assertTrue(restored["passed"])
         self.assertEqual(status(self.database)["database_checks"]["schema_version"], "3")
+
+    def test_restore_rejects_backup_changed_after_migration(self):
+        self.registry.register_feature(
+            Feature("UNRELATED", "Original title", 1, TaskStatus.ON_DECK)
+        )
+        revision = self._downgrade_fixture_to_v3()
+        result = migrate_registry_v3_to_v4(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        with sqlite3.connect(backup) as connection:
+            connection.execute(
+                "UPDATE features SET title='Modified title' WHERE id='UNRELATED'"
+            )
+        backup.chmod(0o600)
+        with self.assertRaisesRegex(OperatorError, "backup SHA-256 mismatch"):
+            restore_registry_v3_backup(
+                self.database,
+                backup,
+                self.release,
+                self.preservation,
+                COMMIT,
+                result["backup"]["sha256"],
+                revision,
+            )
+        self.assertEqual(status(self.database)["database_checks"]["schema_version"], "4")
 
     def test_status_safely_observes_v3_without_control_metadata(self):
         revision = self._downgrade_fixture_to_v3()
@@ -605,6 +637,45 @@ class OperatorFixture(unittest.TestCase):
                     self.database, self.release, self.preservation, COMMIT, revision
                 )
         self.assertEqual(status(self.database)["database_checks"]["schema_version"], "3")
+
+    def test_registry_fk_post_verify_failure_restores_clean_v3(self):
+        revision = self._downgrade_fixture_to_v3()
+        original_verify = operator_module._verify_migrated_v4
+
+        def inject_foreign_key_violation(*args, **kwargs):
+            with sqlite3.connect(self.database) as connection:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                connection.execute(
+                    """INSERT INTO review_outcomes
+                       (id, review_package_id, target_package_id,
+                        implementer_worker_id, reviewer_worker_id,
+                        requested_at, decided_at, state, findings_json,
+                        changes_requested_json, approval_evidence_ids_json)
+                       VALUES ('invalid-review', 'missing-review', 'missing-target',
+                               'missing-implementer', 'missing-reviewer',
+                               '2026-09-25T08:00:00Z', '2026-09-25T08:00:01Z',
+                               'APPROVED', '[]', '[]', '[\"missing-evidence\"]')"""
+                )
+            return original_verify(*args, **kwargs)
+
+        with mock.patch.object(
+            operator_module, "_verify_migrated_v4", inject_foreign_key_violation
+        ):
+            with self.assertRaisesRegex(
+                OperatorError, 'foreign-key.*"succeeded":true'
+            ):
+                migrate_registry_v3_to_v4(
+                    self.database, self.release, self.preservation, COMMIT, revision
+                )
+        observed = status(self.database)
+        self.assertEqual(observed["database_checks"]["schema_version"], "3")
+        self.assertEqual(observed["counts"]["review_outcomes"], 0)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(tuple(connection.execute("PRAGMA foreign_key_check")), ())
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM sqlite_schema "
+                "WHERE type='table' AND name='review_outcomes'"
+            ).fetchone())
 
     def test_canary_registration_gate_rejects_missing_capability(self):
         now = utc_now()
