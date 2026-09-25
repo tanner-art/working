@@ -154,8 +154,11 @@ class LaunchdInstallerTests(unittest.TestCase):
                 self.assertEqual(command[index + 1], 'multi_agent')
         for command_name in ('command', 'fallback_command'):
             command = example['agents']['claude'][command_name]
+            self.assertEqual(command[2:4], ['exec', '/absolute/path/to/claude'])
+            self.assertTrue(command[1].endswith('/scripts/runner/claude_keychain.py'))
             tools = command[command.index('--tools') + 1].split(',')
             self.assertNotIn('Agent', tools)
+        self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', json.dumps(example))
 
     def test_lane_plan_rejects_commands_that_allow_hidden_native_agents(self):
         with tempfile.TemporaryDirectory() as directory:
