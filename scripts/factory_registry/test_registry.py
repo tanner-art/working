@@ -151,6 +151,43 @@ class SQLiteRegistryTest(unittest.TestCase):
         self.assertEqual(runtime_table, 0)
         self.assertEqual(review_outcome_table, 0)
 
+    def test_initialize_refuses_unreviewed_schema_version_four_migration(self) -> None:
+        database = self.root / "pre-cp01-v4.sqlite3"
+        legacy = SQLiteRegistry(database)
+        legacy.initialize()
+        legacy.register_feature(Feature("PRESERVED", "Preserved feature", 100, TaskStatus.READY))
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
+            )
+
+        with self.assertRaisesRegex(
+            RegistryConflict, "REGISTRY_V4_OPERATOR_MIGRATION_REQUIRED"
+        ):
+            legacy.initialize()
+
+        with sqlite3.connect(database) as connection:
+            schema_version = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+            receipt_table = connection.execute(
+                "SELECT count(*) FROM sqlite_schema "
+                "WHERE type='table' AND name='control_operation_receipts'"
+            ).fetchone()[0]
+            preserved = connection.execute(
+                "SELECT title FROM features WHERE id='PRESERVED'"
+            ).fetchone()[0]
+        self.assertEqual(schema_version, "4")
+        self.assertEqual(receipt_table, 0)
+        self.assertEqual(preserved, "Preserved feature")
+
     def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
         legacy_database = self.root / "legacy-capacity.sqlite3"
         with sqlite3.connect(legacy_database) as connection:
@@ -1224,6 +1261,134 @@ class SQLiteRegistryTest(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+
+    def test_delayed_claim_replay_does_not_expire_original_lease(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z", reason="bounded canary",
+        )
+        arguments = {
+            "package_id": "TASK",
+            "worker_id": "worker",
+            "expected_dispatch_revision": live_revision,
+            "operation_id": "operation-delayed-claim",
+        }
+        lease = self.registry.acquire_lease(
+            **arguments,
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:05:00Z",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        replayed = self.registry.acquire_lease(
+            **arguments,
+            acquired_at="2026-09-25T10:06:00Z",
+            expires_at="2026-09-25T10:10:00Z",
+        )
+        self.assertEqual(replayed, lease)
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with sqlite3.connect(self.database) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT released_at FROM leases WHERE id=?", (lease.id,)
+            ).fetchone()[0])
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM task_events WHERE event_type='LEASE_EXPIRED'"
+            ).fetchone()[0], 0)
+
+    def test_mismatched_delayed_claim_replay_cannot_expire_lease(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z", reason="bounded canary",
+        )
+        lease = self.registry.acquire_lease(
+            "TASK", "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:05:00Z",
+            expected_dispatch_revision=live_revision,
+            operation_id="operation-mismatched-claim",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "OPERATION_ID_REUSED"):
+            self.registry.acquire_lease(
+                "TASK", "worker",
+                acquired_at="2026-09-25T10:06:00Z",
+                expires_at="2026-09-25T10:11:00Z",
+                expected_dispatch_revision=live_revision,
+                operation_id="operation-mismatched-claim",
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with sqlite3.connect(self.database) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT released_at FROM leases WHERE id=?", (lease.id,)
+            ).fetchone()[0])
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM task_events WHERE event_type='LEASE_EXPIRED'"
+            ).fetchone()[0], 0)
+
+    def test_delayed_release_replays_do_not_expire_unrelated_lease(self) -> None:
+        self.feature()
+        self.worker("worker-a", "registry")
+        self.worker("worker-b", "registry")
+        self.package("TASK-A")
+        self.package("TASK-B")
+        control = self.registry.dispatch_control()
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z", reason="bounded canary",
+        )
+        lease_a = self.registry.acquire_lease(
+            "TASK-A", "worker-a",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:20:00Z",
+            expected_dispatch_revision=live_revision,
+            operation_id="operation-claim-a",
+        )
+        lease_b = self.registry.acquire_lease(
+            "TASK-B", "worker-b",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:05:00Z",
+            operation_id="operation-claim-b",
+        )
+        release = {
+            "lease_id": lease_a.id,
+            "reason": "implementation stopped",
+            "next_status": TaskStatus.READY,
+            "operation_id": "operation-release-a",
+        }
+        self.registry.release_lease(
+            **release, released_at="2026-09-25T10:02:00Z"
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        self.registry.release_lease(
+            **release, released_at="2026-09-25T10:06:00Z"
+        )
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with self.assertRaisesRegex(RegistryConflict, "OPERATION_ID_REUSED"):
+            self.registry.release_lease(
+                lease_a.id,
+                released_at="2026-09-25T10:06:00Z",
+                reason="different reason",
+                next_status=TaskStatus.READY,
+                operation_id="operation-release-a",
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with sqlite3.connect(self.database) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT released_at FROM leases WHERE id=?", (lease_b.id,)
+            ).fetchone()[0])
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM task_events WHERE event_type='LEASE_EXPIRED'"
+            ).fetchone()[0], 0)
 
     def test_direct_transition_policy_rejects_terminal_reopening(self) -> None:
         self.feature()

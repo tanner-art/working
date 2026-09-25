@@ -192,6 +192,8 @@ class SQLiteRegistry:
         existing_version = self._preflight_schema_version()
         if existing_version == 3:
             raise RegistryConflict("REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED")
+        if existing_version == 4:
+            raise RegistryConflict("REGISTRY_V4_OPERATOR_MIGRATION_REQUIRED")
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
@@ -2049,7 +2051,6 @@ class SQLiteRegistry:
         expires_at = _normalize_timestamp(expires_at)
         if expires_at <= acquired_at:
             raise RegistryConflict("INVALID_LEASE_EXPIRY")
-        self.expire_leases(observed_at=acquired_at)
         request = {
             "package_id": package_id,
             "worker_id": worker_id,
@@ -2075,6 +2076,20 @@ class SQLiteRegistry:
                 if replay is not None:
                     connection.rollback()
                     return Lease(**replay)
+                expired = self._expire_leases(connection, acquired_at)
+                if expired:
+                    self._bump_revision(connection)
+                    connection.commit()
+                    connection.execute("BEGIN IMMEDIATE")
+                    replay = self._operation_replay(
+                        connection,
+                        operation_id=operation_id,
+                        operation_kind="ACQUIRE_LEASE",
+                        request=request,
+                    )
+                    if replay is not None:
+                        connection.rollback()
+                        return Lease(**replay)
                 if expected_dispatch_revision is not None:
                     control = connection.execute(
                         """SELECT control.dispatch_mode, control.kill_switch_engaged,
@@ -2272,7 +2287,6 @@ class SQLiteRegistry:
             "reason": reason,
             "next_status": next_status.value,
         }
-        self.expire_leases(observed_at=released_at)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2285,6 +2299,20 @@ class SQLiteRegistry:
                 if replay is not None:
                     connection.rollback()
                     return
+                expired = self._expire_leases(connection, released_at)
+                if expired:
+                    self._bump_revision(connection)
+                    connection.commit()
+                    connection.execute("BEGIN IMMEDIATE")
+                    replay = self._operation_replay(
+                        connection,
+                        operation_id=operation_id,
+                        operation_kind="RELEASE_LEASE",
+                        request=request,
+                    )
+                    if replay is not None:
+                        connection.rollback()
+                        return
                 row = connection.execute(
                     """SELECT lease.*, package.last_heartbeat_at AS package_heartbeat_at
                        FROM leases AS lease

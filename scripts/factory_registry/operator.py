@@ -744,6 +744,33 @@ def _total_ownership_counts(
         raise OperatorError(f"Registry ownership check failed: {error}") from error
 
 
+def _ownership_history_sha256(
+    database: Path, *, immutable: bool = False
+) -> str:
+    """Hash exact lease, attempt, and runtime provenance in stable key order."""
+    suffix = "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    uri = f"{database.resolve().as_uri()}{suffix}"
+    history: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            for table, order_by in (
+                ("leases", "id"),
+                ("attempts", "id"),
+                ("attempt_runtime_ownership", "attempt_id"),
+            ):
+                history[table] = [
+                    dict(row) for row in connection.execute(
+                        f"SELECT * FROM {table} ORDER BY {order_by}"
+                    )
+                ]
+    except sqlite3.Error as error:
+        raise OperatorError(f"Registry ownership provenance check failed: {error}") from error
+    return hashlib.sha256(
+        json.dumps(history, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _require_migration_state(
     current: Mapping[str, Any], *, expected_schema: int, expected_revision: int
 ) -> None:
@@ -1271,6 +1298,117 @@ def restore_registry_v3_backup(
         "kind": "threadline-factory-registry-restore",
         "passed": True,
         "schema_version": 3,
+        "revision": expected_revision,
+        "backup": str(backup_path),
+        "backup_sha256": expected_backup_sha256,
+        "preservation_sha256": restored_preservation["sha256"],
+        "control": restored["control"],
+    }
+
+
+def restore_registry_v4_backup(
+    database: Path,
+    backup_path: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_backup_sha256: str,
+    expected_revision: int,
+    *,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Restore a reviewed v4 backup before any v5 receipt is recorded."""
+    observed_at = observed_at or utc_now()
+    verify_release(release, expected_commit)
+    permission_failures = _release_permission_failures(release)
+    if permission_failures:
+        raise OperatorError(
+            "private/immutable release gate failed: " + ",".join(permission_failures)
+        )
+    if (
+        _path_mode(database.parent) != 0o700
+        or _path_mode(database) != 0o600
+        or database.is_symlink()
+        or database.stat().st_uid != os.getuid()
+    ):
+        raise OperatorError("Registry restore requires an owner-controlled 0600 database")
+    _require_installed_preservation(database, preservation_path)
+    if backup_path.parent.resolve() != (database.parent / "evidence").resolve():
+        raise OperatorError("Registry backup must come from Registry evidence storage")
+    backup_metadata = backup_path.lstat()
+    if (
+        backup_path.is_symlink()
+        or backup_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(backup_metadata.st_mode) != 0o600
+    ):
+        raise OperatorError("Registry backup must be an owner-controlled 0600 file")
+    _require_backup_hash(backup_path, expected_backup_sha256)
+    backup_checks = _database_checks(
+        backup_path, immutable=True, require_wal=False
+    )
+    if (
+        backup_checks["schema_version"] != "4"
+        or backup_checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION)
+    ):
+        raise OperatorError("Registry backup schema metadata mismatch")
+    backup_control = SQLiteRegistry(backup_path).dispatch_control()
+    if (
+        backup_control["revision"] != expected_revision
+        or backup_control["dispatch_mode"] != "PAUSED"
+        or not backup_control["kill_switch_engaged"]
+    ):
+        raise OperatorError("Registry backup control mismatch")
+    backup_ownership = _total_ownership_counts(backup_path, immutable=True)
+    backup_ownership_sha256 = _ownership_history_sha256(
+        backup_path, immutable=True
+    )
+    verify_preservation(
+        SQLiteRegistry(backup_path).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+
+    current = status(database, observed_at=observed_at)
+    _require_migration_state(
+        current, expected_schema=5, expected_revision=expected_revision
+    )
+    if current["control"] != backup_control:
+        raise OperatorError("cannot restore v4 after Registry control changed")
+    if _total_ownership_counts(database) != backup_ownership:
+        raise OperatorError("cannot restore v4 after ownership history changed")
+    if _ownership_history_sha256(database) != backup_ownership_sha256:
+        raise OperatorError("cannot restore v4 after ownership provenance changed")
+    with sqlite3.connect(database) as connection:
+        receipts = int(connection.execute(
+            "SELECT count(*) FROM control_operation_receipts"
+        ).fetchone()[0])
+    if receipts != 0:
+        raise OperatorError("cannot restore v4 after control operation receipts exist")
+    verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+
+    _restore_database_from_backup(
+        database, backup_path, expected_backup_sha256
+    )
+    restored = status(database, observed_at=observed_at)
+    _require_migration_state(
+        restored, expected_schema=4, expected_revision=expected_revision
+    )
+    if restored["control"] != backup_control:
+        raise OperatorError("restored v4 Registry control does not match its backup")
+    if _total_ownership_counts(database) != backup_ownership:
+        raise OperatorError("restored v4 Registry ownership does not match its backup")
+    if _ownership_history_sha256(database) != backup_ownership_sha256:
+        raise OperatorError("restored v4 Registry ownership provenance does not match its backup")
+    restored_preservation = verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at),
+        preservation_path,
+    )
+    return {
+        "kind": "threadline-factory-registry-restore",
+        "passed": True,
+        "schema_version": 4,
         "revision": expected_revision,
         "backup": str(backup_path),
         "backup_sha256": expected_backup_sha256,

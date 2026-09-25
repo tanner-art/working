@@ -19,6 +19,8 @@ must re-read the gate before claim and launch. Attempt runtime ownership stores
 runner PID plus provider PID/process group and remains queryable after expiry,
 worker disappearance, or another ownership mismatch. These tables remain
 dormant until the separately approved runner/service adapter is wired.
+Existing schema-v3 and schema-v4 Registries are never upgraded by ordinary
+initialization. They require the reviewed, backup-backed operator migrations.
 
 ## Entities
 

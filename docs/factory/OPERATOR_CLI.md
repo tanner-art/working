@@ -103,6 +103,21 @@ a verified owner-only v4 backup, preserves historical leases and attempts,
 applies the receipt table and append-only triggers atomically, and verifies the
 unchanged control state, revision, ownership history, and preservation
 snapshot. Failed post-commit verification restores the verified v4 backup.
+Before any v5 control-operation receipt exists, an operator can explicitly
+restore that exact v4 backup. The command rejects a changed backup, changed
+Registry control or revision, changed ownership history, active ownership, or
+any evidence that v5 retry semantics have already been used:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli restore-registry-v4 \
+  --database "$DATABASE" \
+  --backup /absolute/path/from-the-v5-migration-evidence.sqlite3 \
+  --backup-sha256 SHA256_FROM_MIGRATION_EVIDENCE \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION
+```
 
 ## Evidence-only status and preflight
 
