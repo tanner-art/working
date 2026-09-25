@@ -417,6 +417,71 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def stop_for_worker_disappearance(
+        self, worker_id: str, *, observed_at: str, reason: str
+    ) -> Sequence[Mapping[str, Any]]:
+        """Atomically stop global dispatch and mark one missing worker offline."""
+        observed_at = _normalize_timestamp(observed_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                worker = connection.execute(
+                    "SELECT id FROM workers WHERE id=?", (worker_id,)
+                ).fetchone()
+                if worker is None:
+                    raise RegistryNotFound(f"worker {worker_id}")
+                control = connection.execute(
+                    "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None:
+                    raise RegistryConflict("DISPATCH_CONTROL_MISSING")
+                connection.execute(
+                    """UPDATE factory_control
+                       SET dispatch_mode='STOPPING', kill_switch_engaged=1,
+                           changed_at=?, reason=? WHERE singleton=1""",
+                    (observed_at, reason),
+                )
+                connection.execute(
+                    """UPDATE workers SET availability='OFFLINE', updated_at=?
+                       WHERE id=?""",
+                    (observed_at, worker_id),
+                )
+                self._insert_event(
+                    connection,
+                    "DISPATCH_KILL_SWITCH_ENGAGED",
+                    observed_at,
+                    None,
+                    worker_id,
+                    None,
+                    {"from": control["dispatch_mode"], "reason": reason},
+                )
+                self._insert_event(
+                    connection,
+                    "WORKER_DISAPPEARED",
+                    observed_at,
+                    None,
+                    worker_id,
+                    None,
+                    {"availability": "OFFLINE", "reason": reason},
+                )
+                rows = connection.execute(
+                    """SELECT runtime.attempt_id, runtime.runner_pid,
+                              runtime.agent_pid, runtime.agent_pgid,
+                              attempt.package_id, attempt.worker_id,
+                              attempt.lease_id
+                       FROM attempt_runtime_ownership AS runtime
+                       JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                       WHERE runtime.released_at IS NULL
+                       ORDER BY runtime.attempt_id"""
+                ).fetchall()
+                self._bump_revision(connection)
+                connection.commit()
+                return tuple(dict(row) for row in rows)
+            except Exception:
+                connection.rollback()
+                raise
+
     def begin_attempt_runtime(
         self,
         attempt_id: str,
@@ -551,6 +616,430 @@ class SQLiteRegistry:
                 )
                 self._bump_revision(connection)
                 connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def active_attempt_runtimes(self) -> Sequence[Mapping[str, Any]]:
+        """Return every unreleased runtime in deterministic attempt order."""
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            rows = connection.execute(
+                """SELECT runtime.attempt_id, runtime.runner_pid,
+                          runtime.agent_pid, runtime.agent_pgid,
+                          runtime.recorded_at, runtime.updated_at,
+                          attempt.package_id, attempt.worker_id, attempt.lease_id,
+                          attempt.ended_at, lease.expires_at AS lease_expires_at,
+                          lease.released_at AS lease_released_at
+                   FROM attempt_runtime_ownership AS runtime
+                   JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                   LEFT JOIN leases AS lease ON lease.id=attempt.lease_id
+                   WHERE runtime.released_at IS NULL
+                   ORDER BY runtime.attempt_id"""
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def active_unbound_leases(self) -> Sequence[Mapping[str, Any]]:
+        """Return active leases not owned by an unreleased runtime record."""
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            rows = connection.execute(
+                """SELECT lease.id AS lease_id, lease.package_id, lease.worker_id,
+                          lease.acquired_at, lease.expires_at
+                   FROM leases AS lease
+                   WHERE lease.released_at IS NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM attempts AS attempt
+                         JOIN attempt_runtime_ownership AS runtime
+                           ON runtime.attempt_id=attempt.id
+                         WHERE attempt.lease_id=lease.id
+                           AND runtime.released_at IS NULL
+                     )
+                   ORDER BY lease.id"""
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def renew_attempt_runtime(
+        self,
+        attempt_id: str,
+        lease_id: str,
+        *,
+        now: str,
+        expires_at: str,
+    ) -> Lease:
+        """Renew active runtime ownership while dispatch remains authorized."""
+        now = _normalize_timestamp(now)
+        expires_at = _normalize_timestamp(expires_at)
+        if expires_at <= now:
+            raise RegistryConflict("INVALID_LEASE_EXPIRY")
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                control = connection.execute(
+                    """SELECT dispatch_mode, kill_switch_engaged
+                       FROM factory_control WHERE singleton=1"""
+                ).fetchone()
+                if (
+                    control is None
+                    or control["dispatch_mode"] != "LIVE"
+                    or control["kill_switch_engaged"]
+                ):
+                    raise RegistryConflict("DISPATCH_PAUSED")
+                row = connection.execute(
+                    """SELECT runtime.released_at AS runtime_released_at,
+                              runtime.updated_at AS runtime_updated_at,
+                              runtime.agent_pid, attempt.package_id,
+                              attempt.worker_id, attempt.lease_id,
+                              attempt.ended_at, lease.acquired_at,
+                              lease.expires_at AS lease_expires_at,
+                              lease.released_at AS lease_released_at,
+                              package.status AS package_status,
+                              package.last_heartbeat_at AS package_heartbeat_at,
+                              worker.availability AS worker_availability
+                       FROM attempt_runtime_ownership AS runtime
+                       JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                       JOIN leases AS lease ON lease.id=attempt.lease_id
+                       JOIN work_packages AS package ON package.id=attempt.package_id
+                       JOIN workers AS worker ON worker.id=attempt.worker_id
+                       WHERE runtime.attempt_id=?""",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"attempt runtime {attempt_id}")
+                if row["lease_id"] != lease_id:
+                    raise RegistryConflict("LEASE_OWNERSHIP_MISMATCH")
+                if row["runtime_released_at"] is not None or row["ended_at"] is not None:
+                    raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
+                if row["lease_released_at"] is not None:
+                    raise RegistryConflict("LEASE_REVOKED")
+                if row["lease_expires_at"] <= now:
+                    raise RegistryConflict("LEASE_EXPIRED")
+                if (
+                    now < row["acquired_at"]
+                    or now < row["runtime_updated_at"]
+                    or (
+                        row["package_heartbeat_at"] is not None
+                        and now < row["package_heartbeat_at"]
+                    )
+                ):
+                    raise RegistryConflict("INVALID_LEASE_CHRONOLOGY")
+                if expires_at < row["lease_expires_at"]:
+                    raise RegistryConflict("INVALID_LEASE_EXPIRY")
+                if row["package_status"] != "ACTIVE" or row["worker_availability"] != "BUSY":
+                    raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+                connection.execute(
+                    "UPDATE leases SET expires_at=? WHERE id=?",
+                    (expires_at, lease_id),
+                )
+                connection.execute(
+                    """UPDATE attempt_runtime_ownership
+                       SET updated_at=? WHERE attempt_id=? AND released_at IS NULL""",
+                    (now, attempt_id),
+                )
+                connection.execute(
+                    """UPDATE work_packages SET last_heartbeat_at=?, updated_at=?
+                       WHERE id=?""",
+                    (now, now, row["package_id"]),
+                )
+                connection.execute(
+                    """UPDATE workers SET last_heartbeat_at=?, updated_at=?
+                       WHERE id=?""",
+                    (now, now, row["worker_id"]),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_RUNTIME_RENEWED",
+                    now,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {"lease_id": lease_id, "expires_at": expires_at},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return Lease(
+                    lease_id,
+                    row["package_id"],
+                    row["worker_id"],
+                    row["acquired_at"],
+                    expires_at,
+                )
+            except Exception:
+                connection.rollback()
+                raise
+
+    def recover_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        ended_at: str,
+        reason: str,
+        failure_detail: str,
+    ) -> bool:
+        """Close orphaned runtime ownership even after lease expiry or revocation."""
+        ended_at = _normalize_timestamp(ended_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """SELECT runtime.released_at AS runtime_released_at,
+                              attempt.package_id, attempt.worker_id,
+                              attempt.lease_id, attempt.started_at,
+                              attempt.ended_at, lease.released_at AS lease_released_at,
+                              package.status AS package_status,
+                              worker.availability AS worker_availability
+                       FROM attempt_runtime_ownership AS runtime
+                       JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                       LEFT JOIN leases AS lease ON lease.id=attempt.lease_id
+                       JOIN work_packages AS package ON package.id=attempt.package_id
+                       JOIN workers AS worker ON worker.id=attempt.worker_id
+                       WHERE runtime.attempt_id=?""",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"attempt runtime {attempt_id}")
+                if row["runtime_released_at"] is not None:
+                    connection.rollback()
+                    return False
+                if ended_at < row["started_at"]:
+                    raise RegistryConflict("INVALID_ATTEMPT_CHRONOLOGY")
+                connection.execute(
+                    """UPDATE attempt_runtime_ownership
+                       SET released_at=?, release_reason=?, updated_at=?
+                       WHERE attempt_id=? AND released_at IS NULL""",
+                    (ended_at, reason, ended_at, attempt_id),
+                )
+                if row["ended_at"] is None:
+                    connection.execute(
+                        """UPDATE attempts
+                           SET ended_at=?, outcome='FAILED',
+                               failure_code='RUNTIME_RECOVERY', failure_detail=?
+                           WHERE id=?""",
+                        (ended_at, failure_detail, attempt_id),
+                    )
+                if row["lease_id"] is not None and row["lease_released_at"] is None:
+                    connection.execute(
+                        """UPDATE leases SET released_at=?, release_reason=?
+                           WHERE id=? AND released_at IS NULL""",
+                        (ended_at, reason, row["lease_id"]),
+                    )
+                if row["package_status"] == "ACTIVE":
+                    connection.execute(
+                        """UPDATE work_packages
+                           SET status='BLOCKED', failure_code='RUNTIME_RECOVERY',
+                               failure_detail=?, updated_at=? WHERE id=?""",
+                        (failure_detail, ended_at, row["package_id"]),
+                    )
+                if row["worker_availability"] == "BUSY":
+                    connection.execute(
+                        "UPDATE workers SET availability='IDLE', updated_at=? WHERE id=?",
+                        (ended_at, row["worker_id"]),
+                    )
+                failure_id = str(uuid.uuid4())
+                connection.execute(
+                    """INSERT INTO failure_observations
+                       (id, package_id, worker_id, attempt_id, code, detail,
+                        observed_at, metadata_json)
+                       VALUES (?, ?, ?, ?, 'RUNTIME_RECOVERY', ?, ?, ?)""",
+                    (
+                        failure_id,
+                        row["package_id"],
+                        row["worker_id"],
+                        attempt_id,
+                        failure_detail,
+                        ended_at,
+                        _json({"lease_id": row["lease_id"], "reason": reason}),
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_RUNTIME_RECOVERED",
+                    ended_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {"failure_id": failure_id, "reason": reason},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
+
+    def recover_stopped_lease(
+        self,
+        lease_id: str,
+        *,
+        ended_at: str,
+        reason: str,
+        failure_detail: str,
+    ) -> bool:
+        """Release lease-only ownership left before attempt reservation."""
+        ended_at = _normalize_timestamp(ended_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """SELECT lease.*, package.status AS package_status,
+                              worker.availability AS worker_availability
+                       FROM leases AS lease
+                       JOIN work_packages AS package ON package.id=lease.package_id
+                       JOIN workers AS worker ON worker.id=lease.worker_id
+                       WHERE lease.id=?""",
+                    (lease_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"lease {lease_id}")
+                if row["released_at"] is not None:
+                    connection.rollback()
+                    return False
+                if ended_at < row["acquired_at"]:
+                    raise RegistryConflict("INVALID_LEASE_CHRONOLOGY")
+                connection.execute(
+                    """UPDATE leases SET released_at=?, release_reason=?
+                       WHERE id=? AND released_at IS NULL""",
+                    (ended_at, reason, lease_id),
+                )
+                if row["package_status"] == "ACTIVE":
+                    connection.execute(
+                        """UPDATE work_packages
+                           SET status='BLOCKED', failure_code='LEASE_RECOVERY',
+                               failure_detail=?, updated_at=? WHERE id=?""",
+                        (failure_detail, ended_at, row["package_id"]),
+                    )
+                if row["worker_availability"] == "BUSY":
+                    connection.execute(
+                        "UPDATE workers SET availability='IDLE', updated_at=? WHERE id=?",
+                        (ended_at, row["worker_id"]),
+                    )
+                failure_id = str(uuid.uuid4())
+                connection.execute(
+                    """INSERT INTO failure_observations
+                       (id, package_id, worker_id, attempt_id, code, detail,
+                        observed_at, metadata_json)
+                       VALUES (?, ?, ?, NULL, 'LEASE_RECOVERY', ?, ?, ?)""",
+                    (
+                        failure_id,
+                        row["package_id"],
+                        row["worker_id"],
+                        failure_detail,
+                        ended_at,
+                        _json({"lease_id": lease_id, "reason": reason}),
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "LEASE_OWNERSHIP_RECOVERED",
+                    ended_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    None,
+                    {"failure_id": failure_id, "lease_id": lease_id, "reason": reason},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
+
+    def record_runtime_recovery_failure(
+        self, attempt_id: str, *, observed_at: str, detail: str
+    ) -> str:
+        """Persist deterministic evidence while dispatch remains STOPPING."""
+        observed_at = _normalize_timestamp(observed_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT package_id, worker_id FROM attempts WHERE id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"attempt {attempt_id}")
+                failure_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"runtime-recovery:{attempt_id}",
+                ))
+                connection.execute(
+                    """INSERT OR IGNORE INTO failure_observations
+                       (id, package_id, worker_id, attempt_id, code, detail,
+                        observed_at, metadata_json)
+                       VALUES (?, ?, ?, ?, 'RUNTIME_RECOVERY_FAILED', ?, ?, '{}')""",
+                    (
+                        failure_id,
+                        row["package_id"],
+                        row["worker_id"],
+                        attempt_id,
+                        detail,
+                        observed_at,
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "ATTEMPT_RUNTIME_RECOVERY_FAILED",
+                    observed_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    attempt_id,
+                    {"failure_id": failure_id, "detail": detail},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return failure_id
+            except Exception:
+                connection.rollback()
+                raise
+
+    def record_lease_recovery_failure(
+        self, lease_id: str, *, observed_at: str, detail: str
+    ) -> str:
+        observed_at = _normalize_timestamp(observed_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT package_id, worker_id FROM leases WHERE id=?",
+                    (lease_id,),
+                ).fetchone()
+                if row is None:
+                    raise RegistryNotFound(f"lease {lease_id}")
+                failure_id = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"lease-recovery:{lease_id}",
+                ))
+                connection.execute(
+                    """INSERT OR IGNORE INTO failure_observations
+                       (id, package_id, worker_id, attempt_id, code, detail,
+                        observed_at, metadata_json)
+                       VALUES (?, ?, ?, NULL, 'LEASE_RECOVERY_FAILED', ?, ?, ?)""",
+                    (
+                        failure_id,
+                        row["package_id"],
+                        row["worker_id"],
+                        detail,
+                        observed_at,
+                        _json({"lease_id": lease_id}),
+                    ),
+                )
+                self._insert_event(
+                    connection,
+                    "LEASE_OWNERSHIP_RECOVERY_FAILED",
+                    observed_at,
+                    row["package_id"],
+                    row["worker_id"],
+                    None,
+                    {"failure_id": failure_id, "lease_id": lease_id, "detail": detail},
+                )
+                self._bump_revision(connection)
+                connection.commit()
+                return failure_id
             except Exception:
                 connection.rollback()
                 raise

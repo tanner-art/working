@@ -5,6 +5,7 @@
   "worktrees": "/absolute/path/to/threadline-agent-worktrees",
   "registry_database": "/absolute/path/to/factory-registry.sqlite3",
   "registry_lease_seconds": 2100,
+  "registry_renew_interval_seconds": 30,
   "path": "/absolute/path/to/bin:/usr/bin:/bin:/usr/sbin:/sbin",
   "gh": "/absolute/path/to/threadline-repository/scripts/runner/github.py",
   "git": "/usr/bin/git",

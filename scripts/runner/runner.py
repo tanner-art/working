@@ -51,11 +51,52 @@ class RegistryAttemptLifecycle:
         return True
 
 
+class RegistryLeaseMonitor:
+    """Renew one Registry runtime lease from the runner's main thread."""
+
+    def __init__(self, control, attempt_id, lease_id, lease_seconds):
+        self.control = control
+        self.attempt_id = attempt_id
+        self.lease_id = lease_id
+        self.lease_seconds = lease_seconds
+
+    def check(self):
+        self.control.renew_runtime(
+            self.attempt_id,
+            self.lease_id,
+            lease_seconds=self.lease_seconds,
+        )
+
+
 def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
-        on_start=None):
-    process = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.PIPE,
-                               text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               start_new_session=True)
+        on_start=None, launch_barrier=False, monitor=None, monitor_interval=30):
+    if monitor is not None and monitor_interval <= 0:
+        raise ValueError('monitor_interval must be positive')
+    barrier_read = barrier_write = None
+    command = args
+    popen_options = {}
+    if launch_barrier:
+        barrier_read, barrier_write = os.pipe()
+        command = [
+            sys.executable,
+            str(pathlib.Path(__file__).with_name('provider_barrier.py')),
+            str(barrier_read),
+            *args,
+        ]
+        popen_options['pass_fds'] = (barrier_read,)
+    try:
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, stdin=subprocess.PIPE,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True, **popen_options,
+        )
+    except BaseException:
+        if barrier_read is not None:
+            os.close(barrier_read)
+            os.close(barrier_write)
+        raise
+    if barrier_read is not None:
+        os.close(barrier_read)
     previous = {}
     def stop(signum, frame):
         terminate_process_group(process)
@@ -67,9 +108,53 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
             try:
                 on_start(process.pid)
             except BaseException:
+                if barrier_write is not None:
+                    os.close(barrier_write)
+                    barrier_write = None
                 terminate_process_group(process)
+                process.communicate()
                 raise
-        output, _ = process.communicate(input, timeout=timeout)
+        if barrier_write is not None:
+            try:
+                os.write(barrier_write, b'1')
+            except BaseException:
+                os.close(barrier_write)
+                barrier_write = None
+                terminate_process_group(process)
+                process.communicate()
+                raise
+            else:
+                os.close(barrier_write)
+                barrier_write = None
+        if monitor is None:
+            output, _ = process.communicate(input, timeout=timeout)
+        else:
+            deadline = time.monotonic() + timeout
+            pending_input = input
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    output, _ = process.communicate(
+                        pending_input, timeout=min(monitor_interval, remaining)
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    pending_input = None
+                    if time.monotonic() >= deadline:
+                        raise
+                    try:
+                        monitor()
+                    except Exception as error:
+                        terminate_process_group(process)
+                        output, _ = process.communicate()
+                        if log:
+                            with open(log, 'a') as stream:
+                                stream.write(output)
+                        raise RuntimeError(
+                            f'runtime monitor failed: {error}'
+                        ) from error
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
         try: output, _ = process.communicate(timeout=10)
@@ -82,6 +167,8 @@ def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
             with open(log,'a') as f: f.write(output)
         raise RuntimeError(f'{args[0]} timed out; attempt preserved')
     finally:
+        if barrier_write is not None:
+            os.close(barrier_write)
         for sig, handler in previous.items(): signal.signal(sig,handler)
     result = subprocess.CompletedProcess(args, process.returncode, output)
     if log:
@@ -346,7 +433,9 @@ def recover_stale_claims(state, stale_claim_seconds, on_stale_attempt=None):
             process_group_alive = _process_group_alive(data.get('agent_pgid'))
             if process_group_alive is not False:
                 continue
-        if on_stale_attempt is not None and data.get('registry_attempt_id'):
+        if on_stale_attempt is not None and (
+            data.get('registry_attempt_id') or data.get('registry_lease_id')
+        ):
             try:
                 on_stale_attempt(data)
             except Exception:
@@ -524,6 +613,26 @@ def main():
     registry_control = RunnerRegistryControl.from_config(c)
     if not args.dry_run and registry_control is None:
         raise ValueError('live runner requires registry_database')
+    registry_lease_seconds = c.get(
+        'registry_lease_seconds', c.get('agent_timeout', 1800) + 300
+    )
+    registry_renew_interval_seconds = c.get(
+        'registry_renew_interval_seconds',
+        max(1, min(60, registry_lease_seconds // 3))
+        if isinstance(registry_lease_seconds, int) and not isinstance(registry_lease_seconds, bool)
+        else 0,
+    )
+    if not args.dry_run and (
+        isinstance(registry_lease_seconds, bool)
+        or not isinstance(registry_lease_seconds, int)
+        or registry_lease_seconds <= 1
+        or isinstance(registry_renew_interval_seconds, bool)
+        or not isinstance(registry_renew_interval_seconds, (int, float))
+        or not 0 < registry_renew_interval_seconds < registry_lease_seconds
+    ):
+        raise ValueError(
+            'registry lease seconds must exceed one and renewal interval must be positive and shorter'
+        )
     if args.slot != 1 and not args.agent:
         raise ValueError('--slot requires --agent')
     if args.agent:
@@ -541,8 +650,18 @@ def main():
     env=os.environ.copy();env['PATH']=c['path']
     gh=c['gh']; git=c['git']; pnpm=c['pnpm']
     stale_claim_seconds = c.get('stale_claim_seconds', c.get('agent_timeout', 1800) + 60)
-    def github(*a): return run([gh,*a],cwd=repo,env=env)
-    def g(*a,cwd=repo): return run([git,*a],cwd=cwd,env=env)
+    runtime_monitor = None
+    def monitored_run(command, **kwargs):
+        if runtime_monitor is not None:
+            runtime_monitor.check()
+            kwargs.setdefault('monitor', runtime_monitor.check)
+            kwargs.setdefault('monitor_interval', registry_renew_interval_seconds)
+        output = run(command, **kwargs)
+        if runtime_monitor is not None:
+            runtime_monitor.check()
+        return output
+    def github(*a): return monitored_run([gh,*a],cwd=repo,env=env)
+    def g(*a,cwd=repo): return monitored_run([git,*a],cwd=cwd,env=env)
     # Dry-run performs only read-only GitHub/Git calls: no directories, labels, or fetch.
     github('api','repos/'+c['github'],'--jq','.full_name')
     issues=json.loads(github('issue','list','--repo',c['github'],'--state','open','--label','runner:ready','--limit','100','--json','number,title,body,labels,author'))
@@ -616,11 +735,13 @@ def main():
         cwd=repo, env=env, timeout=10))
     write_heartbeat(state, status='polling', agent=heartbeat_agent,
                     worker=worker)
+    handled_disappearances = set()
     def close_disappeared_registry_attempt(stale):
         if registry_control is not None:
-            registry_control.fail_if_active(
-                stale['registry_attempt_id'], 'runner worker disappeared'
-            )
+            missing_worker = stale.get('worker') or lane
+            if missing_worker not in handled_disappearances:
+                registry_control.handle_worker_disappearance(missing_worker)
+                handled_disappearances.add(missing_worker)
     recover_stale_claims(
         state, stale_claim_seconds,
         close_disappeared_registry_attempt if registry_control is not None else None,
@@ -631,6 +752,7 @@ def main():
         started_at = None
         registry_lease_id = None
         registry_lifecycle = None
+        runtime_monitor = None
         try:
             agent,body=select(issue,c['allowed_authors'])
             if args.agent and agent != args.agent: continue
@@ -685,9 +807,10 @@ def main():
                 registry_lease_id = registry_control.claim_package(
                     body['task'], worker_id=lane,
                     expected_revision=registry_revision,
-                    lease_seconds=c.get('registry_lease_seconds',
-                                        c.get('agent_timeout', 1800) + 300),
+                    lease_seconds=registry_lease_seconds,
                 )
+                data['registry_lease_id'] = registry_lease_id
+                save_record(record, data)
                 reserve_revision = registry_control.pre_launch()
                 registry_control.reserve_attempt(
                     attempt, package_id=body['task'], worker_id=lane,
@@ -696,8 +819,12 @@ def main():
                 registry_lifecycle = RegistryAttemptLifecycle(
                     registry_control, attempt
                 )
-                data.update(registry_attempt_id=attempt,
-                            registry_lease_id=registry_lease_id)
+                runtime_monitor = RegistryLeaseMonitor(
+                    registry_control, attempt, registry_lease_id,
+                    registry_lease_seconds,
+                )
+                runtime_monitor.check()
+                data['registry_attempt_id'] = attempt
                 save_record(record, data)
             write_heartbeat(state, status='starting', issue=n,
                             task_id=body['task'], start_time=started_at,
@@ -724,7 +851,7 @@ def main():
             if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
             with file_lock(state / 'git.lock'):
                 g('worktree','add','-b',branch,str(wt),base)
-            run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
+            monitored_run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]
             agentenv=build_agent_environment(env, config.get('env', {}), c['path'])
             prompt=build_agent_prompt(n, body, worker=lane, slot=args.slot)
@@ -758,9 +885,11 @@ def main():
                 save_record(record, data)
             if registry_control is not None:
                 registry_control.pre_launch()
-            run(usage_decision['command'],cwd=wt,env=agentenv,
-                timeout=c.get('agent_timeout',1800),log=log,input=prompt,
-                on_start=record_agent_process_group)
+            monitored_run(
+                usage_decision['command'], cwd=wt, env=agentenv,
+                timeout=c.get('agent_timeout',1800), log=log, input=prompt,
+                on_start=record_agent_process_group, launch_barrier=True,
+            )
             def verify_changes():
                 if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
                     raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
@@ -779,7 +908,9 @@ def main():
                          base=base, worktree_path=str(wt),
                          validation_result='pending',
                          elapsed_seconds=time.time() - started_at)
-            run_repository_validation(state, pnpm, wt, env, log)
+            run_repository_validation(
+                state, pnpm, wt, env, log, run_command=monitored_run
+            )
             verify_changes()
             g('diff','--check',cwd=wt)
             g('add','--',*body['paths'],cwd=wt)
@@ -800,6 +931,7 @@ def main():
             if registry_lifecycle is not None:
                 registry_lifecycle.succeed()
                 data['registry_runtime_finished'] = True
+                runtime_monitor = None
             save_record(record, data, 'review')
             telemetry_errors = publish_completion_telemetry(
                 state, issue=n, task_id=body['task'], title=issue.get('title'),
@@ -841,6 +973,7 @@ def main():
                         )
                     except Exception:
                         data['registry_recovery_required'] = True
+                runtime_monitor = None
                 if not data.get('pr'):
                     preserve_interrupted_attempt(
                         state, record, data, issue=n, task_id=body.get('task'),
@@ -876,6 +1009,7 @@ def main():
                     )
                 except Exception:
                     data['registry_recovery_required'] = True
+            runtime_monitor = None
             if claimed:
                 save_record(record, data)
             if claimed and started_at is not None:

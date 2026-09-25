@@ -1,12 +1,14 @@
 import pathlib
+import sys
 import tempfile
 import unittest
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from registry_control import RunnerRegistryControl
+from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry import (
     Feature,
     Lane,
@@ -226,6 +228,262 @@ class RunnerRegistryControlTests(unittest.TestCase):
         self.assertIsNotNone(runtime[3])
         self.assertEqual(tuple(attempt), ("FAILED", "bounded failure"))
         self.assertEqual(package, "BLOCKED")
+
+    def test_lease_revocation_stops_renewal_and_recovery_closes_runtime(self):
+        now = datetime.now(timezone.utc)
+        self.registry.register_feature(
+            Feature("FEATURE", "Feature", 10, TaskStatus.READY)
+        )
+        self.registry.register_worker(
+            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,))
+        )
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
+                ("registry",), 10, ("verified",), status=TaskStatus.READY,
+            )
+        )
+        current = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=current["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=now.isoformat(), reason="bounded canary",
+        )
+        lease = self.registry.acquire_lease(
+            "TASK-1", "worker-a", acquired_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        control = RunnerRegistryControl(self.database)
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-1", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+        control.renew_runtime("attempt-1", lease.id, lease_seconds=300)
+        control.record_process("attempt-1", pid=901, pgid=901)
+
+        revoked_at = datetime.now(timezone.utc)
+        self.registry.release_lease(
+            lease.id, released_at=revoked_at.isoformat(),
+            reason="operator revoked lease", next_status=TaskStatus.BLOCKED,
+        )
+        with self.assertRaisesRegex(RegistryConflict, "LEASE_REVOKED"):
+            control.renew_runtime("attempt-1", lease.id, lease_seconds=300)
+        control.fail("attempt-1", "runtime monitor observed lease revocation")
+
+        with self.registry._connection() as connection:
+            runtime = connection.execute(
+                """SELECT released_at FROM attempt_runtime_ownership
+                   WHERE attempt_id='attempt-1'"""
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT ended_at, outcome FROM attempts WHERE id='attempt-1'"
+            ).fetchone()
+            failures = connection.execute(
+                """SELECT code FROM failure_observations
+                   WHERE attempt_id='attempt-1' ORDER BY observed_at"""
+            ).fetchall()
+        self.assertIsNotNone(runtime["released_at"])
+        self.assertIsNotNone(attempt["ended_at"])
+        self.assertEqual(attempt["outcome"], "FAILED")
+        self.assertIn("RUNTIME_RECOVERY", [row["code"] for row in failures])
+
+    def test_real_provider_is_stopped_when_registry_lease_expires(self):
+        now = datetime.now(timezone.utc)
+        self.registry.register_feature(
+            Feature("FEATURE", "Feature", 10, TaskStatus.READY)
+        )
+        self.registry.register_worker(
+            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,))
+        )
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
+                ("registry",), 10, ("verified",), status=TaskStatus.READY,
+            )
+        )
+        current = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=current["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=now.isoformat(), reason="bounded canary",
+        )
+        lease = self.registry.acquire_lease(
+            "TASK-1", "worker-a",
+            acquired_at=(now - timedelta(seconds=10)).isoformat(),
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        control = RunnerRegistryControl(self.database)
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-1", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+        lifecycle = RegistryAttemptLifecycle(control, "attempt-1")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            started, completed = root / "started", root / "completed"
+            command = [
+                sys.executable, "-c",
+                (
+                    "from pathlib import Path; import time; "
+                    f"Path({str(started)!r}).write_text('started'); "
+                    "time.sleep(5); "
+                    f"Path({str(completed)!r}).write_text('completed')"
+                ),
+            ]
+
+            def bind_then_expire(pid):
+                control.record_process("attempt-1", pid=pid, pgid=pid)
+                expired_at = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat()
+                with self.registry._connection() as connection:
+                    connection.execute(
+                        "UPDATE leases SET expires_at=? WHERE id=?",
+                        (expired_at, lease.id),
+                    )
+
+            def monitor_registry():
+                if started.exists():
+                    control.renew_runtime("attempt-1", lease.id, lease_seconds=300)
+
+            with self.assertRaisesRegex(RuntimeError, "LEASE_EXPIRED"):
+                run(
+                    command, launch_barrier=True, on_start=bind_then_expire,
+                    monitor=monitor_registry, monitor_interval=0.1, timeout=10,
+                )
+            lifecycle.fail("runtime monitor observed lease expiry")
+            self.assertTrue(started.exists())
+            self.assertFalse(completed.exists())
+
+        self.assertEqual(self.registry.active_attempt_runtimes(), ())
+        with self.registry._connection() as connection:
+            attempt = connection.execute(
+                "SELECT outcome, ended_at FROM attempts WHERE id='attempt-1'"
+            ).fetchone()
+            released = connection.execute(
+                "SELECT released_at FROM leases WHERE id=?", (lease.id,)
+            ).fetchone()[0]
+        self.assertEqual(attempt["outcome"], "FAILED")
+        self.assertIsNotNone(attempt["ended_at"])
+        self.assertIsNotNone(released)
+
+    def test_worker_disappearance_globally_stops_and_reconciles_all_runtimes(self):
+        now = datetime.now(timezone.utc)
+        self.registry.register_feature(
+            Feature("FEATURE", "Feature", 10, TaskStatus.READY)
+        )
+        for suffix in ("a", "b", "c"):
+            worker_id = f"worker-{suffix}"
+            package_id = f"TASK-{suffix.upper()}"
+            self.registry.register_worker(
+                Worker(worker_id, worker_id, ("registry",), (Lane.PLATFORM,))
+            )
+            self.registry.register_work_package(
+                WorkPackage(
+                    package_id, "FEATURE", package_id, "ORCHESTRATION",
+                    Lane.PLATFORM, ("registry",), 10, ("verified",),
+                    status=TaskStatus.READY,
+                )
+            )
+        current = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=current["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=now.isoformat(), reason="bounded canary",
+        )
+        for index, suffix in enumerate(("a", "b"), start=1):
+            worker_id = f"worker-{suffix}"
+            package_id = f"TASK-{suffix.upper()}"
+            self.registry.acquire_lease(
+                package_id, worker_id, acquired_at=now.isoformat(),
+                expires_at=(now + timedelta(minutes=5)).isoformat(),
+            )
+            self.registry.begin_attempt_runtime(
+                f"attempt-{suffix}", package_id=package_id, worker_id=worker_id,
+                runner_pid=800 + index, started_at=now.isoformat(),
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+            if suffix == "a":
+                self.registry.record_attempt_process(
+                    f"attempt-{suffix}", agent_pid=900 + index,
+                    agent_pgid=900 + index, recorded_at=now.isoformat(),
+                )
+        lease_only = self.registry.acquire_lease(
+            "TASK-C", "worker-c", acquired_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+
+        terminated = []
+        control = RunnerRegistryControl(self.database)
+        result = control.handle_worker_disappearance(
+            "worker-a", terminate=terminated.append
+        )
+        self.assertEqual(result["unresolved"], ())
+        self.assertEqual(terminated, [901])
+        self.assertIn(f"lease:{lease_only.id}", result["resolved"])
+        state = self.registry.dispatch_control()
+        self.assertEqual(state["dispatch_mode"], "PAUSED")
+        self.assertTrue(state["kill_switch_engaged"])
+        self.assertEqual(self.registry.active_attempt_runtimes(), ())
+        with self.registry._connection() as connection:
+            workers = dict(connection.execute(
+                "SELECT id, availability FROM workers ORDER BY id"
+            ).fetchall())
+            packages = dict(connection.execute(
+                "SELECT id, status FROM work_packages ORDER BY id"
+            ).fetchall())
+            attempts = connection.execute(
+                "SELECT outcome FROM attempts ORDER BY id"
+            ).fetchall()
+        self.assertEqual(workers, {
+            "worker-a": "OFFLINE", "worker-b": "IDLE", "worker-c": "IDLE",
+        })
+        self.assertEqual(packages, {
+            "TASK-A": "BLOCKED", "TASK-B": "BLOCKED", "TASK-C": "BLOCKED",
+        })
+        self.assertEqual([row["outcome"] for row in attempts], ["FAILED", "FAILED"])
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAUSED"):
+            control.pre_claim()
+        repeated = control.handle_worker_disappearance(
+            "worker-a", terminate=terminated.append
+        )
+        self.assertEqual(repeated, {"resolved": (), "unresolved": ()})
+        self.assertEqual(terminated, [901])
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
+
+    def test_unresolved_stop_keeps_stopping_and_records_deterministic_evidence(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-1", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+        control.record_process("attempt-1", pid=901, pgid=901)
+        control.engage_stop("operator pause")
+
+        def cannot_terminate(_pgid):
+            raise RuntimeError("simulated surviving process")
+
+        result = control.reconcile_stopping_runtimes(terminate=cannot_terminate)
+        self.assertEqual(result["resolved"], ())
+        self.assertEqual(result["unresolved"], ("attempt-1",))
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "STOPPING")
+        self.assertEqual(
+            [item["attempt_id"] for item in self.registry.active_attempt_runtimes()],
+            ["attempt-1"],
+        )
+        with self.registry._connection() as connection:
+            failures = connection.execute(
+                """SELECT id, code, detail FROM failure_observations
+                   WHERE attempt_id='attempt-1'"""
+            ).fetchall()
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["code"], "RUNTIME_RECOVERY_FAILED")
+        self.assertIn("simulated surviving process", failures[0]["detail"])
 
     def test_process_record_fails_after_kill_switch(self):
         self.seed_assignment()

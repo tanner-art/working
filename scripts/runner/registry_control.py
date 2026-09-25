@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 
@@ -25,6 +27,33 @@ from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E40
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def terminate_recorded_process_group(pgid: int, timeout: float = 10) -> None:
+    """Synchronously stop a recorded process group owned by another runner."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"process group {pgid} survived SIGKILL")
 
 
 class RunnerRegistryControl:
@@ -119,6 +148,23 @@ class RunnerRegistryControl:
             recorded_at=utc_now(),
         )
 
+    def renew_runtime(
+        self,
+        attempt_id: str,
+        lease_id: str,
+        *,
+        lease_seconds: int,
+    ) -> None:
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 1:
+            raise ValueError("registry lease duration must exceed one second")
+        now = datetime.now(timezone.utc)
+        self.registry.renew_attempt_runtime(
+            attempt_id,
+            lease_id,
+            now=now.isoformat(),
+            expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
+        )
+
     def succeed(self, attempt_id: str) -> None:
         self.registry.finish_attempt_runtime(
             attempt_id,
@@ -129,14 +175,29 @@ class RunnerRegistryControl:
         )
 
     def fail(self, attempt_id: str, detail: str) -> None:
-        self.registry.finish_attempt_runtime(
-            attempt_id,
-            ended_at=utc_now(),
-            outcome="FAILED",
-            next_status=TaskStatus.BLOCKED,
-            reason="runner attempt failed",
-            failure_detail=detail,
-        )
+        ended_at = utc_now()
+        try:
+            self.registry.finish_attempt_runtime(
+                attempt_id,
+                ended_at=ended_at,
+                outcome="FAILED",
+                next_status=TaskStatus.BLOCKED,
+                reason="runner attempt failed",
+                failure_detail=detail,
+            )
+        except RegistryConflict as error:
+            if error.code not in {
+                "LEASE_NOT_ACTIVE", "PACKAGE_NOT_ACTIVE",
+            }:
+                raise
+            recovered = self.registry.recover_attempt_runtime(
+                attempt_id,
+                ended_at=ended_at,
+                reason="runner fail-closed runtime recovery",
+                failure_detail=detail,
+            )
+            if not recovered:
+                raise
 
     def fail_if_active(self, attempt_id: str, detail: str) -> bool:
         """Close stale ownership once; an already terminal attempt is a safe no-op."""
@@ -160,6 +221,84 @@ class RunnerRegistryControl:
         return self.registry.engage_dispatch_kill_switch(
             changed_at=utc_now(), reason=reason
         )
+
+    def _reconcile_runtimes(self, runtimes, *, terminate) -> dict[str, tuple[str, ...]]:
+        resolved = []
+        unresolved = []
+        for runtime in sorted(runtimes, key=lambda item: item["attempt_id"]):
+            attempt_id = runtime["attempt_id"]
+            try:
+                pgid = runtime.get("agent_pgid")
+                if pgid is not None:
+                    terminate(int(pgid))
+                self.registry.recover_attempt_runtime(
+                    attempt_id,
+                    ended_at=utc_now(),
+                    reason="global controlled stop",
+                    failure_detail="runtime stopped during fail-closed reconciliation",
+                )
+                resolved.append(attempt_id)
+            except Exception as error:
+                unresolved.append(attempt_id)
+                self.registry.record_runtime_recovery_failure(
+                    attempt_id,
+                    observed_at=utc_now(),
+                    detail=f"{type(error).__name__}: {error}",
+                )
+        for lease in self.registry.active_unbound_leases():
+            lease_id = lease["lease_id"]
+            ownership_id = f"lease:{lease_id}"
+            try:
+                self.registry.recover_stopped_lease(
+                    lease_id,
+                    ended_at=utc_now(),
+                    reason="global controlled stop",
+                    failure_detail="lease-only ownership stopped during fail-closed reconciliation",
+                )
+                resolved.append(ownership_id)
+            except Exception as error:
+                unresolved.append(ownership_id)
+                self.registry.record_lease_recovery_failure(
+                    lease_id,
+                    observed_at=utc_now(),
+                    detail=f"{type(error).__name__}: {error}",
+                )
+        return {
+            "resolved": tuple(resolved),
+            "unresolved": tuple(unresolved),
+        }
+
+    def reconcile_stopping_runtimes(
+        self, *, terminate=terminate_recorded_process_group
+    ) -> dict[str, tuple[str, ...]]:
+        control = self.registry.dispatch_control()
+        if control["dispatch_mode"] != "STOPPING" or not control["kill_switch_engaged"]:
+            raise RegistryConflict("DISPATCH_NOT_STOPPING")
+        return self._reconcile_runtimes(
+            self.registry.active_attempt_runtimes(), terminate=terminate
+        )
+
+    def handle_worker_disappearance(
+        self,
+        worker_id: str,
+        *,
+        terminate=terminate_recorded_process_group,
+    ) -> dict[str, tuple[str, ...]]:
+        runtimes = self.registry.stop_for_worker_disappearance(
+            worker_id,
+            observed_at=utc_now(),
+            reason=f"worker disappeared: {worker_id}",
+        )
+        result = self._reconcile_runtimes(runtimes, terminate=terminate)
+        if result["unresolved"]:
+            raise RegistryConflict(
+                "RUNTIME_RECONCILIATION_REQUIRED",
+                ",".join(result["unresolved"]),
+            )
+        if self.registry.active_attempt_runtimes() or self.registry.active_unbound_leases():
+            raise RegistryConflict("RUNTIME_RECONCILIATION_REQUIRED", "post-read not empty")
+        self.finalize_paused(reason=f"worker disappearance reconciled: {worker_id}")
+        return result
 
     def finalize_paused(self, *, reason: str) -> int:
         control = self.registry.dispatch_control()

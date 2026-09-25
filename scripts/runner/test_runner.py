@@ -83,13 +83,66 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'gate changed'):
                 run(['provider'], on_start=lambda _pid: (_ for _ in ()).throw(
                     RuntimeError('gate changed')
-                ))
+                ), launch_barrier=True)
         self.assertEqual(
             killpg.call_args_list,
             [call(901, __import__('signal').SIGTERM),
              call(901, __import__('signal').SIGKILL)],
         )
         process.wait.assert_called_once_with(timeout=10)
+
+    def test_provider_cannot_execute_before_durable_bind_releases_barrier(self):
+        import pathlib, sys, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / 'provider-ran'
+            command = [
+                sys.executable, '-c',
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+            ]
+
+            def reject_bind(_pid):
+                self.assertFalse(marker.exists())
+                raise RuntimeError('Registry rejected PID binding')
+
+            with self.assertRaisesRegex(RuntimeError, 'rejected PID binding'):
+                run(command, on_start=reject_bind, launch_barrier=True)
+            self.assertFalse(marker.exists())
+
+            bound = []
+            run(command, on_start=bound.append, launch_barrier=True)
+            self.assertTrue(bound)
+            self.assertEqual(marker.read_text(), 'ran')
+
+    def test_runtime_monitor_failure_stops_provider_before_completion(self):
+        import pathlib, sys, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            started, completed = root / 'started', root / 'completed'
+            command = [
+                sys.executable, '-c',
+                (
+                    "from pathlib import Path; import time; "
+                    f"Path({str(started)!r}).write_text('started'); "
+                    "time.sleep(5); "
+                    f"Path({str(completed)!r}).write_text('completed')"
+                ),
+            ]
+            checks = []
+
+            def fail_monitor():
+                checks.append(True)
+                if not started.exists():
+                    return
+                raise RuntimeError('lease revoked')
+
+            with self.assertRaisesRegex(RuntimeError, 'lease revoked'):
+                run(
+                    command, launch_barrier=True, on_start=lambda _pid: None,
+                    monitor=fail_monitor, monitor_interval=0.1, timeout=10,
+                )
+            self.assertTrue(checks)
+            self.assertTrue(started.exists())
+            self.assertFalse(completed.exists())
 
     def test_worker_disappearance_finishes_registry_attempt_before_local_recovery(self):
         import json, pathlib, tempfile
@@ -135,6 +188,25 @@ class ProcessTests(unittest.TestCase):
             preserved = __import__('json').loads(record.read_text())
             self.assertTrue(preserved['registry_recovery_required'])
             self.assertEqual(preserved['status'], 'agent')
+
+    def test_worker_disappearance_callback_covers_lease_only_setup_gap(self):
+        import json, pathlib, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory)
+            record = state / 'issue-1.json'
+            record.write_text(json.dumps({
+                'issue': 1, 'status': 'starting', 'updated_at': 1,
+                'runner_pid': 900, 'registry_lease_id': 'lease-1',
+            }))
+            callback = Mock()
+            with patch('runner.time.time', return_value=1000), \
+                    patch('runner._pid_alive', return_value=False):
+                recover_stale_claims(state, 10, callback)
+            callback.assert_called_once()
+            self.assertEqual(callback.call_args.args[0]['registry_lease_id'], 'lease-1')
+            self.assertEqual(
+                __import__('json').loads(record.read_text())['status'], 'failed'
+            )
 
     def test_shared_validation_gate_serializes_checks_but_not_agent_stages(self):
         import pathlib, tempfile, threading, time
@@ -435,6 +507,9 @@ class LifecycleTests(unittest.TestCase):
             registry.reserve_attempt.side_effect = lambda *args, **kwargs: calls.append(
                 ['registry', 'reserve']
             )
+            registry.renew_runtime.side_effect = lambda *args, **kwargs: calls.append(
+                ['registry', 'renew']
+            )
             registry.record_process.side_effect = lambda *args, **kwargs: calls.append(
                 ['registry', 'bind']
             )
@@ -457,6 +532,9 @@ class LifecycleTests(unittest.TestCase):
                         calls.index(['registry', 'claim']))
         self.assertLess(calls.index(['registry', 'claim']),
                         calls.index(['registry', 'reserve']))
+        self.assertLess(calls.index(['registry', 'reserve']),
+                        calls.index(['registry', 'renew']))
+        self.assertGreaterEqual(calls.count(['registry', 'renew']), 5)
         prelaunches = [index for index, value in enumerate(calls)
                        if value == ['registry', 'pre-launch']]
         self.assertEqual(len(prelaunches), 2)

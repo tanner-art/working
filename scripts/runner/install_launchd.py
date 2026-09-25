@@ -265,11 +265,24 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
     plan = tuple(plan)
+    if mode not in ('serial', 'lanes'):
+        raise ValueError('mode must be serial or lanes')
+    plan_labels = tuple(label for label, _ in plan)
     destinations = {label: label_path(label, home) for label, _ in plan}
-    current_labels = labels_for_mode(mode)
-    if not plan or any(
-        label != DASHBOARD_LABEL and '--dry-run' not in data.get('ProgramArguments', ())
-        for label, data in plan
+    allowed_labels = set(labels_for_mode(mode))
+    current_labels = tuple(dict.fromkeys((
+        *labels_for_mode('serial'), *labels_for_mode('lanes'),
+    )))
+    if (
+        not plan
+        or len(destinations) != len(plan)
+        or any(label not in allowed_labels for label in plan_labels)
+        or not any(label != DASHBOARD_LABEL for label in plan_labels)
+        or any(
+            label != DASHBOARD_LABEL
+            and '--dry-run' not in data.get('ProgramArguments', ())
+            for label, data in plan
+        )
     ):
         raise ValueError('pause replacement requires a reviewed dry-run plan')
     if registry_control is None:
@@ -300,6 +313,15 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
     if failed:
         # Registry stays STOPPING and no definition is reloaded or restored.
         raise RuntimeError('could not stop live services: ' + ', '.join(failed))
+
+    reconciliation = registry_control.reconcile_stopping_runtimes()
+    unresolved = tuple(reconciliation.get('unresolved', ()))
+    if unresolved:
+        # Registry remains STOPPING, live definitions stay on disk, and the
+        # adapter has recorded deterministic evidence for every unresolved ID.
+        raise RuntimeError(
+            'runtime reconciliation incomplete: ' + ', '.join(unresolved)
+        )
 
     for label, data in plan:
         atomic_write_plist(destinations[label], data)

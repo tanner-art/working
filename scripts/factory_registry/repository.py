@@ -67,6 +67,37 @@ class Registry(Protocol):
 
     def renew_lease(self, lease_id: str, *, now: str, expires_at: str) -> Lease: ...
 
+    def renew_attempt_runtime(
+        self,
+        attempt_id: str,
+        lease_id: str,
+        *,
+        now: str,
+        expires_at: str,
+    ) -> Lease: ...
+
+    def active_attempt_runtimes(self) -> Sequence[Mapping[str, Any]]: ...
+
+    def active_unbound_leases(self) -> Sequence[Mapping[str, Any]]: ...
+
+    def recover_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        ended_at: str,
+        reason: str,
+        failure_detail: str,
+    ) -> bool: ...
+
+    def recover_stopped_lease(
+        self,
+        lease_id: str,
+        *,
+        ended_at: str,
+        reason: str,
+        failure_detail: str,
+    ) -> bool: ...
+
     def expire_leases(self, *, observed_at: str) -> int: ...
 
     def release_lease(

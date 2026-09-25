@@ -135,18 +135,30 @@ live runner refuses to start without `registry_database`. Before its local
 claim, it requires the exact package/worker pair in the Registry scheduler's
 current eligible assignments and pins that revision through atomic lease
 acquisition. It reserves the attempt before setup and rechecks LIVE immediately
-before provider launch. The process-start callback records PID/PGID before the
-runner accepts the launch; a rejected bind synchronously terminates the new
-process group. Success, failure, timeout, interruption, and stale-worker
-recovery issue at most one terminal ownership mutation.
+before provider launch. A pipe-backed exec gate starts only the runner-owned
+barrier process, records that stable PID/PGID in the Registry, and releases the
+provider command only after the bind succeeds. A rejected bind terminates the
+process group before provider code can run. The main runner thread renews the
+lease and Registry heartbeats throughout setup, provider execution, validation,
+push, and PR creation; expiry, revocation, or a stopped gate terminates the
+current child and enters durable recovery. Success, failure, timeout, and
+interruption issue at most one terminal ownership mutation.
+
+A disappeared worker engages the global kill switch first, marks that worker
+OFFLINE, terminates every recorded runtime, and reconciles bound, unbound, and
+lease-only ownership. It returns to PAUSED only after a fresh ownership read is
+empty. Failed termination or Registry recovery leaves STOPPING in force and
+records a deterministic failure observation for the unresolved ownership.
 
 `pause_to_dry_run` in `scripts/runner/install_launchd.py` is an injected,
-non-CLI helper. It engages the Registry kill switch first, boots out every
-loaded service in the selected mode, writes only reviewed dry-run definitions,
-commits PAUSED after ownership drains, and then bootstraps the dry-run services.
-It retains live plist backups for explicit recovery but never automatically
-restores or reloads a live definition after a stop or dry-run bootstrap failure.
-This package does not call the helper or touch installed services.
+non-CLI helper. It engages the Registry kill switch first, backs up and boots
+out loaded services from both serial and lane modes, then reconciles every
+runtime and lease-only setup/validation gap. It writes reviewed dry-run
+definitions, commits PAUSED, and bootstraps them only after ownership drains.
+Unresolved ownership leaves the Registry STOPPING with recovery evidence and
+keeps the live definitions on disk. The helper never automatically restores or
+reloads a live definition after a stop or dry-run bootstrap failure. This
+package does not call the helper or touch installed services.
 
 ## Required follow-up before restart
 
