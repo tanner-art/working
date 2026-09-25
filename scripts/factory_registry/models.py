@@ -85,6 +85,11 @@ class UsageObservationClass(StringEnum):
     LEGACY_UNCLASSIFIED = "LEGACY_UNCLASSIFIED"
 
 
+class ReviewOutcomeState(StringEnum):
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    APPROVED = "APPROVED"
+
+
 @dataclass(frozen=True)
 class Feature:
     id: str
@@ -163,6 +168,23 @@ class Attempt:
     started_at: str
     lease_id: str | None = None
     provider_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ReviewOutcome:
+    """One explicit independent review decision for a review package."""
+
+    id: str
+    review_package_id: str
+    target_package_id: str
+    implementer_worker_id: str
+    reviewer_worker_id: str
+    requested_at: str
+    decided_at: str
+    state: ReviewOutcomeState
+    findings: tuple[str, ...] = ()
+    changes_requested: tuple[str, ...] = ()
+    approval_evidence_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -248,6 +270,7 @@ class ControlCenterReadSnapshot:
     leases: tuple[Mapping[str, Any], ...]
     attempts: tuple[Mapping[str, Any], ...]
     evidence: tuple[Mapping[str, Any], ...]
+    review_outcomes: tuple[Mapping[str, Any], ...]
     usage_observations: tuple[Mapping[str, Any], ...]
     usage_invocations: tuple[Mapping[str, Any], ...]
     usage_sources: tuple[Mapping[str, Any], ...]

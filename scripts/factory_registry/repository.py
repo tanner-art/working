@@ -11,6 +11,7 @@ from .models import (
     Evidence,
     Feature,
     Lease,
+    ReviewOutcome,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -130,6 +131,8 @@ class Registry(Protocol):
     ) -> str: ...
 
     def record_evidence(self, evidence: Evidence) -> None: ...
+
+    def record_review_outcome(self, outcome: ReviewOutcome) -> None: ...
 
     def register_attempt(self, attempt: Attempt) -> None: ...
 

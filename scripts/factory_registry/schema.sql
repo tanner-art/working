@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 );
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
-    ('schema_version', '3'),
+    ('schema_version', '4'),
     ('control_schema_version', '1'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
@@ -174,6 +174,34 @@ CREATE TABLE IF NOT EXISTS evidence (
     recorded_at TEXT NOT NULL,
     metadata_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS review_outcomes (
+    id TEXT PRIMARY KEY,
+    review_package_id TEXT NOT NULL UNIQUE REFERENCES work_packages(id),
+    target_package_id TEXT NOT NULL REFERENCES work_packages(id),
+    implementer_worker_id TEXT NOT NULL REFERENCES workers(id),
+    reviewer_worker_id TEXT NOT NULL REFERENCES workers(id),
+    requested_at TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('CHANGES_REQUESTED', 'APPROVED')),
+    findings_json TEXT NOT NULL,
+    changes_requested_json TEXT NOT NULL,
+    approval_evidence_ids_json TEXT NOT NULL,
+    CHECK(implementer_worker_id <> reviewer_worker_id),
+    CHECK(decided_at >= requested_at)
+);
+
+CREATE TRIGGER IF NOT EXISTS review_outcomes_are_append_only_update
+BEFORE UPDATE ON review_outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'REVIEW_OUTCOMES_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS review_outcomes_are_append_only_delete
+BEFORE DELETE ON review_outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'REVIEW_OUTCOMES_APPEND_ONLY');
+END;
 
 CREATE TABLE IF NOT EXISTS usage_observations (
     id TEXT PRIMARY KEY,

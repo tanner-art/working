@@ -8,12 +8,13 @@ The projector translates that immutable read into Control Center schema version 
 
 The read includes:
 
-- Features, packages, dependencies, leases, attempts, evidence, workers, failures, and events.
+- Features, packages, dependencies, leases, attempts, evidence, structured review outcomes, workers, failures, and events.
 - Capacity observations and, when the telemetry migration is present, the append-only invocation ledger and its source history.
 - Preservation imports and artifacts used for reconciliation counts.
-- READY and ACTIVE packages of Registry kind `REVIEW`, projected as waiting or assigned from their dependency, attempt, lease, capability, and lane records. Findings, changes requested, approval, and approval evidence are never inferred; the current Registry schema does not store those review outcomes as first-class records.
+- READY and ACTIVE packages of Registry kind `REVIEW`, projected as waiting or assigned from their dependency, attempt, lease, capability, and lane records.
+- Final `APPROVED` and `CHANGES_REQUESTED` review outcomes from the append-only Registry outcome record. An approval requires typed `review` evidence linked to the review or target package. Findings, changes requested, approval, and approval evidence are never inferred from package status, evidence labels, or prose.
 
-All records in one response come from one read transaction and one Registry revision. Unknown event types are omitted instead of being assigned a misleading timeline kind. Reviews are emitted only when a READY or ACTIVE Registry review package has enough dependency and attempt history to identify its implementer and request time. Missing service, authentication, usage, token, duration, or reconciliation values remain `unknown` or `null` where the dashboard contract permits it. Required numeric aggregates are sums of recorded rows; zero means no matching recorded rows in that Registry read.
+All records in one response come from one read transaction and one Registry revision. Unknown event types are omitted instead of being assigned a misleading timeline kind. Pending reviews are emitted only when a READY or ACTIVE Registry review package has enough dependency and attempt history to identify its implementer and request time. Final reviews remain visible after the review package is DONE because the outcome is independent Registry state. Missing service, authentication, usage, token, duration, or reconciliation values remain `unknown` or `null` where the dashboard contract permits it. Required numeric aggregates are sums of recorded rows; zero means no matching recorded rows in that Registry read. Projection validation rejects mismatched counts, duplicate identities, unknown dependencies, and packages that cannot be placed in their Registry Feature queue.
 
 Schema version 2 has no `unknown` Factory health value. A Registry read with no Orchestra worker is therefore projected as `constrained`, as are preservation mismatches, stale active leases, critical failures, and a non-healthy Orchestra. The projector never upgrades missing Factory health evidence to `healthy`.
 

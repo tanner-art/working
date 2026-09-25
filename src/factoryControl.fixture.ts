@@ -11,7 +11,7 @@ export const factoryControlFixture: FactoryControlSnapshot = {
   generatedAt: '2026-09-24T18:30:00Z',
   source: { kind: 'registry-projection', projectionId: 'projection-1842' },
   verification: { status: 'verified', algorithm: 'HMAC-SHA-256', verifiedAt: '2026-09-24T18:30:01Z' },
-  factory: { health: 'healthy', activeParentCount: 1, activeParentLimit: 3, orchestraReservePercent: 64, readyCount: 1, verifyReviewCount: 1, blockedCount: 1, attentionCount: 1 },
+  factory: { health: 'healthy', activeParentCount: 1, activeParentLimit: 3, orchestraReservePercent: 64, readyCount: 1, verifyReviewCount: 1, blockedCount: 0, attentionCount: 1 },
   reconciliation: { status: 'clean', worktreeCount: 33, dirtyWorktreeCount: 8, unmergedBranchCount: 7, unexplainedRecordCount: 0, activeStaleLeaseCount: 0, observedAt: '2026-09-24T18:29:30Z' },
   features: [
     {

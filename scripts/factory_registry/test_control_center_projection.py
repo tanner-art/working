@@ -18,6 +18,9 @@ from scripts.factory_registry import (
     Feature,
     Lane,
     PackageKind,
+    ReviewOutcome,
+    ReviewOutcomeState,
+    RegistryConflict,
     SQLiteRegistry,
     TaskStatus,
     Worker,
@@ -188,6 +191,64 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.assertIsNone(projection["capacity"][-1]["usedPercent"])
         self.assertEqual(projection["events"][0]["kind"], "REVIEW")
         self.assertEqual(projection["failures"][0]["code"], "CI_FAILURE")
+
+    def test_explicit_review_outcome_survives_completed_review_with_typed_evidence(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "review-approval", "REVIEW-1", "review", "https://example.test/review",
+            "Independent approval record", "2026-09-24T19:54:00Z",
+        ))
+        self.registry.record_review_outcome(ReviewOutcome(
+            id="outcome-1",
+            review_package_id="REVIEW-1",
+            target_package_id="PACKAGE-1",
+            implementer_worker_id="agent-b",
+            reviewer_worker_id="claude",
+            requested_at="2026-09-24T19:51:00Z",
+            decided_at="2026-09-24T19:54:00Z",
+            state=ReviewOutcomeState.APPROVED,
+            findings=("All acceptance criteria passed.",),
+            approval_evidence_ids=("review-approval",),
+        ))
+
+        projection = build_control_center_projection(self.registry, observed_at=NOW)
+        review = next(item for item in projection["reviews"] if item["id"] == "outcome-1")
+        self.assertEqual(review["packageId"], "PACKAGE-1")
+        self.assertEqual(review["state"], "approved")
+        self.assertEqual(review["assignedReviewerId"], "claude")
+        self.assertEqual(review["approvalEvidence"][0]["id"], "review-approval")
+        self.assertFalse(any(
+            item["code"] == "REVIEW_STATE_UNRECORDED" and item["packageId"] == "PACKAGE-1"
+            for item in projection["failures"]
+        ))
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "REVIEW_OUTCOMES_APPEND_ONLY"):
+                connection.execute(
+                    "UPDATE review_outcomes SET state='CHANGES_REQUESTED' WHERE id='outcome-1'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "REVIEW_OUTCOMES_APPEND_ONLY"):
+                connection.execute("DELETE FROM review_outcomes WHERE id='outcome-1'")
+
+    def test_review_approval_requires_independent_typed_evidence(self) -> None:
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="self-review", review_package_id="REVIEW-1", target_package_id="PACKAGE-1",
+                implementer_worker_id="agent-b", reviewer_worker_id="agent-b",
+                requested_at="2026-09-24T19:51:00Z", decided_at="2026-09-24T19:54:00Z",
+                state=ReviewOutcomeState.APPROVED, approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_projection_rejects_packages_missing_from_feature_queue(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        orphan = {**raw.work_packages[0], "id": "ORPHAN", "feature_id": "MISSING"}
+        from scripts.factory_registry.control_center_projection import project_control_center
+        with self.assertRaisesRegex(ControlCenterProjectionError, "absent from the queue"):
+            project_control_center(replace(raw, work_packages=(*raw.work_packages, orphan)))
+
+    def test_validation_rejects_counts_from_another_revision(self) -> None:
+        projection = build_control_center_projection(self.registry, observed_at=NOW)
+        projection["factory"]["readyCount"] += 1
+        with self.assertRaisesRegex(ControlCenterProjectionError, "counts do not match"):
+            validate_control_center_projection(projection)
 
     def test_unknown_diagnostics_remain_unknown_and_unsafe_links_are_removed(self) -> None:
         raw = self.registry.control_center_snapshot(observed_at=NOW)

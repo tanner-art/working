@@ -73,7 +73,7 @@ class SQLiteRegistryTest(unittest.TestCase):
             ).fetchall())
         self.assertEqual(
             versions,
-            {"schema_version": "3", "control_schema_version": "1"},
+            {"schema_version": "4", "control_schema_version": "1"},
         )
 
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
@@ -99,7 +99,7 @@ class SQLiteRegistryTest(unittest.TestCase):
             package_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(work_packages)")
             }
-        self.assertEqual(metadata["schema_version"], "3")
+        self.assertEqual(metadata["schema_version"], "4")
         self.assertEqual(metadata["legacy_marker"], "preserved")
         self.assertEqual(usage_tables, 2)
         self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))
@@ -110,8 +110,12 @@ class SQLiteRegistryTest(unittest.TestCase):
         legacy.initialize()
         legacy.register_feature(Feature("PRESERVED", "Preserved feature", 100, TaskStatus.READY))
         with sqlite3.connect(database) as connection:
+            connection.execute("DROP TABLE review_outcomes")
             connection.execute("DROP TABLE attempt_runtime_ownership")
             connection.execute("DROP TABLE factory_control")
+            connection.execute(
+                "UPDATE registry_metadata SET value='3' WHERE key='schema_version'"
+            )
             connection.execute(
                 "DELETE FROM registry_metadata WHERE key='control_schema_version'"
             )
@@ -134,13 +138,18 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "SELECT count(*) FROM sqlite_schema "
                 "WHERE type='table' AND name='attempt_runtime_ownership'"
             ).fetchone()[0]
+            review_outcome_table = connection.execute(
+                "SELECT count(*) FROM sqlite_schema "
+                "WHERE type='table' AND name='review_outcomes'"
+            ).fetchone()[0]
         self.assertEqual(
             metadata,
-            {"schema_version": "3", "control_schema_version": "1"},
+            {"schema_version": "4", "control_schema_version": "1"},
         )
         self.assertEqual(control, ("PAUSED", 1))
         self.assertEqual(preserved, "Preserved feature")
         self.assertEqual(runtime_table, 1)
+        self.assertEqual(review_outcome_table, 1)
 
     def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
         legacy_database = self.root / "legacy-capacity.sqlite3"
@@ -171,7 +180,7 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "SELECT value FROM registry_metadata WHERE key='schema_version'"
             ).fetchone()[0]
         self.assertEqual(row, ("SUBSTANTIAL", "UNCERTAIN"))
-        self.assertEqual(version, "3")
+        self.assertEqual(version, "4")
 
     def test_initialize_classifies_version_two_usage_provenance(self) -> None:
         legacy_database = self.root / "legacy-v2.sqlite3"
@@ -272,11 +281,11 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "mismatched": "LEGACY_UNCLASSIFIED",
             },
         )
-        self.assertEqual(version, "3")
+        self.assertEqual(version, "4")
 
     def test_initialize_rejects_invalid_versions_without_mutating_database(self) -> None:
         cases = (
-            ("newer", "4", "SCHEMA_VERSION_UNSUPPORTED: 4"),
+            ("newer", "5", "SCHEMA_VERSION_UNSUPPORTED: 5"),
             ("malformed", "future", "SCHEMA_VERSION_INVALID: future"),
         )
         for label, version, error in cases:
@@ -349,7 +358,7 @@ class SQLiteRegistryTest(unittest.TestCase):
 
     def test_initialize_reads_active_wal_before_opening_source(self) -> None:
         cases = (
-            ("newer-active", "4", "SCHEMA_VERSION_UNSUPPORTED: 4"),
+            ("newer-active", "5", "SCHEMA_VERSION_UNSUPPORTED: 5"),
             ("malformed-active", "future", "SCHEMA_VERSION_INVALID: future"),
         )
         for label, wal_version, error in cases:

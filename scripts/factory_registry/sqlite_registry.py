@@ -23,6 +23,8 @@ from .models import (
     Evidence,
     Feature,
     Lease,
+    ReviewOutcome,
+    ReviewOutcomeState,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -34,7 +36,7 @@ from .models import (
 from .repository import RegistryConflict, RegistryNotFound
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 LEGAL_DISPATCH_TRANSITIONS = {
@@ -1719,6 +1721,106 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def record_review_outcome(self, outcome: ReviewOutcome) -> None:
+        """Append one explicit, independently authored review decision."""
+        requested_at = _normalize_timestamp(outcome.requested_at)
+        decided_at = _normalize_timestamp(outcome.decided_at)
+        if not isinstance(outcome.state, ReviewOutcomeState):
+            raise RegistryConflict("INVALID_REVIEW_OUTCOME", "state")
+        if decided_at < requested_at:
+            raise RegistryConflict("INVALID_REVIEW_OUTCOME", "decided before requested")
+        if outcome.implementer_worker_id == outcome.reviewer_worker_id:
+            raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
+        if outcome.state is ReviewOutcomeState.APPROVED and not outcome.approval_evidence_ids:
+            raise RegistryConflict("REVIEW_APPROVAL_EVIDENCE_REQUIRED")
+        if outcome.state is ReviewOutcomeState.CHANGES_REQUESTED and not outcome.changes_requested:
+            raise RegistryConflict("REVIEW_CHANGES_REQUIRED")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                review_package = connection.execute(
+                    "SELECT kind FROM work_packages WHERE id=?", (outcome.review_package_id,)
+                ).fetchone()
+                target_package = connection.execute(
+                    "SELECT 1 FROM work_packages WHERE id=?", (outcome.target_package_id,)
+                ).fetchone()
+                if review_package is None:
+                    raise RegistryNotFound(f"work package {outcome.review_package_id}")
+                if target_package is None:
+                    raise RegistryNotFound(f"work package {outcome.target_package_id}")
+                if review_package["kind"] != "REVIEW":
+                    raise RegistryConflict("REVIEW_PACKAGE_REQUIRED")
+                dependency = connection.execute(
+                    "SELECT 1 FROM task_dependencies WHERE package_id=? AND dependency_id=?",
+                    (outcome.review_package_id, outcome.target_package_id),
+                ).fetchone()
+                if dependency is None:
+                    raise RegistryConflict("REVIEW_TARGET_MISMATCH")
+                implementer_attempt = connection.execute(
+                    "SELECT 1 FROM attempts WHERE package_id=? AND worker_id=? LIMIT 1",
+                    (outcome.target_package_id, outcome.implementer_worker_id),
+                ).fetchone()
+                if implementer_attempt is None:
+                    raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+                reviewer = connection.execute(
+                    "SELECT capabilities_json, approved_lanes_json FROM workers WHERE id=?",
+                    (outcome.reviewer_worker_id,),
+                ).fetchone()
+                if reviewer is None:
+                    raise RegistryNotFound(f"worker {outcome.reviewer_worker_id}")
+                reviewer_capabilities = {item.lower() for item in json.loads(reviewer["capabilities_json"])}
+                reviewer_lanes = set(json.loads(reviewer["approved_lanes_json"]))
+                if "review" not in reviewer_capabilities and "ASSURANCE" not in reviewer_lanes:
+                    raise RegistryConflict("REVIEWER_NOT_ELIGIBLE")
+                if connection.execute(
+                    "SELECT 1 FROM workers WHERE id=?", (outcome.implementer_worker_id,)
+                ).fetchone() is None:
+                    raise RegistryNotFound(f"worker {outcome.implementer_worker_id}")
+                for evidence_id in outcome.approval_evidence_ids:
+                    evidence = connection.execute(
+                        "SELECT package_id, kind FROM evidence WHERE id=?", (evidence_id,)
+                    ).fetchone()
+                    if evidence is None:
+                        raise RegistryNotFound(f"evidence {evidence_id}")
+                    if evidence["kind"].lower() != "review" or evidence["package_id"] not in {
+                        outcome.review_package_id, outcome.target_package_id,
+                    }:
+                        raise RegistryConflict("REVIEW_EVIDENCE_MISMATCH", evidence_id)
+                connection.execute(
+                    """INSERT INTO review_outcomes
+                       (id, review_package_id, target_package_id,
+                        implementer_worker_id, reviewer_worker_id,
+                        requested_at, decided_at, state, findings_json,
+                        changes_requested_json, approval_evidence_ids_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        outcome.id, outcome.review_package_id, outcome.target_package_id,
+                        outcome.implementer_worker_id, outcome.reviewer_worker_id,
+                        requested_at, decided_at, outcome.state.value,
+                        _json(outcome.findings), _json(outcome.changes_requested),
+                        _json(outcome.approval_evidence_ids),
+                    ),
+                )
+                self._insert_event(
+                    connection, "REVIEW_OUTCOME_RECORDED", decided_at,
+                    outcome.target_package_id, outcome.reviewer_worker_id, None,
+                    {
+                        "review_package_id": outcome.review_package_id,
+                        "outcome_id": outcome.id,
+                        "state": outcome.state.value,
+                        "evidence_ids": list(outcome.approval_evidence_ids),
+                        "summary": f"Independent review recorded {outcome.state.value.lower().replace('_', ' ')}.",
+                    },
+                )
+                self._bump_revision(connection)
+                connection.commit()
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("REVIEW_OUTCOME_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
     def register_attempt(self, attempt: Attempt) -> None:
         """Append an attempt identity before autonomous invocation telemetry."""
         started_at = _normalize_timestamp(attempt.started_at)
@@ -2794,6 +2896,13 @@ class SQLiteRegistry:
                 evidence=decoded_rows(
                     "SELECT * FROM evidence ORDER BY recorded_at, id",
                     ("metadata_json",),
+                ),
+                review_outcomes=decoded_rows(
+                    "SELECT * FROM review_outcomes ORDER BY decided_at, id",
+                    (
+                        "findings_json", "changes_requested_json",
+                        "approval_evidence_ids_json",
+                    ),
                 ),
                 usage_observations=decoded_rows(
                     "SELECT * FROM usage_observations ORDER BY observed_at, id",

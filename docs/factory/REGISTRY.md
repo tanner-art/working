@@ -115,9 +115,11 @@ mode. Fresh healthy service/auth/live-invocation evidence with no explicit
 limit signal is eligible; observed rate, exhaustion, throttle, or
 capacity-launch failures constrain the worker without inventing a percentage.
 
-### Attempt, evidence, usage, and failure
+### Attempt, evidence, review outcome, usage, and failure
 
 Attempts retain each execution rather than overwriting retry history. Evidence records commits, checks, tests, reviews, and external artifacts. Usage observations are timestamped and preserve unknown or stale states. Failures store a normalized code and human-readable detail.
+
+Registry schema version 4 adds append-only final review outcomes. Each outcome binds one REVIEW package to its reviewed package, implementer, independent reviewer, request and decision times, findings, requested changes, and typed review evidence. Approval requires at least one existing `review` evidence record attached to the review or target package. The Registry rejects self-review, mismatched dependencies, missing implementer provenance, ineligible reviewers, and outcome replacement. Pending review assignment still comes from the review package and lease; completion status or evidence prose never implies approval.
 
 Invocation consumption is stored separately in the append-only usage ledger.
 Each provider/worker/account/invocation tuple is counted once, while a linked
