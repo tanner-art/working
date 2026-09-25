@@ -190,6 +190,26 @@ class LaunchdInstallerTests(unittest.TestCase):
                     config, state / 'config.json', pathlib.Path(__file__).parent, 'serial'
                 )
 
+    def test_plan_rejects_claude_credentials_from_real_config_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            for agent, configured_env, message in (
+                ('claude', {'CLAUDE_CODE_OAUTH_TOKEN': 'not-a-token'},
+                 'CLAUDE_CODE_OAUTH_TOKEN'),
+                ('claude', {'RENAMED_SECRET': 'sk-ant-oat01-not-a-real-token'},
+                 'raw Claude setup token'),
+                ('codex-a', {'PROVIDER_SECRET': 'prefix-sk-ant-oat01-not-a-real-token'},
+                 'raw Claude setup token'),
+            ):
+                with self.subTest(agent=agent, configured_env=configured_env):
+                    config = self.config(state)
+                    config['agents'][agent]['env'] = configured_env
+                    with self.assertRaisesRegex(ValueError, message):
+                        installer.service_plan(
+                            config, state / 'config.json',
+                            pathlib.Path(__file__).parent, 'lanes',
+                        )
+
     def test_private_storage_hardens_managed_paths_without_truncating_or_changing_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             factory = pathlib.Path(directory) / 'factory'

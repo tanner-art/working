@@ -2,6 +2,7 @@
 """Run Claude with a setup token held only in the macOS login keychain."""
 import getpass
 import os
+import pathlib
 import pwd
 import re
 import subprocess
@@ -19,12 +20,21 @@ class CredentialUnavailable(RuntimeError):
     """The configured keychain credential cannot be used."""
 
 
-def account_name():
-    """Resolve the local account from the effective uid, not caller input."""
-    account = pwd.getpwuid(os.geteuid()).pw_name
+def account_identity():
+    """Resolve the effective user's account and explicit login keychain."""
+    record = pwd.getpwuid(os.geteuid())
+    account = record.pw_name
     if not SAFE_ACCOUNT.fullmatch(account):
         raise CredentialUnavailable('local account name is not keychain-safe')
-    return account
+    home = pathlib.Path(record.pw_dir)
+    if not home.is_absolute():
+        raise CredentialUnavailable('local account home is not an absolute path')
+    return account, str(home / 'Library' / 'Keychains' / 'login.keychain-db')
+
+
+def _security_quote(value):
+    """Quote trusted local identity paths for security's interactive parser."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 def validate_token(token):
@@ -38,11 +48,11 @@ def validate_token(token):
 
 def load_token(run=subprocess.run):
     """Read the fixed credential without exposing its value in argv or logs."""
-    account = account_name()
+    account, keychain = account_identity()
     try:
         result = run(
             [SECURITY, 'find-generic-password', '-a', account,
-             '-s', KEYCHAIN_SERVICE, '-w'],
+             '-s', KEYCHAIN_SERVICE, '-w', keychain],
             capture_output=True, text=True, timeout=5, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -58,11 +68,11 @@ def load_token(run=subprocess.run):
 def store_token(token, run=subprocess.run):
     """Write through security stdin so the token never appears in argv."""
     token = validate_token(token)
-    account = account_name()
+    account, keychain = account_identity()
     encoded = token.encode('utf-8').hex()
     command = (
         f'add-generic-password -U -a "{account}" '
-        f'-s "{KEYCHAIN_SERVICE}" -X "{encoded}"\n'
+        f'-s "{KEYCHAIN_SERVICE}" -X "{encoded}" {_security_quote(keychain)}\n'
     )
     try:
         result = run(

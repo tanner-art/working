@@ -37,6 +37,20 @@ class QueueTests(unittest.TestCase):
                                'TMPDIR': '/tmp', 'CODEX_HOME': '/agent-home',
                                'USER': 'launch-owner'})
 
+    def test_agent_environment_rejects_configured_claude_credentials(self):
+        for configured_env, message in (
+            ({'CLAUDE_CODE_OAUTH_TOKEN': 'not-a-token'},
+             'CLAUDE_CODE_OAUTH_TOKEN'),
+            ({'RENAMED_SECRET': 'sk-ant-oat01-not-a-real-token'},
+             'raw Claude setup token'),
+        ):
+            with self.subTest(configured_env=configured_env):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_agent_environment(
+                        {'HOME': '/home', 'TMPDIR': '/tmp'},
+                        configured_env, '/runner/bin',
+                    )
+
     def test_agent_prompt_reserves_full_validation_for_runner(self):
         prompt = build_agent_prompt(17, {
             'task': 'TASK-117', 'paths': ['src/example.ts'],

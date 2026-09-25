@@ -6,6 +6,10 @@ from queue_snapshot import write_queue_snapshot
 from registry_control import RunnerRegistryControl
 
 
+CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
+CLAUDE_SETUP_TOKEN_MARKER = 'sk-ant-oat'
+
+
 def terminate_process_group(process, timeout=10):
     """Synchronously reap a new-session child and every surviving descendant."""
     try:
@@ -526,6 +530,18 @@ def build_agent_environment(base_env, configured_env, path):
     """Build the minimal environment exposed to an agent CLI."""
     if not isinstance(configured_env, dict):
         raise ValueError('agent env must be an object')
+    if not all(
+        isinstance(key, str) and isinstance(candidate, str)
+        for key, candidate in configured_env.items()
+    ):
+        raise ValueError('agent env keys and values must be strings')
+    if CLAUDE_TOKEN_ENV in configured_env:
+        raise ValueError(f'agent env must not configure {CLAUDE_TOKEN_ENV}')
+    if any(
+        CLAUDE_SETUP_TOKEN_MARKER in candidate.lower()
+        for item in configured_env.items() for candidate in item
+    ):
+        raise ValueError('agent env must not contain a raw Claude setup token')
     allowed = {key: base_env[key] for key in ('HOME', 'TMPDIR') if key in base_env}
     allowed.update(configured_env)
     allowed['PATH'] = path

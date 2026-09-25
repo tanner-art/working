@@ -8,11 +8,16 @@ import claude_keychain as keychain
 
 
 class ClaudeKeychainTests(unittest.TestCase):
-    def test_account_name_uses_effective_uid(self):
-        account = type('Account', (), {'pw_name': 'runner-user'})()
+    def test_account_identity_uses_effective_uid_and_passwd_home(self):
+        account = type('Account', (), {
+            'pw_name': 'runner-user', 'pw_dir': '/Users/runner-user',
+        })()
         with patch.object(keychain.os, 'geteuid', return_value=501), \
                 patch.object(keychain.pwd, 'getpwuid', return_value=account) as lookup:
-            self.assertEqual(keychain.account_name(), 'runner-user')
+            self.assertEqual(keychain.account_identity(), (
+                'runner-user',
+                '/Users/runner-user/Library/Keychains/login.keychain-db',
+            ))
         lookup.assert_called_once_with(501)
 
     def test_load_uses_fixed_service_and_effective_user(self):
@@ -22,12 +27,15 @@ class ClaudeKeychainTests(unittest.TestCase):
             calls.append((command, kwargs))
             return subprocess.CompletedProcess(command, 0, 'setup-token\n', '')
 
-        with patch.object(keychain, 'account_name', return_value='runner-user'):
+        with patch.object(keychain, 'account_identity', return_value=(
+            'runner-user', '/Users/runner-user/Library/Keychains/login.keychain-db',
+        )):
             self.assertEqual(keychain.load_token(run), 'setup-token')
 
         self.assertEqual(calls[0][0], [
             '/usr/bin/security', 'find-generic-password', '-a', 'runner-user',
             '-s', 'life.threadline.factory.claude-setup-token', '-w',
+            '/Users/runner-user/Library/Keychains/login.keychain-db',
         ])
         self.assertTrue(calls[0][1]['capture_output'])
 
@@ -42,7 +50,9 @@ class ClaudeKeychainTests(unittest.TestCase):
                 executable=executable, command=command, environment=environment,
             )
 
-        with patch.object(keychain, 'account_name', return_value='runner-user'):
+        with patch.object(keychain, 'account_identity', return_value=(
+            'runner-user', '/Users/runner-user/Library/Keychains/login.keychain-db',
+        )):
             keychain.exec_claude(
                 ['/opt/homebrew/bin/claude', '-p', '--model', 'sonnet'],
                 run=run, execve=execve,
@@ -61,7 +71,9 @@ class ClaudeKeychainTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 44, '', 'sensitive diagnostic')
 
         stderr = io.StringIO()
-        with patch.object(keychain, 'account_name', return_value='runner-user'), \
+        with patch.object(keychain, 'account_identity', return_value=(
+                'runner-user', '/Users/runner-user/Library/Keychains/login.keychain-db',
+        )), \
                 contextlib.redirect_stderr(stderr):
             status = keychain.main(
                 ['exec', '/opt/homebrew/bin/claude', '-p'], run=run,
@@ -79,21 +91,30 @@ class ClaudeKeychainTests(unittest.TestCase):
             captured.update(command=command, kwargs=kwargs)
             return subprocess.CompletedProcess(command, 0, '', '')
 
-        with patch.object(keychain, 'account_name', return_value='runner-user'):
+        with patch.object(keychain, 'account_identity', return_value=(
+            'runner-user', '/Users/runner-user/Library/Keychains/login.keychain-db',
+        )):
             account = keychain.store_token('secret-value', run)
 
         self.assertEqual(account, 'runner-user')
         self.assertEqual(captured['command'], ['/usr/bin/security', '-i'])
         self.assertNotIn('secret-value', captured['command'])
         self.assertNotIn('secret-value', captured['kwargs']['input'])
-        self.assertIn('7365637265742d76616c7565', captured['kwargs']['input'])
+        self.assertEqual(captured['kwargs']['input'], (
+            'add-generic-password -U -a "runner-user" '
+            '-s "life.threadline.factory.claude-setup-token" '
+            '-X "7365637265742d76616c7565" '
+            '"/Users/runner-user/Library/Keychains/login.keychain-db"\n'
+        ))
 
     def test_store_prompt_output_has_no_token(self):
         def run(command, **kwargs):
             return subprocess.CompletedProcess(command, 0, '', '')
 
         stdout = io.StringIO()
-        with patch.object(keychain, 'account_name', return_value='runner-user'), \
+        with patch.object(keychain, 'account_identity', return_value=(
+                'runner-user', '/Users/runner-user/Library/Keychains/login.keychain-db',
+        )), \
                 contextlib.redirect_stdout(stdout):
             status = keychain.main(
                 ['store'], run=run, prompt=lambda _: 'secret-value',

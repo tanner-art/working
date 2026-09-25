@@ -19,6 +19,8 @@ DASHBOARD_LABEL = 'life.threadline.factory-dashboard'
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 SERVICE_UMASK = 0o077
+CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
+CLAUDE_SETUP_TOKEN_MARKER = 'sk-ant-oat'
 
 
 def service_environment(path):
@@ -166,6 +168,25 @@ def _claude_tools(command):
     return tools if found else None
 
 
+def validate_agent_environment(agent, value):
+    """Reject Claude credentials stored directly in runner configuration."""
+    configured_env = value.get('env', {})
+    if not isinstance(configured_env, dict):
+        raise ValueError(f'{agent} env must be an object')
+    if not all(
+        isinstance(key, str) and isinstance(candidate, str)
+        for key, candidate in configured_env.items()
+    ):
+        raise ValueError(f'{agent} env keys and values must be strings')
+    if CLAUDE_TOKEN_ENV in configured_env:
+        raise ValueError(f'{agent} env must not configure {CLAUDE_TOKEN_ENV}')
+    if any(
+        CLAUDE_SETUP_TOKEN_MARKER in candidate.lower()
+        for item in configured_env.items() for candidate in item
+    ):
+        raise ValueError(f'{agent} env must not contain a raw Claude setup token')
+
+
 def validate_runner_commands(agent, value):
     """Reject commands that could hide provider-native child agents."""
     for field in ('command', 'fallback_command'):
@@ -198,6 +219,7 @@ def service_plan(config, config_path, root, mode='serial', live=False, dashboard
         for agent in LANE_AGENTS:
             value = agents.get(agent)
             if isinstance(value, dict) and 'command' in value:
+                validate_agent_environment(agent, value)
                 validate_runner_commands(agent, value)
     if mode == 'serial':
         return [(SERIAL_LABEL, runner_data(SERIAL_LABEL, common, root, state, config['path'], 'launchd.log', 'launchd-error.log'))]

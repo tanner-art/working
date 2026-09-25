@@ -33,12 +33,17 @@ Run these steps as the same macOS user that owns the Factory LaunchAgent:
 ```
 
 The helper writes the token to the fixed
-`life.threadline.factory.claude-setup-token` service for the effective local
-user. It passes hex-encoded credential data to `/usr/bin/security` over stdin;
-the token is not a shell argument or command-history entry.
+`life.threadline.factory.claude-setup-token` service in the effective local
+user's explicit `~/Library/Keychains/login.keychain-db`. It resolves both the
+account name and home directory from that user's system account record rather
+than relying on inherited `HOME` or Keychain search-list state. It passes
+hex-encoded credential data to `/usr/bin/security` over stdin; the token is not
+a shell argument or command-history entry.
 
 Do not paste the token into `config.json`, a plist, an environment file, a
-repository file, an issue, or a chat.
+repository file, an issue, or a chat. Installer and runtime validation reject
+`CLAUDE_CODE_OAUTH_TOKEN` and raw Claude setup-token values in every configured
+agent `env` object.
 
 ## Runner configuration
 
@@ -71,7 +76,8 @@ First confirm that the keychain item exists without reading its value:
 ```sh
 security find-generic-password \
   -a "$(id -un)" \
-  -s life.threadline.factory.claude-setup-token >/dev/null
+  -s life.threadline.factory.claude-setup-token \
+  "$HOME/Library/Keychains/login.keychain-db" >/dev/null
 ```
 
 Then run the configured wrapper with `claude auth status --json` under the
