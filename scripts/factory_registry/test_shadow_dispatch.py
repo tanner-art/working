@@ -172,6 +172,22 @@ def reason_codes(evaluation) -> set[str]:
 
 
 class ShadowDispatchTest(unittest.TestCase):
+    def test_review_dependency_is_eligible_at_verify_review(self) -> None:
+        implementation = package("implementation", status="VERIFY_REVIEW")
+        review = package(
+            "review", lane="ASSURANCE", capabilities=("independent-review",),
+            kind="REVIEW", capacity_size="VERY_SMALL",
+        )
+        reviewer = worker(
+            "reviewer", capabilities=("independent-review",), lanes=("ASSURANCE",)
+        )
+        decision = decide_shadow(snapshot(
+            packages=(implementation, review),
+            workers=(reviewer,),
+            dependencies=({"package_id": "review", "dependency_id": "implementation"},),
+        ))
+        self.assertIn(Assignment("review", "reviewer"), decision.proposed_assignments)
+
     def test_dependency_then_priority_best_fit_oldest_and_stable_ids(self) -> None:
         packages = (
             package("blocked", priority=1000),

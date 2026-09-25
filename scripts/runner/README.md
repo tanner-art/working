@@ -14,6 +14,11 @@ Paths are exact files, not directories or globs. Dependencies are issue numbers 
 
 ## Setup and operation
 
+For Registry cutover, dry-run loading, worker telemetry, canary registration,
+LIVE enablement, stop/reconciliation, and failed-attempt recovery, follow the
+reviewed [Factory Registry operator runbook](../../docs/factory/OPERATOR_CLI.md).
+Do not use the generic installer to bypass those gates.
+
 Copy and edit `config.example.json` for the host. Every path, repository owner, account name, executable, and model name in that file is a placeholder; replace it before use. `registry_database` enables the authoritative Registry path; live runners then require an eligible Registry package/worker pair and a LIVE revision before claiming, acquire a revision-pinned lease, and reserve the attempt. `registry_renew_interval_seconds` must be shorter than `registry_lease_seconds`; the main runner thread renews ownership during setup, provider work, validation, push, and PR creation. Provider code waits behind an exec gate until its PID/PGID is durably bound. Keep credentials in the installed CLI’s authenticated profile or host keychain, never in this JSON file. `github.py` uses the existing Git credential for GitHub only, with no token file or logging. Headless Codex follows its workspace sandbox; Claude has only file tools and the runner performs validation. Agent CLI auth must already exist.
 
 On macOS, the example Claude command uses `claude_keychain.py exec` because some Claude Code releases can report a successful subscription login without persisting it. Create a long-lived token yourself with `claude setup-token`, then store it without echoing it or putting it in shell history:
@@ -32,6 +37,10 @@ Codex A slots, one Codex B slot, and two Claude slots. Slot one preserves the
 existing service label, arguments, and log names. Additional services use
 labels such as `life.threadline.runner.codex-a-2`, pass `--slot 2`, and write
 logs such as `launchd-codex-a-2.log`.
+
+The reviewed Phase A5 operator profile is deliberately narrower: it requires
+exactly `codex-a`, `codex-b`, and `claude`, with one slot each. The generic
+runner's wider slot range is not authorized for that cutover.
 
 Slots are external, runner-controlled provider child lanes and are the only production fan-out mechanism initially. Every slot launches a foreground CLI process in the runner-created task worktree, so scope locks, process-group termination, validation serialization, and preserved failures remain visible to the factory. Runner installation rejects primary or fallback Codex commands that do not explicitly disable `multi_agent`, and rejects Claude commands without an explicit tool allowlist or with `Agent` in that allowlist. Do not start detached provider jobs such as `claude --background` from a lane: detached work can escape task ownership, timeout handling, and dashboard accounting. Native provider subagents are a later option and should initially be limited to read-only review; writing remains owned by the runner lane.
 

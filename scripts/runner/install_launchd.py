@@ -21,6 +21,7 @@ PRIVATE_FILE_MODE = 0o600
 SERVICE_UMASK = 0o077
 CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
 CLAUDE_SETUP_TOKEN_MARKER = 'sk-ant-oat'
+_OPERATOR_INSTALL_CAPABILITY = object()
 
 
 def service_environment(path):
@@ -282,7 +283,7 @@ def bootout(label, uid, run=subprocess.run):
 
 
 def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
-                     run=subprocess.run, uid=None):
+                     run=subprocess.run, uid=None, after_reconcile=None):
     """Replace live definitions with reviewed dry-run plists without live rollback."""
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
@@ -345,6 +346,13 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
             'runtime reconciliation incomplete: ' + ', '.join(unresolved)
         )
 
+    # Operators may need to commit a prepared, atomic configuration migration
+    # after live ownership is drained but before any replacement definition is
+    # written or bootstrapped.  A failure here deliberately leaves the
+    # Registry STOPPING and the old definitions unloaded.
+    if after_reconcile is not None:
+        after_reconcile()
+
     for label, data in plan:
         atomic_write_plist(destinations[label], data)
     for label, source in existing.items():
@@ -368,14 +376,25 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
     return {'backup_dir': backup_dir, 'destinations': destinations}
 
 
-def install(plan, *, mode, replace_mode, state, replace_current=False, home=None, run=subprocess.run, uid=None):
+def install(
+        plan, *, mode, replace_mode, state, replace_current=False, home=None,
+        run=subprocess.run, uid=None, _operator_capability=None):
     """Install one serial service or the lane set; rollback only this invocation."""
     uid = os.getuid() if uid is None else uid
     state = pathlib.Path(state)
+    plan = tuple(plan)
     destinations = {label: label_path(label, home) for label, _ in plan}
     target_labels = tuple(destinations)
     if replace_mode and replace_current:
         raise ValueError('--replace-mode and --replace-current cannot be combined')
+    live_runner = any(
+        label != DASHBOARD_LABEL and '--dry-run' not in data.get('ProgramArguments', ())
+        for label, data in plan
+    )
+    if (live_runner or replace_current) and _operator_capability is not _OPERATOR_INSTALL_CAPABILITY:
+        raise ValueError(
+            'live or replace-current installation requires the reviewed Registry operator'
+        )
     old_mode = 'lanes' if mode == 'serial' else 'serial'
     old_labels = labels_for_mode(old_mode)
     current_labels = labels_for_mode(mode)
@@ -482,6 +501,11 @@ def install(plan, *, mode, replace_mode, state, replace_current=False, home=None
     return destinations
 
 
+def install_operator_plan(plan, **kwargs):
+    """Install a plan authorized by the reviewed Registry operator gates."""
+    return install(plan, _operator_capability=_OPERATOR_INSTALL_CAPABILITY, **kwargs)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
@@ -496,6 +520,10 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.live or args.replace_current:
+            raise ValueError(
+                '--live and --replace-current require the reviewed Registry operator'
+            )
         config_path = pathlib.Path(args.config).resolve()
         config = load_config(config_path)
         state = pathlib.Path(config['state'])

@@ -465,7 +465,10 @@ class LifecycleTests(unittest.TestCase):
                     try: os.killpg(child, signal.SIGKILL)
                     except ProcessLookupError: pass
 
-    def exercise_poll(self, blocked=False, preclaim_error=False, snapshot_failure=False):
+    def exercise_poll(
+        self, blocked=False, preclaim_error=False, snapshot_failure=False,
+        kind='PARENT',
+    ):
         import contextlib, io, json, pathlib, tempfile
         from unittest.mock import patch
         import runner
@@ -479,8 +482,12 @@ class LifecycleTests(unittest.TestCase):
             if preclaim_error:
                 config['usage_policy'] = {}
             configfile = root/'config.json'; configfile.write_text(json.dumps(config))
-            body = {'task': 'TASK-015', 'paths': ['docs/example.md'], 'instructions': 'Write a note',
-                    'depends_on': [2] if blocked else []}
+            body = {
+                'task': 'TASK-015', 'paths': ['docs/example.md'],
+                'instructions': 'Write a note',
+                'depends_on': [2] if blocked else [], 'kind': kind,
+                'lane': 'ASSURANCE' if kind == 'REVIEW' else 'FEATURE',
+            }
             issue = {'number': 1, 'title': 'test', 'author': {'login': 'owner'},
                      'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}], 'body': json.dumps(body)}
             calls = []; branch = None; validated = False
@@ -509,7 +516,7 @@ class LifecycleTests(unittest.TestCase):
             snapshot = (patch.object(runner, 'write_queue_snapshot', side_effect=OSError('secret snapshot output'))
                         if snapshot_failure else contextlib.nullcontext())
             registry = Mock()
-            registry.pre_claim.side_effect = lambda *args: (
+            registry.pre_claim.side_effect = lambda *args, **kwargs: (
                 calls.append(['registry', 'pre-claim']) or 1
             )
             registry.claim_package.side_effect = lambda *args, **kwargs: (
@@ -561,6 +568,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNone(record)
         self.assertNotIn(['gh', 'issue', 'edit'], [c[:3] for c in calls])
         self.assertNotIn(['git', 'worktree', 'add'], [c[:3] for c in calls])
+
+    def test_registry_review_dependency_defers_to_verify_review_preclaim(self):
+        calls, record = self.exercise_poll(blocked=True, kind='REVIEW')
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn(['registry', 'pre-claim'], calls)
+        self.assertNotIn(['gh', 'issue', 'view'], [call[:3] for call in calls])
 
     def test_preclaim_error_does_not_overwrite_existing_claim(self):
         calls, record = self.exercise_poll(preclaim_error=True)

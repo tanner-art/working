@@ -158,14 +158,18 @@ definitions, commits PAUSED, and bootstraps them only after ownership drains.
 Unresolved ownership leaves the Registry STOPPING with recovery evidence and
 keeps the live definitions on disk. The helper never automatically restores or
 reloads a live definition after a stop or dry-run bootstrap failure. This
-package does not call the helper or touch installed services.
+helper is called only by the explicit reviewed operator command; importing or
+installing the package does not touch installed services.
 
 ## Required follow-up before restart
 
 The remaining restart work is operational: independent ASSURANCE must approve
 this wiring, the reviewed configuration must name the authoritative Registry,
 and an owner-approved A5 canary must exercise it. `pause_to_dry_run` remains
-deliberately unavailable from the installer CLI until that review; operators
-cannot invoke it accidentally through an existing service command. No service
-installation, LIVE transition, queue claim, or provider invocation occurred in
-this package.
+unavailable from the generic installer CLI. The reviewed operator surface in
+[OPERATOR_CLI.md](OPERATOR_CLI.md) wraps it with the authoritative Registry,
+exact-revision evidence, preservation and release checks, an atomic
+configuration migration, and owner-only storage hardening. Shipping that
+surface does not itself install a service, transition LIVE, claim a queue item,
+or invoke a provider; those remain explicit operator commands after
+independent review.

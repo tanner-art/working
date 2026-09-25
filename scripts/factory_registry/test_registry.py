@@ -14,6 +14,7 @@ from scripts.factory_registry import (
     Lane,
     PackageCapacityRisk,
     PackageCapacitySize,
+    PackageKind,
     RegistryConflict,
     SQLiteRegistry,
     TaskStatus,
@@ -104,7 +105,7 @@ class SQLiteRegistryTest(unittest.TestCase):
         self.assertEqual(usage_tables, 2)
         self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))
 
-    def test_initialize_additively_upgrades_pre_control_schema_version_three(self) -> None:
+    def test_initialize_refuses_unreviewed_schema_version_three_migration(self) -> None:
         database = self.root / "pre-a4b-v3.sqlite3"
         legacy = SQLiteRegistry(database)
         legacy.initialize()
@@ -120,17 +121,16 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "DELETE FROM registry_metadata WHERE key='control_schema_version'"
             )
 
-        legacy.initialize()
+        with self.assertRaisesRegex(
+            RegistryConflict, "REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED"
+        ):
+            legacy.initialize()
 
         with sqlite3.connect(database) as connection:
             metadata = dict(connection.execute(
                 "SELECT key, value FROM registry_metadata "
                 "WHERE key IN ('schema_version', 'control_schema_version')"
             ))
-            control = connection.execute(
-                "SELECT dispatch_mode, kill_switch_engaged FROM factory_control "
-                "WHERE singleton=1"
-            ).fetchone()
             preserved = connection.execute(
                 "SELECT title FROM features WHERE id='PRESERVED'"
             ).fetchone()[0]
@@ -144,12 +144,11 @@ class SQLiteRegistryTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(
             metadata,
-            {"schema_version": "4", "control_schema_version": "1"},
+            {"schema_version": "3"},
         )
-        self.assertEqual(control, ("PAUSED", 1))
         self.assertEqual(preserved, "Preserved feature")
-        self.assertEqual(runtime_table, 1)
-        self.assertEqual(review_outcome_table, 1)
+        self.assertEqual(runtime_table, 0)
+        self.assertEqual(review_outcome_table, 0)
 
     def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
         legacy_database = self.root / "legacy-capacity.sqlite3"
@@ -546,6 +545,55 @@ class SQLiteRegistryTest(unittest.TestCase):
             results = sorted(pool.map(claim, ("worker-1", "worker-2")))
         self.assertEqual(sum(result.startswith("worker-") for result in results), 1)
         self.assertEqual(sum(result in {"PACKAGE_NOT_READY", "LEASE_CONFLICT"} for result in results), 1)
+
+    def test_review_claim_excludes_the_actual_implementation_worker(self) -> None:
+        self.feature()
+        self.registry.register_worker(Worker(
+            "hybrid", "Hybrid", ("registry", "independent-review"),
+            (Lane.PLATFORM, Lane.ASSURANCE), usage_state="NORMAL",
+        ))
+        self.registry.register_worker(Worker(
+            "reviewer", "Reviewer", ("independent-review",),
+            (Lane.ASSURANCE,), usage_state="NORMAL",
+        ))
+        self.package("IMPLEMENTATION")
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW", "FEATURE-1", "Review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 99, ("independent approval",),
+            status=TaskStatus.READY, kind=PackageKind.REVIEW,
+            dependency_ids=("IMPLEMENTATION",),
+        ))
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z", reason="review fixture",
+        )
+        self.registry.acquire_lease(
+            "IMPLEMENTATION", "hybrid", acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:20:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "implementation-attempt", package_id="IMPLEMENTATION",
+            worker_id="hybrid", runner_pid=100,
+            started_at="2026-09-25T10:02:00Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "implementation-attempt", ended_at="2026-09-25T10:03:00Z",
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
+            reason="ready for review",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.acquire_lease(
+                "REVIEW", "hybrid", acquired_at="2026-09-25T10:04:00Z",
+                expires_at="2026-09-25T10:20:00Z",
+            )
+        lease = self.registry.acquire_lease(
+            "REVIEW", "reviewer", acquired_at="2026-09-25T10:04:00Z",
+            expires_at="2026-09-25T10:20:00Z",
+        )
+        self.assertEqual(lease.worker_id, "reviewer")
 
     def test_active_package_transition_requires_atomic_lease_release(self) -> None:
         self.feature()

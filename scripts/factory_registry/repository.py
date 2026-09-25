@@ -56,6 +56,36 @@ class Registry(Protocol):
 
     def register_worker(self, worker: Worker) -> None: ...
 
+    def sync_worker_telemetry(
+        self,
+        worker: Worker,
+        usage_observations: Sequence[Mapping[str, Any]],
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
+    def register_canary_bundle(
+        self,
+        feature: Feature,
+        implementation: WorkPackage,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
+    def requeue_failed_package(
+        self,
+        package_id: str,
+        *,
+        expected_revision: int,
+        changed_at: str,
+        reason: str,
+    ) -> int: ...
+
+    def review_implementer_worker(self, review_package_id: str) -> str: ...
+
     def acquire_lease(
         self,
         package_id: str,
@@ -132,7 +162,13 @@ class Registry(Protocol):
 
     def record_evidence(self, evidence: Evidence) -> None: ...
 
-    def record_review_outcome(self, outcome: ReviewOutcome) -> None: ...
+    def record_review_outcome(
+        self,
+        outcome: ReviewOutcome,
+        *,
+        evidence: Evidence | None = None,
+        expected_revision: int | None = None,
+    ) -> int: ...
 
     def register_attempt(self, attempt: Attempt) -> None: ...
 

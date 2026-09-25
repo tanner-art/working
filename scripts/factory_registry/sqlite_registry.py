@@ -22,7 +22,9 @@ from .models import (
     DispatchSnapshot,
     Evidence,
     Feature,
+    Lane,
     Lease,
+    PackageKind,
     ReviewOutcome,
     ReviewOutcomeState,
     TaskStatus,
@@ -184,7 +186,9 @@ class SQLiteRegistry:
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
-        self._preflight_schema_version()
+        existing_version = self._preflight_schema_version()
+        if existing_version == 3:
+            raise RegistryConflict("REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED")
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
@@ -1239,6 +1243,17 @@ class SQLiteRegistry:
             "SELECT value FROM registry_metadata WHERE key='revision'"
         ).fetchone()[0])
 
+    @staticmethod
+    def _require_revision(connection: sqlite3.Connection, expected_revision: int) -> None:
+        revision = int(connection.execute(
+            "SELECT value FROM registry_metadata WHERE key='revision'"
+        ).fetchone()[0])
+        if revision != expected_revision:
+            raise RegistryConflict(
+                "REGISTRY_REVISION_CHANGED",
+                f"expected {expected_revision}, got {revision}",
+            )
+
     def register_feature(self, feature: Feature) -> None:
         now = _utc_now()
         with self._connection() as connection:
@@ -1359,6 +1374,306 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def sync_worker_telemetry(
+        self,
+        worker: Worker,
+        usage_observations: Sequence[Mapping[str, Any]],
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int:
+        """Atomically upsert one active worker and its fresh capacity evidence."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        heartbeat_at = (
+            _normalize_timestamp(worker.last_heartbeat_at)
+            if worker.last_heartbeat_at else None
+        )
+        if worker.id.startswith("legacy-worker:") or worker.availability == "PRESERVED":
+            raise RegistryConflict("PRESERVED_WORKER_IMMUTABLE", worker.id)
+        normalized = []
+        for observation in usage_observations:
+            value = dict(observation)
+            if value.get("worker_id") != worker.id:
+                raise RegistryConflict("USAGE_WORKER_MISMATCH", str(value.get("worker_id")))
+            observation_id = value.get("id")
+            if not isinstance(observation_id, str) or not observation_id:
+                raise RegistryConflict("INVALID_USAGE_OBSERVATION", "id")
+            observed_at = _normalize_timestamp(value.get("observed_at"))
+            reset_at = value.get("reset_at")
+            reset_at = _normalize_timestamp(reset_at) if reset_at else None
+            consumed = value.get("consumed_percent")
+            if consumed is not None and (
+                isinstance(consumed, bool)
+                or not isinstance(consumed, (int, float))
+                or not 0 <= float(consumed) <= 100
+            ):
+                raise RegistryConflict("INVALID_USAGE_OBSERVATION", "consumed_percent")
+            state = value.get("state")
+            if not isinstance(state, str) or not state:
+                raise RegistryConflict("INVALID_USAGE_OBSERVATION", "state")
+            diagnostics = dict(value.get("provider_diagnostics") or {})
+            for key in (
+                "capacity_mode", "capacity_scope", "service_state",
+                "authentication_state", "live_invocation_state", "limit_signal",
+            ):
+                if key in value:
+                    diagnostics[key] = value[key]
+            normalized.append((
+                observation_id, observed_at, reset_at, consumed, state, diagnostics,
+            ))
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                if connection.execute(
+                    "SELECT 1 FROM leases WHERE worker_id=? AND released_at IS NULL",
+                    (worker.id,),
+                ).fetchone():
+                    raise RegistryConflict("WORKER_HAS_ACTIVE_LEASE")
+                prior = connection.execute(
+                    "SELECT availability FROM workers WHERE id=?", (worker.id,)
+                ).fetchone()
+                if prior is not None and prior["availability"] == "PRESERVED":
+                    raise RegistryConflict("PRESERVED_WORKER_IMMUTABLE", worker.id)
+                connection.execute(
+                    """INSERT INTO workers
+                       (id, display_name, role, availability, capabilities_json,
+                        approved_lanes_json, provider_diagnostics_json,
+                        last_heartbeat_at, usage_state, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                        display_name=excluded.display_name,
+                        role=excluded.role,
+                        availability=excluded.availability,
+                        capabilities_json=excluded.capabilities_json,
+                        approved_lanes_json=excluded.approved_lanes_json,
+                        provider_diagnostics_json=excluded.provider_diagnostics_json,
+                        last_heartbeat_at=excluded.last_heartbeat_at,
+                        usage_state=excluded.usage_state,
+                        updated_at=excluded.updated_at""",
+                    (
+                        worker.id, worker.display_name, worker.role, worker.availability,
+                        _json(worker.capabilities),
+                        _json([lane.value for lane in worker.approved_lanes]),
+                        _json(worker.provider_diagnostics), heartbeat_at,
+                        worker.usage_state, recorded_at, recorded_at,
+                    ),
+                )
+                for observation_id, observed_at, reset_at, consumed, state, diagnostics in normalized:
+                    connection.execute(
+                        """INSERT INTO usage_observations
+                           (id, worker_id, observed_at, reset_at, consumed_percent,
+                            state, provider_diagnostics_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            observation_id, worker.id, observed_at, reset_at,
+                            consumed, state, _json(diagnostics),
+                        ),
+                    )
+                self._insert_event(
+                    connection,
+                    "WORKER_TELEMETRY_SYNCED",
+                    recorded_at,
+                    None,
+                    worker.id,
+                    None,
+                    {"usage_observation_ids": [value[0] for value in normalized]},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("WORKER_TELEMETRY_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    def register_canary_bundle(
+        self,
+        feature: Feature,
+        implementation: WorkPackage,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int:
+        """Register exactly one implementation/review canary while fail-closed."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        if implementation.feature_id != feature.id or review.feature_id != feature.id:
+            raise RegistryConflict("CANARY_FEATURE_MISMATCH")
+        if implementation.id == review.id:
+            raise RegistryConflict("CANARY_PACKAGE_ID_CONFLICT")
+        if implementation.kind != PackageKind.PARENT or review.kind != PackageKind.REVIEW:
+            raise RegistryConflict("INVALID_CANARY_KINDS")
+        if implementation.status != TaskStatus.READY or review.status != TaskStatus.READY:
+            raise RegistryConflict("CANARY_PACKAGES_MUST_BE_READY")
+        if review.lane != Lane.ASSURANCE:
+            raise RegistryConflict("CANARY_REVIEW_REQUIRES_ASSURANCE")
+        if tuple(review.dependency_ids) != (implementation.id,):
+            raise RegistryConflict("CANARY_REVIEW_DEPENDENCY_INVALID")
+        if not {value.lower() for value in review.required_capabilities} & {
+            "review", "independent-review"
+        }:
+            raise RegistryConflict("CANARY_REVIEW_CAPABILITY_MISSING")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("CANARY_REGISTRATION_REQUIRES_PAUSED")
+                if connection.execute(
+                    "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                ).fetchone() or connection.execute(
+                    "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                ).fetchone() or connection.execute(
+                    "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1"
+                ).fetchone():
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                existing_ready = connection.execute(
+                    "SELECT id FROM work_packages WHERE status IN ('READY', 'ACTIVE') ORDER BY id"
+                ).fetchall()
+                if existing_ready:
+                    raise RegistryConflict(
+                        "CANARY_NOT_EXCLUSIVE",
+                        ",".join(row["id"] for row in existing_ready),
+                    )
+                connection.execute(
+                    """INSERT INTO features
+                       (id, title, description, priority, status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        feature.id, feature.title, feature.description, feature.priority,
+                        feature.status.value, recorded_at, recorded_at,
+                    ),
+                )
+                self._insert_package(connection, implementation, recorded_at)
+                self._insert_package(connection, review, recorded_at)
+                connection.execute(
+                    "INSERT INTO task_dependencies(package_id, dependency_id) VALUES (?, ?)",
+                    (review.id, implementation.id),
+                )
+                self._insert_event(
+                    connection,
+                    "CANARY_REGISTERED",
+                    recorded_at,
+                    implementation.id,
+                    None,
+                    None,
+                    {"feature_id": feature.id, "review_package_id": review.id},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except sqlite3.IntegrityError as error:
+                connection.rollback()
+                raise RegistryConflict("CANARY_REGISTRATION_CONFLICT", str(error)) from error
+            except Exception:
+                connection.rollback()
+                raise
+
+    def requeue_failed_package(
+        self,
+        package_id: str,
+        *,
+        expected_revision: int,
+        changed_at: str,
+        reason: str,
+    ) -> int:
+        """Requeue a terminal failed package without changing attempt history."""
+        changed_at = _normalize_timestamp(changed_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("REQUEUE_REQUIRES_PAUSED")
+                package = connection.execute(
+                    "SELECT status FROM work_packages WHERE id=?", (package_id,)
+                ).fetchone()
+                if package is None:
+                    raise RegistryNotFound(f"work package {package_id}")
+                if package["status"] != "BLOCKED":
+                    raise RegistryConflict("PACKAGE_NOT_BLOCKED", package["status"])
+                if connection.execute(
+                    "SELECT 1 FROM leases WHERE package_id=? AND released_at IS NULL",
+                    (package_id,),
+                ).fetchone() or connection.execute(
+                    "SELECT 1 FROM attempt_runtime_ownership AS runtime "
+                    "JOIN attempts AS attempt ON attempt.id=runtime.attempt_id "
+                    "WHERE attempt.package_id=? AND runtime.released_at IS NULL",
+                    (package_id,),
+                ).fetchone():
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                attempt = connection.execute(
+                    """SELECT id, ended_at, outcome FROM attempts
+                       WHERE package_id=? ORDER BY started_at DESC, id DESC LIMIT 1""",
+                    (package_id,),
+                ).fetchone()
+                if (
+                    attempt is None
+                    or attempt["ended_at"] is None
+                    or attempt["outcome"] not in {"FAILED", "BLOCKED"}
+                ):
+                    raise RegistryConflict("TERMINAL_FAILED_ATTEMPT_REQUIRED")
+                connection.execute(
+                    """UPDATE work_packages
+                       SET status='READY', ready_at=?, failure_code=NULL,
+                           failure_detail=NULL, updated_at=? WHERE id=?""",
+                    (changed_at, changed_at, package_id),
+                )
+                self._insert_event(
+                    connection,
+                    "PACKAGE_REQUEUED",
+                    changed_at,
+                    package_id,
+                    None,
+                    attempt["id"],
+                    {"reason": reason, "prior_outcome": attempt["outcome"]},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
+    def review_implementer_worker(self, review_package_id: str) -> str:
+        """Return the actual successful implementer for a review package."""
+        with self._connection() as connection:
+            review = connection.execute(
+                "SELECT kind FROM work_packages WHERE id=?", (review_package_id,)
+            ).fetchone()
+            if review is None:
+                raise RegistryNotFound(f"work package {review_package_id}")
+            if review["kind"] != "REVIEW":
+                raise RegistryConflict("REVIEW_PACKAGE_REQUIRED")
+            targets = connection.execute(
+                "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                (review_package_id,),
+            ).fetchall()
+            if len(targets) != 1:
+                raise RegistryConflict("REVIEW_TARGET_MISMATCH")
+            attempt = connection.execute(
+                """SELECT worker_id FROM attempts
+                   WHERE package_id=? AND outcome='SUCCEEDED'
+                     AND ended_at IS NOT NULL AND worker_id IS NOT NULL
+                   ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+                (targets[0]["dependency_id"],),
+            ).fetchone()
+        if attempt is None:
+            raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+        return str(attempt["worker_id"])
+
     @staticmethod
     def _expire_leases(connection: sqlite3.Connection, now: str) -> int:
         expired = connection.execute(
@@ -1469,16 +1784,40 @@ class SQLiteRegistry:
                 missing = sorted(required - capabilities)
                 if missing:
                     raise RegistryConflict("CAPABILITY_MISMATCH", ",".join(missing))
+                allowed_dependency_states = (
+                    ("VERIFY_REVIEW", "DONE")
+                    if package["kind"] == "REVIEW" else ("DONE",)
+                )
+                placeholders = ",".join("?" for _ in allowed_dependency_states)
                 incomplete = connection.execute(
-                    """SELECT dependency_id FROM task_dependencies AS dependency
-                       JOIN work_packages AS required ON required.id=dependency.dependency_id
-                       WHERE dependency.package_id=? AND required.status <> 'DONE'""",
-                    (package_id,),
+                    "SELECT dependency_id FROM task_dependencies AS dependency "
+                    "JOIN work_packages AS required "
+                    "ON required.id=dependency.dependency_id "
+                    f"WHERE dependency.package_id=? AND required.status NOT IN ({placeholders})",
+                    (package_id, *allowed_dependency_states),
                 ).fetchall()
                 if incomplete:
                     raise RegistryConflict(
                         "DEPENDENCY_BLOCKED", ",".join(row["dependency_id"] for row in incomplete)
                     )
+                if package["kind"] == "REVIEW":
+                    targets = connection.execute(
+                        "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                        (package_id,),
+                    ).fetchall()
+                    if len(targets) != 1:
+                        raise RegistryConflict("REVIEW_TARGET_MISMATCH")
+                    implementation = connection.execute(
+                        """SELECT worker_id FROM attempts
+                           WHERE package_id=? AND outcome='SUCCEEDED'
+                             AND ended_at IS NOT NULL AND worker_id IS NOT NULL
+                           ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+                        (targets[0]["dependency_id"],),
+                    ).fetchone()
+                    if implementation is None:
+                        raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+                    if implementation["worker_id"] == worker_id:
+                        raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
                 try:
                     connection.execute(
                         """INSERT INTO leases
@@ -1721,10 +2060,19 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
-    def record_review_outcome(self, outcome: ReviewOutcome) -> None:
+    def record_review_outcome(
+        self,
+        outcome: ReviewOutcome,
+        *,
+        evidence: Evidence | None = None,
+        expected_revision: int | None = None,
+    ) -> int:
         """Append one explicit, independently authored review decision."""
         requested_at = _normalize_timestamp(outcome.requested_at)
         decided_at = _normalize_timestamp(outcome.decided_at)
+        evidence_recorded_at = (
+            _normalize_timestamp(evidence.recorded_at) if evidence is not None else None
+        )
         if not isinstance(outcome.state, ReviewOutcomeState):
             raise RegistryConflict("INVALID_REVIEW_OUTCOME", "state")
         if decided_at < requested_at:
@@ -1735,9 +2083,29 @@ class SQLiteRegistry:
             raise RegistryConflict("REVIEW_APPROVAL_EVIDENCE_REQUIRED")
         if outcome.state is ReviewOutcomeState.CHANGES_REQUESTED and not outcome.changes_requested:
             raise RegistryConflict("REVIEW_CHANGES_REQUIRED")
+        if evidence is not None and (
+            evidence.package_id != outcome.review_package_id
+            or evidence.kind.lower() != "review"
+            or not isinstance(evidence.metadata.get("attempt_id"), str)
+            or not evidence.metadata["attempt_id"]
+        ):
+            raise RegistryConflict("REVIEW_EVIDENCE_MISMATCH", evidence.id)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if expected_revision is not None:
+                    self._require_revision(connection, expected_revision)
+                if evidence is not None:
+                    connection.execute(
+                        """INSERT INTO evidence
+                           (id, package_id, kind, uri, summary, recorded_at, metadata_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            evidence.id, evidence.package_id, evidence.kind,
+                            evidence.uri, evidence.summary, evidence_recorded_at,
+                            _json(evidence.metadata),
+                        ),
+                    )
                 review_package = connection.execute(
                     "SELECT kind FROM work_packages WHERE id=?", (outcome.review_package_id,)
                 ).fetchone()
@@ -1859,8 +2227,9 @@ class SQLiteRegistry:
                         "summary": f"Independent review recorded {outcome.state.value.lower().replace('_', ' ')}.",
                     },
                 )
-                self._bump_revision(connection)
+                revision = self._bump_revision(connection)
                 connection.commit()
+                return revision
             except sqlite3.IntegrityError as error:
                 connection.rollback()
                 raise RegistryConflict("REVIEW_OUTCOME_CONFLICT", str(error)) from error
@@ -2944,12 +3313,15 @@ class SQLiteRegistry:
                     "SELECT * FROM evidence ORDER BY recorded_at, id",
                     ("metadata_json",),
                 ),
-                review_outcomes=decoded_rows(
-                    "SELECT * FROM review_outcomes ORDER BY decided_at, id",
-                    (
-                        "findings_json", "changes_requested_json",
-                        "approval_evidence_ids_json",
-                    ),
+                review_outcomes=(
+                    decoded_rows(
+                        "SELECT * FROM review_outcomes ORDER BY decided_at, id",
+                        (
+                            "findings_json", "changes_requested_json",
+                            "approval_evidence_ids_json",
+                        ),
+                    )
+                    if "review_outcomes" in tables else ()
                 ),
                 usage_observations=decoded_rows(
                     "SELECT * FROM usage_observations ORDER BY observed_at, id",

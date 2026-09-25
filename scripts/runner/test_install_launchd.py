@@ -145,7 +145,11 @@ class LaunchdInstallerTests(unittest.TestCase):
         )
         self.assertEqual(
             {agent: value['slots'] for agent, value in example['agents'].items()},
-            {'codex-a': 2, 'codex-b': 1, 'claude': 2},
+            {'codex-a': 1, 'codex-b': 1, 'claude': 1},
+        )
+        self.assertEqual(
+            example['gh'],
+            '/absolute/path/to/reviewed-release/scripts/runner/github.py',
         )
         for agent in ('codex-a', 'codex-b'):
             for command_name in ('command', 'fallback_command'):
@@ -155,7 +159,10 @@ class LaunchdInstallerTests(unittest.TestCase):
         for command_name in ('command', 'fallback_command'):
             command = example['agents']['claude'][command_name]
             self.assertEqual(command[2:4], ['exec', '/absolute/path/to/claude'])
-            self.assertTrue(command[1].endswith('/scripts/runner/claude_keychain.py'))
+            self.assertEqual(
+                command[1],
+                '/absolute/path/to/reviewed-release/scripts/runner/claude_keychain.py',
+            )
             tools = command[command.index('--tools') + 1].split(',')
             self.assertNotIn('Agent', tools)
         self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', json.dumps(example))
@@ -299,13 +306,31 @@ class LaunchdInstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             state, home = root / 'state', root / 'home'
-            plan = self.plan(state, mode='lanes', live=True)
+            plan = self.plan(state, mode='lanes')
             target = installer.label_path('life.threadline.runner.codex-a', home)
             target.parent.mkdir(parents=True)
             target.write_text('dry-run lane')
             with self.assertRaisesRegex(ValueError, 'existing service preserved'):
                 installer.install(plan, mode='lanes', replace_mode=False, state=state, home=home, run=self.absent_run([]), uid=1)
             self.assertEqual(target.read_text(), 'dry-run lane')
+
+    def test_generic_install_cannot_install_live_or_replace_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            with self.assertRaisesRegex(ValueError, 'reviewed Registry operator'):
+                installer.install(
+                    self.plan(state, mode='lanes', live=True), mode='lanes',
+                    replace_mode=False, state=state, home=home,
+                    run=self.absent_run([]), uid=1,
+                )
+            with self.assertRaisesRegex(ValueError, 'reviewed Registry operator'):
+                installer.install(
+                    self.plan(state, mode='lanes'), mode='lanes',
+                    replace_mode=False, replace_current=True, state=state,
+                    home=home, run=self.absent_run([]), uid=1,
+                )
+            self.assertFalse(installer.launch_agents_dir(home).exists())
 
     def test_replace_current_promotes_dry_run_lanes_and_boots_out_only_loaded_targets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -321,7 +346,10 @@ class LaunchdInstallerTests(unittest.TestCase):
                 loaded = args[1] == 'print' and args[-1].endswith('.codex-a')
                 return subprocess.CompletedProcess(args, 0 if loaded or args[1] != 'print' else 1)
             live_plan = self.plan(state, mode='lanes', live=True)
-            installer.install(live_plan, mode='lanes', replace_mode=False, replace_current=True, state=state, home=home, run=run, uid=1)
+            installer.install_operator_plan(
+                live_plan, mode='lanes', replace_mode=False,
+                replace_current=True, state=state, home=home, run=run, uid=1,
+            )
             self.assertEqual([call[-1] for call in calls if call[1] == 'bootout'], ['gui/1/life.threadline.runner.codex-a'])
             for label, _ in live_plan[:3]:
                 data = plistlib.loads(installer.label_path(label, home).read_bytes())
@@ -348,7 +376,7 @@ class LaunchdInstallerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0)
 
             new_plan = self.plan(state, mode='lanes', live=True)
-            installer.install(
+            installer.install_operator_plan(
                 new_plan, mode='lanes', replace_mode=False, replace_current=True,
                 state=state, home=home, run=run, uid=1,
             )
@@ -383,7 +411,7 @@ class LaunchdInstallerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0)
 
             with self.assertRaisesRegex(RuntimeError, 'installation failed'):
-                installer.install(
+                installer.install_operator_plan(
                     self.plan(state, mode='lanes', live=True), mode='lanes',
                     replace_mode=False, replace_current=True, state=state,
                     home=home, run=run, uid=1,
@@ -403,8 +431,11 @@ class LaunchdInstallerTests(unittest.TestCase):
                 loaded = args[1] == 'print' and args[-1].endswith('.codex-a')
                 return subprocess.CompletedProcess(args, 0 if loaded else 1)
             with self.assertRaisesRegex(ValueError, 'without plist backups'):
-                installer.install(self.plan(state, mode='lanes', live=True), mode='lanes', replace_mode=False,
-                                  replace_current=True, state=state, home=home, run=loaded_run, uid=1)
+                installer.install_operator_plan(
+                    self.plan(state, mode='lanes', live=True), mode='lanes',
+                    replace_mode=False, replace_current=True, state=state,
+                    home=home, run=loaded_run, uid=1,
+                )
 
     def test_replace_current_bootstrap_failure_restores_current_mode(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -426,8 +457,11 @@ class LaunchdInstallerTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args)
                 return subprocess.CompletedProcess(args, 0)
             with self.assertRaisesRegex(RuntimeError, 'installation failed'):
-                installer.install(self.plan(state, mode='lanes', live=True), mode='lanes', replace_mode=False,
-                                  replace_current=True, state=state, home=home, run=run, uid=1)
+                installer.install_operator_plan(
+                    self.plan(state, mode='lanes', live=True), mode='lanes',
+                    replace_mode=False, replace_current=True, state=state,
+                    home=home, run=run, uid=1,
+                )
             for label, original in originals.items():
                 self.assertEqual(installer.label_path(label, home).read_bytes(), original)
             restored_bootstraps = [call[-1] for call in calls if call[1] == 'bootstrap']
@@ -495,6 +529,43 @@ class LaunchdInstallerTests(unittest.TestCase):
             self.assertNotIn('--dry-run', plistlib.loads(backup.read_bytes())['ProgramArguments'])
             self.assertTrue((result['backup_dir'] / lane_destination.name).exists())
             self.assertFalse(lane_destination.exists())
+
+    def test_pause_configuration_callback_runs_after_reconcile_and_before_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            live_plan = self.plan(state, mode='serial', live=True)
+            dry_plan = self.plan(state, mode='serial', live=False)
+            destination = installer.label_path(installer.SERIAL_LABEL, home)
+            installer.atomic_write_plist(destination, live_plan[0][1])
+            original = destination.read_bytes()
+            events = []
+
+            class Control:
+                def engage_stop(self, reason):
+                    events.append('stop')
+                def reconcile_stopping_runtimes(self):
+                    events.append('reconcile')
+                    return {'resolved': (), 'unresolved': ()}
+                def finalize_paused(self, *, reason):
+                    events.append('paused')
+
+            def run(args, **kwargs):
+                return subprocess.CompletedProcess(args, 0 if args[1] != 'print' else 1)
+
+            def fail_configuration():
+                events.append('configuration')
+                self.assertEqual(destination.read_bytes(), original)
+                raise RuntimeError('atomic configuration failed')
+
+            with self.assertRaisesRegex(RuntimeError, 'atomic configuration failed'):
+                installer.pause_to_dry_run(
+                    dry_plan, mode='serial', registry_control=Control(), state=state,
+                    home=home, run=run, uid=1, after_reconcile=fail_configuration,
+                )
+
+            self.assertEqual(events, ['stop', 'reconcile', 'configuration'])
+            self.assertEqual(destination.read_bytes(), original)
 
     def test_pause_refuses_loaded_service_without_reversible_definition(self):
         with tempfile.TemporaryDirectory() as directory:

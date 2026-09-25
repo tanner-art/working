@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from registry_control import RunnerRegistryControl
+from registry_control import RunnerRegistryControl, queue_contract_digest
 from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry import (
     Feature,
@@ -31,6 +31,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def seed_assignment(self):
+        now = datetime.now(timezone.utc)
         self.registry.register_feature(
             Feature("FEATURE", "Feature", 10, TaskStatus.READY)
         )
@@ -62,14 +63,14 @@ class RunnerRegistryControlTests(unittest.TestCase):
             expected_mode="PAUSED",
             new_mode="LIVE",
             kill_switch_engaged=False,
-            changed_at="2026-09-25T10:00:00Z",
+            changed_at=(now - timedelta(minutes=2)).isoformat(),
             reason="bounded canary",
         )
         self.registry.acquire_lease(
             "TASK-1",
             "worker-a",
-            acquired_at="2026-09-25T10:01:00Z",
-            expires_at="2026-09-25T10:20:00Z",
+            acquired_at=(now - timedelta(minutes=1)).isoformat(),
+            expires_at=(now + timedelta(minutes=20)).isoformat(),
         )
 
     def test_is_absent_for_legacy_config_and_rejects_relative_database(self):
@@ -103,6 +104,54 @@ class RunnerRegistryControlTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RegistryConflict, "PAIR_NOT_FOUND"):
                 control.pre_claim("TASK-1", "worker-a")
+
+    def test_pre_claim_pins_the_normalized_queue_contract(self):
+        body = {
+            "task": "TASK-1", "paths": ["docs/canary.md"],
+            "instructions": "Write the canary.", "depends_on": [],
+            "lane": "PLATFORM", "kind": "PARENT",
+            "capacity_size": "VERY_SMALL", "capacity_risk": "BOUNDED",
+        }
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=({
+                "id": "TASK-1",
+                "provider_diagnostics": {
+                    "queue_contract_sha256": queue_contract_digest(body),
+                },
+            },),
+        )
+        control.registry.require_live_dispatch.return_value = 17
+        eligible = SimpleNamespace(package_id="TASK-1", worker_id="worker-a")
+        decision = SimpleNamespace(proposed_assignments=(eligible,), pair_evaluations=())
+        with patch("registry_control.decide_shadow", return_value=decision):
+            self.assertEqual(
+                control.pre_claim("TASK-1", "worker-a", task_contract=body), 17
+            )
+            changed = dict(body, instructions="Different work")
+            with self.assertRaisesRegex(RegistryConflict, "QUEUE_CONTRACT_MISMATCH"):
+                control.pre_claim("TASK-1", "worker-a", task_contract=changed)
+
+    def test_review_preclaim_excludes_the_actual_implementer(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
+        )
+        control.registry.review_implementer_worker.return_value = "worker-a"
+        control.registry.require_live_dispatch.return_value = 17
+        eligible = SimpleNamespace(package_id="TASK-REVIEW", worker_id="worker-b")
+        decision = SimpleNamespace(proposed_assignments=(eligible,), pair_evaluations=())
+        with patch("registry_control.decide_shadow", return_value=decision):
+            with self.assertRaisesRegex(
+                RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"
+            ):
+                control.pre_claim("TASK-REVIEW", "worker-a")
+            self.assertEqual(control.pre_claim("TASK-REVIEW", "worker-b"), 17)
+        control.registry.review_implementer_worker.assert_called_with("TASK-REVIEW")
 
     def test_claim_package_pins_dispatch_revision(self):
         control = RunnerRegistryControl(self.database)

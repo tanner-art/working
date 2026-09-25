@@ -773,8 +773,20 @@ def main():
             agent,body=select(issue,c['allowed_authors'])
             if args.agent and agent != args.agent: continue
             if agent not in c['agents']: raise ValueError('Agent is not enabled')
-            blocked = [dep for dep in body.get('depends_on',[])
-                       if json.loads(github('issue','view',str(dep),'--repo',c['github'],'--json','state'))['state']!='CLOSED']
+            # Registry review packages become eligible when their target is in
+            # VERIFY_REVIEW, before the target GitHub issue is closed. The
+            # authoritative Registry pre-claim below checks that exact state,
+            # target dependency, reviewer capability, and worker pairing.
+            registry_review = (
+                registry_control is not None and body.get('kind') == 'REVIEW'
+            )
+            blocked = [] if registry_review else [
+                dep for dep in body.get('depends_on', [])
+                if json.loads(github(
+                    'issue', 'view', str(dep), '--repo', c['github'],
+                    '--json', 'state',
+                ))['state'] != 'CLOSED'
+            ]
             if blocked:
                 print(json.dumps({'issue':n,'status':'waiting','dependencies':blocked}))
                 continue
@@ -806,7 +818,7 @@ def main():
                                   'usage_state': usage_decision['state']}))
                 continue
             registry_revision = (
-                registry_control.pre_claim(body['task'], lane)
+                registry_control.pre_claim(body['task'], lane, task_contract=body)
                 if registry_control is not None else None
             )
             data = claim(state, issue, agent, body, args.retry, stale_claim_seconds,
