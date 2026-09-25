@@ -295,6 +295,46 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.assertEqual(projection["factory"]["attentionCount"], 0)
         self.assertEqual(projection["factory"]["health"], "healthy")
 
+    def test_sparse_verify_review_evidence_authoritatively_requires_attention(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        from scripts.factory_registry.control_center_projection import project_control_center
+        orchestra = {
+            "id": "orchestra", "display_name": "Orchestra", "role": "ORCHESTRA",
+            "availability": "IDLE", "capabilities": ("coordination",), "approved_lanes": (),
+            "provider_diagnostics": {
+                "provider": "OpenAI", "model": "Codex",
+                "service_state": "healthy", "authentication_state": "valid",
+            },
+            "last_heartbeat_at": "2026-09-24T19:59:00Z", "usage_state": "GREEN",
+        }
+        package = {**raw.work_packages[0], "status": "VERIFY_REVIEW", "failure_code": None, "failure_detail": None}
+        review_evidence = {
+            **raw.evidence[0], "kind": "review", "summary": "Approved rejected words are not structured state",
+        }
+        historical_failure = {**raw.failures[0], "code": "REVIEW_FAILURE"}
+        projection = project_control_center(replace(
+            raw,
+            workers=(*raw.workers, orchestra),
+            work_packages=(package, *raw.work_packages[1:]),
+            evidence=(review_evidence,),
+            failures=(historical_failure,),
+        ))
+
+        historical = next(item for item in projection["failures"] if item["id"] == historical_failure["id"])
+        reconciliation = next(item for item in projection["failures"] if item["code"] == "REVIEW_STATE_UNRECORDED")
+        self.assertFalse(historical["requiresHuman"])
+        self.assertEqual(reconciliation["packageId"], package["id"])
+        self.assertTrue(reconciliation["requiresHuman"])
+        self.assertEqual(reconciliation["title"], "Review outcome is not recorded")
+        self.assertEqual(
+            reconciliation["detail"],
+            "Review evidence exists for this VERIFY / REVIEW package, but this Registry revision has no structured review outcome or current failure.",
+        )
+        self.assertEqual(projection["factory"]["attentionCount"], 1)
+        self.assertEqual(projection["factory"]["health"], "constrained")
+        self.assertNotIn("approved", reconciliation["detail"].lower())
+        self.assertNotIn("rejected", reconciliation["detail"].lower())
+
     def test_projection_is_logically_read_only(self) -> None:
         before = self._logical_state()
         first = build_control_center_projection(self.registry, observed_at=NOW)

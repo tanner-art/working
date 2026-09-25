@@ -537,6 +537,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         })
 
     reconciliation = _project_reconciliation(snapshot)
+    projected_reviews = _project_reviews(snapshot)
     failures = []
     package_state = {str(item.get("id")): item.get("status") for item in snapshot.work_packages}
     for item in snapshot.failures:
@@ -557,6 +558,34 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "severity": "critical", "occurredAt": reconciliation["observedAt"],
             "workerId": None, "packageId": None, "requiresHuman": True,
         })
+
+    structured_review_packages = {str(item["packageId"]) for item in projected_reviews}
+    current_failure_keys = {
+        (item["packageId"], item["code"]) for item in failures if item["requiresHuman"]
+    }
+    for package_id, package in projected_packages.items():
+        has_review_evidence = any(item.get("kind") == "review" for item in package["evidence"])
+        review_state_unrecorded = (
+            package["state"] == "VERIFY_REVIEW"
+            and package["reviewState"] is None
+            and package["failureCode"] is None
+            and has_review_evidence
+            and package_id not in structured_review_packages
+            and (package_id, "REVIEW_STATE_UNRECORDED") not in current_failure_keys
+        )
+        if review_state_unrecorded:
+            failures.append({
+                "id": f"review-state-unrecorded:{package_id}:{snapshot.revision}",
+                "code": "REVIEW_STATE_UNRECORDED",
+                "title": "Review outcome is not recorded",
+                "detail": (
+                    "Review evidence exists for this VERIFY / REVIEW package, but this "
+                    "Registry revision has no structured review outcome or current failure."
+                ),
+                "severity": "warning", "occurredAt": snapshot.observed_at,
+                "workerId": package["ownerWorkerId"], "packageId": package_id,
+                "requiresHuman": True,
+            })
 
     events = []
     for item in snapshot.events:
@@ -587,6 +616,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         reconciliation["status"] == "mismatch"
         or bool(reconciliation["activeStaleLeaseCount"])
         or any(item["severity"] == "critical" and item["requiresHuman"] for item in failures)
+        or any(item["code"] == "REVIEW_STATE_UNRECORDED" and item["requiresHuman"] for item in failures)
         or not orchestra
         or any(item["health"] != "healthy" for item in orchestra)
     )
@@ -605,7 +635,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "attentionCount": sum(1 for item in failures if item["requiresHuman"]),
         },
         "reconciliation": reconciliation, "features": projected_features,
-        "workers": projected_workers, "reviews": _project_reviews(snapshot),
+        "workers": projected_workers, "reviews": projected_reviews,
         "capacity": _project_capacity(snapshot),
         "usageInvocations": _project_usage_invocations(snapshot),
         "events": events, "failures": failures,
