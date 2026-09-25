@@ -31,8 +31,9 @@ from .shadow_dispatch import (
 )
 
 
-CAPACITY_SCOPES = frozenset(("short_window", "weekly_window", "billing_budget"))
-CAPACITY_CLASSES = frozenset(("FULL_CAPABILITY_REQUIRED", "ECONOMY_ELIGIBLE"))
+CAPACITY_SCOPES = frozenset(("short_window", "weekly_window", "billing_budget", "provider_signal"))
+PACKAGE_CAPACITY_SIZES = frozenset(("VERY_SMALL", "SMALL", "SUBSTANTIAL"))
+PACKAGE_CAPACITY_RISKS = frozenset(("BOUNDED", "UNCERTAIN", "EMERGENCY_RECOVERY"))
 IDLE_HEARTBEAT_STATES = frozenset(("idle", "polling"))
 BUSY_HEARTBEAT_STATES = frozenset(("starting", "agent", "validation", "review"))
 
@@ -43,15 +44,16 @@ class LiveObservationError(ValueError):
 
 @dataclass(frozen=True)
 class ProposedObservationPolicy:
-    """Unratified policy values used only by shadow observation."""
+    """Ratified staged policy values used by shadow observation."""
 
     heartbeat_fresh_seconds: int = 180
     usage_fresh_seconds: int = 900
     sweep_seconds: int = 900
     sweep_tolerance_seconds: int = 60
     comparison_tolerance_seconds: int = 60
-    slowdown_percent: float = 70.0
-    stop_percent: float = 80.0
+    caution_percent: float = 90.0
+    checkpoint_percent: float = 95.0
+    hard_stop_percent: float = 98.0
 
     def __post_init__(self) -> None:
         if (
@@ -60,7 +62,7 @@ class ProposedObservationPolicy:
             or self.sweep_seconds <= 0
             or self.sweep_tolerance_seconds < 0
             or self.comparison_tolerance_seconds < 0
-            or not 0 <= self.slowdown_percent < self.stop_percent <= 100
+            or not 0 <= self.caution_percent < self.checkpoint_percent < self.hard_stop_percent <= 100
         ):
             raise LiveObservationError("invalid proposed observation policy")
 
@@ -71,8 +73,9 @@ class ProposedObservationPolicy:
             scheduled_sweep_seconds=self.sweep_seconds,
             scheduled_sweep_tolerance_seconds=self.sweep_tolerance_seconds,
             legacy_observation_tolerance_seconds=self.comparison_tolerance_seconds,
-            worker_stop_percent=self.stop_percent,
-            allowed_usage_states=("GREEN",),
+            worker_caution_percent=self.caution_percent,
+            worker_checkpoint_percent=self.checkpoint_percent,
+            worker_hard_stop_percent=self.hard_stop_percent,
         )
 
 
@@ -82,6 +85,7 @@ class WorkerObservationBinding:
     registry_worker_id: str
     capacity_scopes: tuple[str, ...] = ("short_window", "weekly_window")
     usage_account_by_scope: tuple[tuple[str, str], ...] = ()
+    capacity_mode: str = "percentage"
 
     def __post_init__(self) -> None:
         if not self.runner_worker_id or not self.registry_worker_id:
@@ -89,16 +93,20 @@ class WorkerObservationBinding:
         scopes = tuple(str(value) for value in self.capacity_scopes)
         if not scopes or len(scopes) != len(set(scopes)) or not set(scopes) <= CAPACITY_SCOPES:
             raise LiveObservationError("capacity scopes must be unique approved proposal scopes")
+        if self.capacity_mode not in ("percentage", "provider_signal"):
+            raise LiveObservationError("capacity_mode must be percentage or provider_signal")
+        if self.capacity_mode == "provider_signal" and scopes != ("provider_signal",):
+            raise LiveObservationError("provider_signal workers require only the provider_signal scope")
+        if self.capacity_mode == "percentage" and "provider_signal" in scopes:
+            raise LiveObservationError("percentage workers cannot use the provider_signal scope")
         mapped_scopes = [str(value[0]) for value in self.usage_account_by_scope]
-        mapped_accounts = [str(value[1]) for value in self.usage_account_by_scope]
         if (
             len(mapped_scopes) != len(set(mapped_scopes))
-            or len(mapped_accounts) != len(set(mapped_accounts))
             or not set(mapped_scopes) <= set(scopes)
-            or any(not value for value in mapped_accounts)
+            or any(not str(value[1]) for value in self.usage_account_by_scope)
         ):
             raise LiveObservationError(
-                "usage mappings must be one-to-one and target configured capacity scopes"
+                "usage mappings must uniquely target configured capacity scopes"
             )
 
 
@@ -170,6 +178,7 @@ class ObservationPlan:
                     usage_account_by_scope=tuple(
                         sorted((str(scope), str(account)) for scope, account in usage_map.items())
                     ),
+                    capacity_mode=str(raw.get("capacity_mode", "percentage")),
                 )
             )
         try:
@@ -434,11 +443,13 @@ def _usage_root(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _usage_state(percent: float, policy: ProposedObservationPolicy) -> str:
-    if percent >= policy.stop_percent:
-        return "STOP"
-    if percent >= policy.slowdown_percent:
-        return "SLOW"
-    return "GREEN"
+    if percent >= policy.hard_stop_percent:
+        return "HARD_STOP"
+    if percent >= policy.checkpoint_percent:
+        return "CHECKPOINT"
+    if percent >= policy.caution_percent:
+        return "CAUTION"
+    return "NORMAL"
 
 
 def _normalized_usage(
@@ -466,7 +477,60 @@ def _normalized_usage(
                 f"USAGE_SOURCE_MISSING:{binding.runner_worker_id}:scope={scope}"
             )
             continue
-        percent = record.get("used_percent")
+        record_mode = str(record.get("capacity_mode", "percentage"))
+        if record_mode != binding.capacity_mode:
+            warnings.append(
+                f"USAGE_SOURCE_INVALID:{binding.runner_worker_id}:scope={scope}"
+            )
+            continue
+        if binding.capacity_mode == "provider_signal":
+            limit_signal = str(record.get("limit_signal", "UNKNOWN")).upper()
+            if limit_signal not in (
+                "NONE", "RATE_LIMIT", "EXHAUSTION", "THROTTLING", "CAPACITY_LAUNCH_FAILURE"
+            ):
+                warnings.append(
+                    f"USAGE_SOURCE_INVALID:{binding.runner_worker_id}:scope={scope}"
+                )
+                continue
+            try:
+                observed_at = _canonical_time(record.get("observed_at"), field="usage observed_at")
+            except LiveObservationError:
+                warnings.append(
+                    f"USAGE_SOURCE_INVALID:{binding.runner_worker_id}:scope={scope}"
+                )
+                continue
+            normalized = {
+                "id": "live-usage:" + hashlib.sha256(
+                    f"{binding.registry_worker_id}\0{scope}\0{observed_at}".encode()
+                ).hexdigest()[:24],
+                "worker_id": binding.registry_worker_id,
+                "capacity_scope": scope,
+                "capacity_mode": "provider_signal",
+                "state": "NORMAL" if (
+                    record.get("service_state") == "healthy"
+                    and record.get("authentication_state") == "valid"
+                    and record.get("live_invocation_state") == "succeeded"
+                    and limit_signal == "NONE"
+                ) else "HARD_STOP",
+                "service_state": record.get("service_state"),
+                "authentication_state": record.get("authentication_state"),
+                "live_invocation_state": record.get("live_invocation_state"),
+                "limit_signal": limit_signal,
+                "observed_at": observed_at,
+            }
+            observations.append(normalized)
+            continue
+        if "scopes" in record:
+            raw_scopes = record.get("scopes")
+            scope_record = raw_scopes.get(scope) if isinstance(raw_scopes, Mapping) else None
+        else:
+            scope_record = record
+        if not isinstance(scope_record, Mapping):
+            warnings.append(
+                f"USAGE_SOURCE_MISSING:{binding.runner_worker_id}:scope={scope}"
+            )
+            continue
+        percent = scope_record.get("used_percent")
         if (
             isinstance(percent, bool)
             or not isinstance(percent, (int, float))
@@ -478,7 +542,9 @@ def _normalized_usage(
             )
             continue
         try:
-            observed_at = _canonical_time(record.get("observed_at"), field="usage observed_at")
+            observed_at = _canonical_time(
+                scope_record.get("observed_at"), field="usage observed_at"
+            )
         except LiveObservationError:
             warnings.append(
                 f"USAGE_SOURCE_INVALID:{binding.runner_worker_id}:scope={scope}"
@@ -491,11 +557,12 @@ def _normalized_usage(
             ).hexdigest()[:24],
             "worker_id": binding.registry_worker_id,
             "capacity_scope": scope,
+            "capacity_mode": "percentage",
             "state": _usage_state(float(percent), policy),
             "consumed_percent": float(percent),
             "observed_at": observed_at,
         }
-        reset_at = record.get("reset_at")
+        reset_at = scope_record.get("reset_at")
         if reset_at is not None:
             try:
                 normalized["reset_at"] = _canonical_time(reset_at, field="usage reset_at")
@@ -680,6 +747,7 @@ def project_live_observation(
             value["availability"] = update["availability"]
             value["last_heartbeat_at"] = update["last_heartbeat_at"]
             value["capacity_scopes"] = list(binding.capacity_scopes)
+            value["capacity_mode"] = binding.capacity_mode
         workers.append(value)
     replaced = {
         (binding.registry_worker_id, scope)

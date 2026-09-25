@@ -48,6 +48,10 @@ class RejectionCode(str, Enum):
     USAGE_INVALID = "USAGE_INVALID"
     CAPACITY_CONSTRAINED = "CAPACITY_CONSTRAINED"
     CAPACITY_STOPPED = "CAPACITY_STOPPED"
+    CAPACITY_CAUTION_PACKAGE = "CAPACITY_CAUTION_PACKAGE"
+    CAPACITY_CHECKPOINT_PACKAGE = "CAPACITY_CHECKPOINT_PACKAGE"
+    PROVIDER_SIGNAL_UNHEALTHY = "PROVIDER_SIGNAL_UNHEALTHY"
+    PROVIDER_LIMIT_SIGNAL = "PROVIDER_LIMIT_SIGNAL"
     LANE_NOT_APPROVED = "LANE_NOT_APPROVED"
     CAPABILITY_MISMATCH = "CAPABILITY_MISMATCH"
     PACKAGE_ALREADY_PROPOSED = "PACKAGE_ALREADY_PROPOSED"
@@ -82,8 +86,9 @@ class ShadowPolicy:
     scheduled_sweep_seconds: int = 900
     scheduled_sweep_tolerance_seconds: int = 60
     legacy_observation_tolerance_seconds: int = 60
-    worker_stop_percent: float = 80.0
-    allowed_usage_states: tuple[str, ...] = ("GREEN",)
+    worker_caution_percent: float = 90.0
+    worker_checkpoint_percent: float = 95.0
+    worker_hard_stop_percent: float = 98.0
 
     def __post_init__(self) -> None:
         if (
@@ -94,8 +99,13 @@ class ShadowPolicy:
             or self.legacy_observation_tolerance_seconds < 0
         ):
             raise ShadowDispatchError("freshness windows must be positive")
-        if not 0 < self.worker_stop_percent <= 100:
-            raise ShadowDispatchError("worker_stop_percent must be in (0, 100]")
+        if not (
+            0 <= self.worker_caution_percent
+            < self.worker_checkpoint_percent
+            < self.worker_hard_stop_percent
+            <= 100
+        ):
+            raise ShadowDispatchError("worker capacity thresholds must satisfy 0 <= caution < checkpoint < hard stop <= 100")
 
 
 @dataclass(frozen=True, order=True)
@@ -362,6 +372,7 @@ def _usage_reasons(
     *,
     orchestra: bool,
     expected_scopes: Iterable[str] = ("default",),
+    capacity_mode: str = "percentage",
 ) -> tuple[Reason, ...]:
     prefix = "ORCHESTRA_" if orchestra else ""
     scopes = sorted({str(value) for value in expected_scopes})
@@ -393,6 +404,35 @@ def _usage_reasons(
             code = RejectionCode.ORCHESTRA_USAGE_STALE if orchestra else RejectionCode.USAGE_STALE
             reasons.append(_reason(code, f"scope={scope} age={age:.6f}s"))
             continue
+        observation_mode = str(usage.get("capacity_mode", "percentage")).lower()
+        if observation_mode != capacity_mode:
+            code = (
+                RejectionCode.ORCHESTRA_USAGE_INVALID if orchestra else RejectionCode.USAGE_INVALID
+            )
+            reasons.append(
+                _reason(code, f"scope={scope} capacity_mode={observation_mode} expected={capacity_mode}")
+            )
+            continue
+        if capacity_mode == "provider_signal":
+            if orchestra:
+                reasons.append(
+                    _reason(RejectionCode.ORCHESTRA_USAGE_INVALID, f"scope={scope} provider signal has no reserve percentage")
+                )
+                continue
+            limit_signal = str(usage.get("limit_signal", "UNKNOWN")).upper()
+            if limit_signal != "NONE":
+                reasons.append(
+                    _reason(RejectionCode.PROVIDER_LIMIT_SIGNAL, f"scope={scope} signal={limit_signal}")
+                )
+            if not (
+                usage.get("service_state") == "healthy"
+                and usage.get("authentication_state") == "valid"
+                and usage.get("live_invocation_state") == "succeeded"
+            ):
+                reasons.append(
+                    _reason(RejectionCode.PROVIDER_SIGNAL_UNHEALTHY, f"scope={scope}")
+                )
+            continue
         state = str(usage.get("state", "UNKNOWN")).upper()
         consumed = usage.get("consumed_percent")
         if isinstance(consumed, bool) or not isinstance(consumed, (int, float)):
@@ -409,14 +449,9 @@ def _usage_reasons(
             continue
         if orchestra:
             remaining = 100.0 - float(consumed)
-            if state not in policy.allowed_usage_states:
-                code = (
-                    RejectionCode.ORCHESTRA_CAPACITY_CONSTRAINED
-                    if state == "SLOW"
-                    else RejectionCode.ORCHESTRA_USAGE_UNKNOWN
-                )
-                reasons.append(_reason(code, f"scope={scope} state={state}"))
-            elif remaining < snapshot.orchestra_reserve_percent:
+            if state not in ("GREEN", "NORMAL", "CAUTION", "CHECKPOINT", "HARD_STOP"):
+                reasons.append(_reason(RejectionCode.ORCHESTRA_USAGE_UNKNOWN, f"scope={scope} state={state}"))
+            if remaining < snapshot.orchestra_reserve_percent:
                 reasons.append(
                     _reason(
                         RejectionCode.ORCHESTRA_CAPACITY_RISK,
@@ -424,22 +459,8 @@ def _usage_reasons(
                         f"reserve={snapshot.orchestra_reserve_percent:.6f}%",
                     )
                 )
-        else:
-            if state not in policy.allowed_usage_states:
-                code = (
-                    RejectionCode.CAPACITY_CONSTRAINED
-                    if state == "SLOW"
-                    else RejectionCode.USAGE_UNKNOWN
-                )
-                reasons.append(_reason(code, f"scope={scope} state={state}"))
-            elif float(consumed) >= policy.worker_stop_percent:
-                reasons.append(
-                    _reason(
-                        RejectionCode.CAPACITY_STOPPED,
-                        f"scope={scope} consumed={float(consumed):.6f}% "
-                        f"stop={policy.worker_stop_percent:.6f}%",
-                    )
-                )
+        elif state in ("UNKNOWN", "INVALID"):
+            reasons.append(_reason(RejectionCode.USAGE_UNKNOWN, f"scope={scope} state={state}"))
     return tuple(sorted(set(reasons)))
 
 
@@ -477,6 +498,7 @@ def _worker_reasons(
             policy,
             orchestra=False,
             expected_scopes=worker.get("capacity_scopes") or ("default",),
+            capacity_mode=str(worker.get("capacity_mode", "percentage")).lower(),
         )
     )
     return tuple(sorted(set(reasons)))
@@ -525,10 +547,12 @@ def _package_reasons(
 
 
 def _pair_reasons(
+    snapshot: DispatchSnapshot,
     package: Mapping[str, Any],
     worker: Mapping[str, Any],
     package_evaluation: EntityEvaluation,
     worker_evaluation: EntityEvaluation,
+    policy: ShadowPolicy,
 ) -> tuple[Reason, ...]:
     reasons: list[Reason] = []
     if not package_evaluation.eligible:
@@ -544,7 +568,65 @@ def _pair_reasons(
     missing = sorted(required - capabilities)
     if missing:
         reasons.append(_reason(RejectionCode.CAPABILITY_MISMATCH, ",".join(missing)))
+    if not reasons:
+        reasons.extend(_capacity_package_reasons(snapshot, package, worker, policy))
     return tuple(sorted(set(reasons)))
+
+
+def _capacity_stage(
+    snapshot: DispatchSnapshot,
+    worker: Mapping[str, Any],
+    policy: ShadowPolicy,
+) -> str:
+    if str(worker.get("capacity_mode", "percentage")).lower() == "provider_signal":
+        return "NORMAL"
+    scopes = worker.get("capacity_scopes") or ("default",)
+    latest = _latest_usage_by_scope(snapshot, str(worker.get("id")), scopes)
+    highest = "NORMAL"
+    rank = {"NORMAL": 0, "CAUTION": 1, "CHECKPOINT": 2, "HARD_STOP": 3}
+    for scope in scopes:
+        consumed = float(latest[str(scope)]["consumed_percent"])
+        stage = (
+            "HARD_STOP" if consumed >= policy.worker_hard_stop_percent
+            else "CHECKPOINT" if consumed >= policy.worker_checkpoint_percent
+            else "CAUTION" if consumed >= policy.worker_caution_percent
+            else "NORMAL"
+        )
+        if rank[stage] > rank[highest]:
+            highest = stage
+    return highest
+
+
+def _capacity_package_reasons(
+    snapshot: DispatchSnapshot,
+    package: Mapping[str, Any],
+    worker: Mapping[str, Any],
+    policy: ShadowPolicy,
+) -> tuple[Reason, ...]:
+    stage = _capacity_stage(snapshot, worker, policy)
+    size = str(package.get("capacity_size", "SUBSTANTIAL")).upper()
+    risk = str(package.get("capacity_risk", "UNCERTAIN")).upper()
+    lane = str(package.get("lane", "")).upper()
+    kind = str(package.get("kind", "PARENT")).upper()
+    if size not in ("VERY_SMALL", "SMALL", "SUBSTANTIAL") or risk not in (
+        "BOUNDED", "UNCERTAIN", "EMERGENCY_RECOVERY"
+    ):
+        return (_reason(RejectionCode.USAGE_INVALID, "invalid package capacity classification"),)
+    if stage in ("CAUTION", "CHECKPOINT") and kind == "PARENT" and (
+        size == "SUBSTANTIAL" or risk == "UNCERTAIN"
+    ):
+        code = (
+            RejectionCode.CAPACITY_CHECKPOINT_PACKAGE
+            if stage == "CHECKPOINT"
+            else RejectionCode.CAPACITY_CAUTION_PACKAGE
+        )
+        return (_reason(code, f"size={size} risk={risk}"),)
+    if stage == "HARD_STOP" and not (
+        risk == "EMERGENCY_RECOVERY"
+        or (size == "VERY_SMALL" and risk == "BOUNDED" and lane == "ASSURANCE")
+    ):
+        return (_reason(RejectionCode.CAPACITY_STOPPED, f"size={size} risk={risk}"),)
+    return ()
 
 
 def _capability_surplus(package: Mapping[str, Any], worker: Mapping[str, Any]) -> int:
@@ -680,10 +762,12 @@ def decide_shadow(
             str(worker.get("id")),
             not (
                 reasons := _pair_reasons(
+                    snapshot,
                     package,
                     worker,
                     package_evaluation_by_id[str(package.get("id"))],
                     worker_evaluation_by_id[str(worker.get("id"))],
+                    policy,
                 )
             ),
             reasons,

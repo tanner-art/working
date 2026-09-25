@@ -205,8 +205,8 @@ class BuildReportTests(unittest.TestCase):
             self.assertEqual(conservative['max_parallel_tasks'], 1)
 
             config['usage_policy'] = {
-                'slowdown_percent': 70, 'stop_percent': 80,
-                'stale_after_seconds': 3600,
+                'caution_percent': 90, 'checkpoint_percent': 95,
+                'hard_stop_percent': 98, 'stale_after_seconds': 3600,
             }
             config['agents']['codex-a'].update({
                 'account': 'account-a', 'model': 'astra',

@@ -6,6 +6,10 @@ export type CallerAuthentication =
   | { ok: true; userId: string }
   | { ok: false; status: 401 | 403 | 503; error: 'unauthorized' | 'origin_not_allowed' | 'auth_unavailable'; message: string }
 
+export type CallerAuthenticationOptions = {
+  allowSameOriginSafeRequestWithoutOrigin?: boolean
+}
+
 function allowedOrigins(request: Request): Set<string> {
   const allowed = new Set([new URL(request.url).origin])
   for (const value of (process.env.AI_ALLOWED_ORIGINS ?? '').split(',')) {
@@ -42,10 +46,17 @@ function supabaseConfig(): { url: string; key: string } | undefined {
 export async function authenticateInterpretCaller(
   request: Request,
   fetchImpl: typeof fetch = fetch,
+  options: CallerAuthenticationOptions = {},
 ): Promise<CallerAuthentication> {
   const origin = request.headers.get('origin')
   const fetchSite = request.headers.get('sec-fetch-site')
-  if (!origin || !allowedOrigins(request).has(origin) || (fetchSite && fetchSite !== 'same-origin')) {
+  const safeSameOriginRequestWithoutOrigin = !origin
+    && options.allowSameOriginSafeRequestWithoutOrigin === true
+    && (request.method === 'GET' || request.method === 'HEAD')
+    && fetchSite === 'same-origin'
+  if ((!origin && !safeSameOriginRequestWithoutOrigin)
+    || (origin !== null && !allowedOrigins(request).has(origin))
+    || (fetchSite !== null && fetchSite !== 'same-origin')) {
     return { ok: false, status: 403, error: 'origin_not_allowed', message: 'The request origin is not allowed.' }
   }
 

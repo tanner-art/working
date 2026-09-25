@@ -731,6 +731,18 @@ The Factory should not assume that an authenticated worker has capacity.
 
 If usage information is stale or unknown, the system treats the worker as constrained instead of inventing availability.
 
+Workers with percentage telemetry use four stages: normal below 90%, caution
+from 90% to 95%, checkpoint from 95% to 98%, and hard stop at 98%. Caution and
+checkpoint avoid substantial or uncertain parent packages. Healthy active work
+may reach a clean checkpoint after crossing 95%; it is not interrupted merely
+for crossing that line. Hard stop permits only emergency recovery or very small
+bounded assurance work.
+
+Some providers do not expose a live usage percentage. Those workers use fresh
+service, authentication, heartbeat, live-invocation, and actual limit signals.
+Healthy evidence keeps them normally eligible. The Factory records real rate
+limits or exhaustion instead of inventing a percentage ceiling.
+
 ---
 
 # 28. Orchestra Reserve

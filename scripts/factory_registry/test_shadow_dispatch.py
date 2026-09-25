@@ -35,6 +35,8 @@ def package(
     capabilities: tuple[str, ...] = ("registry",),
     status: str = "READY",
     kind: str = "PARENT",
+    capacity_size: str = "SUBSTANTIAL",
+    capacity_risk: str = "BOUNDED",
 ) -> dict:
     return {
         "id": package_id,
@@ -43,6 +45,8 @@ def package(
         "category": "ORCHESTRATION",
         "lane": lane,
         "kind": kind,
+        "capacity_size": capacity_size,
+        "capacity_risk": capacity_risk,
         "required_capabilities": list(capabilities),
         "priority": priority,
         "acceptance_criteria": ["evidence"],
@@ -63,6 +67,7 @@ def worker(
     heartbeat: str = "2026-09-24T11:59:00Z",
     provider: str = "provider-a",
     capacity_scopes: tuple[str, ...] = ("default",),
+    capacity_mode: str = "percentage",
 ) -> dict:
     return {
         "id": worker_id,
@@ -73,6 +78,7 @@ def worker(
         "approved_lanes": list(lanes),
         "provider_diagnostics": {"provider": provider, "model": "diagnostic-only"},
         "capacity_scopes": list(capacity_scopes),
+        "capacity_mode": capacity_mode,
         "last_heartbeat_at": heartbeat,
         "usage_state": "GREEN",
     }
@@ -93,6 +99,7 @@ def usage(
         "reset_at": "2026-09-25T00:00:00Z",
         "consumed_percent": consumed,
         "state": state,
+        "capacity_mode": "percentage",
         "capacity_scope": scope,
         "provider_diagnostics": {"provider": "diagnostic-only"},
     }
@@ -230,15 +237,11 @@ class ShadowDispatchTest(unittest.TestCase):
             worker("stale-heartbeat", heartbeat="2026-09-24T11:00:00Z"),
             worker("missing-usage"),
             worker("stale-usage"),
-            worker("stopped"),
-            worker("slow"),
         )
         usages = (
             usage("busy"),
             usage("stale-heartbeat"),
             usage("stale-usage", observed_at="2026-09-24T11:00:00Z"),
-            usage("stopped", consumed=80),
-            usage("slow", consumed=70, state="SLOW"),
             usage("orchestra"),
         )
         decision = decide_shadow(snapshot(packages=(package("task"),), workers=workers, usages=usages))
@@ -247,9 +250,68 @@ class ShadowDispatchTest(unittest.TestCase):
         self.assertIn(RejectionCode.HEARTBEAT_STALE.value, by_id["stale-heartbeat"])
         self.assertIn(RejectionCode.USAGE_MISSING.value, by_id["missing-usage"])
         self.assertIn(RejectionCode.USAGE_STALE.value, by_id["stale-usage"])
-        self.assertIn(RejectionCode.CAPACITY_STOPPED.value, by_id["stopped"])
-        self.assertIn(RejectionCode.CAPACITY_CONSTRAINED.value, by_id["slow"])
         self.assertFalse(decision.proposed_assignments)
+
+    def test_staged_capacity_uses_explicit_package_size_and_risk(self) -> None:
+        packages = (
+            package("substantial", priority=400),
+            package("uncertain", priority=300, capacity_size="SMALL", capacity_risk="UNCERTAIN"),
+            package("small", priority=200, capacity_size="SMALL"),
+        )
+        caution = snapshot(
+            packages=packages,
+            workers=(worker("worker"),),
+            usages=(usage("worker", consumed=90, state="CAUTION"), usage("orchestra")),
+        )
+        decision = decide_shadow(caution)
+        self.assertEqual(decision.proposed_assignments, (Assignment("small", "worker"),))
+        pairs = {(value.package_id, value.worker_id): reason_codes(value)
+                 for value in decision.pair_evaluations}
+        self.assertIn(RejectionCode.CAPACITY_CAUTION_PACKAGE.value,
+                      pairs[("substantial", "worker")])
+        self.assertIn(RejectionCode.CAPACITY_CAUTION_PACKAGE.value,
+                      pairs[("uncertain", "worker")])
+
+    def test_hard_stop_allows_only_emergency_or_tiny_bounded_assurance(self) -> None:
+        packages = (
+            package("ordinary", priority=300, capacity_size="SMALL"),
+            package("emergency", priority=200, capacity_risk="EMERGENCY_RECOVERY"),
+            package("assurance", priority=100, lane="ASSURANCE", kind="REVIEW",
+                    capacity_size="VERY_SMALL"),
+        )
+        value = snapshot(
+            packages=packages,
+            workers=(worker("worker", lanes=("PLATFORM", "ASSURANCE")),),
+            usages=(usage("worker", consumed=98, state="HARD_STOP"), usage("orchestra")),
+        )
+        decision = decide_shadow(value)
+        self.assertEqual(decision.proposed_assignments, (Assignment("emergency", "worker"),))
+        ordinary = next(value for value in decision.pair_evaluations
+                        if value.package_id == "ordinary" and value.worker_id == "worker")
+        self.assertIn(RejectionCode.CAPACITY_STOPPED.value, reason_codes(ordinary))
+
+    def test_healthy_provider_signal_is_eligible_without_percentage(self) -> None:
+        signal = {
+            "id": "signal-worker", "worker_id": "worker", "capacity_scope": "provider_signal",
+            "capacity_mode": "provider_signal", "observed_at": "2026-09-24T11:58:00Z",
+            "state": "NORMAL", "service_state": "healthy",
+            "authentication_state": "valid", "live_invocation_state": "succeeded",
+            "limit_signal": "NONE", "provider_diagnostics": {},
+        }
+        value = snapshot(
+            packages=(package("task"),),
+            workers=(worker("worker", capacity_scopes=("provider_signal",),
+                            capacity_mode="provider_signal"),),
+            usages=(signal, usage("orchestra")),
+        )
+        self.assertEqual(decide_shadow(value).proposed_assignments,
+                         (Assignment("task", "worker"),))
+        limited = copy.deepcopy(value)
+        limited.usage_observations[0]["limit_signal"] = "RATE_LIMIT"
+        limited.usage_observations[0]["state"] = "HARD_STOP"
+        decision = decide_shadow(limited)
+        worker_eval = next(item for item in decision.worker_evaluations if item.id == "worker")
+        self.assertIn(RejectionCode.PROVIDER_LIMIT_SIGNAL.value, reason_codes(worker_eval))
 
     def test_nonexpired_lease_rejects_worker_even_when_marked_idle(self) -> None:
         value = snapshot(

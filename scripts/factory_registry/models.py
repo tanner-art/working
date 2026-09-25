@@ -40,6 +40,18 @@ class PackageKind(StringEnum):
     EVALUATION = "EVALUATION"
 
 
+class PackageCapacitySize(StringEnum):
+    VERY_SMALL = "VERY_SMALL"
+    SMALL = "SMALL"
+    SUBSTANTIAL = "SUBSTANTIAL"
+
+
+class PackageCapacityRisk(StringEnum):
+    BOUNDED = "BOUNDED"
+    UNCERTAIN = "UNCERTAIN"
+    EMERGENCY_RECOVERY = "EMERGENCY_RECOVERY"
+
+
 class FailureCode(StringEnum):
     UNDERUTILIZED_SESSION = "UNDERUTILIZED_SESSION"
     WEEKLY_CAPACITY_UNUSED = "WEEKLY_CAPACITY_UNUSED"
@@ -55,6 +67,22 @@ class FailureCode(StringEnum):
     AUTH_FAILURE = "AUTH_FAILURE"
     TASK_TOO_LARGE = "TASK_TOO_LARGE"
     ORCHESTRA_CAPACITY_RISK = "ORCHESTRA_CAPACITY_RISK"
+
+
+class UsageSource(StringEnum):
+    """Structured origins accepted by the provider-neutral usage ledger."""
+
+    CLI_JSON = "CLI_JSON"
+    CLI_STREAM_JSON = "CLI_STREAM_JSON"
+    TRANSCRIPT = "TRANSCRIPT"
+
+
+class UsageObservationClass(StringEnum):
+    """Whether an invocation is production work or an explicit health probe."""
+
+    AUTONOMOUS = "AUTONOMOUS"
+    DIAGNOSTIC = "DIAGNOSTIC"
+    LEGACY_UNCLASSIFIED = "LEGACY_UNCLASSIFIED"
 
 
 @dataclass(frozen=True)
@@ -78,6 +106,8 @@ class WorkPackage:
     acceptance_criteria: tuple[str, ...]
     status: TaskStatus = TaskStatus.ON_DECK
     kind: PackageKind = PackageKind.PARENT
+    capacity_size: PackageCapacitySize = PackageCapacitySize.SUBSTANTIAL
+    capacity_risk: PackageCapacityRisk = PackageCapacityRisk.UNCERTAIN
     dependency_ids: tuple[str, ...] = ()
     provider_diagnostics: Mapping[str, Any] = field(default_factory=dict)
     branch: str | None = None
@@ -126,6 +156,63 @@ class Evidence:
 
 
 @dataclass(frozen=True)
+class Attempt:
+    id: str
+    package_id: str
+    worker_id: str | None
+    started_at: str
+    lease_id: str | None = None
+    provider_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UsageLedgerEntry:
+    """One invocation or explicit probe, aggregated across observed sources.
+
+    ``invocation_id`` is the cross-source deduplication identity. A runner
+    should generate it before launch and pass it to every ingestion path. When
+    that is not possible, provider session identity is the conservative
+    fallback used by the Claude parser.
+    """
+
+    id: str
+    provider: str
+    worker_id: str
+    account_id: str
+    invocation_id: str
+    session_id: str
+    observed_at: str
+    outcome: str
+    source_type: UsageSource
+    source_identity: str
+    observation_class: UsageObservationClass = UsageObservationClass.AUTONOMOUS
+    package_id: str | None = None
+    attempt_id: str | None = None
+    model_diagnostic: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    duration_ms: float | None = None
+    task_completed: bool = False
+    review_completed: bool = False
+    limit_signal: str | None = None
+    limit_reset_at: str | None = None
+    limit_raw_error: str | None = None
+    calibration_metadata: Mapping[str, Any] = field(default_factory=dict)
+    source_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UsageLedgerWrite:
+    """Outcome of idempotent usage ingestion."""
+
+    entry_id: str
+    inserted: bool
+    source_added: bool
+
+
+@dataclass(frozen=True)
 class DispatchSnapshot:
     """Consistent read model consumed by schedulers and dashboard projections."""
 
@@ -139,3 +226,32 @@ class DispatchSnapshot:
     workers: tuple[Mapping[str, Any], ...]
     active_leases: tuple[Mapping[str, Any], ...]
     usage_observations: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ControlCenterReadSnapshot:
+    """One backend-neutral, consistent Registry read for UI projection.
+
+    These are authoritative Registry records, not dashboard-shaped state. The
+    Control Center projector is responsible for sanitizing and translating the
+    records without acquiring write authority or opening a second store.
+    """
+
+    revision: int
+    observed_at: str
+    active_parent_limit: int
+    orchestra_reserve_percent: float
+    features: tuple[Mapping[str, Any], ...]
+    work_packages: tuple[Mapping[str, Any], ...]
+    dependencies: tuple[Mapping[str, Any], ...]
+    workers: tuple[Mapping[str, Any], ...]
+    leases: tuple[Mapping[str, Any], ...]
+    attempts: tuple[Mapping[str, Any], ...]
+    evidence: tuple[Mapping[str, Any], ...]
+    usage_observations: tuple[Mapping[str, Any], ...]
+    usage_invocations: tuple[Mapping[str, Any], ...]
+    usage_sources: tuple[Mapping[str, Any], ...]
+    failures: tuple[Mapping[str, Any], ...]
+    events: tuple[Mapping[str, Any], ...]
+    preservation_imports: tuple[Mapping[str, Any], ...]
+    preserved_artifacts: tuple[Mapping[str, Any], ...]

@@ -46,15 +46,16 @@ observable legacy-runner state, and prove no Factory input was mutated.
   calls, queue/dashboard mutation, or live-dispatch authority.
 - Receives independent ASSURANCE review before merge readiness.
 
-## Proposed policy, pending owner approval
+## Superseded policy note
 
-- Capacity scopes: `short_window`, `weekly_window`, optional `billing_budget`.
-- Package capacity class: `FULL_CAPABILITY_REQUIRED` by default;
-  `ECONOMY_ELIGIBLE` only when explicit.
+- Capacity scopes: `short_window`, `weekly_window`, optional `billing_budget`,
+  or explicit `provider_signal` mode.
+- Package capacity uses explicit size and risk fields documented in
+  [CAPACITY_POLICY.md](CAPACITY_POLICY.md).
 - Freshness/alignment: heartbeat 180 seconds, usage 900 seconds, sweep 900
   seconds ±60, legacy comparison 60 seconds.
-- `SLOW` remains ineligible until capacity classes and low-cost routing are
-  ratified.
+- The earlier `GREEN`/`SLOW` 70/80 proposal was superseded by the ratified
+  90/95/98 staged policy.
 
 ## Exclusions
 

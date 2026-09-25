@@ -211,7 +211,7 @@ class LiveObservationTests(unittest.TestCase):
             self.assertEqual(observed.worker_updates[0]["availability"], "IDLE")
             self.assertEqual(observed.worker_updates[0]["last_heartbeat_at"], NOW.replace("Z", ".000000Z"))
             self.assertEqual(observed.usage_observations[0]["capacity_scope"], "weekly_window")
-            self.assertEqual(observed.usage_observations[0]["state"], "GREEN")
+            self.assertEqual(observed.usage_observations[0]["state"], "NORMAL")
             serialized = json.dumps(
                 {
                     "workers": observed.worker_updates,
@@ -249,6 +249,80 @@ class LiveObservationTests(unittest.TestCase):
             usage_source = next(value for value in observed.sources if value.label == "usage")
             self.assertIsNone(usage_source.raw)
 
+    def test_provider_signal_worker_needs_no_percentage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LiveFixture(directory)
+            usage_path = fixture.state / "usage.json"
+            usage = json.loads(usage_path.read_text())
+            usage["workers"]["runner-a"]["account-a"] = {
+                "provider": "diagnostic-only",
+                "model": "diagnostic-only",
+                "capacity_mode": "provider_signal",
+                "observed_at": NOW,
+                "service_state": "healthy",
+                "authentication_state": "valid",
+                "live_invocation_state": "succeeded",
+                "limit_signal": "NONE",
+            }
+            write_json(usage_path, usage)
+            plan = ObservationPlan(
+                workers=(WorkerObservationBinding(
+                    "runner-a", "registry-a",
+                    capacity_scopes=("provider_signal",),
+                    usage_account_by_scope=(("provider_signal", "account-a"),),
+                    capacity_mode="provider_signal",
+                ),),
+                preservation=fixture.plan.preservation,
+            )
+            observed = capture_live_observation(
+                fixture.config, fixture.preservation, plan, observed_at=NOW
+            )
+            record = observed.usage_observations[0]
+            self.assertEqual(record["capacity_mode"], "provider_signal")
+            self.assertEqual(record["state"], "NORMAL")
+            self.assertNotIn("consumed_percent", record)
+            projected = project_live_observation(snapshot(), observed, plan)
+            from scripts.factory_registry.shadow_dispatch import decide_shadow
+            decision = decide_shadow(projected, policy=plan.policy.shadow_policy())
+            self.assertTrue(next(
+                item for item in decision.worker_evaluations if item.id == "registry-a"
+            ).eligible)
+
+    def test_one_account_can_supply_distinct_short_and_weekly_scopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LiveFixture(directory)
+            usage_path = fixture.state / "usage.json"
+            usage = json.loads(usage_path.read_text())
+            usage["workers"]["runner-a"]["account-a"] = {
+                "provider": "diagnostic-only", "model": "diagnostic-only",
+                "capacity_mode": "percentage",
+                "scopes": {
+                    "short_window": {"used_percent": 0, "observed_at": NOW},
+                    "weekly_window": {"used_percent": 73, "observed_at": NOW},
+                },
+            }
+            write_json(usage_path, usage)
+            plan = ObservationPlan(
+                workers=(WorkerObservationBinding(
+                    "runner-a", "registry-a",
+                    capacity_scopes=("short_window", "weekly_window"),
+                    usage_account_by_scope=(
+                        ("short_window", "account-a"),
+                        ("weekly_window", "account-a"),
+                    ),
+                ),),
+                preservation=fixture.plan.preservation,
+            )
+            observed = capture_live_observation(
+                fixture.config, fixture.preservation, plan, observed_at=NOW
+            )
+            by_scope = {
+                item["capacity_scope"]: item for item in observed.usage_observations
+            }
+            self.assertEqual(by_scope["short_window"]["consumed_percent"], 0)
+            self.assertEqual(by_scope["weekly_window"]["consumed_percent"], 73)
+            self.assertEqual({item["state"] for item in by_scope.values()}, {"NORMAL"})
+
     def test_projection_is_copy_only_and_replaces_authoritative_scopes(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = LiveFixture(directory)
@@ -262,6 +336,7 @@ class LiveObservationTests(unittest.TestCase):
             worker = next(value for value in projected.workers if value["id"] == "registry-a")
             self.assertEqual(worker["availability"], "IDLE")
             self.assertEqual(worker["capacity_scopes"], ["weekly_window"])
+            self.assertEqual(worker["capacity_mode"], "percentage")
             worker_usage = [
                 value for value in projected.usage_observations if value["worker_id"] == "registry-a"
             ]
@@ -542,13 +617,21 @@ class LiveObservationTests(unittest.TestCase):
             self.assertTrue(any("preservation" in value for value in evidence.failures))
 
     def test_plan_rejects_ambiguous_scope_mappings(self):
+        binding = WorkerObservationBinding(
+            "runner-a", "registry-a",
+            usage_account_by_scope=(
+                ("short_window", "same-account"),
+                ("weekly_window", "same-account"),
+            ),
+        )
+        self.assertEqual(len(binding.usage_account_by_scope), 2)
         with self.assertRaises(LiveObservationError):
             WorkerObservationBinding(
                 "runner-a",
                 "registry-a",
                 usage_account_by_scope=(
                     ("short_window", "same-account"),
-                    ("weekly_window", "same-account"),
+                    ("short_window", "other-account"),
                 ),
             )
 

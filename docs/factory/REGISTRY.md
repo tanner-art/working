@@ -8,6 +8,18 @@ SQLite with WAL is the first migration adapter. It is not a permanent architectu
 
 GitHub issues and pull requests remain collaboration and evidence surfaces. During migration they are imported sources and projections, not an alternate scheduler.
 
+The dormant, provider-neutral restart sequence is specified in
+[`CONTROLLED_RESTART.md`](CONTROLLED_RESTART.md). It does not grant live
+authority; concrete Registry and runtime adapters remain a separately reviewed
+restart gate.
+
+The SQLite migration adapter initializes dispatch control as `PAUSED` with the
+kill switch engaged. Controlled callers use revision-checked mode changes and
+must re-read the gate before claim and launch. Attempt runtime ownership stores
+runner PID plus provider PID/process group and remains queryable after expiry,
+worker disappearance, or another ownership mismatch. These tables remain
+dormant until the separately approved runner/service adapter is wired.
+
 ## Entities
 
 ### Feature
@@ -35,6 +47,12 @@ A bounded package records:
 - runtime and usage consumption;
 - normalized failure code and human detail;
 - test and review evidence.
+
+Capacity-sensitive dispatch uses explicit package data rather than provider or
+model identity: `capacity_size` is `VERY_SMALL`, `SMALL`, or `SUBSTANTIAL`, and
+`capacity_risk` is `BOUNDED`, `UNCERTAIN`, or `EMERGENCY_RECOVERY`. Existing or
+imported packages default conservatively to `SUBSTANTIAL` and `UNCERTAIN` until
+classified.
 
 Provider/model diagnostics never grant eligibility. A legacy import may have no lane; that makes it ineligible until the Orchestra decomposes and assigns it deliberately.
 
@@ -76,6 +94,8 @@ cannot create a lease or launch work.
 
 `dispatch_snapshot(observed_at)` returns a consistent read at one monotonically increasing registry revision. It includes features; complete work-package state and `ready_at`; dependencies; workers, roles, availability, capabilities, and approved lanes; unreleased leases and expiry state; usage observations; the active-parent limit; and the Orchestra reserve percentage. Both shadow and live schedulers consume this contract. They do not query SQLite directly.
 
+The read-only Control Center export is documented in [CONTROL_CENTER_PROJECTION.md](CONTROL_CENTER_PROJECTION.md). It reads one Registry revision through the backend-neutral `Registry.control_center_snapshot()` contract and does not create a dashboard database or grant write authority.
+
 Capacity observations may include a provider-neutral `capacity_scope`, and
 worker configuration may declare expected `capacity_scopes`. This is part of
 the read contract rather than provider/model ownership. Until the owner maps
@@ -86,9 +106,33 @@ fresh—do not influence eligibility. Adding a real capacity window therefore
 requires an explicit worker-configuration change rather than merely emitting a
 new observation.
 
+Percentage-observed workers follow the staged policy in
+[CAPACITY_POLICY.md](CAPACITY_POLICY.md): below 90% normal, 90–95% caution,
+95–98% checkpoint, and 98% hard stop with only the documented small exceptions.
+A healthy active lease is not revoked merely because usage crosses 95%.
+Workers without percentage telemetry may instead declare `provider_signal`
+mode. Fresh healthy service/auth/live-invocation evidence with no explicit
+limit signal is eligible; observed rate, exhaustion, throttle, or
+capacity-launch failures constrain the worker without inventing a percentage.
+
 ### Attempt, evidence, usage, and failure
 
 Attempts retain each execution rather than overwriting retry history. Evidence records commits, checks, tests, reviews, and external artifacts. Usage observations are timestamped and preserve unknown or stale states. Failures store a normalized code and human-readable detail.
+
+Invocation consumption is stored separately in the append-only usage ledger.
+Each provider/worker/account/invocation tuple is counted once, while a linked
+append-only source table retains CLI JSON, stream JSON, and transcript
+observations without double-counting. The ledger records measurable token
+components, duration, outcome, completion/review throughput, and explicit
+provider limit signals. Factory-measured consumption does not become a
+provider-reported quota percentage. See [Claude telemetry](CLAUDE_TELEMETRY.md)
+for the first provider parser and privacy boundary.
+
+Autonomous ledger records require package and attempt provenance, and the
+Registry verifies that the attempt belongs to the package. Unlinked service or
+authentication probes use a distinct `DIAGNOSTIC` observation class. Canonical
+reads reconcile all append-only source observations deterministically, so
+ingestion order cannot hide a later explicit limit signal or completion fact.
 
 ### Events
 

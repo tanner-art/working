@@ -141,6 +141,26 @@ Ratified by the 2026-09-24 Factory governance direction and recorded by RISK-003
 
 This ordering rule does not authorize unassigned work, broaden a package, or bypass product-owner decisions. It governs which already-bounded work should be dispatched first.
 
+### D-016: Staged, Provider-Neutral Factory Capacity
+
+Ratified by the product owner on 2026-09-24.
+
+**Decision.** Percentage-observed workers are normal below 90%, caution from
+90% to below 95%, checkpoint from 95% to below 98%, and hard stop at 98%.
+Caution avoids substantial or uncertain parents. Checkpoint permits healthy
+bounded work to reach a clean commit/push boundary and prevents another
+substantial or uncertain parent from starting. Crossing 95% alone never
+interrupts healthy active work. Hard stop permits only emergency recovery or a
+very small bounded ASSURANCE package.
+
+Packages carry provider-neutral size and risk classification. Provider/model
+identity never substitutes for that data. Workers without provider percentage
+telemetry are eligible from fresh healthy service, authentication, heartbeat,
+and successful live-invocation evidence when no actual rate-limit, exhaustion,
+throttling, or capacity-launch failure is present. No percentage ceiling is
+inferred. Missing or stale percentage scopes remain constrained, and Orchestra
+retains at least 20% in every declared percentage scope.
+
 ## Open Decisions
 
 ### OD-003: Interpretation Reversal
@@ -167,5 +187,7 @@ Will one owner or multiple administrators have dashboard write access, and which
 ### OD-010: Factory Restart and Merge Controls
 Which initial worker capabilities and lane permissions should be configured as data, and may any role besides the owner merge to main? The initial Agent A, Agent B, and Claude mapping is configuration rather than identity semantics. The existing no-agent-main-merge rule remains in force until an explicit decision changes it.
 
-### OD-011: Factory Capacity Scope and Economy Policy
-Which real usage window governs Orchestra capacity when accounts are shared or changed? Does the 20% reserve apply independently to every declared window or only the most constrained one? Which work, if any, may use an approved economy/slow class, and which freshness/timing thresholds should govern live dispatch? Until approval, the stricter per-scope reserve, unrounded comparisons, and fail-closed treatment of missing, stale, future, malformed, unknown, or unmapped telemetry apply.
+### OD-011: Factory Capacity Source Mapping
+Which real provider/account window maps to each declared Orchestra percentage
+scope when accounts are shared or changed? Missing, stale, future, malformed,
+unknown, or unmapped percentage telemetry remains constrained.

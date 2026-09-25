@@ -3,6 +3,9 @@
   "github": "OWNER/REPOSITORY",
   "state": "/absolute/path/to/threadline-runner-state",
   "worktrees": "/absolute/path/to/threadline-agent-worktrees",
+  "registry_database": "/absolute/path/to/factory-registry.sqlite3",
+  "registry_lease_seconds": 2100,
+  "registry_renew_interval_seconds": 30,
   "path": "/absolute/path/to/bin:/usr/bin:/bin:/usr/sbin:/sbin",
   "gh": "/absolute/path/to/threadline-repository/scripts/runner/github.py",
   "git": "/usr/bin/git",
@@ -10,14 +13,17 @@
   "allowed_authors": ["GITHUB_LOGIN"],
   "agent_timeout": 1800,
   "usage_policy": {
-    "slowdown_percent": 70,
-    "stop_percent": 80,
+    "caution_percent": 90,
+    "checkpoint_percent": 95,
+    "hard_stop_percent": 98,
     "stale_after_seconds": 3600,
-    "unknown_behavior": "slow"
+    "unknown_behavior": "defer"
   },
   "agents": {
     "codex-a": {
       "provider": "openai", "account": "openai-account-a",
+      "capacity_mode": "percentage",
+      "capacity_scopes": ["short_window", "weekly_window"],
       "slots": 2,
       "model": "gpt-5.6-terra", "fallback_model": "gpt-5.6-luna",
       "command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-terra", "--ignore-user-config", "--disable", "multi_agent", "-s", "workspace-write", "--json", "-"],
@@ -26,6 +32,8 @@
     },
     "codex-b": {
       "provider": "openai", "account": "openai-account-b",
+      "capacity_mode": "percentage",
+      "capacity_scopes": ["short_window", "weekly_window"],
       "slots": 1,
       "model": "gpt-5.6-terra", "fallback_model": "gpt-5.6-luna",
       "command": ["/absolute/path/to/codex", "exec", "--model", "gpt-5.6-terra", "--ignore-user-config", "--disable", "multi_agent", "-s", "workspace-write", "--json", "-"],
@@ -34,6 +42,8 @@
     },
     "claude": {
       "provider": "anthropic", "account": "anthropic-account-a",
+      "capacity_mode": "provider_signal",
+      "capacity_scopes": ["provider_signal"],
       "slots": 2,
       "model": "claude-sonnet", "fallback_model": "claude-haiku",
       "command": ["/absolute/path/to/claude", "-p", "--model", "claude-sonnet", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--output-format", "json", "--tools", "Read,Edit,Write,Glob,Grep"],

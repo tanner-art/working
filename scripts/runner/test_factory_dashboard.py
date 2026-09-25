@@ -163,7 +163,7 @@ class RedactionTests(unittest.TestCase):
             workers = fd.build_report('cfg.json', {'state': str(state), 'usage_policy': {'stale_after_seconds': 600}}, now=1000.0)['usage']['workers']
             self.assertEqual([(item['worker'], item['account']) for item in workers],
                              [('codex-a', 'fallback'), ('codex-a', 'primary')])
-            self.assertEqual([item['state'] for item in workers], ['slow', 'green'])
+            self.assertEqual([item['state'] for item in workers], ['normal', 'normal'])
 
     def test_stale_or_future_usage_is_unknown(self):
         with tempfile.TemporaryDirectory() as d:
@@ -195,6 +195,44 @@ class RedactionTests(unittest.TestCase):
             workers = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)['usage']['workers']
             self.assertEqual({item['account']: item['state'] for item in workers},
                              {'missing': 'unknown', 'invalid': 'unknown'})
+
+    def test_provider_signal_usage_reports_health_without_a_percentage(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'claude': {'default': {
+                'provider': 'anthropic', 'model': 'claude-code',
+                'capacity_mode': 'provider_signal',
+                'observed_at': '1970-01-01T00:16:35Z',
+                'service_state': 'healthy', 'authentication_state': 'valid',
+                'live_invocation_state': 'succeeded', 'limit_signal': 'NONE',
+            }}})
+            worker = fd.build_report(
+                'cfg.json', {'state': str(state), 'usage_policy': {'stale_after_seconds': 600}},
+                now=1000.0,
+            )['usage']['workers'][0]
+            self.assertEqual(worker['capacity_mode'], 'provider_signal')
+            self.assertIsNone(worker['used_percent'])
+            self.assertEqual(worker['limit_signal'], 'NONE')
+            self.assertEqual(worker['state'], 'normal')
+
+    def test_scoped_percentage_usage_keeps_each_scope_visible(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'codex-a': {'default': {
+                'provider': 'openai', 'model': 'codex', 'capacity_mode': 'percentage',
+                'scopes': {
+                    'short': {'used_percent': 1, 'observed_at': '1970-01-01T00:16:35Z'},
+                    'weekly': {'used_percent': 96, 'observed_at': '1970-01-01T00:16:35Z'},
+                },
+            }}})
+            workers = fd.build_report(
+                'cfg.json', {'state': str(state), 'usage_policy': {'stale_after_seconds': 600}},
+                now=1000.0,
+            )['usage']['workers']
+            self.assertEqual([(item['scope'], item['state']) for item in workers],
+                             [('short', 'normal'), ('weekly', 'checkpoint')])
 
 
 class MissingOrCorruptDataTests(unittest.TestCase):
@@ -531,7 +569,7 @@ class UtilizationMathTests(unittest.TestCase):
 
 
 class ProducerIntegrationTests(unittest.TestCase):
-    def test_child_capacity_uses_same_green_only_gate_as_runner(self):
+    def test_child_capacity_uses_same_staged_gate_as_runner(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'state'
             state.mkdir()
@@ -541,8 +579,8 @@ class ProducerIntegrationTests(unittest.TestCase):
                 })
             config = {
                 'state': str(state),
-                'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80,
-                                 'stale_after_seconds': 3600},
+                'usage_policy': {'caution_percent': 90, 'checkpoint_percent': 95,
+                                 'hard_stop_percent': 98, 'stale_after_seconds': 3600},
                 'agents': {'codex-a': {
                     'provider': 'openai', 'account': 'account-a', 'slots': 2,
                     'model': 'astra', 'fallback_model': 'luna',
@@ -557,21 +595,22 @@ class ProducerIntegrationTests(unittest.TestCase):
                     'observed_at': '1970-01-01T00:16:30Z',
                 }}})
 
-            write_usage(75)
-            slow = fd.build_report('cfg.json', config, now=1000.0)
-            slow_workers = {worker['key']: worker for worker in slow['workers']}
-            self.assertEqual(slow['capacity']['configured_lane_count'], 2)
-            self.assertEqual(slow['capacity']['dispatchable_lane_count'], 1)
-            self.assertEqual(slow['capacity']['max_parallel_tasks'], 1)
-            self.assertEqual(slow_workers['codex-a']['dispatch_decision'], 'fallback')
-            self.assertEqual(slow_workers['codex-a-2']['dispatch_decision'], 'defer')
+            write_usage(73)
+            normal = fd.build_report('cfg.json', config, now=1000.0)
+            normal_workers = {worker['key']: worker for worker in normal['workers']}
+            self.assertEqual(normal['capacity']['configured_lane_count'], 2)
+            self.assertEqual(normal['capacity']['dispatchable_lane_count'], 2)
+            self.assertEqual(normal['capacity']['max_parallel_tasks'], 2)
+            self.assertEqual(normal_workers['codex-a']['usage_state'], 'normal')
+            self.assertEqual(normal_workers['codex-a-2']['dispatch_decision'], 'allow')
 
-            write_usage(10)
-            green = fd.build_report('cfg.json', config, now=1000.0)
-            green_workers = {worker['key']: worker for worker in green['workers']}
-            self.assertEqual(green['capacity']['dispatchable_lane_count'], 2)
-            self.assertEqual(green['capacity']['max_parallel_tasks'], 2)
-            self.assertEqual(green_workers['codex-a-2']['dispatch_decision'], 'allow')
+            write_usage(92)
+            caution = fd.build_report('cfg.json', config, now=1000.0)
+            caution_workers = {worker['key']: worker for worker in caution['workers']}
+            self.assertEqual(caution['capacity']['dispatchable_lane_count'], 0)
+            self.assertEqual(caution['capacity']['max_parallel_tasks'], 0)
+            self.assertEqual(caution_workers['codex-a']['dispatch_decision'], 'defer')
+            self.assertEqual(caution_workers['codex-a-2']['dispatch_decision'], 'defer')
 
             config_without_usage = dict(config)
             config_without_usage.pop('usage_policy')
@@ -618,20 +657,71 @@ class ProducerIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(total['value'], 2.0, places=6)
             self.assertAlmostEqual(total['percent_of_capacity'], 1.0, places=6)
 
-    def test_canonical_usage_percent_thresholds_slow_and_stop(self):
+    def test_canonical_usage_percent_thresholds_show_all_stages(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'state'
             state.mkdir()
             write_json(state / 'usage.json', {
                 'codex-a': {'provider': 'openai', 'model': 'gpt-5-codex',
-                            'used_percent': 70.0, 'observed_at': '1970-01-01T00:16:00Z'},
+                            'used_percent': 90.0, 'observed_at': '1970-01-01T00:16:00Z'},
                 'codex-b': {'provider': 'openai', 'model': 'gpt-5-codex',
-                            'used_percent': 80.0, 'observed_at': '1970-01-01T00:16:00Z'},
+                            'used_percent': 95.0, 'observed_at': '1970-01-01T00:16:00Z'},
+                'codex-c': {'provider': 'openai', 'model': 'gpt-5-codex',
+                            'used_percent': 98.0, 'observed_at': '1970-01-01T00:16:00Z'},
             })
             report = fd.build_report('cfg.json', {'state': str(state)}, now=1000.0)
             workers = {w['worker']: w for w in report['usage']['workers']}
-            self.assertEqual(workers['codex-a']['state'], 'slow')
-            self.assertEqual(workers['codex-b']['state'], 'stop')
+            self.assertEqual(workers['codex-a']['state'], 'caution')
+            self.assertEqual(workers['codex-b']['state'], 'checkpoint')
+            self.assertEqual(workers['codex-c']['state'], 'hard_stop')
+
+    def test_healthy_provider_signal_worker_is_normally_eligible(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'claude': {'default': {
+                'provider': 'anthropic', 'model': 'claude-code',
+                'capacity_mode': 'provider_signal',
+                'observed_at': '1970-01-01T00:16:35Z',
+                'service_state': 'healthy', 'authentication_state': 'valid',
+                'live_invocation_state': 'succeeded', 'limit_signal': 'NONE',
+            }}})
+            config = {
+                'state': str(state), 'usage_policy': {'stale_after_seconds': 600},
+                'agents': {'claude': {
+                    'provider': 'anthropic', 'model': 'claude-code',
+                    'capacity_mode': 'provider_signal', 'command': ['claude'],
+                }},
+            }
+            worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
+            self.assertEqual(worker['usage_state'], 'normal')
+            self.assertEqual(worker['capacity_mode'], 'provider_signal')
+            self.assertEqual(worker['dispatch_decision'], 'allow')
+            self.assertEqual(worker['effective_model'], 'claude-code')
+
+    def test_provider_limit_signal_stops_new_dispatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = pathlib.Path(d) / 'state'
+            state.mkdir()
+            write_json(state / 'usage.json', {'claude': {'default': {
+                'provider': 'anthropic', 'model': 'claude-code',
+                'capacity_mode': 'provider_signal',
+                'observed_at': '1970-01-01T00:16:35Z',
+                'service_state': 'healthy', 'authentication_state': 'valid',
+                'live_invocation_state': 'failed', 'limit_signal': 'RATE_LIMIT',
+            }}})
+            config = {
+                'state': str(state), 'usage_policy': {'stale_after_seconds': 600},
+                'agents': {'claude': {
+                    'provider': 'anthropic', 'model': 'claude-code',
+                    'capacity_mode': 'provider_signal', 'command': ['claude'],
+                }},
+            }
+            worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
+            self.assertEqual(worker['usage_state'], 'hard_stop')
+            self.assertEqual(worker['limit_signal'], 'RATE_LIMIT')
+            self.assertEqual(worker['dispatch_decision'], 'stop')
+            self.assertIsNone(worker['effective_model'])
 
 
 class LongestBlockedDurationTests(unittest.TestCase):
@@ -728,7 +818,7 @@ class WorkerStateTests(unittest.TestCase):
                 'worker': 'codex-a-2', 'branch': None, 'commit': None, 'pr': None,
                 'error': None, 'diff_stat': None},
         }
-        projected = {'codex-a': {'effective_model': 'astra', 'usage_state': 'green',
+        projected = {'codex-a': {'effective_model': 'astra', 'usage_state': 'normal',
                                  'dispatch_decision': 'allow', 'low_cost_only': False,
                                  'child_slots_allowed': True}}
         workers = fd.build_worker_views(
@@ -746,13 +836,13 @@ class WorkerStateTests(unittest.TestCase):
         self.assertEqual(child['state'], 'active')
         self.assertEqual(by_key['codex-a']['current_issue'], 1)
 
-    def test_child_lane_defers_when_parent_is_not_fresh_green(self):
+    def test_child_lane_defers_when_parent_package_is_not_eligible(self):
         agent_defs = fd.agent_definitions({'agents': {'codex-a': {
             'provider': 'openai', 'model': 'astra', 'slots': 2,
         }}})
         projected = {'codex-a': {
-            'effective_model': 'luna', 'usage_state': 'slow',
-            'dispatch_decision': 'fallback', 'low_cost_only': True,
+            'effective_model': None, 'usage_state': 'caution',
+            'dispatch_decision': 'defer', 'low_cost_only': False,
             'child_slots_allowed': False,
         }}
         workers = fd.build_worker_views(
@@ -760,11 +850,11 @@ class WorkerStateTests(unittest.TestCase):
             dispatch_models=projected,
         )
         by_key = {worker['key']: worker for worker in workers}
-        self.assertEqual(by_key['codex-a']['dispatch_decision'], 'fallback')
-        self.assertEqual(by_key['codex-a']['effective_model'], 'luna')
+        self.assertEqual(by_key['codex-a']['dispatch_decision'], 'defer')
+        self.assertIsNone(by_key['codex-a']['effective_model'])
         self.assertEqual(by_key['codex-a-2']['dispatch_decision'], 'defer')
         self.assertIsNone(by_key['codex-a-2']['effective_model'])
-        self.assertEqual(by_key['codex-a-2']['usage_state'], 'slow')
+        self.assertEqual(by_key['codex-a-2']['usage_state'], 'caution')
 
     def test_active_worker_shows_current_issue_and_elapsed(self):
         agent_defs = {'codex-a': {'key': 'codex-a', 'provider': 'openai', 'model': 'gpt-5-codex', 'label': None}}
@@ -799,7 +889,7 @@ class WorkerStateTests(unittest.TestCase):
         self.assertEqual(workers[0]['state'], 'idle')
         self.assertIsNotNone(workers[0]['reason'])
 
-    def test_effective_fallback_model_is_used_when_usage_is_unknown(self):
+    def test_unknown_usage_defers_without_selecting_a_model(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'state'
             state.mkdir()
@@ -811,8 +901,9 @@ class WorkerStateTests(unittest.TestCase):
             })
             config = {
                 'state': str(state),
-                'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80,
-                                 'stale_after_seconds': 3600, 'unknown_behavior': 'slow'},
+                'usage_policy': {'caution_percent': 90, 'checkpoint_percent': 95,
+                                 'hard_stop_percent': 98, 'stale_after_seconds': 3600,
+                                 'unknown_behavior': 'defer'},
                 'agents': {'codex-a': {
                     'provider': 'openai', 'account': 'openai-a',
                     'model': 'terra', 'fallback_model': 'luna',
@@ -821,12 +912,12 @@ class WorkerStateTests(unittest.TestCase):
             }
             worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
             self.assertEqual(worker['model'], 'terra')
-            self.assertEqual(worker['effective_model'], 'luna')
+            self.assertIsNone(worker['effective_model'])
             self.assertEqual(worker['usage_state'], 'unknown')
-            self.assertEqual(worker['dispatch_decision'], 'fallback')
-            self.assertTrue(worker['low_cost_only'])
+            self.assertEqual(worker['dispatch_decision'], 'defer')
+            self.assertFalse(worker['low_cost_only'])
 
-    def test_effective_primary_model_is_used_for_fresh_green_usage(self):
+    def test_effective_primary_model_is_used_for_fresh_normal_usage(self):
         with tempfile.TemporaryDirectory() as d:
             state = pathlib.Path(d) / 'state'
             state.mkdir()
@@ -836,8 +927,9 @@ class WorkerStateTests(unittest.TestCase):
             }}})
             config = {
                 'state': str(state),
-                'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80,
-                                 'stale_after_seconds': 3600, 'unknown_behavior': 'slow'},
+                'usage_policy': {'caution_percent': 90, 'checkpoint_percent': 95,
+                                 'hard_stop_percent': 98, 'stale_after_seconds': 3600,
+                                 'unknown_behavior': 'defer'},
                 'agents': {'codex-a': {
                     'provider': 'openai', 'account': 'openai-a',
                     'model': 'terra', 'fallback_model': 'luna',
@@ -846,7 +938,7 @@ class WorkerStateTests(unittest.TestCase):
             }
             worker = fd.build_report('cfg.json', config, now=1000.0)['workers'][0]
             self.assertEqual(worker['effective_model'], 'terra')
-            self.assertEqual(worker['usage_state'], 'green')
+            self.assertEqual(worker['usage_state'], 'normal')
             self.assertEqual(worker['dispatch_decision'], 'allow')
 
     def test_running_heartbeat_model_overrides_current_policy_projection(self):
@@ -857,7 +949,7 @@ class WorkerStateTests(unittest.TestCase):
             'time': 900.0, 'start_time': 800.0, 'effective_model': 'luna',
             'usage_state': 'unknown',
         }}
-        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'green',
+        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'normal',
                                  'dispatch_decision': 'allow', 'low_cost_only': False}}
         worker = fd.build_worker_views(
             agent_defs, records={}, events=[], heartbeat=heartbeat, now=1000.0,
@@ -865,8 +957,8 @@ class WorkerStateTests(unittest.TestCase):
         )[0]
         self.assertEqual(worker['effective_model'], 'luna')
         self.assertEqual(worker['usage_state'], 'unknown')
-        self.assertEqual(worker['dispatch_decision'], 'fallback')
-        self.assertTrue(worker['low_cost_only'])
+        self.assertEqual(worker['dispatch_decision'], 'defer')
+        self.assertFalse(worker['low_cost_only'])
 
     def test_validation_heartbeat_uses_dispatch_tuple_from_latest_event(self):
         agent_defs = {'codex-a': {'key': 'codex-a', 'provider': 'openai',
@@ -881,7 +973,7 @@ class WorkerStateTests(unittest.TestCase):
              'effective_model': 'luna', 'usage_state': 'unknown'},
             {'time': 940.0, 'status': 'validation', 'agent': 'codex-a', 'issue': 4},
         ]
-        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'green',
+        projected = {'codex-a': {'effective_model': 'terra', 'usage_state': 'normal',
                                  'dispatch_decision': 'allow', 'low_cost_only': False}}
         worker = fd.build_worker_views(
             agent_defs, records={}, events=events, heartbeat=heartbeat, now=1000.0,
@@ -889,18 +981,29 @@ class WorkerStateTests(unittest.TestCase):
         )[0]
         self.assertEqual(worker['effective_model'], 'luna')
         self.assertEqual(worker['usage_state'], 'unknown')
-        self.assertEqual(worker['dispatch_decision'], 'fallback')
-        self.assertTrue(worker['low_cost_only'])
+        self.assertEqual(worker['dispatch_decision'], 'defer')
+        self.assertFalse(worker['low_cost_only'])
 
-    def test_green_runtime_tuple_replaces_projected_fallback_atomically(self):
+    def test_normal_runtime_tuple_replaces_projected_defer_atomically(self):
         worker = {
             'effective_model': 'luna', 'usage_state': 'unknown',
-            'dispatch_decision': 'fallback', 'low_cost_only': True,
+            'dispatch_decision': 'defer', 'low_cost_only': False,
         }
-        fd.apply_runtime_dispatch(worker, 'terra', 'green')
+        fd.apply_runtime_dispatch(worker, 'terra', 'normal')
         self.assertEqual(worker, {
-            'effective_model': 'terra', 'usage_state': 'green',
+            'effective_model': 'terra', 'usage_state': 'normal',
             'dispatch_decision': 'allow', 'low_cost_only': False,
+        })
+
+    def test_active_worker_crossing_95_percent_is_checkpointed_not_stopped(self):
+        worker = {
+            'effective_model': 'astra', 'usage_state': 'normal',
+            'dispatch_decision': 'allow', 'low_cost_only': False,
+        }
+        fd.apply_runtime_dispatch(worker, 'astra', 'checkpoint')
+        self.assertEqual(worker, {
+            'effective_model': 'astra', 'usage_state': 'checkpoint',
+            'dispatch_decision': 'checkpoint', 'low_cost_only': False,
         })
 
     def test_blocked_state_from_events_overrides_stale_issue_record(self):
@@ -949,44 +1052,36 @@ class ValidationResultTests(unittest.TestCase):
 class UsagePolicyTests(unittest.TestCase):
     def test_defaults_when_not_configured(self):
         policy = fd.usage_policy({})
-        self.assertEqual(policy['slowdown_threshold_pct'], 70.0)
-        self.assertEqual(policy['stop_threshold_pct'], 80.0)
-        self.assertFalse(policy['stop_threshold_clamped_to_max'])
+        self.assertEqual(policy['caution_percent'], 90.0)
+        self.assertEqual(policy['checkpoint_percent'], 95.0)
+        self.assertEqual(policy['hard_stop_percent'], 98.0)
 
     def test_config_overrides_defaults(self):
-        policy = fd.usage_policy({'usage_policy': {'slowdown_percent': 50, 'stop_percent': 60}})
-        self.assertEqual(policy['slowdown_percent'], 50.0)
-        self.assertEqual(policy['stop_percent'], 60.0)
-        self.assertEqual(policy['slowdown_threshold_pct'], 50.0)
-        self.assertEqual(policy['stop_threshold_pct'], 60.0)
-
-    def test_canonical_thresholds_win_over_legacy_aliases(self):
         policy = fd.usage_policy({'usage_policy': {
-            'slowdown_percent': 71, 'stop_percent': 79,
-            'slowdown_threshold_pct': 11, 'stop_threshold_pct': 12,
+            'caution_percent': 80, 'checkpoint_percent': 90, 'hard_stop_percent': 99,
         }})
-        self.assertEqual(policy['slowdown_percent'], 71.0)
-        self.assertEqual(policy['stop_percent'], 79.0)
+        self.assertEqual(policy['caution_percent'], 80.0)
+        self.assertEqual(policy['checkpoint_percent'], 90.0)
+        self.assertEqual(policy['hard_stop_percent'], 99.0)
 
-    def test_legacy_threshold_aliases_remain_supported(self):
-        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50, 'stop_threshold_pct': 60}})
-        self.assertEqual(policy['slowdown_percent'], 50.0)
-        self.assertEqual(policy['stop_percent'], 60.0)
-
-    def test_stop_threshold_is_clamped_to_max_80(self):
-        policy = fd.usage_policy({'usage_policy': {'stop_threshold_pct': 95}})
-        self.assertEqual(policy['stop_threshold_pct'], 80.0)
-        self.assertTrue(policy['stop_threshold_clamped_to_max'])
+    def test_legacy_thresholds_are_rejected(self):
+        with self.assertRaises(fd.UsagePolicyError):
+            fd.usage_policy({'usage_policy': {'slowdown_percent': 70, 'stop_percent': 80}})
 
     def test_cli_overrides_take_precedence_over_config(self):
-        policy = fd.usage_policy({'usage_policy': {'slowdown_threshold_pct': 50}}, slowdown_override=65)
-        self.assertEqual(policy['slowdown_threshold_pct'], 65.0)
+        policy = fd.usage_policy({}, caution_override=80, checkpoint_override=90,
+                                 hard_stop_override=99)
+        self.assertEqual(policy['caution_percent'], 80.0)
+        self.assertEqual(policy['checkpoint_percent'], 90.0)
+        self.assertEqual(policy['hard_stop_percent'], 99.0)
 
     def test_classify_usage_state(self):
-        policy = {'slowdown_threshold_pct': 70.0, 'stop_threshold_pct': 80.0}
-        self.assertEqual(fd.classify_usage_state(10, policy), 'green')
-        self.assertEqual(fd.classify_usage_state(75, policy), 'slow')
-        self.assertEqual(fd.classify_usage_state(85, policy), 'stop')
+        policy = {'caution_percent': 90.0, 'checkpoint_percent': 95.0,
+                  'hard_stop_percent': 98.0}
+        self.assertEqual(fd.classify_usage_state(73, policy), 'normal')
+        self.assertEqual(fd.classify_usage_state(90, policy), 'caution')
+        self.assertEqual(fd.classify_usage_state(95, policy), 'checkpoint')
+        self.assertEqual(fd.classify_usage_state(98, policy), 'hard_stop')
         self.assertEqual(fd.classify_usage_state(None, policy), 'unknown')
         self.assertEqual(fd.classify_usage_state('not-a-number', policy), 'unknown')
 

@@ -1,10 +1,11 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 from runner import (build_agent_environment, build_agent_prompt,
                     preserve_interrupted_attempt, publish_completion_telemetry,
-                    refresh_queue_snapshot, run_repository_validation, select,
-                    usage_policy_enabled)
+                    recover_stale_claims, refresh_queue_snapshot,
+                    RegistryAttemptLifecycle, run,
+                    run_repository_validation, select, usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -50,6 +51,163 @@ class QueueTests(unittest.TestCase):
         self.assertIn('Leave changes for the runner', prompt)
 
 class ProcessTests(unittest.TestCase):
+    def test_registry_terminal_mutation_is_attempted_exactly_once(self):
+        control = Mock()
+        success = RegistryAttemptLifecycle(control, 'attempt-success')
+        self.assertTrue(success.succeed())
+        self.assertFalse(success.fail('late failure'))
+        control.succeed.assert_called_once_with('attempt-success')
+        control.fail.assert_not_called()
+
+        failure = RegistryAttemptLifecycle(control, 'attempt-failure')
+        self.assertTrue(failure.fail('provider failed'))
+        self.assertFalse(failure.fail('duplicate'))
+        control.fail.assert_called_once_with('attempt-failure', 'provider failed')
+
+    def test_registry_terminal_failure_is_not_retried_after_mutation_error(self):
+        control = Mock()
+        control.fail.side_effect = RuntimeError('registry unavailable')
+        lifecycle = RegistryAttemptLifecycle(control, 'attempt-error')
+        with self.assertRaisesRegex(RuntimeError, 'registry unavailable'):
+            lifecycle.fail('provider failed')
+        self.assertTrue(lifecycle.finish_attempted)
+        self.assertFalse(lifecycle.finish_completed)
+        self.assertFalse(lifecycle.fail('late retry'))
+        control.fail.assert_called_once_with('attempt-error', 'provider failed')
+
+    def test_failed_process_binding_synchronously_reaps_new_group(self):
+        process = Mock(pid=901)
+        process.wait.return_value = 1
+        with patch('runner.subprocess.Popen', return_value=process), \
+                patch('runner.os.killpg') as killpg:
+            with self.assertRaisesRegex(RuntimeError, 'gate changed'):
+                run(['provider'], on_start=lambda _pid: (_ for _ in ()).throw(
+                    RuntimeError('gate changed')
+                ), launch_barrier=True)
+        self.assertEqual(
+            killpg.call_args_list,
+            [call(901, __import__('signal').SIGTERM),
+             call(901, __import__('signal').SIGKILL)],
+        )
+        process.wait.assert_called_once_with(timeout=10)
+
+    def test_provider_cannot_execute_before_durable_bind_releases_barrier(self):
+        import pathlib, sys, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / 'provider-ran'
+            command = [
+                sys.executable, '-c',
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+            ]
+
+            def reject_bind(_pid):
+                self.assertFalse(marker.exists())
+                raise RuntimeError('Registry rejected PID binding')
+
+            with self.assertRaisesRegex(RuntimeError, 'rejected PID binding'):
+                run(command, on_start=reject_bind, launch_barrier=True)
+            self.assertFalse(marker.exists())
+
+            bound = []
+            run(command, on_start=bound.append, launch_barrier=True)
+            self.assertTrue(bound)
+            self.assertEqual(marker.read_text(), 'ran')
+
+    def test_runtime_monitor_failure_stops_provider_before_completion(self):
+        import pathlib, sys, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            started, completed = root / 'started', root / 'completed'
+            command = [
+                sys.executable, '-c',
+                (
+                    "from pathlib import Path; import time; "
+                    f"Path({str(started)!r}).write_text('started'); "
+                    "time.sleep(5); "
+                    f"Path({str(completed)!r}).write_text('completed')"
+                ),
+            ]
+            checks = []
+
+            def fail_monitor():
+                checks.append(True)
+                if not started.exists():
+                    return
+                raise RuntimeError('lease revoked')
+
+            with self.assertRaisesRegex(RuntimeError, 'lease revoked'):
+                run(
+                    command, launch_barrier=True, on_start=lambda _pid: None,
+                    monitor=fail_monitor, monitor_interval=0.1, timeout=10,
+                )
+            self.assertTrue(checks)
+            self.assertTrue(started.exists())
+            self.assertFalse(completed.exists())
+
+    def test_worker_disappearance_finishes_registry_attempt_before_local_recovery(self):
+        import json, pathlib, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory)
+            record = state / 'issue-1.json'
+            record.write_text(json.dumps({
+                'issue': 1, 'status': 'agent', 'updated_at': 1,
+                'runner_pid': 900, 'agent_pgid': 901,
+                'agent_process_group_state': 'recorded',
+                'registry_attempt_id': 'attempt-1',
+            }))
+            callback = Mock()
+            with patch('runner.time.time', return_value=1000), \
+                    patch('runner._pid_alive', return_value=False), \
+                    patch('runner._process_group_alive', return_value=False):
+                recover_stale_claims(state, 10, callback)
+            callback.assert_called_once()
+            self.assertEqual(callback.call_args.args[0]['registry_attempt_id'], 'attempt-1')
+            current = __import__('json').loads(record.read_text())
+            self.assertEqual(current['status'], 'failed')
+            self.assertTrue(current['preserved'])
+            recovered = list(state.glob('issue-1-failed-*.json'))
+            self.assertEqual(len(recovered), 1)
+
+    def test_worker_disappearance_keeps_claim_when_registry_finish_fails(self):
+        import json, pathlib, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory)
+            record = state / 'issue-1.json'
+            record.write_text(json.dumps({
+                'issue': 1, 'status': 'agent', 'updated_at': 1,
+                'runner_pid': 900, 'agent_pgid': 901,
+                'agent_process_group_state': 'recorded',
+                'registry_attempt_id': 'attempt-1',
+            }))
+            with patch('runner.time.time', return_value=1000), \
+                    patch('runner._pid_alive', return_value=False), \
+                    patch('runner._process_group_alive', return_value=False):
+                recover_stale_claims(
+                    state, 10, Mock(side_effect=RuntimeError('registry unavailable'))
+                )
+            preserved = __import__('json').loads(record.read_text())
+            self.assertTrue(preserved['registry_recovery_required'])
+            self.assertEqual(preserved['status'], 'agent')
+
+    def test_worker_disappearance_callback_covers_lease_only_setup_gap(self):
+        import json, pathlib, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory)
+            record = state / 'issue-1.json'
+            record.write_text(json.dumps({
+                'issue': 1, 'status': 'starting', 'updated_at': 1,
+                'runner_pid': 900, 'registry_lease_id': 'lease-1',
+            }))
+            callback = Mock()
+            with patch('runner.time.time', return_value=1000), \
+                    patch('runner._pid_alive', return_value=False):
+                recover_stale_claims(state, 10, callback)
+            callback.assert_called_once()
+            self.assertEqual(callback.call_args.args[0]['registry_lease_id'], 'lease-1')
+            self.assertEqual(
+                __import__('json').loads(record.read_text())['status'], 'failed'
+            )
+
     def test_shared_validation_gate_serializes_checks_but_not_agent_stages(self):
         import pathlib, tempfile, threading, time
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +326,25 @@ class LifecycleTests(unittest.TestCase):
                  patch('sys.argv', ['runner', '--config', str(configfile), '--dry-run']), contextlib.redirect_stdout(io.StringIO()):
                 runner.main()
             write.assert_not_called()
+
+    def test_live_runner_fails_closed_without_registry_configuration(self):
+        import json, pathlib, tempfile
+        from unittest.mock import patch
+        import runner
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = {
+                'repo': directory, 'state': str(root / 'state'),
+                'worktrees': str(root / 'trees'), 'path': '/usr/bin:/bin',
+                'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm',
+                'github': 'owner/repo', 'allowed_authors': ['owner'],
+                'agents': {},
+            }
+            configfile = root / 'config.json'
+            configfile.write_text(json.dumps(config))
+            with patch('sys.argv', ['runner', '--config', str(configfile)]):
+                with self.assertRaisesRegex(ValueError, 'registry_database'):
+                    runner.main()
 
     def test_lane_dry_run_only_reports_its_assigned_provider(self):
         import contextlib, io, json, pathlib, tempfile
@@ -311,10 +488,34 @@ class LifecycleTests(unittest.TestCase):
                 if args[:4] == ['git', 'diff', '--cached', '--name-only']:
                     return 'outside.txt' if validated else ''
                 if args == ['pnpm', 'check']: validated = True
+                if args == ['agent'] and kwargs.get('on_start'):
+                    calls.append(['provider', 'started'])
+                    kwargs['on_start'](901)
                 return ''
             snapshot = (patch.object(runner, 'write_queue_snapshot', side_effect=OSError('secret snapshot output'))
                         if snapshot_failure else contextlib.nullcontext())
+            registry = Mock()
+            registry.pre_claim.side_effect = lambda *args: (
+                calls.append(['registry', 'pre-claim']) or 1
+            )
+            registry.claim_package.side_effect = lambda *args, **kwargs: (
+                calls.append(['registry', 'claim']) or 'lease-1'
+            )
+            registry.pre_launch.side_effect = lambda: (
+                calls.append(['registry', 'pre-launch']) or 2
+            )
+            registry.reserve_attempt.side_effect = lambda *args, **kwargs: calls.append(
+                ['registry', 'reserve']
+            )
+            registry.renew_runtime.side_effect = lambda *args, **kwargs: calls.append(
+                ['registry', 'renew']
+            )
+            registry.record_process.side_effect = lambda *args, **kwargs: calls.append(
+                ['registry', 'bind']
+            )
             with patch.object(runner, 'run', side_effect=fake_run), snapshot, \
+                 patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                 patch.object(runner.os, 'getpgid', return_value=901), \
                  patch('sys.argv', ['runner', '--config', str(configfile)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 runner.main()
             record = root/'state'/'issue-1.json'
@@ -327,6 +528,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(['pnpm', 'check'], calls)
         self.assertNotIn(['git', 'commit'], [c[:2] for c in calls])
         self.assertNotIn(['git', 'push'], [c[:2] for c in calls])
+        self.assertLess(calls.index(['registry', 'pre-claim']),
+                        calls.index(['registry', 'claim']))
+        self.assertLess(calls.index(['registry', 'claim']),
+                        calls.index(['registry', 'reserve']))
+        self.assertLess(calls.index(['registry', 'reserve']),
+                        calls.index(['registry', 'renew']))
+        self.assertGreaterEqual(calls.count(['registry', 'renew']), 5)
+        prelaunches = [index for index, value in enumerate(calls)
+                       if value == ['registry', 'pre-launch']]
+        self.assertEqual(len(prelaunches), 2)
+        self.assertLess(prelaunches[-1], calls.index(['provider', 'started']))
+        self.assertLess(calls.index(['provider', 'started']),
+                        calls.index(['registry', 'bind']))
 
     def test_open_dependency_waits_without_failure_or_claim(self):
         calls, record = self.exercise_poll(blocked=True)
