@@ -692,6 +692,135 @@ class OperatorFixture(unittest.TestCase):
                 observed_at=now,
             )
 
+    def _pause_canary_after_successful_implementation(
+        self, *, implementer="codex-a", observed_at=None
+    ):
+        observed_at = observed_at or (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        ).isoformat()
+        feature, implementation, review = parse_canary_spec(self.canary())
+        revision = self.registry.dispatch_control()["revision"]
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=revision, recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=observed_at, reason="fixture implementation",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", implementer,
+            acquired_at=observed_at,
+            expires_at=(
+                datetime.fromisoformat(observed_at) + timedelta(minutes=5)
+            ).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "implementation-attempt",
+            package_id="TASK-201", worker_id=implementer,
+            runner_pid=os.getpid(), started_at=observed_at,
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "implementation-attempt", ended_at=utc_now(), outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW,
+            reason="implementation ready for review",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=utc_now(), reason="fixture pause after implementation",
+        )
+        RunnerRegistryControl(self.database).finalize_paused(
+            reason="fixture implementation ownership drained"
+        )
+
+    def test_enable_live_resumes_ready_review_from_verify_review(self):
+        self.config_path.write_text(json.dumps(self.config(strict=False)))
+        loaded = set()
+
+        def launchctl(arguments, **kwargs):
+            operation = arguments[1]
+            if operation == "print":
+                label = arguments[-1].rsplit("/", 1)[-1]
+                return subprocess.CompletedProcess(
+                    arguments, 0 if label in loaded else 1
+                )
+            if operation == "bootout":
+                loaded.discard(arguments[-1].rsplit("/", 1)[-1])
+                return subprocess.CompletedProcess(arguments, 0)
+            if operation == "bootstrap":
+                loaded.add(Path(arguments[-1]).stem)
+                return subprocess.CompletedProcess(arguments, 0)
+            raise AssertionError(arguments)
+
+        prepare_dry_run(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()["revision"],
+            self.migration(), home=self.root / "home", run=launchctl, uid=501,
+        )
+        now = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.sync_workers(now)
+        self._pause_canary_after_successful_implementation(observed_at=now)
+
+        evidence = enable_live(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()["revision"],
+            "A5-CANARY", home=self.root / "home", run=launchctl, uid=501,
+        )
+
+        self.assertEqual(
+            evidence["worker_gate"]["independent_pairs"],
+            [["codex-a", "claude"]],
+        )
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "LIVE")
+
+    def test_worker_gate_preserves_review_separation_during_resume(self):
+        now = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        for payload in (
+            self.telemetry("orchestra", role="ORCHESTRA", now=now),
+            self.telemetry("codex-a", now=now),
+        ):
+            if payload["worker"]["id"] == "codex-a":
+                payload["worker"]["capabilities"].extend(
+                    ["review", "independent-review"]
+                )
+                payload["worker"]["approved_lanes"].append("ASSURANCE")
+            worker, usage = validate_telemetry_payload(payload, now)
+            self.registry.sync_worker_telemetry(
+                worker, usage,
+                expected_revision=self.registry.dispatch_control()["revision"],
+                recorded_at=now,
+            )
+        self._pause_canary_after_successful_implementation(observed_at=now)
+
+        with self.assertRaisesRegex(OperatorError, "reviewer is not independent"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                observed_at=utc_now(), require_permissions_gate=False,
+                require_workers=True, canary_feature_id="A5-CANARY",
+            )
+
+    def test_worker_gate_preserves_review_package_gates_during_resume(self):
+        now = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.sync_workers(now)
+        self._pause_canary_after_successful_implementation(observed_at=now)
+        future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE work_packages SET ready_at=? WHERE id='TASK-202'",
+                (future,),
+            )
+
+        with self.assertRaisesRegex(OperatorError, "no eligible independent reviewer"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, self.registry.dispatch_control()["revision"],
+                observed_at=utc_now(), require_permissions_gate=False,
+                require_workers=True, canary_feature_id="A5-CANARY",
+            )
+
     def test_status_cli_emits_structured_evidence(self):
         output = StringIO()
         with redirect_stdout(output):
