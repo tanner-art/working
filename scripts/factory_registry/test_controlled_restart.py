@@ -52,6 +52,15 @@ class FakeRegistry:
         self.workers = {"worker-a": "IDLE", "worker-b": "IDLE"}
         self.packages = {}
         self.unresolved = set()
+        self.snapshot_observed_at = None
+        self.worker_authentication_valid = True
+        self.worker_heartbeat_fresh = True
+        self.provider_capacity_eligible = True
+        self.active_parent_package_count = 0
+        self.active_parent_package_limit = 3
+        self.orchestra_reserve_percent = 20.0
+        self.required_orchestra_reserve_percent = 20.0
+        self.eligibility_blockers = ()
 
     def seed_active(self, item):
         self.ownership.append(item)
@@ -68,13 +77,21 @@ class FakeRegistry:
     def restart_snapshot(self, *, observed_at):
         return RestartSnapshot(
             revision=self.revision,
-            observed_at=observed_at,
+            observed_at=self.snapshot_observed_at or observed_at,
             phase=self.phase,
             kill_switch_engaged=self.kill_switch_engaged,
             ownership=tuple(self.ownership),
             attempts=tuple(self.attempts.values()),
             worker_availability=dict(self.workers),
             package_states=dict(self.packages),
+            worker_authentication_valid=self.worker_authentication_valid,
+            worker_heartbeat_fresh=self.worker_heartbeat_fresh,
+            provider_capacity_eligible=self.provider_capacity_eligible,
+            active_parent_package_count=self.active_parent_package_count,
+            active_parent_package_limit=self.active_parent_package_limit,
+            orchestra_reserve_percent=self.orchestra_reserve_percent,
+            required_orchestra_reserve_percent=self.required_orchestra_reserve_percent,
+            eligibility_blockers=self.eligibility_blockers,
         )
 
     def reconcile_preservation(self, *, observed_at):
@@ -238,6 +255,38 @@ class ControlledRestartTests(unittest.TestCase):
 
         self.assertEqual(["registry:preservation"], self.log)
         self.assertEqual(RestartPhase.PAUSED, self.registry.phase)
+
+    def test_enable_rechecks_every_current_registry_eligibility_gate(self):
+        cases = (
+            ("worker_authentication_valid", False, "authentication"),
+            ("worker_heartbeat_fresh", False, "heartbeat"),
+            ("provider_capacity_eligible", False, "provider capacity"),
+            ("active_parent_package_count", 3, "parent-package limit"),
+            ("active_parent_package_limit", None, "parent-package limit"),
+            ("orchestra_reserve_percent", 19.9, "Orchestra reserve"),
+            ("required_orchestra_reserve_percent", None, "Orchestra reserve"),
+            (
+                "eligibility_blockers",
+                ("worker is not approved for canary lane",),
+                "canary lane",
+            ),
+            ("eligibility_blockers", None, "malformed"),
+            ("snapshot_observed_at", LATER, "stale Registry"),
+        )
+        for attribute, value, message in cases:
+            with self.subTest(attribute=attribute):
+                registry = FakeRegistry([])
+                setattr(registry, attribute, value)
+                supervisor = FakeSupervisor(registry.log)
+                procedure = ControlledRestartProcedure(registry, supervisor)
+                with self.assertRaisesRegex(ControlledRestartError, message):
+                    procedure.enable_live(
+                        observed_at=NOW,
+                        expected_preservation=PRESERVATION,
+                        reason="canary",
+                    )
+                self.assertEqual([], registry.log)
+                self.assertEqual(RestartPhase.PAUSED, registry.phase)
 
     def test_enable_rejects_an_active_attempt_without_a_lease(self):
         self.registry.attempts["orphan-attempt"] = AttemptState(

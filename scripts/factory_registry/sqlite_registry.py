@@ -36,6 +36,7 @@ from .repository import RegistryConflict, RegistryNotFound
 
 CURRENT_SCHEMA_VERSION = 3
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
+CONTROL_SCHEMA_VERSION = 1
 
 
 def _json(value: Any) -> str:
@@ -152,6 +153,15 @@ class SQLiteRegistry:
                 version = int(raw_version)
                 if not MINIMUM_MIGRATABLE_SCHEMA_VERSION <= version <= CURRENT_SCHEMA_VERSION:
                     raise RegistryConflict("SCHEMA_VERSION_UNSUPPORTED", raw_version)
+                control_row = connection.execute(
+                    "SELECT value FROM registry_metadata "
+                    "WHERE key='control_schema_version'"
+                ).fetchone()
+                if control_row is None:
+                    if version == CURRENT_SCHEMA_VERSION:
+                        raise RegistryConflict("CONTROL_SCHEMA_METADATA_MISSING")
+                else:
+                    self._require_control_schema(connection)
                 return version
             except sqlite3.Error as error:
                 raise RegistryConflict("SCHEMA_METADATA_INVALID") from error
@@ -161,7 +171,7 @@ class SQLiteRegistry:
     def initialize(self) -> None:
         self.database.parent.mkdir(parents=True, exist_ok=True)
         schema = Path(__file__).with_name("schema.sql").read_text()
-        existing_version = self._preflight_schema_version()
+        self._preflight_schema_version()
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
@@ -235,6 +245,7 @@ class SQLiteRegistry:
                 "WHERE key='schema_version' AND CAST(value AS INTEGER) < ?",
                 (str(CURRENT_SCHEMA_VERSION), CURRENT_SCHEMA_VERSION),
             )
+            self._require_control_schema(connection)
 
     def journal_mode(self) -> str:
         with self._connection() as connection:
@@ -243,6 +254,7 @@ class SQLiteRegistry:
     def dispatch_control(self) -> Mapping[str, Any]:
         """Return the durable, fail-closed runner dispatch gate."""
         with self._connection() as connection:
+            self._require_control_schema(connection)
             row = connection.execute(
                 """SELECT control.dispatch_mode, control.kill_switch_engaged,
                           control.changed_at, control.reason, metadata.value AS revision
@@ -291,6 +303,7 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_DISPATCH_CONTROL")
         changed_at = _normalize_timestamp(changed_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 revision = int(connection.execute(
@@ -308,7 +321,11 @@ class SQLiteRegistry:
                     running = connection.execute(
                         "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
                     ).fetchone()
-                    if active or running:
+                    runtimes = connection.execute(
+                        """SELECT 1 FROM attempt_runtime_ownership
+                           WHERE released_at IS NULL LIMIT 1"""
+                    ).fetchone()
+                    if active or running or runtimes:
                         raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
                 if new_mode == "PAUSED":
                     active = connection.execute(
@@ -354,6 +371,7 @@ class SQLiteRegistry:
         """Engage the kill switch without relying on a stale caller revision."""
         changed_at = _normalize_timestamp(changed_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 control = connection.execute(
@@ -398,6 +416,7 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_PROCESS_ID")
         started_at = _normalize_timestamp(started_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 control = connection.execute(
@@ -469,6 +488,7 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_PROCESS_ID")
         recorded_at = _normalize_timestamp(recorded_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 control = connection.execute(
@@ -528,6 +548,7 @@ class SQLiteRegistry:
     ) -> None:
         released_at = _normalize_timestamp(released_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 updated = connection.execute(
@@ -581,6 +602,7 @@ class SQLiteRegistry:
             raise RegistryConflict("ATTEMPT_OUTCOME_STATUS_MISMATCH")
         ended_at = _normalize_timestamp(ended_at)
         with self._connection() as connection:
+            self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
@@ -662,6 +684,7 @@ class SQLiteRegistry:
         """Return unresolved runtime ownership without changing it."""
         observed_at = _normalize_timestamp(observed_at or _utc_now())
         with self._connection() as connection:
+            self._require_control_schema(connection)
             rows = connection.execute(
                 """SELECT runtime.*, attempt.package_id, attempt.worker_id,
                           attempt.ended_at, lease.released_at AS lease_released_at,
@@ -679,6 +702,26 @@ class SQLiteRegistry:
                 (observed_at,),
             ).fetchall()
         return tuple(dict(row) for row in rows)
+
+    @staticmethod
+    def _require_control_schema(connection: sqlite3.Connection) -> None:
+        """Reject unknown control-plane storage before reading or mutating it."""
+        try:
+            row = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='control_schema_version'"
+            ).fetchone()
+        except sqlite3.DatabaseError as error:
+            raise RegistryConflict("CONTROL_SCHEMA_METADATA_MISSING") from error
+        if row is None:
+            raise RegistryConflict("CONTROL_SCHEMA_METADATA_MISSING")
+        try:
+            version = int(row[0])
+        except (TypeError, ValueError) as error:
+            raise RegistryConflict("MALFORMED_CONTROL_SCHEMA_VERSION", str(row[0])) from error
+        if str(version) != str(row[0]).strip():
+            raise RegistryConflict("MALFORMED_CONTROL_SCHEMA_VERSION", str(row[0]))
+        if version != CONTROL_SCHEMA_VERSION:
+            raise RegistryConflict("UNSUPPORTED_CONTROL_SCHEMA_VERSION", str(version))
 
     @staticmethod
     def _bump_revision(connection: sqlite3.Connection) -> int:

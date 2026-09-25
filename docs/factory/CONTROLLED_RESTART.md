@@ -37,8 +37,11 @@ and all current owner gates in `OWNER_APPROVALS.md` are satisfied.
    reviewed counts are 33 worktrees, 8 dirty worktrees, 7 unmerged branches,
    0 unexplained records, and 0 active stale leases; later reviewed evidence
    replaces these values rather than being silently accepted.
-4. Recheck worker authentication, heartbeat, provider health/capacity, the
-   three-parent limit, and the 20% Orchestra reserve through the Registry.
+4. In that same time-pinned Registry snapshot, recheck explicit worker
+   authentication and heartbeat fields, provider capacity eligibility, the
+   current and maximum active-parent counts, and current and required
+   Orchestra reserve percentages. Missing, stale, malformed, or ineligible
+   values fail closed before runtime preparation.
 5. Prepare the supervisor while it is still unable to claim.
 6. Compare-and-swap the Registry from the retained `PAUSED` revision to
    `LIVE`, recording the reason and event atomically.
@@ -113,6 +116,11 @@ The Registry schema now creates a singleton `factory_control` row with the
 fail-closed default `PAUSED` and `kill_switch_engaged=1`. The SQLite adapter
 provides revision-checked mode changes, an unconditional kill-switch operation,
 and read gates intended for both the pre-claim and pre-launch boundaries.
+Every transition to `LIVE`, including `STOPPING` to `LIVE`, rejects an
+unreleased runtime-ownership row even when its attempt and lease were made
+terminal by an incomplete recovery. Control APIs accept only the explicitly
+supported control schema version and fail closed on missing, malformed, or
+newer metadata.
 
 `attempt_runtime_ownership` durably maps a Registry attempt to its runner PID
 and provider PID/process group. Reserving an attempt requires a live control
@@ -127,6 +135,10 @@ absent `registry_database` returns no adapter, preserving the current legacy
 GitHub runner. When explicitly wired later, its `pre_claim` and `pre_launch`
 methods fail closed and its process callback records PID/PGID provenance. The
 adapter is dormant: `runner.py` does not import or call it in this commit.
+Because that wiring remains unapproved, there is still a launch-to-PID binding
+race between provider process creation and durable PID/PGID recording. This
+limitation blocks restart until the required follow-up closes and tests that
+window.
 
 ## Required follow-up before restart
 

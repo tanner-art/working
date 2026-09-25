@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 from typing import Mapping, Protocol, Sequence
 
 
@@ -70,6 +71,14 @@ class RestartSnapshot:
     attempts: tuple[AttemptState, ...]
     worker_availability: Mapping[str, str]
     package_states: Mapping[str, str]
+    worker_authentication_valid: bool
+    worker_heartbeat_fresh: bool
+    provider_capacity_eligible: bool
+    active_parent_package_count: int
+    active_parent_package_limit: int
+    orchestra_reserve_percent: float
+    required_orchestra_reserve_percent: float
+    eligibility_blockers: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -178,6 +187,57 @@ def _assert_same_preservation(actual: PreservationState, expected: PreservationS
         raise ControlledRestartError("preservation has unexplained records or stale ownership")
 
 
+def _assert_restart_eligibility(snapshot: RestartSnapshot, observed_at: str) -> None:
+    """Fail closed unless the same Registry snapshot authorizes a fresh canary."""
+    blockers = (
+        list(snapshot.eligibility_blockers)
+        if isinstance(snapshot.eligibility_blockers, tuple)
+        and all(isinstance(value, str) and value for value in snapshot.eligibility_blockers)
+        else ["eligibility blockers are malformed"]
+    )
+    if snapshot.observed_at != observed_at:
+        blockers.append("stale Registry eligibility snapshot")
+    if snapshot.worker_authentication_valid is not True:
+        blockers.append("worker authentication is not valid")
+    if snapshot.worker_heartbeat_fresh is not True:
+        blockers.append("worker heartbeat is not fresh")
+    if snapshot.provider_capacity_eligible is not True:
+        blockers.append("provider capacity is not eligible")
+    parent_values_valid = all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (
+            snapshot.active_parent_package_count,
+            snapshot.active_parent_package_limit,
+        )
+    )
+    if not parent_values_valid or (
+        snapshot.active_parent_package_count < 0
+        or snapshot.active_parent_package_limit < 1
+        or snapshot.active_parent_package_count >= snapshot.active_parent_package_limit
+    ):
+        blockers.append("active parent-package limit has no canary slot")
+    reserve_values_valid = all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isfinite(value)
+        for value in (
+            snapshot.orchestra_reserve_percent,
+            snapshot.required_orchestra_reserve_percent,
+        )
+    )
+    if not reserve_values_valid or (
+        snapshot.orchestra_reserve_percent < 0
+        or snapshot.required_orchestra_reserve_percent < 0
+        or snapshot.orchestra_reserve_percent
+        < snapshot.required_orchestra_reserve_percent
+    ):
+        blockers.append("Orchestra reserve is below the required level")
+    if blockers:
+        raise ControlledRestartError(
+            "restart eligibility failed: " + "; ".join(sorted(set(blockers)))
+        )
+
+
 def _active_attempt_ids(snapshot: RestartSnapshot) -> tuple[str, ...]:
     return tuple(
         attempt.id
@@ -239,6 +299,7 @@ class ControlledRestartProcedure:
                 _ownership_identifiers(snapshot),
                 "live enable found active ownership",
             )
+        _assert_restart_eligibility(snapshot, observed_at)
         actual_preservation = self._registry.reconcile_preservation(observed_at=observed_at)
         _assert_same_preservation(actual_preservation, expected_preservation)
         self._supervisor.prepare()

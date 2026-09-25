@@ -395,6 +395,56 @@ class SQLiteRegistryTest(unittest.TestCase):
                     )
                 finally:
                     connection.close()
+
+    def test_control_apis_fail_closed_for_newer_or_malformed_schema(self) -> None:
+        for value, code in (
+            ("2", "UNSUPPORTED_CONTROL_SCHEMA_VERSION"),
+            ("future", "MALFORMED_CONTROL_SCHEMA_VERSION"),
+        ):
+            with self.subTest(value=value):
+                with sqlite3.connect(self.database) as connection:
+                    connection.execute(
+                        "UPDATE registry_metadata SET value=? WHERE key='control_schema_version'",
+                        (value,),
+                    )
+                with self.assertRaisesRegex(RegistryConflict, code):
+                    self.registry.dispatch_control()
+                with self.assertRaisesRegex(RegistryConflict, code):
+                    self.registry.initialize()
+                with sqlite3.connect(self.database) as connection:
+                    stored = connection.execute(
+                        "SELECT value FROM registry_metadata WHERE key='control_schema_version'"
+                    ).fetchone()[0]
+                    mode = connection.execute(
+                        "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+                    ).fetchone()[0]
+                    connection.execute(
+                        "UPDATE registry_metadata SET value='1' WHERE key='control_schema_version'"
+                    )
+                self.assertEqual(stored, value)
+                self.assertEqual(mode, "PAUSED")
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DELETE FROM registry_metadata WHERE key='control_schema_version'"
+            )
+        with self.assertRaisesRegex(RegistryConflict, "CONTROL_SCHEMA_METADATA_MISSING"):
+            self.registry.dispatch_control()
+        with self.assertRaisesRegex(RegistryConflict, "CONTROL_SCHEMA_METADATA_MISSING"):
+            self.registry.initialize()
+        with sqlite3.connect(self.database) as connection:
+            stored = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key='control_schema_version'"
+            ).fetchone()
+            mode = connection.execute(
+                "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO registry_metadata(key, value) VALUES ('control_schema_version', '1')"
+            )
+        self.assertIsNone(stored)
+        self.assertEqual(mode, "PAUSED")
+
     def test_enforces_three_active_parent_packages_transactionally(self) -> None:
         self.feature()
         for number in range(1, 5):
@@ -1053,6 +1103,66 @@ class SQLiteRegistryTest(unittest.TestCase):
         orphans = self.registry.runtime_orphans()
         self.assertEqual([item["attempt_id"] for item in orphans], ["attempt-1"])
         self.assertIsNone(orphans[0]["released_at"])
+
+    def test_stopping_cannot_return_live_with_unreleased_runtime_orphan(self) -> None:
+        self.feature()
+        self.worker("worker", "registry")
+        self.package("TASK")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"],
+            expected_mode="PAUSED",
+            new_mode="LIVE",
+            kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z",
+            reason="bounded canary",
+        )
+        lease = self.registry.acquire_lease(
+            "TASK",
+            "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:10:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1",
+            package_id="TASK",
+            worker_id="worker",
+            runner_pid=100,
+            started_at="2026-09-25T10:02:00Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at="2026-09-25T10:02:01Z", reason="operator stop"
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE attempts SET ended_at=?, outcome='FAILED' WHERE id='attempt-1'",
+                ("2026-09-25T10:03:00.000000Z",),
+            )
+            connection.execute(
+                "UPDATE leases SET released_at=?, release_reason='incomplete recovery' WHERE id=?",
+                ("2026-09-25T10:03:00.000000Z", lease.id),
+            )
+            connection.execute(
+                "UPDATE work_packages SET status='BLOCKED' WHERE id='TASK'"
+            )
+            connection.execute(
+                "UPDATE workers SET availability='IDLE' WHERE id='worker'"
+            )
+        stopped = self.registry.dispatch_control()
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_OWNERSHIP_PRESENT"):
+            self.registry.set_dispatch_control(
+                expected_revision=stopped["revision"],
+                expected_mode="STOPPING",
+                new_mode="LIVE",
+                kill_switch_engaged=False,
+                changed_at="2026-09-25T10:04:00Z",
+                reason="unsafe restart",
+            )
+        unchanged = self.registry.dispatch_control()
+        self.assertEqual(unchanged["dispatch_mode"], "STOPPING")
+        self.assertTrue(unchanged["kill_switch_engaged"])
+        self.assertEqual(unchanged["revision"], stopped["revision"])
 
     def test_expired_lease_and_disappeared_worker_surface_runtime_orphans(self) -> None:
         self.feature()
