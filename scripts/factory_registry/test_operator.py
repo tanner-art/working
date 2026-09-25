@@ -766,6 +766,61 @@ class OperatorFixture(unittest.TestCase):
                 revision,
             )
 
+    def test_restore_v4_preserves_mutation_racing_after_initial_validation(self):
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        original_verify = operator_module.verify_preservation
+        calls = 0
+
+        def inject_mutation(snapshot, preservation_path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                control = self.registry.dispatch_control()
+                self.registry.set_dispatch_control(
+                    expected_revision=control["revision"],
+                    expected_mode="PAUSED",
+                    new_mode="STOPPING",
+                    kill_switch_engaged=True,
+                    changed_at="2026-09-25T10:05:00Z",
+                    reason="concurrent authoritative stop",
+                    operation_id="racing-stop",
+                )
+            return original_verify(snapshot, preservation_path)
+
+        with mock.patch.object(
+            operator_module, "verify_preservation", side_effect=inject_mutation
+        ):
+            with self.assertRaisesRegex(
+                OperatorError, "revision changed before v4 restore"
+            ):
+                restore_registry_v4_backup(
+                    self.database,
+                    backup,
+                    self.release,
+                    self.preservation,
+                    COMMIT,
+                    result["backup"]["sha256"],
+                    revision,
+                )
+
+        current = status(self.database)
+        self.assertEqual(current["database_checks"]["schema_version"], "5")
+        self.assertEqual(current["control"]["dispatch_mode"], "STOPPING")
+        self.assertEqual(current["control"]["revision"], revision + 1)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM control_operation_receipts "
+                "WHERE operation_id='racing-stop'"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM task_events "
+                "WHERE event_type='DISPATCH_CONTROL_CHANGED'"
+            ).fetchone()[0], 1)
+
     def test_reviewed_registry_migration_and_restore(self):
         revision = self._downgrade_fixture_to_v3()
         observed = status(self.database)

@@ -750,22 +750,26 @@ def _ownership_history_sha256(
     """Hash exact lease, attempt, and runtime provenance in stable key order."""
     suffix = "?mode=ro&immutable=1" if immutable else "?mode=ro"
     uri = f"{database.resolve().as_uri()}{suffix}"
-    history: dict[str, list[dict[str, Any]]] = {}
     try:
         with sqlite3.connect(uri, uri=True) as connection:
             connection.row_factory = sqlite3.Row
-            for table, order_by in (
-                ("leases", "id"),
-                ("attempts", "id"),
-                ("attempt_runtime_ownership", "attempt_id"),
-            ):
-                history[table] = [
-                    dict(row) for row in connection.execute(
-                        f"SELECT * FROM {table} ORDER BY {order_by}"
-                    )
-                ]
+            return _ownership_history_sha256_connection(connection)
     except sqlite3.Error as error:
         raise OperatorError(f"Registry ownership provenance check failed: {error}") from error
+
+
+def _ownership_history_sha256_connection(connection: sqlite3.Connection) -> str:
+    history: dict[str, list[dict[str, Any]]] = {}
+    for table, order_by in (
+        ("leases", "id"),
+        ("attempts", "id"),
+        ("attempt_runtime_ownership", "attempt_id"),
+    ):
+        history[table] = [
+            dict(row) for row in connection.execute(
+                f"SELECT * FROM {table} ORDER BY {order_by}"
+            )
+        ]
     return hashlib.sha256(
         json.dumps(history, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -1388,9 +1392,82 @@ def restore_registry_v4_backup(
         preservation_path,
     )
 
-    _restore_database_from_backup(
-        database, backup_path, expected_backup_sha256
-    )
+    # Schema v5 adds only the append-only receipt table and its triggers. Reverse
+    # those additions under the same writer lock as the final gate checks. A
+    # file-level restore after separate checks could erase a concurrent commit.
+    with sqlite3.connect(database, timeout=10, isolation_level=None) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM registry_metadata"
+            ))
+            if metadata.get("schema_version") != "5":
+                raise OperatorError("Registry schema changed before v4 restore")
+            if metadata.get("revision") != str(expected_revision):
+                raise OperatorError("Registry revision changed before v4 restore")
+            control_row = connection.execute(
+                "SELECT dispatch_mode, kill_switch_engaged, changed_at, reason "
+                "FROM factory_control WHERE singleton=1"
+            ).fetchone()
+            if control_row is None:
+                raise OperatorError("Registry control disappeared before v4 restore")
+            locked_control = {
+                "dispatch_mode": control_row["dispatch_mode"],
+                "kill_switch_engaged": bool(control_row["kill_switch_engaged"]),
+                "changed_at": control_row["changed_at"],
+                "reason": control_row["reason"],
+                "revision": int(metadata["revision"]),
+            }
+            if locked_control != backup_control:
+                raise OperatorError("Registry control changed before v4 restore")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                ).fetchone()
+                or connection.execute(
+                    "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                ).fetchone()
+                or connection.execute(
+                    "SELECT 1 FROM attempt_runtime_ownership "
+                    "WHERE released_at IS NULL LIMIT 1"
+                ).fetchone()
+            ):
+                raise OperatorError("active ownership appeared before v4 restore")
+            if connection.execute(
+                "SELECT 1 FROM control_operation_receipts LIMIT 1"
+            ).fetchone():
+                raise OperatorError(
+                    "control operation receipts appeared before v4 restore"
+                )
+            if (
+                _ownership_history_sha256_connection(connection)
+                != backup_ownership_sha256
+            ):
+                raise OperatorError(
+                    "ownership provenance changed before v4 restore"
+                )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "UPDATE registry_metadata SET value='4' "
+                "WHERE key='schema_version' AND value='5'"
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise OperatorError("Registry v4 restore compare-and-swap failed")
+            if tuple(connection.execute("PRAGMA foreign_key_check")):
+                raise OperatorError("Registry v4 restore introduced foreign-key violations")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
     restored = status(database, observed_at=observed_at)
     _require_migration_state(
         restored, expected_schema=4, expected_revision=expected_revision

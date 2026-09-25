@@ -119,6 +119,12 @@ any evidence that v5 retry semantics have already been used:
   --expect-revision REVISION
 ```
 
+The rollback uses the verified backup as its reference artifact, then removes
+only the v5 receipt schema in one locked transaction. Its final revision,
+control, ownership-provenance, and zero-receipt checks share the same writer
+lock as the schema reversal, so a concurrent authoritative mutation makes the
+rollback fail instead of being overwritten.
+
 ## Evidence-only status and preflight
 
 Status is read-only and does not require a revision:
