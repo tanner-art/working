@@ -7,6 +7,7 @@ import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, set
 import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke } from './canvasStrokes'
+import { MobileCanvasToolbar } from './surfaces/canvas'
 
 function ColorControl({ label, value, colors, onChange }: { label: string; value: string; colors: readonly string[]; onChange: (value: string) => void }) {
   return <fieldset className="canvas-color-control"><legend>{label}</legend><div className="canvas-swatches">
@@ -350,7 +351,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   return <div className="canvas-page">
     <div className="canvas-head">
     <div>
-    <button className="canvas-exit" onClick={onExit}>← Back to Bank</button>
+    <button type="button" className="canvas-exit" aria-label="Close canvas and return to Canvas Bank" title="Close canvas"><span aria-hidden="true">×</span><span className="canvas-exit-label">Back to Bank</span></button>
     <label className="sr-only" htmlFor="canvas-title">Canvas title</label>
     <input ref={titleInput} id="canvas-title" className="canvas-title-input" maxLength={120} value={titleDraft} onChange={event => { cancelTitle.current = false; setTitleDraft(event.target.value) }} onBlur={commitTitle} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { cancelTitle.current = true; setTitleDraft(title); event.currentTarget.blur() } }} />
     <p className="canvas-save-status" role="status">{saveStatus}</p>
@@ -379,6 +380,31 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <span>{Math.round(scale * 100)}%</span>
     <button aria-label="Zoom in" onClick={() => onViewport(zoomCanvasViewport(viewport, { x: (canvasRef.current?.clientWidth ?? 0) / 2, y: (canvasRef.current?.clientHeight ?? 0) / 2 }, scale + .15))}>＋</button>
     </div>
+    <MobileCanvasToolbar
+      primary={<>
+        <button type="button" onClick={() => add('text')}>Text</button>
+        <button type="button" className={tool === 'pen' ? 'selected-tool' : ''} aria-pressed={tool === 'pen'} onClick={() => { cancel(); setTool(current => current === 'pen' ? 'select' : 'pen'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Pen</button>
+        <button type="button" className={tool === 'lasso' ? 'selected-tool' : ''} aria-pressed={tool === 'lasso'} onClick={() => { cancel(); setTool(current => current === 'lasso' ? 'select' : 'lasso'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Lasso</button>
+      </>}
+      secondary={<>
+        <button type="button" disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
+        <button type="button" onClick={() => add('container')}>Add group</button>
+        <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
+          <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
+        </select></label>
+        <button type="button" disabled={!selectedElement || selectedElement.type === 'arrow'} onClick={branchSelected}>Branch child</button>
+        <button type="button" disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
+        <button type="button" disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>Connect</button>
+        <button type="button" disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
+        <button type="button" disabled={!selected} onClick={removeSelected}>Delete</button>
+        <button type="button" disabled={!canUndo} onClick={onUndo}>Undo</button>
+        <button type="button" disabled={!canRedo} onClick={onRedo}>Redo</button>
+        <button type="button" onClick={() => fit()}>Fit canvas</button>
+        <button type="button" disabled={!selectedElement || selectedElement.type === 'arrow'} onClick={() => fit(true)}>Fit selection</button>
+        <button type="button" aria-label="Zoom out" onClick={() => onViewport(zoomCanvasViewport(viewport, { x: (canvasRef.current?.clientWidth ?? 0) / 2, y: (canvasRef.current?.clientHeight ?? 0) / 2 }, scale - .15))}>Zoom out</button>
+        <button type="button" aria-label="Zoom in" onClick={() => onViewport(zoomCanvasViewport(viewport, { x: (canvasRef.current?.clientWidth ?? 0) / 2, y: (canvasRef.current?.clientHeight ?? 0) / 2 }, scale + .15))}>Zoom in</button>
+      </>}
+    />
     </div>
     <div className={`canvas-properties${selectedElement && (editMode || selectedElement.type === 'arrow') ? ' has-selection' : ''}${editMode ? ' edit-mode' : ''}`}>{selectedElement && (editMode || selectedElement.type === 'arrow') && selectedElement.type !== 'arrow' && <>
     <label>Shape <select aria-label="Block shape" value={canvasNodeShape(selectedElement)} onChange={event => onCommit(convertCanvasNode(elements, selectedElement.id, event.target.value as CanvasShape))}>
