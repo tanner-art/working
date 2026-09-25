@@ -196,6 +196,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "review-approval", "REVIEW-1", "review", "https://example.test/review",
             "Independent approval record", "2026-09-24T19:54:00Z",
+            {"attempt_id": "review-attempt-1"},
         ))
         self.registry.record_review_outcome(ReviewOutcome(
             id="outcome-1",
@@ -220,6 +221,18 @@ class ControlCenterProjectionTest(unittest.TestCase):
             item["code"] == "REVIEW_STATE_UNRECORDED" and item["packageId"] == "PACKAGE-1"
             for item in projection["failures"]
         ))
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        forged_outcome = {**raw.review_outcomes[0], "implementer_worker_id": "claude"}
+        from scripts.factory_registry.control_center_projection import project_control_center
+        with self.assertRaisesRegex(ControlCenterProjectionError, "implementer is invalid"):
+            project_control_center(replace(raw, review_outcomes=(forged_outcome,)))
+        forged_evidence = tuple(
+            {**item, "metadata": {"attempt_id": "attempt-1"}}
+            if item["id"] == "review-approval" else item
+            for item in raw.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "review evidence is missing"):
+            project_control_center(replace(raw, evidence=forged_evidence))
         with sqlite3.connect(self.database) as connection:
             with self.assertRaisesRegex(sqlite3.IntegrityError, "REVIEW_OUTCOMES_APPEND_ONLY"):
                 connection.execute(
@@ -237,6 +250,84 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 state=ReviewOutcomeState.APPROVED, approval_evidence_ids=("evidence-1",),
             ))
 
+    def test_review_outcome_rejects_forged_implementer_and_reviewer_provenance(self) -> None:
+        self.registry.register_worker(Worker(
+            "agent-a", "Agent A", ("platform",), (Lane.PLATFORM,), usage_state="GREEN",
+        ))
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, 0, '{}')""",
+                (
+                    "older-agent-a-attempt", "PACKAGE-1", "agent-a",
+                    "2026-09-24T19:20:00.000000Z", "2026-09-24T19:30:00.000000Z",
+                    "SUCCEEDED",
+                ),
+            )
+        self.registry.record_evidence(Evidence(
+            "review-bound", "REVIEW-1", "review", None, "Bound reviewer evidence",
+            "2026-09-24T19:54:00Z", {"attempt_id": "review-attempt-1"},
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_IMPLEMENTER_MISMATCH"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-implementer", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-a",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("review-bound",),
+            ))
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, 0, '{}')""",
+                (
+                    "reviewer-target-attempt", "PACKAGE-1", "claude",
+                    "2026-09-24T19:31:00.000000Z", "2026-09-24T19:32:00.000000Z",
+                    "FAILED",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEWER_IMPLEMENTED_TARGET"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-independence", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("review-bound",),
+            ))
+
+    def test_review_outcome_rejects_evidence_not_bound_to_reviewer_attempt(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "forged-review-evidence", "REVIEW-1", "review", None,
+            "Claims approval but names the implementation attempt",
+            "2026-09-24T19:54:00Z", {"attempt_id": "attempt-1"},
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_EVIDENCE_MISMATCH"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-evidence", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("forged-review-evidence",),
+            ))
+
+    def test_review_outcome_requires_reviewer_owned_review_attempt(self) -> None:
+        self.registry.register_worker(Worker(
+            "agent-c", "Agent C", ("review",), (Lane.ASSURANCE,), usage_state="GREEN",
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEWER_ATTEMPT_REQUIRED"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="missing-reviewer-attempt", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="agent-c", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
     def test_projection_rejects_packages_missing_from_feature_queue(self) -> None:
         raw = self.registry.control_center_snapshot(observed_at=NOW)
         orphan = {**raw.work_packages[0], "id": "ORPHAN", "feature_id": "MISSING"}
@@ -246,9 +337,12 @@ class ControlCenterProjectionTest(unittest.TestCase):
 
     def test_validation_rejects_counts_from_another_revision(self) -> None:
         projection = build_control_center_projection(self.registry, observed_at=NOW)
-        projection["factory"]["readyCount"] += 1
-        with self.assertRaisesRegex(ControlCenterProjectionError, "counts do not match"):
-            validate_control_center_projection(projection)
+        for field in ("activeParentCount", "readyCount"):
+            with self.subTest(field=field):
+                tampered = json.loads(json.dumps(projection))
+                tampered["factory"][field] += 1
+                with self.assertRaisesRegex(ControlCenterProjectionError, "counts do not match"):
+                    validate_control_center_projection(tampered)
 
     def test_unknown_diagnostics_remain_unknown_and_unsafe_links_are_removed(self) -> None:
         raw = self.registry.control_center_snapshot(observed_at=NOW)

@@ -22,6 +22,10 @@ describe('Factory Control Center snapshot contract', () => {
   })
 
   it('fails closed when same-revision counts or queue relationships do not reconcile', () => {
+    const wrongActiveParentCount = structuredClone(factoryControlFixture)
+    wrongActiveParentCount.factory.activeParentCount += 1
+    expect(() => parseFactoryControlSnapshot(wrongActiveParentCount)).toThrow('activeParentCount does not match this Registry revision')
+
     const wrongCount = structuredClone(factoryControlFixture)
     wrongCount.factory.readyCount += 1
     expect(() => parseFactoryControlSnapshot(wrongCount)).toThrow('readyCount does not match this Registry revision')

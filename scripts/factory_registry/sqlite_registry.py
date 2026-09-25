@@ -1756,12 +1756,40 @@ class SQLiteRegistry:
                 ).fetchone()
                 if dependency is None:
                     raise RegistryConflict("REVIEW_TARGET_MISMATCH")
-                implementer_attempt = connection.execute(
-                    "SELECT 1 FROM attempts WHERE package_id=? AND worker_id=? LIMIT 1",
-                    (outcome.target_package_id, outcome.implementer_worker_id),
-                ).fetchone()
-                if implementer_attempt is None:
+                target_attempts = connection.execute(
+                    """SELECT id, worker_id, started_at, ended_at, outcome
+                       FROM attempts WHERE package_id=?
+                       ORDER BY started_at, id""",
+                    (outcome.target_package_id,),
+                ).fetchall()
+                successful_implementation_attempts = [
+                    attempt for attempt in target_attempts
+                    if attempt["worker_id"] is not None
+                    and attempt["outcome"] == "SUCCEEDED"
+                    and attempt["ended_at"] is not None
+                    and attempt["ended_at"] <= requested_at
+                ]
+                if not successful_implementation_attempts:
                     raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+                actual_implementation = max(
+                    successful_implementation_attempts,
+                    key=lambda attempt: (
+                        attempt["ended_at"], attempt["started_at"], attempt["id"],
+                    ),
+                )
+                if actual_implementation["worker_id"] != outcome.implementer_worker_id:
+                    raise RegistryConflict("REVIEW_IMPLEMENTER_MISMATCH")
+                if any(
+                    attempt["worker_id"] == outcome.reviewer_worker_id
+                    for attempt in target_attempts
+                ):
+                    raise RegistryConflict("REVIEWER_IMPLEMENTED_TARGET")
+                if any(
+                    attempt["started_at"] > requested_at
+                    and attempt["started_at"] <= decided_at
+                    for attempt in target_attempts
+                ):
+                    raise RegistryConflict("REVIEW_TARGET_CHANGED_DURING_REVIEW")
                 reviewer = connection.execute(
                     "SELECT capabilities_json, approved_lanes_json FROM workers WHERE id=?",
                     (outcome.reviewer_worker_id,),
@@ -1772,19 +1800,35 @@ class SQLiteRegistry:
                 reviewer_lanes = set(json.loads(reviewer["approved_lanes_json"]))
                 if "review" not in reviewer_capabilities and "ASSURANCE" not in reviewer_lanes:
                     raise RegistryConflict("REVIEWER_NOT_ELIGIBLE")
-                if connection.execute(
-                    "SELECT 1 FROM workers WHERE id=?", (outcome.implementer_worker_id,)
-                ).fetchone() is None:
-                    raise RegistryNotFound(f"worker {outcome.implementer_worker_id}")
+                reviewer_attempts = connection.execute(
+                    """SELECT id, started_at, ended_at FROM attempts
+                       WHERE package_id=? AND worker_id=? AND outcome='SUCCEEDED'
+                         AND ended_at IS NOT NULL AND started_at>=? AND ended_at<=?
+                       ORDER BY ended_at, started_at, id""",
+                    (
+                        outcome.review_package_id, outcome.reviewer_worker_id,
+                        requested_at, decided_at,
+                    ),
+                ).fetchall()
+                if not reviewer_attempts:
+                    raise RegistryConflict("REVIEWER_ATTEMPT_REQUIRED")
+                reviewer_attempt = reviewer_attempts[-1]
                 for evidence_id in outcome.approval_evidence_ids:
                     evidence = connection.execute(
-                        "SELECT package_id, kind FROM evidence WHERE id=?", (evidence_id,)
+                        """SELECT package_id, kind, recorded_at, metadata_json
+                           FROM evidence WHERE id=?""",
+                        (evidence_id,),
                     ).fetchone()
                     if evidence is None:
                         raise RegistryNotFound(f"evidence {evidence_id}")
-                    if evidence["kind"].lower() != "review" or evidence["package_id"] not in {
-                        outcome.review_package_id, outcome.target_package_id,
-                    }:
+                    evidence_metadata = json.loads(evidence["metadata_json"])
+                    if (
+                        evidence["kind"].lower() != "review"
+                        or evidence["package_id"] != outcome.review_package_id
+                        or evidence_metadata.get("attempt_id") != reviewer_attempt["id"]
+                        or evidence["recorded_at"] < reviewer_attempt["started_at"]
+                        or evidence["recorded_at"] > decided_at
+                    ):
                         raise RegistryConflict("REVIEW_EVIDENCE_MISMATCH", evidence_id)
                 connection.execute(
                     """INSERT INTO review_outcomes

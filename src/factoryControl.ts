@@ -41,6 +41,7 @@ export interface FactoryPackage {
   id: string
   featureId: string
   title: string
+  kind: 'PARENT' | 'TEST' | 'REVIEW' | 'EVALUATION'
   priority: number
   lane: string | null
   state: FactoryState
@@ -289,7 +290,7 @@ function parseAttempt(value: unknown, path: string): FactoryAttempt {
 function parsePackage(value: unknown, path: string): FactoryPackage {
   const v = object(value, path)
   return {
-    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence), attempts: list(v.attempts, `${path}.attempts`, parseAttempt),
+    id: string(v.id, `${path}.id`), featureId: string(v.featureId, `${path}.featureId`), title: string(v.title, `${path}.title`), kind: oneOf(v.kind, ['PARENT', 'TEST', 'REVIEW', 'EVALUATION'] as const, `${path}.kind`), priority: number(v.priority, `${path}.priority`), lane: nullableString(v.lane, `${path}.lane`), state: oneOf(v.state, factoryStates, `${path}.state`), dependencies: strings(v.dependencies, `${path}.dependencies`), requiredCapabilities: strings(v.requiredCapabilities, `${path}.requiredCapabilities`), ownerWorkerId: nullableString(v.ownerWorkerId, `${path}.ownerWorkerId`), currentLease: parseNullableLease(v.currentLease, `${path}.currentLease`), attemptNumber: number(v.attemptNumber, `${path}.attemptNumber`), elapsedRuntimeSeconds: number(v.elapsedRuntimeSeconds, `${path}.elapsedRuntimeSeconds`), branch: nullableString(v.branch, `${path}.branch`), pullRequestUrl: nullableString(v.pullRequestUrl, `${path}.pullRequestUrl`), reviewState: v.reviewState === null ? null : oneOf(v.reviewState, ['waiting', 'assigned', 'changes_requested', 'approved'] as const, `${path}.reviewState`), failureCode: nullableString(v.failureCode, `${path}.failureCode`), blockReason: nullableString(v.blockReason, `${path}.blockReason`), acceptanceCriteria: strings(v.acceptanceCriteria, `${path}.acceptanceCriteria`), evidence: list(v.evidence, `${path}.evidence`, parseEvidence), attempts: list(v.attempts, `${path}.attempts`, parseAttempt),
   }
 }
 function parseFeature(value: unknown, path: string): FactoryFeature {
@@ -389,6 +390,7 @@ export function parseFactoryProjection(value: unknown): FactoryProjectionPayload
     if (failure.workerId !== null && !workers.has(failure.workerId)) throw new Error(`snapshot failure ${failure.id} references an unknown worker.`)
   }
   const count = (state: FactoryState) => packages.filter(item => item.state === state).length
+  if (projection.factory.activeParentCount !== packages.filter(item => item.kind === 'PARENT' && item.state === 'ACTIVE').length) throw new Error('snapshot.factory.activeParentCount does not match this Registry revision.')
   if (projection.factory.readyCount !== count('READY')) throw new Error('snapshot.factory.readyCount does not match this Registry revision.')
   if (projection.factory.verifyReviewCount !== count('VERIFY_REVIEW')) throw new Error('snapshot.factory.verifyReviewCount does not match this Registry revision.')
   if (projection.factory.blockedCount !== count('BLOCKED')) throw new Error('snapshot.factory.blockedCount does not match this Registry revision.')

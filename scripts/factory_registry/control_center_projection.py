@@ -377,13 +377,69 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
             "CHANGES_REQUESTED": "changes_requested",
         }.get(outcome.get("state"))
         requested_at = _iso(outcome.get("requested_at"))
-        if not state or requested_at is None:
+        decided_at = _iso(outcome.get("decided_at"))
+        if not state or requested_at is None or decided_at is None:
             raise ControlCenterProjectionError("structured review outcome is invalid")
+        target_attempts = attempts.get(target_id, [])
+        completed_implementations = [
+            attempt for attempt in target_attempts
+            if attempt.get("worker_id") is not None
+            and attempt.get("outcome") == "SUCCEEDED"
+            and _iso(attempt.get("ended_at")) is not None
+            and _iso(attempt.get("ended_at")) <= requested_at
+        ]
+        if not completed_implementations:
+            raise ControlCenterProjectionError("structured review implementer provenance is missing")
+        actual_implementation = max(
+            completed_implementations,
+            key=lambda attempt: (
+                str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
+                str(attempt.get("id")),
+            ),
+        )
+        if actual_implementation.get("worker_id") != implementer:
+            raise ControlCenterProjectionError("structured review implementer is invalid")
+        if any(attempt.get("worker_id") == reviewer for attempt in target_attempts):
+            raise ControlCenterProjectionError("structured review independence is invalid")
+        if any(
+            _iso(attempt.get("started_at")) is not None
+            and str(_iso(attempt.get("started_at"))) > requested_at
+            and str(_iso(attempt.get("started_at"))) <= decided_at
+            for attempt in target_attempts
+        ):
+            raise ControlCenterProjectionError("structured review target changed during review")
+        reviewer_attempts = [
+            attempt for attempt in attempts.get(review_package_id, [])
+            if attempt.get("worker_id") == reviewer
+            and attempt.get("outcome") == "SUCCEEDED"
+            and _iso(attempt.get("ended_at")) is not None
+            and _iso(attempt.get("started_at")) is not None
+            and str(_iso(attempt.get("started_at"))) >= requested_at
+            and str(_iso(attempt.get("ended_at"))) <= decided_at
+        ]
+        if not reviewer_attempts:
+            raise ControlCenterProjectionError("structured review attempt is missing")
+        reviewer_attempt = max(
+            reviewer_attempts,
+            key=lambda attempt: (
+                str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
+                str(attempt.get("id")),
+            ),
+        )
         evidence_ids = _strings(outcome.get("approval_evidence_ids"))
         approval_evidence = []
         for evidence_id in evidence_ids:
             item = evidence_by_id.get(evidence_id)
-            if item is None or str(item.get("kind", "")).lower() != "review":
+            metadata = _mapping(item.get("metadata")) if item is not None else {}
+            if (
+                item is None
+                or str(item.get("kind", "")).lower() != "review"
+                or item.get("package_id") != review_package_id
+                or metadata.get("attempt_id") != reviewer_attempt.get("id")
+                or _iso(item.get("recorded_at")) is None
+                or str(_iso(item.get("recorded_at"))) < str(_iso(reviewer_attempt.get("started_at")))
+                or str(_iso(item.get("recorded_at"))) > decided_at
+            ):
                 raise ControlCenterProjectionError("structured review evidence is missing")
             approval_evidence.append(_evidence(item))
         reviews.append({
@@ -523,6 +579,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             projected = {
                 "id": package_id, "featureId": feature_id,
                 "title": str(package.get("title", "")),
+                "kind": str(package.get("kind", "")),
                 "priority": int(_nonnegative(package.get("priority"))),
                 "lane": package.get("lane") if isinstance(package.get("lane"), str) else None,
                 "state": package.get("status"), "dependencies": dependencies.get(package_id, []),
@@ -770,6 +827,7 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
                 not isinstance(package, Mapping) or package.get("state") not in _STATES
                 or package.get("featureId") != feature.get("id")
                 or not all(isinstance(package.get(field), str) for field in ("id", "title"))
+                or package.get("kind") not in {"PARENT", "TEST", "REVIEW", "EVALUATION"}
                 or _finite_number(package.get("priority")) is None
                 or not all(isinstance(package.get(field), list) for field in ("dependencies", "requiredCapabilities", "acceptanceCriteria", "evidence", "attempts"))
             ):
@@ -818,6 +876,11 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             if isinstance(lease, Mapping) and lease.get("workerId") not in worker_ids:
                 raise ControlCenterProjectionError("package lease worker is absent from this Registry revision")
     expected_counts = {
+        "activeParentCount": sum(
+            1 for feature in value.get("features", [])
+            for package in feature.get("packages", [])
+            if package.get("kind") == "PARENT" and package.get("state") == "ACTIVE"
+        ),
         "readyCount": state_counts["READY"],
         "verifyReviewCount": state_counts["VERIFY_REVIEW"],
         "blockedCount": state_counts["BLOCKED"],
