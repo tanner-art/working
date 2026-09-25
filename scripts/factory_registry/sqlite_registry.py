@@ -37,6 +37,12 @@ from .repository import RegistryConflict, RegistryNotFound
 CURRENT_SCHEMA_VERSION = 3
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
+LEGAL_DISPATCH_TRANSITIONS = {
+    "PAUSED": frozenset({"LIVE", "STOPPING"}),
+    "LIVE": frozenset({"STOPPING"}),
+    "STOPPING": frozenset({"PAUSED", "RECOVERY_REQUIRED"}),
+    "RECOVERY_REQUIRED": frozenset({"PAUSED", "STOPPING"}),
+}
 
 
 def _json(value: Any) -> str:
@@ -158,7 +164,12 @@ class SQLiteRegistry:
                     "WHERE key='control_schema_version'"
                 ).fetchone()
                 if control_row is None:
-                    if version == CURRENT_SCHEMA_VERSION:
+                    control_tables = connection.execute(
+                        "SELECT name FROM sqlite_schema "
+                        "WHERE type='table' AND name IN "
+                        "('factory_control', 'attempt_runtime_ownership')"
+                    ).fetchall()
+                    if control_tables:
                         raise RegistryConflict("CONTROL_SCHEMA_METADATA_MISSING")
                 else:
                     self._require_control_schema(connection)
@@ -340,6 +351,11 @@ class SQLiteRegistry:
                     ).fetchone()
                     if active or running or runtimes:
                         raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                if new_mode not in LEGAL_DISPATCH_TRANSITIONS[expected_mode]:
+                    raise RegistryConflict(
+                        "INVALID_DISPATCH_TRANSITION",
+                        f"{expected_mode}->{new_mode}",
+                    )
                 connection.execute(
                     """UPDATE factory_control
                        SET dispatch_mode=?, kill_switch_engaged=?, changed_at=?, reason=?

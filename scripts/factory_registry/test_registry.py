@@ -104,6 +104,44 @@ class SQLiteRegistryTest(unittest.TestCase):
         self.assertEqual(usage_tables, 2)
         self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))
 
+    def test_initialize_additively_upgrades_pre_control_schema_version_three(self) -> None:
+        database = self.root / "pre-a4b-v3.sqlite3"
+        legacy = SQLiteRegistry(database)
+        legacy.initialize()
+        legacy.register_feature(Feature("PRESERVED", "Preserved feature", 100, TaskStatus.READY))
+        with sqlite3.connect(database) as connection:
+            connection.execute("DROP TABLE attempt_runtime_ownership")
+            connection.execute("DROP TABLE factory_control")
+            connection.execute(
+                "DELETE FROM registry_metadata WHERE key='control_schema_version'"
+            )
+
+        legacy.initialize()
+
+        with sqlite3.connect(database) as connection:
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM registry_metadata "
+                "WHERE key IN ('schema_version', 'control_schema_version')"
+            ))
+            control = connection.execute(
+                "SELECT dispatch_mode, kill_switch_engaged FROM factory_control "
+                "WHERE singleton=1"
+            ).fetchone()
+            preserved = connection.execute(
+                "SELECT title FROM features WHERE id='PRESERVED'"
+            ).fetchone()[0]
+            runtime_table = connection.execute(
+                "SELECT count(*) FROM sqlite_schema "
+                "WHERE type='table' AND name='attempt_runtime_ownership'"
+            ).fetchone()[0]
+        self.assertEqual(
+            metadata,
+            {"schema_version": "3", "control_schema_version": "1"},
+        )
+        self.assertEqual(control, ("PAUSED", 1))
+        self.assertEqual(preserved, "Preserved feature")
+        self.assertEqual(runtime_table, 1)
+
     def test_initialize_adds_capacity_fields_to_existing_version_one_packages(self) -> None:
         legacy_database = self.root / "legacy-capacity.sqlite3"
         with sqlite3.connect(legacy_database) as connection:
@@ -972,6 +1010,52 @@ class SQLiteRegistryTest(unittest.TestCase):
             reason="bounded canary",
         )
         self.assertEqual(self.registry.require_live_dispatch(), revision)
+
+    def test_dispatch_control_enforces_complete_phase_transition_table(self) -> None:
+        legal = {
+            ("PAUSED", "LIVE"),
+            ("PAUSED", "STOPPING"),
+            ("LIVE", "STOPPING"),
+            ("STOPPING", "PAUSED"),
+            ("STOPPING", "RECOVERY_REQUIRED"),
+            ("RECOVERY_REQUIRED", "PAUSED"),
+            ("RECOVERY_REQUIRED", "STOPPING"),
+        }
+        modes = ("PAUSED", "LIVE", "STOPPING", "RECOVERY_REQUIRED")
+        for source in modes:
+            for target in modes:
+                with self.subTest(source=source, target=target):
+                    database = self.root / f"transition-{source}-{target}.sqlite3"
+                    registry = SQLiteRegistry(database)
+                    registry.initialize()
+                    with sqlite3.connect(database) as connection:
+                        connection.execute(
+                            "UPDATE factory_control SET dispatch_mode=?, "
+                            "kill_switch_engaged=? WHERE singleton=1",
+                            (source, int(source != "LIVE")),
+                        )
+                    before = registry.dispatch_control()
+                    arguments = {
+                        "expected_revision": before["revision"],
+                        "expected_mode": source,
+                        "new_mode": target,
+                        "kill_switch_engaged": target != "LIVE",
+                        "changed_at": "2026-09-25T10:00:00Z",
+                        "reason": "transition-table test",
+                    }
+                    if (source, target) in legal:
+                        registry.set_dispatch_control(**arguments)
+                        self.assertEqual(
+                            registry.dispatch_control()["dispatch_mode"], target
+                        )
+                    else:
+                        with self.assertRaisesRegex(
+                            RegistryConflict, "INVALID_DISPATCH_TRANSITION"
+                        ):
+                            registry.set_dispatch_control(**arguments)
+                        after = registry.dispatch_control()
+                        self.assertEqual(after["dispatch_mode"], source)
+                        self.assertEqual(after["revision"], before["revision"])
 
     def test_runtime_provenance_is_atomic_and_finishes_all_ownership(self) -> None:
         self.feature()
