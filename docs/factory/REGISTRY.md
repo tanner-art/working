@@ -121,6 +121,15 @@ Attempts retain each execution rather than overwriting retry history. Evidence r
 
 Registry schema version 4 adds append-only final review outcomes. Each outcome binds one REVIEW package to its reviewed package, Registry-verified implementer, independent reviewer, request and decision times, findings, requested changes, and typed review evidence. The implementer must match the latest successful target attempt; the reviewer must own a successful review-package attempt and must have no attempt on the target. No target attempt may overlap the review interval, including an attempt that began before the request and completed afterward or remained active. Approval evidence must be a `review` record on the review package whose metadata names that reviewer-owned attempt. The Registry rejects stale target reviews, self-review, mismatched dependencies, missing or forged attempt provenance, ineligible reviewers, and outcome replacement. Pending review assignment still comes from the review package and lease; completion status or evidence prose never implies approval.
 
+Registry schema version 5 adds append-only control-operation receipts. A caller
+may supply a stable operation ID for claim, attempt start/finish, evidence,
+review outcome, lease release, package transition, and dispatch-mode changes.
+An exact retry returns the original result without another event or state
+mutation. Reusing that ID for a different semantic request fails closed with
+`OPERATION_ID_REUSED`. The runner derives stable IDs from authoritative package,
+attempt, lease, and Registry revision identities rather than process-local
+randomness.
+
 Invocation consumption is stored separately in the append-only usage ledger.
 Each provider/worker/account/invocation tuple is counted once, while a linked
 append-only source table retains CLI JSON, stream JSON, and transcript

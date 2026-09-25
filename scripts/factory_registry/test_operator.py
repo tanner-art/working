@@ -35,6 +35,7 @@ from scripts.factory_registry.operator import (
     followup_review_worker_gate,
     harden_paths,
     migrate_registry_v3_to_v4,
+    migrate_registry_v4_to_v5,
     parse_canary_spec,
     parse_followup_review_spec,
     preflight,
@@ -555,6 +556,13 @@ class OperatorFixture(unittest.TestCase):
 
     def _downgrade_fixture_to_v3(self) -> int:
         with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_update")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_delete")
             connection.execute("DROP TABLE review_outcomes")
@@ -563,6 +571,51 @@ class OperatorFixture(unittest.TestCase):
             )
         harden_paths(self.database, self.config_path, self.release)
         return self.registry.dispatch_control()["revision"]
+
+    def _downgrade_fixture_to_v4(self) -> int:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
+            )
+        harden_paths(self.database, self.config_path, self.release)
+        return self.registry.dispatch_control()["revision"]
+
+    def test_reviewed_registry_v5_migration_preserves_v4_history(self):
+        self.registry.register_feature(
+            Feature("HISTORY", "History", 1, TaskStatus.READY)
+        )
+        revision = self._downgrade_fixture_to_v4()
+        observed = status(self.database)
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["source_schema"], 4)
+        self.assertEqual(result["schema_version"], 5)
+        self.assertEqual(result["control"], observed["control"])
+        self.assertEqual(
+            status(self.database)["database_checks"]["schema_version"], "5"
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM control_operation_receipts"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT title FROM features WHERE id='HISTORY'"
+                ).fetchone()[0],
+                "History",
+            )
 
     def test_reviewed_registry_migration_and_restore(self):
         revision = self._downgrade_fixture_to_v3()

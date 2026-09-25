@@ -50,6 +50,18 @@ class Registry(Protocol):
 
     def require_live_dispatch(self, *, expected_revision: int | None = None) -> int: ...
 
+    def set_dispatch_control(
+        self,
+        *,
+        expected_revision: int,
+        expected_mode: str,
+        new_mode: str,
+        kill_switch_engaged: bool,
+        changed_at: str,
+        reason: str,
+        operation_id: str | None = None,
+    ) -> int: ...
+
     def register_feature(self, feature: Feature) -> None: ...
 
     def register_work_package(self, package: WorkPackage) -> None: ...
@@ -104,6 +116,7 @@ class Registry(Protocol):
         acquired_at: str,
         expires_at: str,
         expected_dispatch_revision: int | None = None,
+        operation_id: str | None = None,
     ) -> Lease: ...
 
     def renew_lease(self, lease_id: str, *, now: str, expires_at: str) -> Lease: ...
@@ -116,6 +129,30 @@ class Registry(Protocol):
         now: str,
         expires_at: str,
     ) -> Lease: ...
+
+    def begin_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        package_id: str,
+        worker_id: str,
+        runner_pid: int,
+        started_at: str,
+        expected_revision: int,
+        operation_id: str | None = None,
+    ) -> None: ...
+
+    def finish_attempt_runtime(
+        self,
+        attempt_id: str,
+        *,
+        ended_at: str,
+        outcome: str,
+        next_status: TaskStatus,
+        reason: str,
+        failure_detail: str | None = None,
+        operation_id: str | None = None,
+    ) -> None: ...
 
     def active_attempt_runtimes(self) -> Sequence[Mapping[str, Any]]: ...
 
@@ -148,6 +185,7 @@ class Registry(Protocol):
         released_at: str,
         reason: str,
         next_status: TaskStatus,
+        operation_id: str | None = None,
     ) -> None: ...
 
     def transition_work_package(
@@ -157,6 +195,7 @@ class Registry(Protocol):
         expected_status: TaskStatus,
         new_status: TaskStatus,
         changed_at: str,
+        operation_id: str | None = None,
     ) -> None: ...
 
     def append_event(
@@ -170,7 +209,9 @@ class Registry(Protocol):
         detail: Mapping[str, Any] | None = None,
     ) -> str: ...
 
-    def record_evidence(self, evidence: Evidence) -> None: ...
+    def record_evidence(
+        self, evidence: Evidence, *, operation_id: str | None = None
+    ) -> None: ...
 
     def record_review_outcome(
         self,
@@ -178,6 +219,7 @@ class Registry(Protocol):
         *,
         evidence: Evidence | None = None,
         expected_revision: int | None = None,
+        operation_id: str | None = None,
     ) -> int: ...
 
     def register_attempt(self, attempt: Attempt) -> None: ...

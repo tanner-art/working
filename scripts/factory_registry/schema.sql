@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 );
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
-    ('schema_version', '4'),
+    ('schema_version', '5'),
     ('control_schema_version', '1'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
@@ -312,6 +312,26 @@ CREATE TABLE IF NOT EXISTS task_events (
     attempt_id TEXT REFERENCES attempts(id),
     detail_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS control_operation_receipts (
+    operation_id TEXT PRIMARY KEY,
+    operation_kind TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS control_operation_receipts_are_append_only_update
+BEFORE UPDATE ON control_operation_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS control_operation_receipts_are_append_only_delete
+BEFORE DELETE ON control_operation_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+END;
 
 CREATE TRIGGER IF NOT EXISTS task_events_are_append_only_update
 BEFORE UPDATE ON task_events

@@ -83,6 +83,23 @@ V3_TO_V4_STATEMENTS = (
            SELECT RAISE(ABORT, 'REVIEW_OUTCOMES_APPEND_ONLY');
        END""",
 )
+V4_TO_V5_STATEMENTS = (
+    """CREATE TABLE control_operation_receipts (
+        operation_id TEXT PRIMARY KEY,
+        operation_kind TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""",
+    """CREATE TRIGGER control_operation_receipts_are_append_only_update
+       BEFORE UPDATE ON control_operation_receipts BEGIN
+           SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+       END""",
+    """CREATE TRIGGER control_operation_receipts_are_append_only_delete
+       BEFORE DELETE ON control_operation_receipts BEGIN
+           SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+       END""",
+)
 HEARTBEAT_FRESH_SECONDS = 180
 USAGE_FRESH_SECONDS = 900
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
@@ -95,6 +112,7 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/controlled_restart.py",
     "scripts/factory_registry/live_observation.py",
     "scripts/factory_registry/live_observation_cli.py",
+    "scripts/factory_registry/lifecycle.py",
     "scripts/factory_registry/models.py",
     "scripts/factory_registry/operator.py",
     "scripts/factory_registry/operator_cli.py",
@@ -758,6 +776,8 @@ def _create_verified_registry_backup(
     *,
     expected_revision: int,
     observed_at: str,
+    expected_schema: int = 3,
+    require_empty_history: bool = True,
 ) -> Mapping[str, Any]:
     evidence_directory = database.parent / "evidence"
     if (
@@ -777,11 +797,11 @@ def _create_verified_registry_backup(
             target.execute("PRAGMA journal_mode=DELETE")
     except sqlite3.Error as error:
         backup.unlink(missing_ok=True)
-        raise OperatorError(f"cannot create Registry v3 backup: {error}") from error
+        raise OperatorError(f"cannot create Registry v{expected_schema} backup: {error}") from error
     install_launchd._set_owner_only(backup, 0o600)
     checks = _database_checks(backup, immutable=True, require_wal=False)
     if (
-        checks["schema_version"] != "3"
+        checks["schema_version"] != str(expected_schema)
         or checks["control_schema_version"] != str(CONTROL_SCHEMA_VERSION)
     ):
         raise OperatorError("Registry backup schema metadata mismatch")
@@ -792,10 +812,12 @@ def _create_verified_registry_backup(
         or not backup_control["kill_switch_engaged"]
     ):
         raise OperatorError("Registry backup control mismatch")
-    if _total_ownership_counts(backup, immutable=True) != {
+    if require_empty_history and _total_ownership_counts(backup, immutable=True) != {
         "leases": 0, "attempts": 0, "runtimes": 0,
     }:
-        raise OperatorError("Registry v3 backup contains ownership history")
+        raise OperatorError(
+            f"Registry v{expected_schema} backup contains ownership history"
+        )
     preservation = verify_preservation(
         SQLiteRegistry(backup).control_center_snapshot(observed_at=observed_at),
         preservation_path,
@@ -1023,6 +1045,150 @@ def migrate_registry_v3_to_v4(
         "preservation_before": preservation,
         "preservation_after": preservation_after,
         "review_outcomes": 0,
+    }
+
+
+def migrate_registry_v4_to_v5(
+    database: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+    *,
+    backup_path: Path | None = None,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Add replay receipts to a quiescent v4 Registry with verified rollback."""
+    observed_at = observed_at or utc_now()
+    verify_release(release, expected_commit)
+    permission_failures = _release_permission_failures(release)
+    if permission_failures:
+        raise OperatorError(
+            "private/immutable release gate failed: " + ",".join(permission_failures)
+        )
+    if (
+        _path_mode(database.parent) != 0o700
+        or _path_mode(database) != 0o600
+        or database.is_symlink()
+        or database.stat().st_uid != os.getuid()
+    ):
+        raise OperatorError("Registry migration requires an owner-controlled 0600 database")
+    _require_installed_preservation(database, preservation_path)
+    current = status(database, observed_at=observed_at)
+    _require_migration_state(current, expected_schema=4, expected_revision=expected_revision)
+    ownership_before = _total_ownership_counts(database)
+    before_snapshot = SQLiteRegistry(database).control_center_snapshot(
+        observed_at=observed_at
+    )
+    preservation = verify_preservation(before_snapshot, preservation_path)
+    control_before = dict(current["control"])
+    backup_path = backup_path or (
+        database.parent
+        / "evidence"
+        / f"registry-v4-revision-{expected_revision}-{time.time_ns()}.sqlite3"
+    )
+    backup_evidence = _create_verified_registry_backup(
+        database,
+        backup_path,
+        preservation_path,
+        expected_revision=expected_revision,
+        observed_at=observed_at,
+        expected_schema=4,
+        require_empty_history=False,
+    )
+    with sqlite3.connect(database, timeout=10, isolation_level=None) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM registry_metadata"
+            ))
+            if metadata.get("schema_version") != "4":
+                raise OperatorError("Registry schema changed before migration")
+            if metadata.get("revision") != str(expected_revision):
+                raise OperatorError("Registry revision changed before migration")
+            control = connection.execute(
+                "SELECT dispatch_mode, kill_switch_engaged FROM factory_control "
+                "WHERE singleton=1"
+            ).fetchone()
+            if control is None or control[0] != "PAUSED" or control[1] != 1:
+                raise OperatorError("Registry control changed before migration")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
+                ).fetchone()
+                or connection.execute(
+                    "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1"
+                ).fetchone()
+                or connection.execute(
+                    "SELECT 1 FROM attempt_runtime_ownership "
+                    "WHERE released_at IS NULL LIMIT 1"
+                ).fetchone()
+            ):
+                raise OperatorError("Registry active ownership appeared before migration")
+            for statement in V4_TO_V5_STATEMENTS:
+                connection.execute(statement)
+            connection.execute(
+                "UPDATE registry_metadata SET value='5' "
+                "WHERE key='schema_version' AND value='4'"
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise OperatorError("Registry schema version compare-and-swap failed")
+            if tuple(connection.execute("PRAGMA foreign_key_check")):
+                raise OperatorError("Registry migration introduced foreign-key violations")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    try:
+        final = status(database, observed_at=observed_at)
+        _require_migration_state(
+            final, expected_schema=5, expected_revision=expected_revision
+        )
+        if final["control"] != control_before:
+            raise OperatorError("Registry migration changed dispatch control")
+        with sqlite3.connect(database) as connection:
+            receipts = connection.execute(
+                "SELECT count(*) FROM control_operation_receipts"
+            ).fetchone()[0]
+        if receipts != 0:
+            raise OperatorError("Registry migration did not create an empty receipt store")
+        if _total_ownership_counts(database) != ownership_before:
+            raise OperatorError("Registry migration changed ownership history")
+        preservation_after = verify_preservation(
+            SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at),
+            preservation_path,
+        )
+    except Exception as original_error:
+        try:
+            _restore_database_from_backup(
+                database, backup_path, backup_evidence["sha256"]
+            )
+            restored = status(database, observed_at=observed_at)
+            _require_migration_state(
+                restored, expected_schema=4, expected_revision=expected_revision
+            )
+        except Exception as restore_error:
+            raise OperatorError(
+                "v5 migration verification and v4 restore both failed; "
+                f"original={type(original_error).__name__}: {original_error}; "
+                f"restore={type(restore_error).__name__}: {restore_error}"
+            ) from original_error
+        raise OperatorError(
+            "v5 migration verification failed; verified v4 backup restored; "
+            f"original={type(original_error).__name__}: {original_error}"
+        ) from original_error
+    return {
+        "kind": "threadline-factory-registry-migration",
+        "passed": True,
+        "source_schema": 4,
+        "schema_version": 5,
+        "control": final["control"],
+        "backup": backup_evidence,
+        "preservation_before": preservation,
+        "preservation_after": preservation_after,
+        "operation_receipts": 0,
     }
 
 
@@ -2134,6 +2300,7 @@ def enable_live(
             kill_switch_engaged=False,
             changed_at=utc_now(),
             reason=f"owner-approved bounded canary {canary_feature_id}",
+            operation_id=f"enable-live:{canary_feature_id}:{expected_revision}",
         )
     except Exception:
         # A stale revision after service promotion is handled as an emergency
@@ -2207,6 +2374,7 @@ def return_paused(database: Path, *, expected_revision: int, reason: str) -> Map
         kill_switch_engaged=True,
         changed_at=utc_now(),
         reason=reason,
+        operation_id=f"return-paused:{expected_revision}:{reason}",
     )
     return {
         "kind": "threadline-factory-return-paused",

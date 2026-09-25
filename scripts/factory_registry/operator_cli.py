@@ -26,6 +26,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     enable_live,
     followup_review_worker_gate,
     migrate_registry_v3_to_v4,
+    migrate_registry_v4_to_v5,
     parse_canary_spec,
     parse_followup_review_spec,
     preflight,
@@ -75,6 +76,18 @@ def _parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("status", help="Read Registry control and ownership state")
     command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "migrate-registry-v5",
+        help="Atomically migrate a quiescent PAUSED Registry from v4 to v5",
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--backup", type=pathlib.Path)
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser(
@@ -191,6 +204,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ))
     if args.command == "migrate-registry-v4":
         return dict(migrate_registry_v3_to_v4(
+            args.database,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.expect_revision,
+            backup_path=args.backup,
+            observed_at=args.observed_at,
+        ))
+    if args.command == "migrate-registry-v5":
+        return dict(migrate_registry_v4_to_v5(
             args.database,
             args.release,
             args.preservation,

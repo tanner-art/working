@@ -7,6 +7,7 @@ the same ``Registry`` protocol later.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -36,25 +37,27 @@ from .models import (
     WorkPackage,
 )
 from .repository import RegistryConflict, RegistryNotFound
+from .lifecycle import (
+    TransitionAuthority,
+    validate_attempt_completion,
+    validate_dispatch_transition,
+    validate_package_transition,
+)
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
-LEGAL_DISPATCH_TRANSITIONS = {
-    "PAUSED": frozenset({"LIVE", "STOPPING"}),
-    "LIVE": frozenset({"STOPPING"}),
-    "STOPPING": frozenset({"PAUSED", "RECOVERY_REQUIRED"}),
-    "RECOVERY_REQUIRED": frozenset({"PAUSED", "STOPPING"}),
-}
-
-
 def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
 def _utc_now() -> str:
     return _normalize_timestamp(datetime.now(timezone.utc).isoformat())
+
+
+def _request_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
 def _normalize_timestamp(value: str) -> str:
@@ -268,6 +271,123 @@ class SQLiteRegistry:
         with self._connection() as connection:
             return str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
 
+    @staticmethod
+    def _operation_replay(
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str | None,
+        operation_kind: str,
+        request: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """Return an exact prior result or reject operation-ID reuse."""
+        if operation_id is None:
+            return None
+        if not operation_id.strip():
+            raise RegistryConflict("INVALID_OPERATION_ID")
+        row = connection.execute(
+            """SELECT operation_kind, request_sha256, result_json
+               FROM control_operation_receipts WHERE operation_id=?""",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        digest = _request_sha256(request)
+        if row["operation_kind"] != operation_kind or row["request_sha256"] != digest:
+            raise RegistryConflict("OPERATION_ID_REUSED", operation_id)
+        result = json.loads(row["result_json"])
+        if result.get("error_type") == "RegistryConflict":
+            raise RegistryConflict(
+                str(result["error_code"]), str(result.get("error_detail", ""))
+            )
+        if result.get("error_type") == "RegistryNotFound":
+            raise RegistryNotFound(str(result.get("error_detail", "not found")))
+        return result
+
+    @staticmethod
+    def _record_operation(
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str | None,
+        operation_kind: str,
+        request: Mapping[str, Any],
+        result: Mapping[str, Any],
+        recorded_at: str,
+    ) -> None:
+        if operation_id is None:
+            return
+        connection.execute(
+            """INSERT INTO control_operation_receipts
+               (operation_id, operation_kind, request_sha256, result_json, recorded_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                operation_id,
+                operation_kind,
+                _request_sha256(request),
+                _json(result),
+                recorded_at,
+            ),
+        )
+
+    def _record_operation_rejection(
+        self,
+        *,
+        operation_id: str | None,
+        operation_kind: str,
+        request: Mapping[str, Any],
+        error: Exception,
+        recorded_at: str,
+    ) -> None:
+        """Best-effort durable audit for a named, authoritatively rejected mutation."""
+        if operation_id is None or not isinstance(error, (RegistryConflict, RegistryNotFound)):
+            return
+        if isinstance(error, RegistryConflict):
+            result = {
+                "error_type": "RegistryConflict",
+                "error_code": error.code,
+                "error_detail": error.detail,
+            }
+        else:
+            result = {
+                "error_type": "RegistryNotFound",
+                "error_detail": str(error),
+            }
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT 1 FROM control_operation_receipts WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                if existing is not None:
+                    connection.rollback()
+                    return
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                    request=request,
+                    result=result,
+                    recorded_at=recorded_at,
+                )
+                self._insert_event(
+                    connection,
+                    "CONTROL_OPERATION_REJECTED",
+                    recorded_at,
+                    None,
+                    None,
+                    None,
+                    {
+                        "operation_id": operation_id,
+                        "operation_kind": operation_kind,
+                        **result,
+                    },
+                )
+                self._bump_revision(connection)
+                connection.commit()
+        except Exception:
+            # Audit failure must never replace the authoritative rejection.
+            return
+
     def dispatch_control(self) -> Mapping[str, Any]:
         """Return the durable, fail-closed runner dispatch gate."""
         with self._connection() as connection:
@@ -310,6 +430,7 @@ class SQLiteRegistry:
         kill_switch_engaged: bool,
         changed_at: str,
         reason: str,
+        operation_id: str | None = None,
     ) -> int:
         """Atomically compare-and-swap the persistent dispatch gate."""
         if new_mode not in {"PAUSED", "LIVE", "STOPPING", "RECOVERY_REQUIRED"}:
@@ -319,10 +440,26 @@ class SQLiteRegistry:
         if new_mode != "LIVE" and not kill_switch_engaged:
             raise RegistryConflict("INVALID_DISPATCH_CONTROL")
         changed_at = _normalize_timestamp(changed_at)
+        request = {
+            "expected_revision": expected_revision,
+            "expected_mode": expected_mode,
+            "new_mode": new_mode,
+            "kill_switch_engaged": kill_switch_engaged,
+            "reason": reason,
+        }
         with self._connection() as connection:
             self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="SET_DISPATCH_CONTROL",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
                 revision = int(connection.execute(
                     "SELECT value FROM registry_metadata WHERE key='revision'"
                 ).fetchone()[0])
@@ -357,11 +494,7 @@ class SQLiteRegistry:
                     ).fetchone()
                     if active or running or runtimes:
                         raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
-                if new_mode not in LEGAL_DISPATCH_TRANSITIONS[expected_mode]:
-                    raise RegistryConflict(
-                        "INVALID_DISPATCH_TRANSITION",
-                        f"{expected_mode}->{new_mode}",
-                    )
+                validate_dispatch_transition(expected_mode, new_mode)
                 connection.execute(
                     """UPDATE factory_control
                        SET dispatch_mode=?, kill_switch_engaged=?, changed_at=?, reason=?
@@ -383,10 +516,25 @@ class SQLiteRegistry:
                     },
                 )
                 result = self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="SET_DISPATCH_CONTROL",
+                    request=request,
+                    result={"revision": result},
+                    recorded_at=changed_at,
+                )
                 connection.commit()
                 return result
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="SET_DISPATCH_CONTROL",
+                    request=request,
+                    error=error,
+                    recorded_at=changed_at,
+                )
                 raise
 
     def engage_dispatch_kill_switch(self, *, changed_at: str, reason: str) -> int:
@@ -497,15 +645,32 @@ class SQLiteRegistry:
         runner_pid: int,
         started_at: str,
         expected_revision: int,
+        operation_id: str | None = None,
     ) -> None:
         """Persist attempt and runner ownership before any provider launch."""
         if runner_pid <= 0:
             raise RegistryConflict("INVALID_PROCESS_ID")
         started_at = _normalize_timestamp(started_at)
+        request = {
+            "attempt_id": attempt_id,
+            "package_id": package_id,
+            "worker_id": worker_id,
+            "runner_pid": runner_pid,
+            "expected_revision": expected_revision,
+        }
         with self._connection() as connection:
             self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="BEGIN_ATTEMPT_RUNTIME",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
                 control = connection.execute(
                     """SELECT control.dispatch_mode, control.kill_switch_engaged,
                               metadata.value AS revision
@@ -554,12 +719,35 @@ class SQLiteRegistry:
                     {"runner_pid": runner_pid, "lease_id": lease["id"]},
                 )
                 self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="BEGIN_ATTEMPT_RUNTIME",
+                    request=request,
+                    result={"attempt_id": attempt_id},
+                    recorded_at=started_at,
+                )
                 connection.commit()
             except sqlite3.IntegrityError as error:
                 connection.rollback()
-                raise RegistryConflict("ATTEMPT_RUNTIME_CONFLICT", str(error)) from error
-            except Exception:
+                conflict = RegistryConflict("ATTEMPT_RUNTIME_CONFLICT", str(error))
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="BEGIN_ATTEMPT_RUNTIME",
+                    request=request,
+                    error=conflict,
+                    recorded_at=started_at,
+                )
+                raise conflict from error
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="BEGIN_ATTEMPT_RUNTIME",
+                    request=request,
+                    error=error,
+                    recorded_at=started_at,
+                )
                 raise
 
     def record_attempt_process(
@@ -1097,25 +1285,31 @@ class SQLiteRegistry:
         next_status: TaskStatus,
         reason: str,
         failure_detail: str | None = None,
+        operation_id: str | None = None,
     ) -> None:
         """Atomically close runtime, attempt, lease, package, and worker ownership."""
-        if outcome not in {"SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED"}:
-            raise RegistryConflict("INVALID_ATTEMPT_OUTCOME", outcome)
-        if next_status == TaskStatus.ACTIVE:
-            raise RegistryConflict("INVALID_RELEASE_STATUS")
-        allowed_statuses = {
-            "SUCCEEDED": {TaskStatus.VERIFY_REVIEW, TaskStatus.DONE},
-            "FAILED": {TaskStatus.BLOCKED},
-            "BLOCKED": {TaskStatus.BLOCKED},
-            "CANCELLED": {TaskStatus.BLOCKED, TaskStatus.READY},
-        }
-        if next_status not in allowed_statuses[outcome]:
-            raise RegistryConflict("ATTEMPT_OUTCOME_STATUS_MISMATCH")
+        validate_attempt_completion(outcome, next_status)
         ended_at = _normalize_timestamp(ended_at)
+        request = {
+            "attempt_id": attempt_id,
+            "outcome": outcome,
+            "next_status": next_status.value,
+            "reason": reason,
+            "failure_detail": failure_detail,
+        }
         with self._connection() as connection:
             self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="FINISH_ATTEMPT_RUNTIME",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
                 row = connection.execute(
                     """SELECT attempt.package_id, attempt.worker_id, attempt.lease_id,
                               attempt.started_at, attempt.ended_at,
@@ -1184,9 +1378,24 @@ class SQLiteRegistry:
                     },
                 )
                 self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="FINISH_ATTEMPT_RUNTIME",
+                    request=request,
+                    result={"attempt_id": attempt_id, "status": next_status.value},
+                    recorded_at=ended_at,
+                )
                 connection.commit()
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="FINISH_ATTEMPT_RUNTIME",
+                    request=request,
+                    error=error,
+                    recorded_at=ended_at,
+                )
                 raise
 
     def runtime_orphans(
@@ -1834,16 +2043,38 @@ class SQLiteRegistry:
         acquired_at: str,
         expires_at: str,
         expected_dispatch_revision: int | None = None,
+        operation_id: str | None = None,
     ) -> Lease:
         acquired_at = _normalize_timestamp(acquired_at)
         expires_at = _normalize_timestamp(expires_at)
         if expires_at <= acquired_at:
             raise RegistryConflict("INVALID_LEASE_EXPIRY")
         self.expire_leases(observed_at=acquired_at)
-        lease_id = str(uuid.uuid4())
+        request = {
+            "package_id": package_id,
+            "worker_id": worker_id,
+            "lease_duration_seconds": (
+                datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                - datetime.fromisoformat(acquired_at.replace("Z", "+00:00"))
+            ).total_seconds(),
+            "expected_dispatch_revision": expected_dispatch_revision,
+        }
+        lease_id = (
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"factory-operation:{operation_id}"))
+            if operation_id is not None else str(uuid.uuid4())
+        )
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="ACQUIRE_LEASE",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return Lease(**replay)
                 if expected_dispatch_revision is not None:
                     control = connection.execute(
                         """SELECT control.dispatch_mode, control.kill_switch_engaged,
@@ -1873,6 +2104,11 @@ class SQLiteRegistry:
                     raise RegistryConflict("ORCHESTRA_CANNOT_CLAIM")
                 if package["status"] != TaskStatus.READY.value:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
+                validate_package_transition(
+                    TaskStatus.READY,
+                    TaskStatus.ACTIVE,
+                    authority=TransitionAuthority.LEASE_ACQUIRE,
+                )
                 if package["lane"] is None:
                     raise RegistryConflict("PACKAGE_LANE_UNASSIGNED")
                 if worker["availability"] != "IDLE":
@@ -1945,9 +2181,33 @@ class SQLiteRegistry:
                     {"lease_id": lease_id, "expires_at": expires_at},
                 )
                 self._bump_revision(connection)
+                result = {
+                    "id": lease_id,
+                    "package_id": package_id,
+                    "worker_id": worker_id,
+                    "acquired_at": acquired_at,
+                    "expires_at": expires_at,
+                    "released_at": None,
+                    "release_reason": None,
+                }
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="ACQUIRE_LEASE",
+                    request=request,
+                    result=result,
+                    recorded_at=acquired_at,
+                )
                 connection.commit()
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="ACQUIRE_LEASE",
+                    request=request,
+                    error=error,
+                    recorded_at=acquired_at,
+                )
                 raise
         return Lease(lease_id, package_id, worker_id, acquired_at, expires_at)
 
@@ -2004,14 +2264,27 @@ class SQLiteRegistry:
         released_at: str,
         reason: str,
         next_status: TaskStatus,
+        operation_id: str | None = None,
     ) -> None:
-        if next_status == TaskStatus.ACTIVE:
-            raise RegistryConflict("INVALID_RELEASE_STATUS")
         released_at = _normalize_timestamp(released_at)
+        request = {
+            "lease_id": lease_id,
+            "reason": reason,
+            "next_status": next_status.value,
+        }
         self.expire_leases(observed_at=released_at)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RELEASE_LEASE",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
                 row = connection.execute(
                     """SELECT lease.*, package.last_heartbeat_at AS package_heartbeat_at
                        FROM leases AS lease
@@ -2027,6 +2300,11 @@ class SQLiteRegistry:
                     row["package_heartbeat_at"] and released_at < row["package_heartbeat_at"]
                 ):
                     raise RegistryConflict("INVALID_LEASE_CHRONOLOGY")
+                validate_package_transition(
+                    TaskStatus.ACTIVE,
+                    next_status,
+                    authority=TransitionAuthority.LEASE_RELEASE,
+                )
                 transitioned = connection.execute(
                     """UPDATE work_packages
                        SET status=?, ready_at=CASE WHEN ?='READY' THEN ? ELSE ready_at END,
@@ -2052,9 +2330,24 @@ class SQLiteRegistry:
                     {"lease_id": lease_id, "reason": reason, "next_status": next_status.value},
                 )
                 self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RELEASE_LEASE",
+                    request=request,
+                    result={"lease_id": lease_id, "status": next_status.value},
+                    recorded_at=released_at,
+                )
                 connection.commit()
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RELEASE_LEASE",
+                    request=request,
+                    error=error,
+                    recorded_at=released_at,
+                )
                 raise
 
     def transition_work_package(
@@ -2064,18 +2357,38 @@ class SQLiteRegistry:
         expected_status: TaskStatus,
         new_status: TaskStatus,
         changed_at: str,
+        operation_id: str | None = None,
     ) -> None:
         changed_at = _normalize_timestamp(changed_at)
         if new_status == TaskStatus.ACTIVE:
             raise RegistryConflict("ACTIVE_REQUIRES_LEASE")
+        request = {
+            "package_id": package_id,
+            "expected_status": expected_status.value,
+            "new_status": new_status.value,
+        }
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="TRANSITION_WORK_PACKAGE",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
                 if expected_status == TaskStatus.ACTIVE and connection.execute(
                     "SELECT 1 FROM leases WHERE package_id=? AND released_at IS NULL",
                     (package_id,),
                 ).fetchone():
                     raise RegistryConflict("ACTIVE_TRANSITION_REQUIRES_LEASE_RELEASE")
+                validate_package_transition(
+                    expected_status,
+                    new_status,
+                    authority=TransitionAuthority.DIRECT,
+                )
                 updated = connection.execute(
                     """UPDATE work_packages
                        SET status=?, ready_at=CASE WHEN ?='READY' THEN ? ELSE ready_at END,
@@ -2093,9 +2406,24 @@ class SQLiteRegistry:
                     {"from": expected_status.value, "to": new_status.value},
                 )
                 self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="TRANSITION_WORK_PACKAGE",
+                    request=request,
+                    result={"package_id": package_id, "status": new_status.value},
+                    recorded_at=changed_at,
+                )
                 connection.commit()
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="TRANSITION_WORK_PACKAGE",
+                    request=request,
+                    error=error,
+                    recorded_at=changed_at,
+                )
                 raise
 
     @staticmethod
@@ -2141,11 +2469,60 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
-    def record_evidence(self, evidence: Evidence) -> None:
+    def record_evidence(
+        self, evidence: Evidence, *, operation_id: str | None = None
+    ) -> None:
         recorded_at = _normalize_timestamp(evidence.recorded_at)
+        request = {
+            "id": evidence.id,
+            "package_id": evidence.package_id,
+            "kind": evidence.kind,
+            "uri": evidence.uri,
+            "summary": evidence.summary,
+            "recorded_at": recorded_at,
+            "metadata": dict(evidence.metadata),
+        }
+        operation_id = operation_id or f"evidence:{evidence.id}"
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_EVIDENCE",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
+                existing = connection.execute(
+                    """SELECT package_id, kind, uri, summary, recorded_at, metadata_json
+                       FROM evidence WHERE id=?""",
+                    (evidence.id,),
+                ).fetchone()
+                if existing is not None:
+                    existing_request = {
+                        "id": evidence.id,
+                        "package_id": existing["package_id"],
+                        "kind": existing["kind"],
+                        "uri": existing["uri"],
+                        "summary": existing["summary"],
+                        "recorded_at": existing["recorded_at"],
+                        "metadata": json.loads(existing["metadata_json"]),
+                    }
+                    if _request_sha256(existing_request) != _request_sha256(request):
+                        raise RegistryConflict("EVIDENCE_ID_REUSED", evidence.id)
+                    self._record_operation(
+                        connection,
+                        operation_id=operation_id,
+                        operation_kind="RECORD_EVIDENCE",
+                        request=request,
+                        result={"evidence_id": evidence.id},
+                        recorded_at=recorded_at,
+                    )
+                    self._bump_revision(connection)
+                    connection.commit()
+                    return
                 connection.execute(
                     """INSERT INTO evidence
                    (id, package_id, kind, uri, summary, recorded_at, metadata_json)
@@ -2156,9 +2533,24 @@ class SQLiteRegistry:
                     ),
                 )
                 self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_EVIDENCE",
+                    request=request,
+                    result={"evidence_id": evidence.id},
+                    recorded_at=recorded_at,
+                )
                 connection.commit()
-            except Exception:
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RECORD_EVIDENCE",
+                    request=request,
+                    error=error,
+                    recorded_at=recorded_at,
+                )
                 raise
 
     def record_review_outcome(
@@ -2167,6 +2559,7 @@ class SQLiteRegistry:
         *,
         evidence: Evidence | None = None,
         expected_revision: int | None = None,
+        operation_id: str | None = None,
     ) -> int:
         """Append one explicit, independently authored review decision."""
         requested_at = _normalize_timestamp(outcome.requested_at)
@@ -2191,9 +2584,44 @@ class SQLiteRegistry:
             or not evidence.metadata["attempt_id"]
         ):
             raise RegistryConflict("REVIEW_EVIDENCE_MISMATCH", evidence.id)
+        request = {
+            "outcome": {
+                "id": outcome.id,
+                "review_package_id": outcome.review_package_id,
+                "target_package_id": outcome.target_package_id,
+                "implementer_worker_id": outcome.implementer_worker_id,
+                "reviewer_worker_id": outcome.reviewer_worker_id,
+                "requested_at": requested_at,
+                "decided_at": decided_at,
+                "state": outcome.state.value,
+                "findings": list(outcome.findings),
+                "changes_requested": list(outcome.changes_requested),
+                "approval_evidence_ids": list(outcome.approval_evidence_ids),
+            },
+            "evidence": None if evidence is None else {
+                "id": evidence.id,
+                "package_id": evidence.package_id,
+                "kind": evidence.kind,
+                "uri": evidence.uri,
+                "summary": evidence.summary,
+                "recorded_at": evidence_recorded_at,
+                "metadata": dict(evidence.metadata),
+            },
+            "expected_revision": expected_revision,
+        }
+        operation_id = operation_id or f"review-outcome:{outcome.id}"
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_REVIEW_OUTCOME",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
                 if expected_revision is not None:
                     self._require_revision(connection, expected_revision)
                 if evidence is not None:
@@ -2227,6 +2655,11 @@ class SQLiteRegistry:
                     or review_package["feature_id"] != target_package["feature_id"]
                 ):
                     raise RegistryConflict("REVIEW_OUTCOME_STATUS_INVALID")
+                validate_package_transition(
+                    TaskStatus.VERIFY_REVIEW,
+                    TaskStatus.DONE,
+                    authority=TransitionAuthority.REVIEW_OUTCOME,
+                )
                 dependency = connection.execute(
                     "SELECT 1 FROM task_dependencies WHERE package_id=? AND dependency_id=?",
                     (outcome.review_package_id, outcome.target_package_id),
@@ -2364,13 +2797,36 @@ class SQLiteRegistry:
                     },
                 )
                 revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_REVIEW_OUTCOME",
+                    request=request,
+                    result={"revision": revision, "outcome_id": outcome.id},
+                    recorded_at=decided_at,
+                )
                 connection.commit()
                 return revision
             except sqlite3.IntegrityError as error:
                 connection.rollback()
-                raise RegistryConflict("REVIEW_OUTCOME_CONFLICT", str(error)) from error
-            except Exception:
+                conflict = RegistryConflict("REVIEW_OUTCOME_CONFLICT", str(error))
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RECORD_REVIEW_OUTCOME",
+                    request=request,
+                    error=conflict,
+                    recorded_at=decided_at,
+                )
+                raise conflict from error
+            except Exception as error:
                 connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RECORD_REVIEW_OUTCOME",
+                    request=request,
+                    error=error,
+                    recorded_at=decided_at,
+                )
                 raise
 
     def register_attempt(self, attempt: Attempt) -> None:
