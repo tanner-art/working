@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { factoryControlFixture } from './factoryControl.fixture'
 import { actualSoakCanaryProjectionFixture, preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
-import { capacitySummary, effectiveWorkerHealth, emptyQueueFilters, filterFactoryFeatures, packageIndex, visibleAttention, visibleReviews } from './buildDashboard'
+import { capacitySummary, effectiveWorkerHealth, emptyQueueFilters, failureClassification, filterFactoryFeatures, packageIndex, readinessReason, recommendedFailureAction, visibleAttention, visibleReviews, workerConstraintDetails } from './buildDashboard'
 
 describe('Factory Control Center view helpers', () => {
   it('filters packages while retaining feature-level organization', () => {
@@ -81,5 +81,22 @@ describe('Factory Control Center view helpers', () => {
     expect(effectiveWorkerHealth({ ...base, heartbeatAt: '2026-09-24T18:20:00Z' }, generatedAt)).toMatchObject({ state: 'constrained', reason: 'Heartbeat evidence is stale (600s old).' })
     expect(effectiveWorkerHealth({ ...base, heartbeatAt: '2026-09-24T18:31:00Z' }, generatedAt)).toMatchObject({ state: 'constrained', reason: 'Heartbeat timestamp is in the future.' })
     expect(effectiveWorkerHealth(base, generatedAt).state).toBe('healthy')
+  })
+
+  it('explains worker constraints and concrete recovery actions', () => {
+    const worker = { ...factoryControlFixture.workers[0], serviceState: 'offline' as const, authenticationState: 'invalid' as const, heartbeatAt: '2026-09-24T18:20:00Z', capacityState: 'unknown' as const }
+    const details = workerConstraintDetails(worker, factoryControlFixture.generatedAt)
+    expect(details.map(item => item.code)).toEqual(expect.arrayContaining(['SERVICE_OFFLINE', 'AUTH_INVALID', 'HEARTBEAT_STALE', 'CAPACITY_UNKNOWN']))
+    expect(details.every(item => item.nextAction.length > 0)).toBe(true)
+  })
+
+  it('explains why proposed and dependency-blocked work is not ready', () => {
+    const packages = packageIndex(factoryControlFixture.features)
+    const proposed = { ...factoryControlFixture.features[0].packages[0], id: 'PROPOSED', state: 'ON_DECK' as const, dependencies: [] }
+    const waiting = { ...proposed, id: 'WAITING', dependencies: ['CONTROL-UI'] }
+    expect(readinessReason(proposed, packages)).toContain('Proposed / suggested work')
+    expect(readinessReason(waiting, packages)).toContain('CONTROL-UI (ACTIVE)')
+    expect(failureClassification('DEPENDENCY_BLOCKED')).toBe('dependency')
+    expect(recommendedFailureAction('DEPENDENCY_BLOCKED')).toContain('prerequisite')
   })
 })

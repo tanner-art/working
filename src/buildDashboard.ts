@@ -7,6 +7,12 @@ export interface WorkerDisplayHealth {
   reason: string
 }
 
+export interface WorkerConstraintDetail {
+  code: string
+  reason: string
+  nextAction: string
+}
+
 export interface ReviewDisplayItem {
   id: string
   packageId: string
@@ -86,6 +92,73 @@ export function effectiveWorkerHealth(worker: FactoryWorker, generatedAt: string
   if (heartbeatAgeSeconds > WORKER_HEARTBEAT_FRESH_SECONDS) return { state: 'constrained', reason: `Heartbeat evidence is stale (${Math.floor(heartbeatAgeSeconds)}s old).` }
   if (worker.health === 'constrained') return { state: 'constrained', reason: 'Worker reports constrained.' }
   return { state: 'healthy', reason: 'Service, authentication, and heartbeat evidence are current.' }
+}
+
+export function workerConstraintDetails(worker: FactoryWorker, generatedAt: string, scopes: FactoryCapacityScope[] = []): WorkerConstraintDetail[] {
+  const details: WorkerConstraintDetail[] = []
+  const add = (code: string, reason: string, nextAction: string) => details.push({ code, reason, nextAction })
+  if (worker.health === 'offline') add('WORKER_OFFLINE', 'Worker reports offline.', 'Reload the worker in PAUSED / DRY-RUN and verify a fresh heartbeat before making it eligible.')
+  if (worker.serviceState === 'offline') add('SERVICE_OFFLINE', 'Worker service reports offline.', 'Reload the service in PAUSED / DRY-RUN and verify its launch environment.')
+  else if (worker.serviceState === 'degraded') add('SERVICE_DEGRADED', 'Worker service reports degraded.', 'Inspect the service diagnostic and restore a healthy live invocation before dispatch.')
+  else if (worker.serviceState === 'unknown') add('SERVICE_UNKNOWN', 'Service state is unknown.', 'Refresh the worker service observation before dispatch.')
+  if (worker.authenticationState === 'invalid') add('AUTH_INVALID', 'Authentication is invalid.', 'Repair the worker authentication environment and verify a live invocation from the runner environment.')
+  else if (worker.authenticationState === 'unknown') add('AUTH_UNKNOWN', 'Authentication state is unknown.', 'Run a non-destructive authentication probe from the runner environment.')
+
+  if (worker.heartbeatAt === null) add('HEARTBEAT_MISSING', 'Heartbeat evidence is missing.', 'Reload in PAUSED / DRY-RUN and wait for a fresh heartbeat.')
+  else {
+    const age = (Date.parse(generatedAt) - Date.parse(worker.heartbeatAt)) / 1000
+    if (age < 0) add('HEARTBEAT_FUTURE', 'Heartbeat timestamp is in the future.', 'Correct the host clock or heartbeat timestamp before dispatch.')
+    else if (age > WORKER_HEARTBEAT_FRESH_SECONDS) add('HEARTBEAT_STALE', `Last heartbeat is ${Math.floor(age)}s old; the limit is ${WORKER_HEARTBEAT_FRESH_SECONDS}s.`, 'Reload in PAUSED / DRY-RUN and refresh the heartbeat.')
+  }
+
+  if (worker.capacityState !== 'normal') {
+    const latest = [...scopes]
+      .filter(scope => scope.observedAt !== null)
+      .sort((left, right) => (right.observedAt ?? '').localeCompare(left.observedAt ?? ''))[0]
+    const observation = latest
+      ? `${latest.label}: ${capacitySummary(latest)}; observed ${latest.observedAt}.`
+      : 'No current capacity observation is recorded.'
+    const nextAction = worker.capacityState === 'unknown'
+      ? 'Refresh the provider or Factory capacity observation before dispatch.'
+      : worker.capacityState === 'caution'
+        ? 'Avoid a substantial or uncertain new parent; bounded work remains eligible.'
+        : worker.capacityState === 'checkpoint'
+          ? 'Finish current bounded work to a clean checkpoint, then do not start a substantial parent.'
+          : 'Do not dispatch normal work until a fresh healthy capacity observation is recorded.'
+    add(`CAPACITY_${worker.capacityState.toUpperCase()}`, observation, nextAction)
+  }
+  if (!details.length && worker.health === 'constrained') add('WORKER_CONSTRAINED', 'Worker reports constrained without a more specific diagnostic.', 'Refresh worker diagnostics and keep the worker in PAUSED / DRY-RUN.')
+  return details
+}
+
+export function readinessReason(item: FactoryPackage, packages: Map<string, FactoryPackage>): string {
+  if (item.state === 'READY') return 'All recorded prerequisites are satisfied; this package is READY.'
+  if (item.state === 'ACTIVE') return 'An active Registry lease owns this package.'
+  if (item.state === 'VERIFY_REVIEW') return 'Implementation is waiting for validation or independent review.'
+  if (item.state === 'DONE') return 'Registry completion requirements are recorded as satisfied.'
+  if (item.blockReason) return item.blockReason
+  const incomplete = item.dependencies.filter(id => packages.get(id)?.state !== 'DONE')
+  if (incomplete.length) return `Waiting for ${incomplete.map(id => `${id} (${packages.get(id)?.state ?? 'missing'})`).join(', ')}.`
+  if (item.state === 'ON_DECK') return 'Proposed / suggested work is recorded in Registry and has not been promoted to READY.'
+  return 'Registry records this package as BLOCKED without a human-readable reason.'
+}
+
+export function failureClassification(code: string): string {
+  if (code.includes('AUTH')) return 'authentication'
+  if (code.includes('CAPACITY') || code === 'RATE_LIMIT' || code === 'CONTEXT_EXHAUSTED') return 'capacity'
+  if (code.includes('DEPENDENCY')) return 'dependency'
+  if (code.includes('REVIEW')) return 'review'
+  return 'technical'
+}
+
+export function recommendedFailureAction(code: string): string {
+  if (code === 'AUTH_FAILURE') return 'Repair authentication in the worker runner environment, then record a successful live invocation.'
+  if (code === 'DEPENDENCY_BLOCKED') return 'Complete or explicitly resolve the listed prerequisite before returning the package to READY.'
+  if (code === 'REVIEW_FAILURE' || code === 'REVIEW_STATE_UNRECORDED') return 'Record the independent review outcome and address any requested changes.'
+  if (code === 'RATE_LIMIT' || code === 'CONTEXT_EXHAUSTED' || code === 'ORCHESTRA_CAPACITY_RISK') return 'Wait for or verify fresh capacity, then retry only when the worker is eligible.'
+  if (code === 'CI_FAILURE') return 'Open the referenced attempt or pull request, repair the failed check, and rerun validation.'
+  if (code === 'PRESERVATION_MISMATCH') return 'Reconcile every unexplained Registry record before dispatch or restart.'
+  return 'Inspect the triggering Registry event and evidence, repair the recorded cause, then retry through the normal lifecycle.'
 }
 
 export function visibleReviews(snapshot: FactoryControlSnapshot): ReviewDisplayItem[] {

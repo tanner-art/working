@@ -21,6 +21,31 @@ describe('Factory Control Center snapshot contract', () => {
     expect(() => parseFactoryControlSnapshot(withoutUsage)).toThrow('snapshot.usageInvocations')
   })
 
+  it('fails closed when same-revision counts or queue relationships do not reconcile', () => {
+    const wrongActiveParentCount = structuredClone(factoryControlFixture)
+    wrongActiveParentCount.factory.activeParentCount += 1
+    expect(() => parseFactoryControlSnapshot(wrongActiveParentCount)).toThrow('activeParentCount does not match this Registry revision')
+
+    const wrongCount = structuredClone(factoryControlFixture)
+    wrongCount.factory.readyCount += 1
+    expect(() => parseFactoryControlSnapshot(wrongCount)).toThrow('readyCount does not match this Registry revision')
+
+    const missingDependency = structuredClone(factoryControlFixture)
+    missingDependency.features[0].packages[0].dependencies = ['NOT-IN-THIS-REVISION']
+    expect(() => parseFactoryControlSnapshot(missingDependency)).toThrow('references unknown dependency')
+  })
+
+  it('fails closed when a final review result lacks independent evidence', () => {
+    const selfReview = structuredClone(factoryControlFixture)
+    selfReview.reviews[0].assignedReviewerId = 'agent-b'
+    expect(() => parseFactoryControlSnapshot(selfReview)).toThrow('violates review independence')
+
+    const unsupportedApproval = structuredClone(factoryControlFixture)
+    unsupportedApproval.reviews[0].state = 'approved'
+    unsupportedApproval.reviews[0].approvalEvidence = []
+    expect(() => parseFactoryControlSnapshot(unsupportedApproval)).toThrow('missing approval evidence')
+  })
+
   it('fails closed when usage provenance or source history is incomplete', () => {
     const missingAttempt = structuredClone(factoryControlFixture)
     missingAttempt.usageInvocations[0].attemptId = null

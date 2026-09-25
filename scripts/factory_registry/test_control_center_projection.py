@@ -18,6 +18,9 @@ from scripts.factory_registry import (
     Feature,
     Lane,
     PackageKind,
+    ReviewOutcome,
+    ReviewOutcomeState,
+    RegistryConflict,
     SQLiteRegistry,
     TaskStatus,
     Worker,
@@ -188,6 +191,238 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.assertIsNone(projection["capacity"][-1]["usedPercent"])
         self.assertEqual(projection["events"][0]["kind"], "REVIEW")
         self.assertEqual(projection["failures"][0]["code"], "CI_FAILURE")
+
+    def test_explicit_review_outcome_survives_completed_review_with_typed_evidence(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "review-approval", "REVIEW-1", "review", "https://example.test/review",
+            "Independent approval record", "2026-09-24T19:54:00Z",
+            {"attempt_id": "review-attempt-1"},
+        ))
+        self.registry.record_review_outcome(ReviewOutcome(
+            id="outcome-1",
+            review_package_id="REVIEW-1",
+            target_package_id="PACKAGE-1",
+            implementer_worker_id="agent-b",
+            reviewer_worker_id="claude",
+            requested_at="2026-09-24T19:51:00Z",
+            decided_at="2026-09-24T19:54:00Z",
+            state=ReviewOutcomeState.APPROVED,
+            findings=("All acceptance criteria passed.",),
+            approval_evidence_ids=("review-approval",),
+        ))
+
+        projection = build_control_center_projection(self.registry, observed_at=NOW)
+        review = next(item for item in projection["reviews"] if item["id"] == "outcome-1")
+        self.assertEqual(review["packageId"], "PACKAGE-1")
+        self.assertEqual(review["state"], "approved")
+        self.assertEqual(review["assignedReviewerId"], "claude")
+        self.assertEqual(review["approvalEvidence"][0]["id"], "review-approval")
+        self.assertFalse(any(
+            item["code"] == "REVIEW_STATE_UNRECORDED" and item["packageId"] == "PACKAGE-1"
+            for item in projection["failures"]
+        ))
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        forged_outcome = {**raw.review_outcomes[0], "implementer_worker_id": "claude"}
+        from scripts.factory_registry.control_center_projection import project_control_center
+        with self.assertRaisesRegex(ControlCenterProjectionError, "implementer is invalid"):
+            project_control_center(replace(raw, review_outcomes=(forged_outcome,)))
+        forged_evidence = tuple(
+            {**item, "metadata": {"attempt_id": "attempt-1"}}
+            if item["id"] == "review-approval" else item
+            for item in raw.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "review evidence is missing"):
+            project_control_center(replace(raw, evidence=forged_evidence))
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "REVIEW_OUTCOMES_APPEND_ONLY"):
+                connection.execute(
+                    "UPDATE review_outcomes SET state='CHANGES_REQUESTED' WHERE id='outcome-1'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "REVIEW_OUTCOMES_APPEND_ONLY"):
+                connection.execute("DELETE FROM review_outcomes WHERE id='outcome-1'")
+
+    def test_review_approval_requires_independent_typed_evidence(self) -> None:
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="self-review", review_package_id="REVIEW-1", target_package_id="PACKAGE-1",
+                implementer_worker_id="agent-b", reviewer_worker_id="agent-b",
+                requested_at="2026-09-24T19:51:00Z", decided_at="2026-09-24T19:54:00Z",
+                state=ReviewOutcomeState.APPROVED, approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_review_outcome_rejects_forged_implementer_and_reviewer_provenance(self) -> None:
+        self.registry.register_worker(Worker(
+            "agent-a", "Agent A", ("platform",), (Lane.PLATFORM,), usage_state="GREEN",
+        ))
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, 0, '{}')""",
+                (
+                    "older-agent-a-attempt", "PACKAGE-1", "agent-a",
+                    "2026-09-24T19:20:00.000000Z", "2026-09-24T19:30:00.000000Z",
+                    "SUCCEEDED",
+                ),
+            )
+        self.registry.record_evidence(Evidence(
+            "review-bound", "REVIEW-1", "review", None, "Bound reviewer evidence",
+            "2026-09-24T19:54:00Z", {"attempt_id": "review-attempt-1"},
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_IMPLEMENTER_MISMATCH"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-implementer", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-a",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("review-bound",),
+            ))
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, 0, '{}')""",
+                (
+                    "reviewer-target-attempt", "PACKAGE-1", "claude",
+                    "2026-09-24T19:31:00.000000Z", "2026-09-24T19:32:00.000000Z",
+                    "FAILED",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEWER_IMPLEMENTED_TARGET"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-independence", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("review-bound",),
+            ))
+
+    def test_review_outcome_rejects_evidence_not_bound_to_reviewer_attempt(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "forged-review-evidence", "REVIEW-1", "review", None,
+            "Claims approval but names the implementation attempt",
+            "2026-09-24T19:54:00Z", {"attempt_id": "attempt-1"},
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_EVIDENCE_MISMATCH"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="forged-evidence", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("forged-review-evidence",),
+            ))
+
+    def test_review_outcome_requires_reviewer_owned_review_attempt(self) -> None:
+        self.registry.register_worker(Worker(
+            "agent-c", "Agent C", ("review",), (Lane.ASSURANCE,), usage_state="GREEN",
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "REVIEWER_ATTEMPT_REQUIRED"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="missing-reviewer-attempt", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="agent-c", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_review_outcome_rejects_target_attempt_finishing_after_review_request(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, ?, ?, 120, 0, '{}')""",
+                (
+                    "overlapping-target-attempt", "PACKAGE-1", "agent-b",
+                    "2026-09-24T19:50:30.000000Z", "2026-09-24T19:52:30.000000Z",
+                    "FAILED",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_TARGET_CHANGED_DURING_REVIEW"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="stale-overlap", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_review_outcome_rejects_active_target_attempt_at_review_request(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                """INSERT INTO attempts
+                   (id, package_id, worker_id, started_at, ended_at, outcome,
+                    runtime_seconds, blocked_seconds, provider_diagnostics_json)
+                   VALUES (?, ?, ?, ?, NULL, NULL, 0, 0, '{}')""",
+                (
+                    "active-overlapping-target-attempt", "PACKAGE-1", "agent-b",
+                    "2026-09-24T19:50:30.000000Z",
+                ),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_TARGET_CHANGED_DURING_REVIEW"):
+            self.registry.record_review_outcome(ReviewOutcome(
+                id="stale-active-overlap", review_package_id="REVIEW-1",
+                target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+                reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                approval_evidence_ids=("evidence-1",),
+            ))
+
+    def test_projection_rejects_target_attempts_overlapping_recorded_review(self) -> None:
+        self.registry.record_evidence(Evidence(
+            "review-overlap-evidence", "REVIEW-1", "review", None,
+            "Bound reviewer evidence", "2026-09-24T19:54:00Z",
+            {"attempt_id": "review-attempt-1"},
+        ))
+        self.registry.record_review_outcome(ReviewOutcome(
+            id="outcome-overlap-check", review_package_id="REVIEW-1",
+            target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
+            reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
+            decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+            approval_evidence_ids=("review-overlap-evidence",),
+        ))
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        target_attempt = next(item for item in raw.attempts if item["id"] == "attempt-1")
+        overlaps = (
+            {
+                **target_attempt, "id": "forged-completed-overlap",
+                "started_at": "2026-09-24T19:50:30Z",
+                "ended_at": "2026-09-24T19:52:30Z", "outcome": "FAILED",
+            },
+            {
+                **target_attempt, "id": "forged-active-overlap",
+                "started_at": "2026-09-24T19:50:30Z",
+                "ended_at": None, "outcome": None,
+            },
+        )
+        from scripts.factory_registry.control_center_projection import project_control_center
+        for overlapping_attempt in overlaps:
+            with self.subTest(attempt_id=overlapping_attempt["id"]):
+                with self.assertRaisesRegex(
+                    ControlCenterProjectionError, "target changed during review",
+                ):
+                    project_control_center(replace(
+                        raw, attempts=(*raw.attempts, overlapping_attempt),
+                    ))
+
+    def test_projection_rejects_packages_missing_from_feature_queue(self) -> None:
+        raw = self.registry.control_center_snapshot(observed_at=NOW)
+        orphan = {**raw.work_packages[0], "id": "ORPHAN", "feature_id": "MISSING"}
+        from scripts.factory_registry.control_center_projection import project_control_center
+        with self.assertRaisesRegex(ControlCenterProjectionError, "absent from the queue"):
+            project_control_center(replace(raw, work_packages=(*raw.work_packages, orphan)))
+
+    def test_validation_rejects_counts_from_another_revision(self) -> None:
+        projection = build_control_center_projection(self.registry, observed_at=NOW)
+        for field in ("activeParentCount", "readyCount"):
+            with self.subTest(field=field):
+                tampered = json.loads(json.dumps(projection))
+                tampered["factory"][field] += 1
+                with self.assertRaisesRegex(ControlCenterProjectionError, "counts do not match"):
+                    validate_control_center_projection(tampered)
 
     def test_unknown_diagnostics_remain_unknown_and_unsafe_links_are_removed(self) -> None:
         raw = self.registry.control_center_snapshot(observed_at=NOW)
