@@ -18,6 +18,7 @@ from scripts.factory_registry import (
     Feature,
     Lane,
     PackageKind,
+    ReviewInput,
     ReviewOutcome,
     ReviewOutcomeState,
     RegistryConflict,
@@ -94,6 +95,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             )
         )
         self._insert_extended_records()
+        self._record_review_input()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -166,6 +168,31 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 "WHERE id IN ('PACKAGE-1', 'REVIEW-1')"
             )
 
+    def _review_provenance(self) -> dict[str, str]:
+        return {
+            "reviewed_commit": "a" * 40,
+            "reviewed_base_commit": "b" * 40,
+            "contract_sha256": self._contract_sha256,
+            "review_input_evidence_id": "review-input-1",
+            "reviewer_attempt_id": "review-attempt-1",
+        }
+
+    def _review_evidence_metadata(self, attempt_id: str = "review-attempt-1") -> dict[str, str]:
+        return {"attempt_id": attempt_id, **self._review_provenance()}
+
+    def _record_review_input(self) -> None:
+        contract = {"task": "PACKAGE-1", "paths": ["scripts/factory_registry/control_center_projection.py"]}
+        self._contract_sha256 = hashlib.sha256(
+            json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        self.registry.record_review_input(ReviewInput(
+            id="review-input-1", review_package_id="REVIEW-1", target_package_id="PACKAGE-1",
+            implementation_attempt_id="attempt-1", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1",
+            contract_sha256=self._contract_sha256, contract=contract,
+            validation_evidence={"focused_tests": "passed"}, recorded_at="2026-09-24T19:51:00Z",
+        ))
+
     def _logical_state(self) -> dict[str, object]:
         with sqlite3.connect(self.database) as connection:
             tables = [
@@ -204,7 +231,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "review-approval", "REVIEW-1", "review", "https://example.test/review",
             "Independent approval record", "2026-09-24T19:54:00Z",
-            {"attempt_id": "review-attempt-1"},
+            self._review_evidence_metadata(),
         ))
         self.registry.record_review_outcome(ReviewOutcome(
             id="outcome-1",
@@ -215,6 +242,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
             requested_at="2026-09-24T19:51:00Z",
             decided_at="2026-09-24T19:54:00Z",
             state=ReviewOutcomeState.APPROVED,
+            **self._review_provenance(),
             findings=("All acceptance criteria passed.",),
             approval_evidence_ids=("review-approval",),
         ))
@@ -255,7 +283,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 id="self-review", review_package_id="REVIEW-1", target_package_id="PACKAGE-1",
                 implementer_worker_id="agent-b", reviewer_worker_id="agent-b",
                 requested_at="2026-09-24T19:51:00Z", decided_at="2026-09-24T19:54:00Z",
-                state=ReviewOutcomeState.APPROVED, approval_evidence_ids=("evidence-1",),
+                state=ReviewOutcomeState.APPROVED, **self._review_provenance(), approval_evidence_ids=("evidence-1",),
             ))
 
     def test_review_outcome_rejects_forged_implementer_and_reviewer_provenance(self) -> None:
@@ -277,14 +305,14 @@ class ControlCenterProjectionTest(unittest.TestCase):
             )
         self.registry.record_evidence(Evidence(
             "review-bound", "REVIEW-1", "review", None, "Bound reviewer evidence",
-            "2026-09-24T19:54:00Z", {"attempt_id": "review-attempt-1"},
+            "2026-09-24T19:54:00Z", self._review_evidence_metadata(),
         ))
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_IMPLEMENTER_MISMATCH"):
             self.registry.record_review_outcome(ReviewOutcome(
                 id="forged-implementer", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-a",
                 reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("review-bound",),
             ))
 
@@ -305,7 +333,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 id="forged-independence", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
                 reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("review-bound",),
             ))
 
@@ -314,14 +342,14 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "forged-review-evidence", "REVIEW-1", "review", None,
             "Claims approval but names the implementation attempt",
-            "2026-09-24T19:54:00Z", {"attempt_id": "attempt-1"},
+            "2026-09-24T19:54:00Z", self._review_evidence_metadata("attempt-1"),
         ))
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_EVIDENCE_MISMATCH"):
             self.registry.record_review_outcome(ReviewOutcome(
                 id="forged-evidence", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
                 reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("forged-review-evidence",),
             ))
 
@@ -335,7 +363,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 id="missing-reviewer-attempt", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
                 reviewer_worker_id="agent-c", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("evidence-1",),
             ))
 
@@ -358,7 +386,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 id="stale-overlap", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
                 reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("evidence-1",),
             ))
 
@@ -380,7 +408,7 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 id="stale-active-overlap", review_package_id="REVIEW-1",
                 target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
                 reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+                decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
                 approval_evidence_ids=("evidence-1",),
             ))
 
@@ -389,13 +417,13 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "review-overlap-evidence", "REVIEW-1", "review", None,
             "Bound reviewer evidence", "2026-09-24T19:54:00Z",
-            {"attempt_id": "review-attempt-1"},
+            self._review_evidence_metadata(),
         ))
         self.registry.record_review_outcome(ReviewOutcome(
             id="outcome-overlap-check", review_package_id="REVIEW-1",
             target_package_id="PACKAGE-1", implementer_worker_id="agent-b",
             reviewer_worker_id="claude", requested_at="2026-09-24T19:51:00Z",
-            decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED,
+            decided_at="2026-09-24T19:54:00Z", state=ReviewOutcomeState.APPROVED, **self._review_provenance(),
             approval_evidence_ids=("review-overlap-evidence",),
         ))
         raw = self.registry.control_center_snapshot(observed_at=NOW)

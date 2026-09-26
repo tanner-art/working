@@ -12,6 +12,7 @@ import json
 import sqlite3
 import tempfile
 import uuid
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from .models import (
     PackageKind,
     ReviewOutcome,
     ReviewOutcomeState,
+    ReviewInput,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -49,7 +51,7 @@ CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 def _json(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
 
 def _utc_now() -> str:
@@ -1986,6 +1988,26 @@ class SQLiteRegistry:
             raise RegistryConflict("SUCCESSFUL_PACKAGE_PROVENANCE_REQUIRED")
         return str(attempt["worker_id"])
 
+    def record_review_input(self, review_input: ReviewInput, *, operation_id: str | None = None) -> None:
+        """Record immutable review input separately from a reviewer verdict."""
+        if (not all(isinstance(value, str) and value for value in (review_input.id, review_input.review_package_id, review_input.target_package_id, review_input.implementation_attempt_id, review_input.pr_url, review_input.contract_sha256)) or not re.fullmatch(r"[0-9a-f]{40,64}", review_input.implementation_commit) or not re.fullmatch(r"[0-9a-f]{40,64}", review_input.base_commit) or not re.fullmatch(r"[0-9a-f]{64}", review_input.contract_sha256) or not isinstance(review_input.contract, Mapping) or not isinstance(review_input.validation_evidence, Mapping) or not review_input.validation_evidence):
+            raise RegistryConflict("INVALID_REVIEW_INPUT")
+        if _request_sha256(dict(review_input.contract)) != review_input.contract_sha256:
+            raise RegistryConflict("REVIEW_CONTRACT_MISMATCH")
+        self.record_evidence(Evidence(id=review_input.id, package_id=review_input.review_package_id, kind="review-input", uri=review_input.pr_url, summary="Exact implementation input bound for independent review.", recorded_at=review_input.recorded_at, metadata={"target_package_id": review_input.target_package_id, "implementation_attempt_id": review_input.implementation_attempt_id, "implementation_commit": review_input.implementation_commit, "base_commit": review_input.base_commit, "contract_sha256": review_input.contract_sha256, "contract": dict(review_input.contract), "validation_evidence": dict(review_input.validation_evidence)}), operation_id=operation_id or f"review-input:{review_input.id}")
+
+    def review_input(self, review_package_id: str) -> Mapping[str, Any]:
+        """Return the single immutable input assigned to a review package."""
+        with self._connection() as connection:
+            rows = connection.execute("SELECT id, package_id, uri, recorded_at, metadata_json FROM evidence WHERE package_id=? AND kind='review-input' ORDER BY recorded_at, id", (review_package_id,)).fetchall()
+        if len(rows) != 1:
+            raise RegistryConflict("REVIEW_INPUT_REQUIRED", review_package_id)
+        row = rows[0]
+        value = {"id": row["id"], "review_package_id": row["package_id"], "pr_url": row["uri"], "recorded_at": row["recorded_at"], **json.loads(row["metadata_json"])}
+        if not {"target_package_id", "implementation_attempt_id", "implementation_commit", "base_commit", "contract_sha256", "contract", "validation_evidence"}.issubset(value):
+            raise RegistryConflict("REVIEW_INPUT_INVALID", str(row["id"]))
+        return value
+
     @staticmethod
     def _expire_leases(connection: sqlite3.Connection, now: str) -> int:
         expired = connection.execute(
@@ -2625,6 +2647,11 @@ class SQLiteRegistry:
                 "findings": list(outcome.findings),
                 "changes_requested": list(outcome.changes_requested),
                 "approval_evidence_ids": list(outcome.approval_evidence_ids),
+                "reviewed_commit": outcome.reviewed_commit,
+                "reviewed_base_commit": outcome.reviewed_base_commit,
+                "contract_sha256": outcome.contract_sha256,
+                "review_input_evidence_id": outcome.review_input_evidence_id,
+                "reviewer_attempt_id": outcome.reviewer_attempt_id,
             },
             "evidence": None if evidence is None else {
                 "id": evidence.id,
@@ -2754,6 +2781,16 @@ class SQLiteRegistry:
                 if not reviewer_attempts:
                     raise RegistryConflict("REVIEWER_ATTEMPT_REQUIRED")
                 reviewer_attempt = reviewer_attempts[-1]
+                if not all(isinstance(value, str) and value for value in (outcome.reviewed_commit, outcome.reviewed_base_commit, outcome.contract_sha256, outcome.review_input_evidence_id, outcome.reviewer_attempt_id)):
+                    raise RegistryConflict("REVIEW_PROVENANCE_REQUIRED")
+                if reviewer_attempt["id"] != outcome.reviewer_attempt_id:
+                    raise RegistryConflict("REVIEWER_ATTEMPT_MISMATCH")
+                input_evidence = connection.execute("SELECT package_id, metadata_json FROM evidence WHERE id=? AND kind='review-input'", (outcome.review_input_evidence_id,)).fetchone()
+                if input_evidence is None or input_evidence["package_id"] != outcome.review_package_id:
+                    raise RegistryConflict("REVIEW_INPUT_REQUIRED")
+                review_input = json.loads(input_evidence["metadata_json"])
+                if (review_input.get("target_package_id") != outcome.target_package_id or review_input.get("implementation_attempt_id") != actual_implementation["id"] or review_input.get("implementation_commit") != outcome.reviewed_commit or review_input.get("base_commit") != outcome.reviewed_base_commit or review_input.get("contract_sha256") != outcome.contract_sha256 or _request_sha256(review_input.get("contract", {})) != outcome.contract_sha256 or not review_input.get("validation_evidence")):
+                    raise RegistryConflict("REVIEW_INPUT_MISMATCH")
                 for evidence_id in outcome.approval_evidence_ids:
                     evidence = connection.execute(
                         """SELECT package_id, kind, recorded_at, metadata_json
@@ -2767,6 +2804,10 @@ class SQLiteRegistry:
                         evidence["kind"].lower() != "review"
                         or evidence["package_id"] != outcome.review_package_id
                         or evidence_metadata.get("attempt_id") != reviewer_attempt["id"]
+                        or evidence_metadata.get("reviewed_commit") != outcome.reviewed_commit
+                        or evidence_metadata.get("reviewed_base_commit") != outcome.reviewed_base_commit
+                        or evidence_metadata.get("contract_sha256") != outcome.contract_sha256
+                        or evidence_metadata.get("review_input_evidence_id") != outcome.review_input_evidence_id
                         or evidence["recorded_at"] < reviewer_attempt["started_at"]
                         or evidence["recorded_at"] > decided_at
                     ):
@@ -2821,6 +2862,8 @@ class SQLiteRegistry:
                         "outcome_id": outcome.id,
                         "state": outcome.state.value,
                         "evidence_ids": list(outcome.approval_evidence_ids),
+                        "reviewed_commit": outcome.reviewed_commit,
+                        "review_input_evidence_id": outcome.review_input_evidence_id,
                         "summary": f"Independent review recorded {outcome.state.value.lower().replace('_', ' ')}.",
                     },
                 )
