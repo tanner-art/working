@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -12,7 +13,9 @@ from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry import (
     Feature,
     Lane,
+    PackageKind,
     RegistryConflict,
+    ReviewInput,
     SQLiteRegistry,
     TaskStatus,
     Worker,
@@ -153,6 +156,18 @@ class RunnerRegistryControlTests(unittest.TestCase):
             self.assertEqual(control.pre_claim("TASK-REVIEW", "worker-b"), 17)
         control.registry.review_implementer_worker.assert_called_with("TASK-REVIEW")
 
+    def test_review_preclaim_fails_closed_when_its_bound_input_is_missing(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
+        )
+        control.registry.review_input.side_effect = RegistryConflict("REVIEW_INPUT_REQUIRED")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_REQUIRED"):
+            control.pre_claim("TASK-REVIEW", "worker-b")
+        control.registry.review_implementer_worker.assert_not_called()
+
     def test_claim_package_pins_dispatch_revision(self):
         control = RunnerRegistryControl(self.database)
         control.registry = Mock()
@@ -277,6 +292,31 @@ class RunnerRegistryControlTests(unittest.TestCase):
         self.assertIsNotNone(runtime[3])
         self.assertEqual(tuple(attempt), ("FAILED", "bounded failure"))
         self.assertEqual(package, "BLOCKED")
+
+    def test_implementation_completion_and_review_input_are_atomic(self):
+        self.seed_assignment()
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW-1", "FEATURE", "Review", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 10, ("review",), kind=PackageKind.REVIEW,
+            dependency_ids=("TASK-1",), status=TaskStatus.READY,
+        ))
+        control = RunnerRegistryControl(self.database)
+        revision = control.pre_claim()
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt("attempt-atomic", package_id="TASK-1", worker_id="worker-a", expected_revision=revision)
+        completed_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        contract = {"task": "TASK-1", "instructions": "résumé"}
+        digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        review_input = ReviewInput(
+            id="review-input-atomic", review_package_id="REVIEW-1", target_package_id="TASK-1",
+            implementation_attempt_id="attempt-atomic", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1", contract_sha256=digest,
+            contract=contract, validation_evidence={"focused": "passed"}, recorded_at=completed_at,
+        )
+        control.succeed("attempt-atomic", review_inputs=(review_input,), ended_at=completed_at)
+        self.assertEqual(self.registry.review_input("REVIEW-1")["id"], "review-input-atomic")
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute("SELECT status FROM work_packages WHERE id='TASK-1'").fetchone()[0], "VERIFY_REVIEW")
 
     def test_lease_revocation_stops_renewal_and_recovery_closes_runtime(self):
         now = datetime.now(timezone.utc)
