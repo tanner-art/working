@@ -131,6 +131,7 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/runner/queue_snapshot.py",
     "scripts/runner/registry_control.py",
     "scripts/runner/review_queue.py",
+    "scripts/runner/review_protocol.py",
     "scripts/runner/runner.py",
     "scripts/runner/usage_policy.py",
 })
@@ -2256,6 +2257,11 @@ def parse_review_outcome_spec(
             approval_evidence_ids=tuple(
                 str(item) for item in raw_outcome.get("approval_evidence_ids", ())
             ),
+            reviewed_commit=str(raw_outcome["reviewed_commit"]),
+            reviewed_base_commit=str(raw_outcome["reviewed_base_commit"]),
+            contract_sha256=str(raw_outcome["contract_sha256"]),
+            review_input_evidence_id=str(raw_outcome["review_input_evidence_id"]),
+            reviewer_attempt_id=str(raw_outcome["reviewer_attempt_id"]),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise OperatorError("review outcome spec is invalid") from error
@@ -2267,6 +2273,7 @@ def parse_review_outcome_spec(
         or not evidence.summary
         or not isinstance(attempt_id, str)
         or not attempt_id
+        or attempt_id != outcome.reviewer_attempt_id
     ):
         raise OperatorError("review evidence must bind the review package and attempt")
     requested_at = _parse_time(outcome.requested_at, "review requested_at")

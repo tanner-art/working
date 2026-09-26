@@ -21,7 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.factory_registry.models import TaskStatus  # noqa: E402
+from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome, TaskStatus  # noqa: E402
 from scripts.factory_registry.repository import RegistryConflict  # noqa: E402
 from scripts.factory_registry.shadow_dispatch import decide_shadow  # noqa: E402
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E402
@@ -114,6 +114,7 @@ class RunnerRegistryControl:
             if not isinstance(expected, str) or expected != actual:
                 raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
         if package is not None and package.get("kind") == "REVIEW":
+            self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
             if implementer == worker_id:
                 raise RegistryConflict(
@@ -207,15 +208,34 @@ class RunnerRegistryControl:
             expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
         )
 
-    def succeed(self, attempt_id: str) -> None:
+    def succeed(self, attempt_id: str, *, review_inputs: tuple[ReviewInput, ...] = (), ended_at: str | None = None) -> None:
         self.registry.finish_attempt_runtime(
             attempt_id,
-            ended_at=utc_now(),
+            ended_at=ended_at or utc_now(),
             outcome="SUCCEEDED",
             next_status=TaskStatus.VERIFY_REVIEW,
             reason="runner completed and opened review",
+            review_inputs=review_inputs,
             operation_id=f"attempt-finish:{attempt_id}",
         )
+
+    def record_review_input(self, review_input: ReviewInput) -> None:
+        self.registry.record_review_input(review_input, operation_id=f"review-input:{review_input.id}")
+
+    def implementation_review_inputs(self, *, target_package_id: str, implementation_attempt_id: str, implementation_commit: str, base_commit: str, pr_url: str, contract: dict, validation_evidence: dict, recorded_at: str) -> tuple[ReviewInput, ...]:
+        snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
+        review_ids = [package["id"] for package in snapshot.work_packages if package.get("kind") == "REVIEW" and target_package_id in {dependency["dependency_id"] for dependency in snapshot.dependencies if dependency["package_id"] == package.get("id")}]
+        digest = queue_contract_digest(contract)
+        return tuple(
+            ReviewInput(id=f"review-input:{review_id}:{implementation_attempt_id}", review_package_id=review_id, target_package_id=target_package_id, implementation_attempt_id=implementation_attempt_id, implementation_commit=implementation_commit, base_commit=base_commit, pr_url=pr_url, contract_sha256=digest, contract=contract, validation_evidence=validation_evidence, recorded_at=recorded_at)
+            for review_id in review_ids
+        )
+
+    def review_input(self, review_package_id: str) -> ReviewInput:
+        return ReviewInput(**self.registry.review_input(review_package_id))
+
+    def record_review_outcome(self, outcome: ReviewOutcome, evidence: Evidence, *, expected_revision: int) -> int:
+        return self.registry.record_review_outcome(outcome, evidence=evidence, expected_revision=expected_revision, operation_id=f"review-outcome:{outcome.id}")
 
     def fail(self, attempt_id: str, detail: str) -> None:
         ended_at = utc_now()
