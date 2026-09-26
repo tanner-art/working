@@ -114,10 +114,21 @@ def normalize_buckets(worker_id: str, sample: Mapping[str, Any]) -> tuple[Mappin
         raise CapacityCollectorError("provider has not allowed ordinary usage")
     if not sample.get("account_identity_sha256"):
         raise CapacityCollectorError("account identity is unavailable")
-    for scope, bucket_name in (("short_window", "primary"), ("weekly_window", "secondary")):
+    # Provider slots are not semantic scopes: some accounts expose only a
+    # weekly window in `primary`. Classify the reported duration instead.
+    scopes_by_duration = {300: "short_window", 10080: "weekly_window"}
+    seen_scopes = set()
+    for bucket_name in ("primary", "secondary"):
         bucket = sample.get(bucket_name)
         if not isinstance(bucket, Mapping):
             continue
+        duration = bucket.get("windowDurationMins")
+        if isinstance(duration, bool) or duration not in scopes_by_duration:
+            raise CapacityCollectorError("unrecognized rate-limit window duration")
+        scope = scopes_by_duration[duration]
+        if scope in seen_scopes:
+            raise CapacityCollectorError("duplicate rate-limit window scope")
+        seen_scopes.add(scope)
         used = bucket.get("usedPercent")
         measured_at = sample.get("observed_at")
         if not isinstance(used, (int, float)) or isinstance(used, bool) or not isinstance(measured_at, str):

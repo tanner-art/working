@@ -19,7 +19,8 @@ class CapacityPublicationTests(unittest.TestCase):
             path.write_text(json.dumps(preserved))
             sample = {'ordinary_usage_allowed': True, 'account_identity_sha256': 'pool-a',
                 'observed_at': '2026-09-26T10:01:00Z',
-                'primary': {'usedPercent': 11}, 'secondary': {'usedPercent': 20}}
+                'primary': {'usedPercent': 11, 'windowDurationMins': 300},
+                'secondary': {'usedPercent': 20, 'windowDurationMins': 10080}}
             config = {'agents': {'codex-a': {'model': 'gpt-5.6-terra', 'account': 'agent-a',
                 'capacity_scopes': ['short_window', 'weekly_window']}}}
             write_collected_usage(path, config, [{'worker_id': 'codex-a',
