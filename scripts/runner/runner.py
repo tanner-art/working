@@ -576,6 +576,12 @@ def write_collected_usage(path, config, collected):
             if not item['observations']:
                 continue
             worker_id = item['worker_id']
+            # Registry-only aliases may receive a verified shared-account
+            # observation, but are not runner dispatch agents.  Their
+            # Registry fact must remain there without inventing a usage.json
+            # account or requiring dispatch settings.
+            if worker_id not in config.get('agents', {}):
+                continue
             settings = agent_settings(config, worker_id)
             first = item['observations'][0]
             diagnostics = first['provider_diagnostics']

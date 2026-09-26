@@ -1,3 +1,8 @@
+import contextlib
+import datetime
+import io
+import pathlib
+import tempfile
 import unittest
 import json
 from types import SimpleNamespace
@@ -9,6 +14,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     RegistryAttemptLifecycle, run,
                     refresh_capacity_observations, run_repository_validation, select, stage_verified_changes,
                     usage_policy_enabled)
+from usage_policy import worker_state
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -139,6 +145,85 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('outside-scope.md', calls[-1][0])
 
 class ProcessTests(unittest.TestCase):
+    def test_capacity_refresh_publishes_configured_workers_not_registry_only_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            usage_path = state / 'usage.json'
+            measured_at = '2026-09-26T10:01:00Z'
+
+            def percentage(worker_id):
+                return ({
+                    'worker_id': worker_id, 'observed_at': measured_at,
+                    'consumed_percent': 11, 'reset_at': None,
+                    'provider_diagnostics': {
+                        'capacity_mode': 'percentage', 'capacity_scope': 'short_window',
+                        'capacity_pool': 'verified-account-hash',
+                    },
+                },)
+
+            claude = ({
+                'worker_id': 'claude', 'observed_at': measured_at,
+                'consumed_percent': None, 'reset_at': None,
+                'provider_diagnostics': {
+                    'capacity_mode': 'provider_signal', 'capacity_scope': 'provider_signal',
+                    'service_state': 'unhealthy', 'authentication_state': 'valid',
+                    'live_invocation_state': 'failed', 'limit_signal': 'RATE_LIMIT',
+                },
+            },)
+            config = {
+                'agents': {
+                    'codex-a': {'model': 'gpt-5.6-terra', 'account': 'agent-a',
+                                'capacity_scopes': ['short_window']},
+                    'codex-b': {'model': 'gpt-5.6-terra', 'account': 'agent-b',
+                                'capacity_scopes': ['short_window']},
+                    'claude': {'model': 'sonnet', 'account': 'review',
+                               'capacity_mode': 'provider_signal'},
+                },
+                'capacity_collectors': {'codex-b': {
+                    'shared_account_aliases': ['orchestra-agent-b'],
+                }},
+                'usage_policy': {'stale_after_seconds': 60},
+            }
+            control = Mock()
+            control.refresh_configured_capacity.return_value = (
+                {'worker_id': 'codex-a', 'observations': percentage('codex-a')},
+                {'worker_id': 'codex-b', 'observations': percentage('codex-b')},
+                {'worker_id': 'orchestra-agent-b',
+                 'observations': percentage('orchestra-agent-b')},
+                {'worker_id': 'claude', 'observations': claude},
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertTrue(refresh_capacity_observations(
+                    control, config, 'codex-a', state, usage_path, [None],
+                ))
+            self.assertNotIn('CAPACITY_COLLECTION_FAILED', output.getvalue())
+            published = json.loads(usage_path.read_text())['workers']
+            self.assertEqual(set(published), {'codex-a', 'codex-b', 'claude'})
+            self.assertEqual(
+                published['codex-b']['agent-b']['scopes']['short_window']['observed_at'],
+                measured_at,
+            )
+            self.assertEqual(published['claude']['review']['observed_at'], measured_at)
+            self.assertEqual(
+                worker_state(config, {'workers': published}, 'codex-a', 'agent-a',
+                             now=datetime.datetime(2026, 9, 26, 10, 1, 1,
+                                                   tzinfo=datetime.timezone.utc)),
+                'normal',
+            )
+            self.assertEqual(
+                worker_state(config, {'workers': published}, 'claude', 'review',
+                             now=datetime.datetime(2026, 9, 26, 10, 1, 1,
+                                                   tzinfo=datetime.timezone.utc)),
+                'hard_stop',
+            )
+            self.assertEqual(
+                worker_state(config, {'workers': published}, 'codex-a', 'agent-a',
+                             now=datetime.datetime(2026, 9, 26, 10, 2, 1,
+                                                   tzinfo=datetime.timezone.utc)),
+                'unknown',
+            )
+
     def test_concurrent_capacity_refresh_collects_and_publishes_once(self):
         import pathlib, tempfile, threading
         with tempfile.TemporaryDirectory() as directory:
