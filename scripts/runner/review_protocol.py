@@ -6,6 +6,18 @@ import re
 from typing import Any, Mapping
 from scripts.factory_registry.models import ReviewInput, ReviewOutcomeState, ReviewVerdict
 _SHA = re.compile(r"^[0-9a-f]{40,64}$")
+REVIEW_VERDICT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["state", "reviewed_commit", "reviewed_base_commit", "contract_sha256", "findings", "changes_requested"],
+    "properties": {
+        "state": {"type": "string", "enum": ["APPROVED", "CHANGES_REQUESTED"]},
+        "reviewed_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "reviewed_base_commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "changes_requested": {"type": "array", "items": {"type": "string"}},
+    },
+}
 class ReviewProtocolError(ValueError):
     """The review was blocked, missing required input, or not parseable."""
 
@@ -50,10 +62,17 @@ def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdic
                 or raw.get("subtype") not in (None, "success")
                 or "error" in raw):
             raise ReviewProtocolError("review provider result was not successful")
-        result = raw.get("result")
-        if not isinstance(result, str):
-            raise ReviewProtocolError("review provider result is not verdict JSON")
-        raw = _load_json(result, message="review provider result is not verdict JSON")
+        if "structured_output" in raw:
+            # Claude --json-schema owns this field. Its human result prose is
+            # never searched, stripped of fences, or converted into a verdict.
+            raw = raw["structured_output"]
+            if not isinstance(raw, Mapping):
+                raise ReviewProtocolError("review structured output is not verdict JSON")
+        else:
+            result = raw.get("result")
+            if not isinstance(result, str):
+                raise ReviewProtocolError("review provider result is not verdict JSON")
+            raw = _load_json(result, message="review provider result is not verdict JSON")
     if not isinstance(raw, Mapping) or set(raw) != {"state", "reviewed_commit", "reviewed_base_commit", "contract_sha256", "findings", "changes_requested"}: raise ReviewProtocolError("review verdict schema is invalid")
     try: state = ReviewOutcomeState(raw["state"])
     except (KeyError, ValueError) as error: raise ReviewProtocolError("review verdict state is invalid") from error

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 from queue_snapshot import write_queue_snapshot
 from registry_control import RunnerRegistryControl
-from review_protocol import ReviewProtocolError, parse_review_verdict, review_handoff
+from review_protocol import REVIEW_VERDICT_SCHEMA, ReviewProtocolError, parse_review_verdict, review_handoff
 from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome
 from scripts.factory_registry.repository import RegistryConflict
 
@@ -695,7 +695,7 @@ def review_command(config, *, review_packet_path=None):
         executable = command[0]
     if pathlib.Path(executable).name != 'claude':
         raise ValueError('Registry review command must invoke Claude')
-    protected = {'--output-format', '--tools', '--permission-mode', '--permission-prompts'}
+    protected = {'--output-format', '--tools', '--permission-mode', '--permission-prompts', '--json-schema'}
     prohibited = {
         '--dangerously-skip-permissions', '--permission-prompt-tool', '--add-dir',
     }
@@ -714,6 +714,7 @@ def review_command(config, *, review_packet_path=None):
             continue
         sanitized.append(item)
         index += 1
+    sanitized.extend(['--json-schema', json.dumps(REVIEW_VERDICT_SCHEMA, separators=(',', ':'))])
     sanitized.extend([
         '--output-format', 'json', '--tools', 'Read,Glob,Grep',
         '--permission-mode', 'dontAsk', '--permission-prompts', 'none',

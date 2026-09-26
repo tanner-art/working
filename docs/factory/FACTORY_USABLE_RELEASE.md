@@ -146,3 +146,10 @@ Final coordinator validation before independent review: 225 Registry tests,
 and `git diff --check` passed. The existing large-bundle build warning remains;
 no product code was changed. Independent review evidence is intentionally kept
 outside its own reviewed commit to avoid a self-referential SHA assertion.
+
+The first real Claude review reported approval but returned fenced JSON inside
+prose; the strict adapter rejected it rather than recording success. The adapter
+now passes a closed verdict schema through `--json-schema` and consumes the
+successful envelope's `structured_output` field. Plain-text/fenced verdicts are
+still rejected. The provider-output failure is retained outside this commit;
+the revised exact commit requires a fresh structured verdict.

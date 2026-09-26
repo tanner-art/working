@@ -62,6 +62,21 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewProtocolError, "duplicate JSON key"):
                     parse_review_verdict(value, self.input)
 
+    def test_schema_output_is_authoritative_and_prose_is_never_salvaged(self):
+        envelope = {"type": "result", "subtype": "success", "is_error": False,
+            "result": "Review complete. See structured output.",
+            "structured_output": json.loads(self.verdict())}
+        self.assertEqual(parse_review_verdict(json.dumps(envelope), self.input).state,
+                         ReviewOutcomeState.APPROVED)
+        for invalid in (None, "APPROVED", {"state": "APPROVED"}):
+            envelope['structured_output'] = invalid
+            with self.assertRaises(ReviewProtocolError):
+                parse_review_verdict(json.dumps(envelope), self.input)
+        envelope.pop('structured_output')
+        envelope['result'] = 'Review complete.\n```json\n' + self.verdict() + '\n```'
+        with self.assertRaises(ReviewProtocolError):
+            parse_review_verdict(json.dumps(envelope), self.input)
+
     def test_non_ascii_contract_digests_match_without_changing_receipt_digest(self):
         contract = {"task": "TÄSK-1", "instructions": "résumé ✅"}
         sqlite_review = _review_contract_sha256(contract)

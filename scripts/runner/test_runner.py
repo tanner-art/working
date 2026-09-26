@@ -1,4 +1,5 @@
 import unittest
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from runner import (build_agent_environment, build_agent_prompt, build_review_prompt,
@@ -77,6 +78,9 @@ class QueueTests(unittest.TestCase):
                                        'exec', '/opt/bin/claude', '-p'])
         self.assertEqual(command[-8:], ['--output-format', 'json', '--tools', 'Read,Glob,Grep',
                                         '--permission-mode', 'dontAsk', '--permission-prompts', 'none'])
+        schema = json.loads(command[command.index('--json-schema') + 1])
+        self.assertFalse(schema['additionalProperties'])
+        self.assertIn('reviewed_commit', schema['required'])
         for config in (
             {'provider': 'openai', 'command': ['/opt/bin/claude', '-p']},
             {'provider': 'anthropic', 'command': ['/opt/bin/claude', '-p', '--tools=Read,Edit']},
