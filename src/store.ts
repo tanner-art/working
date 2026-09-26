@@ -14,6 +14,7 @@ const sourceTypes: SourceType[] = ['text', 'voice', 'canvas']
 const relationshipTypes: Relationship['type'][] = ['belongs_to', 'relates_to', 'depends_on', 'supports']
 const effortValues: Required<ObjectMetadata>['effort'][] = ['small', 'medium', 'large']
 const attentionValues: Required<ObjectMetadata>['attentionLoad'][] = ['low', 'medium', 'high']
+const interpretationMethods: NonNullable<LegacyInterpretation['method']>[] = ['provider', 'built-in', 'built-in-fallback']
 
 const seed: AppState = {
   objects: [
@@ -110,6 +111,7 @@ function isInterpretation(value: unknown): value is LegacyInterpretation {
   return typeof item.summary === 'string' &&
     objectKinds.includes(item.suggestedKind as ObjectKind) &&
     typeof item.rationale === 'string' &&
+    (item.method === undefined || interpretationMethods.includes(item.method)) &&
     (item.suggestedProject === undefined || typeof item.suggestedProject === 'string') &&
     (item.suggestedDate === undefined || typeof item.suggestedDate === 'string')
 }

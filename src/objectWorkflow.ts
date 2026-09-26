@@ -11,6 +11,10 @@ export const activeObjects = (objects: ThoughtObject[]) =>
 export const reviewObjects = (objects: ThoughtObject[]) => objects.filter(item =>
   item.status === 'review' && item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision !== 'rejected')
 
+/** Ideas are visible only after the dedicated Review resolution completes. */
+export const resolvedIdeas = (objects: ThoughtObject[]) =>
+  activeObjects(objects).filter(item => item.kind === 'idea' && item.status === 'confirmed')
+
 /** Confirmed and eligible: an unresolved `depends_on` link keeps a confirmed Action out of the queue without hiding it in a score. */
 export const confirmedActions = (objects: ThoughtObject[], relationships: SemanticRelationship[] = []) =>
   activeObjects(objects)
@@ -81,7 +85,8 @@ export function canvasObjectDraft(element: CanvasElement) {
     interpretation: {
       summary: originalContent.length > 84 ? `${originalContent.slice(0, 81)}...` : originalContent,
       suggestedKind: 'idea' as ObjectKind,
-      rationale: 'Captured from canvas; review before turning spatial thought into structure.'
+      rationale: 'Captured from canvas; review before turning spatial thought into structure.',
+      method: 'built-in' as const,
     }
   }
 }

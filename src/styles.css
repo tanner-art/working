@@ -428,11 +428,43 @@ button.sidebar-bottom:hover { background: #2c3d37; border-radius: 8px; }
 .canvas-lasso-preview { fill: #99c66722; stroke: #507737; stroke-width: 2; stroke-dasharray: 7 5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .canvas-refinement-sheet { position: absolute; z-index: 6; right: 22px; bottom: 22px; width: min(340px, calc(100% - 44px)); padding: 18px; border: 1px solid #b7d9ce; border-radius: 12px; background: #fffefa; box-shadow: 0 12px 32px #23312838; color: #31453b; }
 .canvas-refinement-sheet h2 { margin: 4px 0 8px; font: 500 23px 'Playfair Display'; }.canvas-refinement-sheet p:not(.section-label) { margin: 0 28px 15px 0; color: #5d7167; font-size: 12px; line-height: 1.45; }.canvas-refinement-sheet > div { display: flex; gap: 8px; }.canvas-refinement-sheet .primary { border: 0; border-radius: 8px; padding: 11px 13px; background: #456b32; color: #fffefa; font: 700 12px Manrope; }.canvas-refinement-dismiss { position: absolute; top: 8px; right: 9px; border: 0; background: transparent; color: #617169; font-size: 22px; }
+.canvas-mobile-toolbar { display: none; }
 @media (max-width: 720px) {
   .canvas-tools { min-height: 44px; }
   .canvas-properties.edit-mode { max-height: 104px; }
   .canvas-node:has(.canvas-resize-handle) { z-index: 3; }
   .canvas-refinement-sheet { right: 12px; bottom: 12px; width: min(340px, calc(100% - 24px)); }
+}
+
+/* WP-05: Canvas takes over the phone viewport; normal app navigation does not
+   spend any of the editing area. The toolbar is outside canvas-world, whose
+   transform is the only transform applied during pan and zoom. */
+@media (max-width: 720px) {
+  body:has(.canvas-page) { overflow: hidden; }
+  .app-shell:has(.canvas-page) { display: block; min-height: 0; }
+  .app-shell:has(.canvas-page) .sidebar { display: none; }
+  .app-shell:has(.canvas-page) .content { height: 100dvh; }
+  .canvas-page { height: 100dvh; grid-template-rows: auto auto auto minmax(0, 1fr); }
+  .canvas-head { position: relative; z-index: 7; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: calc(6px + var(--safe-top, 0px)) max(10px, calc(10px + var(--safe-right, 0px))) 6px max(10px, calc(10px + var(--safe-left, 0px))); box-shadow: 0 1px 0 #d8ddd6; }
+  .canvas-head > div:first-child { display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 8px; align-items: center; min-width: 0; }
+  .canvas-exit { grid-row: span 2; display: grid; place-items: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 1px solid #d1dad0; border-radius: 50%; background: #fffefa; font-size: 28px; line-height: 1; }
+  .canvas-exit-label { display: none; }
+  .canvas-title-input { width: 100%; margin: 0; font-size: 20px; }
+  .canvas-save-status { grid-column: 2; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .canvas-head > .canvas-tools { display: none; }
+  .canvas-mobile-toolbar { display: flex; align-items: start; gap: 6px; min-width: 0; }
+  .canvas-mobile-primary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); flex: 1; gap: 6px; }
+  .canvas-mobile-toolbar button, .canvas-mobile-more summary { min-height: 44px; border: 1px solid #d8ddd6; border-radius: 8px; background: #fffefa; color: #46564d; font-size: 12px; font-weight: 700; }
+  .canvas-mobile-toolbar button:disabled { opacity: .45; }
+  .canvas-mobile-toolbar .selected-tool { background: #dcefc0; border-color: #aed27c; }
+  .canvas-mobile-more { position: relative; flex: 0 0 44px; }
+  .canvas-mobile-more summary { display: grid; place-items: center; width: 44px; list-style: none; cursor: pointer; font-size: 17px; letter-spacing: 1px; }
+  .canvas-mobile-more summary::-webkit-details-marker { display: none; }
+  .canvas-mobile-more-menu { position: absolute; z-index: 8; top: calc(100% + 6px); right: 0; display: grid; gap: 6px; width: min(280px, calc(100vw - 20px)); max-height: min(60dvh, 440px); overflow-y: auto; padding: 10px; border: 1px solid #cbd6c7; border-radius: 10px; background: #f7f6f1; box-shadow: 0 12px 30px #23312833; }
+  .canvas-mobile-more-menu button { width: 100%; padding: 0 12px; text-align: left; }
+  .canvas-mobile-more-menu .canvas-palette { display: grid; gap: 5px; font-size: 11px; }
+  .canvas-mobile-more-menu .canvas-palette select { width: 100%; min-height: 44px; }
+  .canvas-note { padding-left: max(10px, calc(10px + var(--safe-left, 0px))); padding-right: max(10px, calc(10px + var(--safe-right, 0px))); }
 }
 /* Opt-in secondary home: /?preview=home. The production start page remains unchanged. */
 .beta-home { min-height: 100%; padding: clamp(22px, 5vw, 64px); background: radial-gradient(circle at 8% 0%, #e8f3d4 0, transparent 32%), linear-gradient(145deg, #fbf8ef 0%, #f6f5ee 58%, #edf2e6 100%); color: #19271f; }

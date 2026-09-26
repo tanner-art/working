@@ -59,7 +59,7 @@ describe('service substitution and persistence boundary', () => {
       await Promise.resolve()
       received = input
       return { summary: 'Provider proposal', rationale: 'Test substitute', confidence: .99,
-        proposedKind: 'action', proposedAction: { summary: 'Provider proposal' }, reviewState: 'review' }
+        proposedKind: 'action', proposedAction: { summary: 'Provider proposal' }, reviewState: 'review', method: 'provider' }
     } }
     const item = await createInterpretedObject('  Preserve my words\n', 'Context', service)
     expect(received).toEqual({ id: `capture:${item.id}`, source: 'text', createdAt: item.createdAt,
@@ -70,7 +70,7 @@ describe('service substitution and persistence boundary', () => {
     expect(isPersistedState(model)).toBe(true)
     expect(model.captures[0]).toEqual(received)
     expect(model.interpretations[0]).toMatchObject({ captureIds: [received!.id], version: 1,
-      proposedKind: 'action', proposedAction: { summary: 'Provider proposal' }, reviewState: 'review' })
+      proposedKind: 'action', proposedAction: { summary: 'Provider proposal' }, reviewState: 'review', method: 'provider' })
     expect(model.semanticObjects).toEqual([])
     const confirmed = confirmObject(legacyUiProjection(model).objects[0])
     const accepted = reconcileLegacyUi({ objects: [confirmed], canvas: [], model })
@@ -81,7 +81,7 @@ describe('service substitution and persistence boundary', () => {
   it('rejects substitute meaning that the compatibility writer would otherwise lose', async () => {
     const service: InterpretationService = { async interpret() {
       return { summary: 'One reading', rationale: 'Test', confidence: .9, proposedKind: 'action',
-        proposedAction: { summary: 'Different work' }, reviewState: 'review' }
+        proposedAction: { summary: 'Different work' }, reviewState: 'review', method: 'provider' }
     } }
     await expect(createInterpretedObject('Capture', undefined, service)).rejects.toThrow('cannot be represented')
   })

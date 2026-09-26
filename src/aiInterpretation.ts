@@ -45,7 +45,7 @@ export function validateInterpretationProposal(capture: CaptureRecord, value: un
   if (typeof rationale !== 'string' || !rationale.trim()) throw new Error('Provider response is missing a rationale.')
   if (!isConfidence(confidence)) throw new Error('Provider response has an invalid confidence.')
   const suggestedDate = typeof candidate.suggestedDate === 'string' && candidate.suggestedDate.trim() ? candidate.suggestedDate : undefined
-  const base = { summary, rationale, confidence, reviewState: 'review' as const, suggestedDate }
+  const base = { summary, rationale, confidence, reviewState: 'review' as const, method: 'provider' as const, suggestedDate }
   if (proposedKind === 'unresolved') {
     return { ...base, proposedKind: 'unresolved', proposedReminder: {
       captureIds: [capture.id], deliveryState: 'needs-review',
@@ -115,7 +115,7 @@ export function createFailClosedInterpretationService(config: ProviderConfig, op
     try { return await provider.interpret(capture) }
     catch (error) {
       if (typeof console !== 'undefined') console.warn('AI interpretation provider unavailable; using deterministic interpretation.', error)
-      return deterministicInterpretationService.interpret(capture)
+      return { ...await deterministicInterpretationService.interpret(capture), method: 'built-in-fallback' }
     }
   } }
 }

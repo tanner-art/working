@@ -114,6 +114,7 @@ describe('object workflow', () => {
     const draft = canvasObjectDraft({ id: 'node', type: 'text', x: 10, y: 20, text: '  AI sales training\n' })
     expect(draft).toMatchObject({ kind: 'idea', originalContent: '  AI sales training\n', source: 'canvas', confidence: .72 })
     expect(draft?.interpretation.rationale).toContain('Captured from canvas')
+    expect(draft?.interpretation.method).toBe('built-in')
   })
 
   it('does not create semantic drafts from empty nodes or arrows', () => {

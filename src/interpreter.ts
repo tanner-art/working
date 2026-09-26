@@ -18,7 +18,7 @@ export const deterministicInterpretationService: InterpretationService = {
       rationale = 'This includes uncertainty, a condition, a question, or a change of intent. Review before treating it as work to execute.'
     }
     const summary = content.length > 84 ? `${content.slice(0, 81)}…` : content
-    const base = { summary, rationale, confidence, reviewState: 'review' as const,
+    const base = { summary, rationale, confidence, reviewState: 'review' as const, method: 'built-in' as const,
       suggestedDate: date ? 'Needs a date' : undefined }
     if (kind === 'unresolved') return { ...base, proposedKind: kind,
       proposedReminder: { captureIds: [capture.id], deliveryState: 'needs-review',

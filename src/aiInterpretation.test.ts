@@ -79,8 +79,9 @@ describe('validateInterpretationProposal', () => {
 
   it('forces reviewState to review even if the payload claims otherwise', () => {
     const result = validateInterpretationProposal(capture,
-      { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', reviewState: 'accepted' })
+      { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', reviewState: 'accepted', method: 'built-in' })
     expect(result.reviewState).toBe('review')
+    expect(result.method).toBe('provider')
   })
 
   it.each(['idea', 'project', 'commitment', 'person', 'reference', 'objective'])
@@ -182,6 +183,7 @@ describe('createFailClosedInterpretationService', () => {
     const result = await service.interpret(capture)
     expect(fetchImpl).not.toHaveBeenCalled()
     expect(result).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(result.method).toBe('built-in')
   })
 
   it('returns the validated provider result when enabled and the endpoint succeeds', async () => {
@@ -189,24 +191,25 @@ describe('createFailClosedInterpretationService', () => {
     const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
     const result = await service.interpret(capture)
     expect(result).toMatchObject({ proposedKind: 'action', summary: 'Provider summary', reviewState: 'review' })
+    expect(result.method).toBe('provider')
   })
 
   it('falls back to the deterministic service on a network error', async () => {
     const fetchImpl = fetchMock(async () => { throw new Error('offline') })
     const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
-    expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(await service.interpret(capture)).toEqual({ ...await deterministicInterpretationService.interpret(capture), method: 'built-in-fallback' })
   })
 
   it('falls back to the deterministic service on a non-2xx response', async () => {
     const fetchImpl = fetchMock(async () => failResponse(500))
     const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
-    expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(await service.interpret(capture)).toEqual({ ...await deterministicInterpretationService.interpret(capture), method: 'built-in-fallback' })
   })
 
   it('falls back to the deterministic service on a malformed payload', async () => {
     const fetchImpl = fetchMock(async () => okResponse({ proposedKind: 'idea' }))
     const service = createFailClosedInterpretationService({ status: 'enabled' }, { fetchImpl, ...signedIn })
-    expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(await service.interpret(capture)).toEqual({ ...await deterministicInterpretationService.interpret(capture), method: 'built-in-fallback' })
   })
 
   it('never lets a provider response bypass review, even when it tries to', async () => {
@@ -221,7 +224,7 @@ describe('createFailClosedInterpretationService', () => {
     const service = createFailClosedInterpretationService({ status: 'enabled' }, {
       fetchImpl, getAccessToken: async () => undefined,
     })
-    expect(await service.interpret(capture)).toEqual(await deterministicInterpretationService.interpret(capture))
+    expect(await service.interpret(capture)).toEqual({ ...await deterministicInterpretationService.interpret(capture), method: 'built-in-fallback' })
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 })

@@ -1,4 +1,4 @@
-import type { CaptureRecord, Interpretation, ReminderInstruction } from './domain'
+import type { CaptureRecord, Interpretation, InterpretationMethod, ReminderInstruction } from './domain'
 import { aiInterpretationService } from './aiInterpretation'
 
 /** Meaning only: persistence owns identity, versions, history and acceptance.
@@ -11,6 +11,7 @@ import { aiInterpretationService } from './aiInterpretation'
 export type InterpretationProposal = Pick<Interpretation,
   'summary' | 'rationale' | 'confidence'> & {
   reviewState: 'review'
+  method: InterpretationMethod
   /** Original timing wording is evidence, never a scheduled date. */
   suggestedDate?: string
 } & (
