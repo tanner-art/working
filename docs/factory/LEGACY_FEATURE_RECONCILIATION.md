@@ -64,15 +64,13 @@ Use an explicit one- or two-review `enable-live --bounded-run` envelope whose
 after it fail. Stop, reconcile, and return to `PAUSED` using the normal
 operator sequence. Old `CHANGES_REQUESTED` outcomes remain append-only.
 
-## TASK-313 verification matrix
+## TASK-315 verification matrix
 
 | Requirement | Regression coverage |
 | --- | --- |
-| 1 | `SQLiteRegistryTest.test_followup_registration_restores_global_ready_active_exclusivity`; existing `OperatorFixture.test_telemetry_canary_and_worker_gate_are_revision_checked` preserves the accepted target flow. |
-| 2 | `bounded_run_worker_gate` requires exact review-input and successful-attempt lookups before reviewer evaluation; runner pre-claim remains covered by `RunnerRegistryControlTests.test_review_preclaim_uses_real_sqlite_branch_when_no_review_input_exists`. |
-| 3 | `SQLiteRegistryTest.test_operator_review_packet_requires_exact_hashes_contract_and_green_ci` covers packet hash/contract tamper rejection; `SQLiteRegistry.record_operator_review_input` performs that verification under `BEGIN IMMEDIATE`, while normal runner immutable publication remains covered by `RunnerRegistryControlTests.test_implementation_completion_and_review_input_are_atomic`. |
-| 4 | Existing runner integration tests use fake GitHub/provider calls; no live provider or Registry is contacted. |
-| 5 | `SQLiteRegistryTest.test_legacy_source_binding_is_contract_pinned_and_idempotent` covers contract mismatch, replacement rejection, idempotence, and preserved event history. |
-| 6 | The reconciliation path adds no attempts or verdicts; `OPERATOR_REVIEW_INPUT_RECORDED` explicitly marks historical input rather than implementation authorship. |
+| Operator cardinality | `bounded_run_worker_gate` now rejects a review with zero or multiple dependency rows before target lookup. |
+| Operator review input | `SQLiteRegistryTest.test_operator_review_input_requires_paused_drained_target_attempt_and_is_single_write` exercises the real `record_operator_review_input` transaction, successful attempt provenance, revision bump, and replay refusal. |
+| Legacy source binding | `SQLiteRegistryTest.test_legacy_source_binding_rejects_each_gate_without_rewriting_history` exercises status, attempt-history, replacement, replay, contract identity, and dependency preservation. |
+| Runner review gate | `RunnerRegistryControlTests.test_review_preclaim_excludes_the_actual_implementer` and `test_review_preclaim_fails_closed_when_its_bound_input_is_missing` cover review-only pre-claim rejection; `ReviewValidationTests.test_pending_failed_or_wrong_head_are_not_review_ready` retains exact-head and green-CI checks. |
 
-Focused commands: `PYTHONPYCACHEPREFIX=/private/tmp/task313-pyc python3 -m unittest scripts.factory_registry.test_registry scripts.factory_registry.test_operator`; runner tests must run from `scripts/runner` because they intentionally import local runner modules. These commands do not run `pnpm check`; that immutable-packet validation remains the factory runner's responsibility.
+Focused commands run: `PYTHONPYCACHEPREFIX=/private/tmp/task315-pyc python3 -m unittest scripts.factory_registry.test_operator scripts.factory_registry.test_registry` (89 tests run; one failed only because this sandbox did not enforce the owner-only mode assertion in `OperatorFixture.test_preservation_is_pinned_and_installed_owner_only`); from `scripts/runner`, `PYTHONPYCACHEPREFIX=/private/tmp/task315-pyc python3 -m unittest test_registry_control test_usable_integration` (32 passed). These Python suites do not run `pnpm check`; the runner owns that final shared-lock validation.

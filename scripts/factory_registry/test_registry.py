@@ -119,6 +119,56 @@ class SQLiteRegistryTest(unittest.TestCase):
             ).fetchall()
         self.assertEqual([row[0] for row in history], ["LEGACY_SOURCE_BOUND"])
 
+    def test_legacy_source_binding_rejects_each_gate_without_rewriting_history(self) -> None:
+        self.feature()
+        contract = {"task": "TASK-LEGACY", "depends_on": [], "paths": ["docs/legacy.md"]}
+        digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.registry.register_work_package(WorkPackage("DEPENDENCY", "FEATURE-1", "dependency", "ORCHESTRATION", Lane.PLATFORM, ("registry",), 1, ("preserved",), status=TaskStatus.DONE))
+        self.registry.register_work_package(WorkPackage("TASK-LEGACY", "FEATURE-1", "legacy", "ORCHESTRATION", Lane.PLATFORM, ("registry",), 1, ("preserved",), status=TaskStatus.ON_DECK, provider_diagnostics={"queue_contract_sha256": digest}, dependency_ids=("DEPENDENCY",)))
+        def bind(**kwargs):
+            return self.registry.bind_legacy_package_source("TASK-LEGACY", github_issue=173, queue_contract=contract, expected_revision=self.registry.dispatch_control()["revision"], recorded_at="2026-09-27T12:00:00Z", **kwargs)
+        # Each fixture changes only the gate it names; no failed request rewrites the source/dependency/history.
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE work_packages SET status='VERIFY_REVIEW' WHERE id='TASK-LEGACY'")
+        with self.assertRaisesRegex(RegistryConflict, "STATUS_INVALID"): bind()
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE work_packages SET status='ON_DECK' WHERE id='TASK-LEGACY'")
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("INSERT INTO attempts(id, package_id, worker_id, lease_id, started_at, ended_at, outcome, provider_diagnostics_json) VALUES ('old', 'TASK-LEGACY', 'w', 'l', '2026-09-26T00:00:00Z', '2026-09-26T00:01:00Z', 'FAILED', '{}')")
+        with self.assertRaisesRegex(RegistryConflict, "ATTEMPT_HISTORY"): bind()
+        with self.registry._connection() as connection:
+            connection.execute("DELETE FROM attempts WHERE id='old'")
+        revision = bind()
+        self.assertEqual(bind(), revision)
+        with self.assertRaisesRegex(RegistryConflict, "REPLACEMENT_FORBIDDEN"):
+            self.registry.bind_legacy_package_source("TASK-LEGACY", github_issue=174, queue_contract=contract, expected_revision=revision, recorded_at="2026-09-27T12:00:01Z")
+        with self.registry._connection() as connection:
+            dependencies = connection.execute("SELECT dependency_id FROM task_dependencies WHERE package_id='TASK-LEGACY'").fetchall()
+        self.assertEqual([row[0] for row in dependencies], ["DEPENDENCY"])
+
+    def test_operator_review_input_requires_paused_drained_target_attempt_and_is_single_write(self) -> None:
+        self.feature(); self.worker("implementer", "registry")
+        self.package("TARGET")
+        self.registry.register_work_package(WorkPackage("REVIEW", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE, ("review",), 1, ("review",), status=TaskStatus.READY, kind=PackageKind.REVIEW, dependency_ids=("TARGET",)))
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(expected_revision=control["revision"], expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False, changed_at="2026-09-27T10:00:00Z", reason="fixture")
+        self.registry.acquire_lease("TARGET", "implementer", acquired_at="2026-09-27T10:00:00Z", expires_at="2026-09-27T11:00:00Z")
+        self.registry.begin_attempt_runtime("attempt", package_id="TARGET", worker_id="implementer", runner_pid=1, started_at="2026-09-27T10:00:01Z", expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.finish_attempt_runtime("attempt", ended_at="2026-09-27T10:01:00Z", outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW, reason="done")
+        self.registry.engage_dispatch_kill_switch(changed_at="2026-09-27T10:01:01Z", reason="pause")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(expected_revision=control["revision"], expected_mode="STOPPING", new_mode="PAUSED", kill_switch_engaged=True, changed_at="2026-09-27T10:01:02Z", reason="drained")
+        packet = self.root / "packet"; packet.mkdir(); contract = {"task": "TARGET"}
+        files = {"base-to-implementation.diff": b"d", "changed-files.txt": b"f\n", "contract.json": json.dumps(contract, sort_keys=True).encode(), "validation-evidence.json": b"{}"}
+        for name, value in files.items(): (packet / name).write_bytes(value)
+        hashes = {name: hashlib.sha256(value).hexdigest() for name, value in files.items()}
+        manifest = {"schema_version": 1, "implementation_attempt_id": "attempt", "base_commit": "b" * 40, "implementation_commit": "a" * 40, "files": hashes}; raw = json.dumps(manifest, sort_keys=True).encode(); (packet / "manifest.json").write_bytes(raw)
+        value = ReviewInput("input", "REVIEW", "TARGET", "attempt", "a" * 40, "b" * 40, "https://example.test/pr", hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), contract, {"ci": {"state": "SUCCESS", "implementation_commit": "a" * 40, "pr_url": "https://example.test/pr"}, "review_packet": {"path": str(packet), "manifest_sha256": hashlib.sha256(raw).hexdigest(), "files": hashes}}, "2026-09-27T10:02:00Z")
+        revision = self.registry.dispatch_control()["revision"]
+        self.assertEqual(self.registry.record_operator_review_input(value, expected_revision=revision), revision + 1)
+        with self.assertRaisesRegex(RegistryConflict, "ALREADY_RECORDED"):
+            self.registry.record_operator_review_input(value, expected_revision=revision + 1)
+
     def test_followup_registration_restores_global_ready_active_exclusivity(self) -> None:
         self.feature()
         self.registry.register_work_package(WorkPackage(

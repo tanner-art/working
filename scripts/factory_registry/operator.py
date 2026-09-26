@@ -1978,9 +1978,18 @@ def bounded_run_worker_gate(
             or len(parents) + len(reviews) != len(run_packages)):
         raise OperatorError("bounded run requires one or two implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
+    dependency_rows = {
+        str(review.get("id")): [
+            str(item.get("dependency_id")) for item in dependencies
+            if item.get("package_id") == review.get("id")
+        ]
+        for review in reviews
+    }
+    if any(len(rows) != 1 for rows in dependency_rows.values()):
+        raise OperatorError("bounded run reviews require exactly one dependency row")
     required_ids = allowed | {str(item.get("dependency_id")) for item in dependencies}
     packages = tuple(item for item in snapshot.work_packages if item.get("id") in required_ids)
-    review_targets = {str(item.get("package_id")): str(item.get("dependency_id")) for item in dependencies}
+    review_targets = {review_id: rows[0] for review_id, rows in dependency_rows.items()}
     if not review_only and {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
         raise OperatorError("bounded run review dependencies do not exactly match implementations")
     if review_only:
