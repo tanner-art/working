@@ -76,6 +76,10 @@
     margin-top: 8px;
   }
   .unknown { color: var(--muted); font-style: italic; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; padding: 8px 0; }
+  .feature-package { border-top: 1px solid var(--panel-border); padding: 10px 0 10px 14px; }
+  main.stale { opacity: 0.65; }
   .grid {
     display: grid;
     gap: 12px;
@@ -154,13 +158,17 @@
   </section>
 
   <section id="section-registry-queue">
-    <h2>Registry Work Packages</h2>
+    <h2>Features &amp; progress</h2>
+    <div id="feature-groups"></div>
+    <p class="note">Grouped by registered feature identity. Expand a feature to see its implementation, reviews, and attempt history. DONE is a Registry state, not proof of merge or deployment.</p>
+    <details><summary>All Registry work packages (technical detail)</summary>
     <div class="table-wrap">
       <table id="registry-packages-table">
-        <thead><tr><th>Package</th><th>State</th><th>Kind</th><th>Lane</th><th>Dependencies</th><th>Owner</th><th>Attempts</th></tr></thead>
+        <thead><tr><th>Package</th><th>State</th><th>Kind</th><th>Lane</th><th>Next blocker</th><th>Owner</th><th>Review verdict</th><th>PR</th><th>Attempts</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
+    </details>
     <p class="note">Read directly from the Registry projection. Refresh never registers, claims, or dispatches work.</p>
   </section>
 
@@ -225,6 +233,8 @@
 (function () {
   var REFRESH_MS = 10000;
   var REFRESH_TIMEOUT_MS = 8000;
+  var refreshInFlight = false;
+  var expandedFeatures = {};
 
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -293,21 +303,27 @@
     var kpis = document.getElementById('registry-kpis');
     var note = document.getElementById('registry-note');
     var tbody = document.querySelector('#registry-packages-table tbody');
+    var groups = document.getElementById('feature-groups');
     clearChildren(kpis);
     clearChildren(tbody);
+    clearChildren(groups);
     if (!registry || !registry.available) {
       kpis.appendChild(unknown((registry && registry.error) || 'Registry is not configured'));
       note.textContent = 'Legacy compatibility telemetry is shown below.';
-      tbody.appendChild(el('tr', {}, [el('td', { colspan: '7' }, [unknown('Registry projection unavailable')])]));
+      groups.appendChild(unknown('Registry projection unavailable'));
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '9' }, [unknown('Registry projection unavailable')])]));
       return;
     }
     var projection = registry.projection;
     var control = registry.control;
     var ownership = registry.ownership;
+    var run = control.bounded_run;
     [
       ['Registry revision', projection.registryRevision],
       ['Mode', control.dispatch_mode],
       ['Kill switch', control.kill_switch_engaged ? 'ENGAGED' : 'released'],
+      ['Run ID', run ? run.run_id : 'Legacy / none'],
+      ['Run deadline', run ? run.deadline : 'Unknown'],
       ['Factory health', projection.factory.health],
       ['Ready', projection.factory.readyCount],
       ['Verify / review', projection.factory.verifyReviewCount],
@@ -329,8 +345,38 @@
       + '. The revision may remain unchanged when no Factory state was mutated.'
       + (ownership.error ? ' Partial failure: ' + ownership.error + '.' : '');
     var packages = registryPackages(registry);
+    projection.features.forEach(function (feature) {
+      var counts = {};
+      feature.packages.forEach(function (pkg) { counts[pkg.state] = (counts[pkg.state] || 0) + 1; });
+      var progress = Object.keys(counts).map(function (state) { return counts[state] + ' ' + state; }).join(' · ');
+      var details = el('details', { 'data-feature-id': feature.id });
+      details.open = !!expandedFeatures[feature.id];
+      details.addEventListener('toggle', function () { expandedFeatures[feature.id] = details.open; });
+      details.appendChild(el('summary', { text: feature.title + ' — ' + (progress || 'No packages registered') }));
+      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state }));
+      feature.packages.forEach(function (pkg) {
+        var packageNode = el('div', { class: 'feature-package' }, [
+          el('strong', { text: pkg.id + ' — ' + pkg.title }),
+          el('div', { text: pkg.state + ' · ' + pkg.kind + ' · Owner: ' + (pkg.ownerWorkerId || 'Unclaimed') }),
+          el('div', { class: 'note', text: 'Review: ' + (pkg.reviewState || 'Outcome unrecorded')
+            + ' · Blocker: ' + (pkg.blockReason || 'None recorded') }),
+          el('div', { class: 'note', text: 'Dependencies: ' + (pkg.dependencies.join(', ') || 'None') })
+        ]);
+        if (pkg.pullRequestUrl) packageNode.appendChild(el('a', { href: pkg.pullRequestUrl, text: 'Open PR', target: '_blank', rel: 'noopener' }));
+        var attempts = el('details', {}, [el('summary', { text: 'Attempt history (' + pkg.attempts.length + ')' })]);
+        pkg.attempts.forEach(function (attempt) {
+          attempts.appendChild(el('div', { class: 'note', text: '#' + attempt.number + ' · '
+            + (attempt.workerId || 'Unknown worker') + ' · ' + attempt.outcome + ' · '
+            + attempt.startedAt + ' → ' + (attempt.endedAt || 'Not ended')
+            + (attempt.commitSha ? ' · ' + attempt.commitSha.slice(0, 10) : '') }));
+        });
+        packageNode.appendChild(attempts);
+        details.appendChild(packageNode);
+      });
+      groups.appendChild(details);
+    });
     if (!packages.length) {
-      tbody.appendChild(el('tr', {}, [el('td', { colspan: '7' }, [unknown('No packages are registered')])]));
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '9' }, [unknown('No packages are registered')])]));
     }
     packages.forEach(function (pkg) {
       var badgeClass = pkg.state === 'ACTIVE' ? 'active' : (pkg.state === 'BLOCKED' ? 'blocked' : 'idle');
@@ -339,8 +385,12 @@
         el('td', {}, [badge(pkg.state, badgeClass)]),
         el('td', { text: pkg.kind }),
         el('td', { text: pkg.lane || '—' }),
-        el('td', { text: pkg.dependencies.length ? pkg.dependencies.join(', ') : 'None' }),
+        el('td', { text: pkg.blockReason || (pkg.dependencies.length ? pkg.dependencies.join(', ') : 'None') }),
         el('td', { text: pkg.ownerWorkerId || 'Unclaimed' }),
+        el('td', { text: pkg.reviewState || 'Outcome unrecorded' }),
+        pkg.pullRequestUrl
+          ? el('td', {}, [el('a', { href: pkg.pullRequestUrl, text: 'Open PR' })])
+          : el('td', {}, [unknown('Not recorded')]),
         el('td', { text: String(pkg.attemptNumber) })
       ]));
     });
@@ -556,6 +606,8 @@
   }
 
   function refresh(manual) {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
     var attemptedAt = new Date();
     var button = document.getElementById('refresh-button');
     var status = document.getElementById('refresh-status');
@@ -576,14 +628,18 @@
       .then(function (report) {
         hideError();
         render(report);
+        document.querySelector('main').classList.remove('stale');
         status.textContent = 'Last successful refresh ' + new Date().toLocaleTimeString();
       })
       .catch(function (err) {
-        showError('Could not refresh dashboard: '
+        document.querySelector('main').classList.add('stale');
+        status.textContent = 'Refresh failed — displayed values are the last successful snapshot';
+        showError('STALE SNAPSHOT — Could not refresh dashboard: '
           + (err.name === 'AbortError' ? 'request timed out' : err.message));
       })
       .finally(function () {
         clearTimeout(timeout);
+        refreshInFlight = false;
         if (manual) {
           button.disabled = false;
           button.textContent = 'Refresh Factory State';

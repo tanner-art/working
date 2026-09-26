@@ -88,6 +88,14 @@ class Registry(Protocol):
         recorded_at: str,
     ) -> int: ...
 
+    def register_bounded_pilot(
+        self,
+        pairs: Sequence[tuple[Feature, WorkPackage, WorkPackage]],
+        *,
+        expected_revision: int,
+        recorded_at: str,
+    ) -> int: ...
+
     def register_followup_review(
         self,
         review: WorkPackage,

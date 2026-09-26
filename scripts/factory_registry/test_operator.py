@@ -1632,6 +1632,62 @@ class OperatorFixture(unittest.TestCase):
         with self.assertRaisesRegex(OperatorError, "secret-shaped"):
             validate_telemetry_payload(payload, "2026-09-25T08:00:01Z")
 
+    def test_bounded_enable_supports_two_pairs_without_rewriting_historical_ready(self):
+        self.config_path.write_text(json.dumps(self.config(strict=False)))
+        loaded = set()
+        def launchctl(arguments, **kwargs):
+            operation = arguments[1]
+            label = arguments[-1].rsplit('/', 1)[-1]
+            if operation == 'print':
+                return subprocess.CompletedProcess(arguments, 0 if label in loaded else 1)
+            if operation == 'bootout':
+                loaded.discard(label)
+            elif operation == 'bootstrap':
+                loaded.add(Path(arguments[-1]).stem)
+            else:
+                raise AssertionError(arguments)
+            return subprocess.CompletedProcess(arguments, 0)
+        prepare_dry_run(self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()['revision'], self.migration(),
+            home=self.root / 'home', run=launchctl, uid=501)
+        now = utc_now()
+        self.sync_workers(now)
+        worker, usage = validate_telemetry_payload(self.telemetry('codex-b', now=now), now)
+        self.registry.sync_worker_telemetry(worker, usage,
+            expected_revision=self.registry.dispatch_control()['revision'], recorded_at=now)
+        specs = []
+        for number in (201, 301):
+            spec = self.canary()
+            spec['feature']['id'] = 'PILOT-' + str(number)
+            for key, identifier in (('implementation', number), ('review', number + 1)):
+                package = spec[key]
+                package.update(id='TASK-' + str(identifier), feature_id=spec['feature']['id'], source_ref=str(identifier))
+                package['queue_contract']['task'] = package['id']
+                if key == 'review':
+                    package['dependency_ids'] = ['TASK-' + str(number)]
+                    package['queue_contract']['depends_on'] = [number]
+            specs.append(spec)
+        pairs = operator_module.parse_bounded_pilot_spec({'pairs': specs})
+        self.registry.register_feature(Feature('HISTORICAL', 'Preserved backlog', 999, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage('TASK-999', 'HISTORICAL', 'Unrelated',
+            'test', Lane.PLATFORM, ('documentation',), 999, ('preserve',), status=TaskStatus.READY))
+        self.registry.register_bounded_pilot(pairs,
+            expected_revision=self.registry.dispatch_control()['revision'], recorded_at=now)
+        scope = {'run_id': 'two-parent-pilot', 'package_ids': ['TASK-201', 'TASK-202', 'TASK-301', 'TASK-302'],
+            'deadline': '2099-01-01T00:00:00Z', 'base_ref': 'main', 'parent_limit': 2}
+        evidence = enable_live(self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()['revision'], 'two-parent-pilot',
+            home=self.root / 'home', run=launchctl, uid=501, bounded_run=scope)
+        self.assertTrue(evidence['passed'])
+        self.assertEqual(self.registry.dispatch_control()['bounded_run']['run_id'], scope['run_id'])
+        from scripts.runner.registry_control import RunnerRegistryControl
+        controller = RunnerRegistryControl(self.database)
+        self.assertIsNone(controller.proposed_worker('TASK-999'))
+        self.assertIsNotNone(controller.proposed_worker('TASK-201'))
+        self.assertIsNotNone(controller.proposed_worker('TASK-301'))
+        historical = next(p for p in self.registry.dispatch_snapshot(observed_at=now).work_packages if p['id'] == 'TASK-999')
+        self.assertEqual(historical['status'], 'READY')
+
 
 if __name__ == "__main__":
     unittest.main()

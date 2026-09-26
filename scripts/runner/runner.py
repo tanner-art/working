@@ -62,12 +62,14 @@ class RegistryAttemptLifecycle:
 class RegistryLeaseMonitor:
     """Renew one Registry runtime lease from the runner's main thread."""
 
-    def __init__(self, control, attempt_id, lease_id, lease_seconds, worker_id=None):
+    def __init__(self, control, attempt_id, lease_id, lease_seconds, worker_id=None,
+                 capacity_refresh=None):
         self.control = control
         self.attempt_id = attempt_id
         self.lease_id = lease_id
         self.lease_seconds = lease_seconds
         self.worker_id = worker_id
+        self.capacity_refresh = capacity_refresh
 
     def check(self):
         self.control.renew_runtime(
@@ -77,6 +79,8 @@ class RegistryLeaseMonitor:
         )
         if self.worker_id is not None:
             self.control.observe_worker_heartbeat(self.worker_id)
+        if self.capacity_refresh is not None:
+            self.capacity_refresh()
 
 
 def run(args, cwd=None, env=None, timeout=180, log=None, input=None,
@@ -501,13 +505,8 @@ def claim(state, issue, agent, body, retry=False, stale_claim_seconds=1860,
         return data
 
 
-def select(issue, allowed):
-    labels = {x['name'] for x in issue['labels']}
-    agents = labels & {'agent:codex-a','agent:codex-b','agent:claude'}
-    if issue['author']['login'] not in allowed or len(agents) != 1:
-        raise ValueError('Queue issue requires an allowed author and exactly one agent label')
-    if labels & {'runner:running','runner:review','runner:failed'}:
-        raise ValueError('Issue already running, failed, or awaiting review')
+def normalized_contract(issue):
+    """Parse the immutable queue contract without treating labels as authority."""
     body = json.loads(issue['body'])
     if not isinstance(body.get('task'),str) or not re.fullmatch(r'TASK-\d+',body['task']):
         raise ValueError('Invalid task identifier')
@@ -533,7 +532,71 @@ def select(issue, allowed):
         raise ValueError('kind must be PARENT, TEST, REVIEW, or EVALUATION')
     body.update(capacity_size=capacity_size, capacity_risk=capacity_risk,
                 lane=lane, kind=kind)
-    return next(iter(agents)).split(':')[1], body
+    return body
+
+
+def review_source_is_green(github, repository, review_input):
+    """Require the review packet's exact PR head and required checks.
+
+    GitHub supplies this observation only; the immutable review input remains
+    Registry-owned and a failed/pending query merely defers assurance.
+    """
+    try:
+        source = json.loads(github(
+            'pr', 'view', review_input.pr_url, '--repo', repository,
+            '--json', 'headRefOid',
+        ))
+        checks = json.loads(github(
+            'pr', 'checks', review_input.pr_url, '--repo', repository,
+            '--json', 'name,state,workflow',
+        ))
+    except Exception:
+        return False
+    if source.get('headRefOid') != review_input.implementation_commit:
+        return False
+    verify = [
+        item for item in checks if isinstance(item, dict)
+        and item.get('name') == 'verify'
+        and (item.get('workflow') in (None, '', 'Validate app'))
+    ]
+    return bool(verify) and all(item.get('state') in {'SUCCESS', 'PASS'} for item in verify)
+
+
+def write_collected_usage(path, config, collected):
+    """Publish only fresh collector records in the existing usage-policy shape."""
+    with file_lock(path.with_suffix('.collector.lock')):
+        try:
+            workers = validate_usage(json.loads(path.read_text()))
+        except FileNotFoundError:
+            workers = {}
+        for item in collected:
+            worker_id = item['worker_id']
+            settings = agent_settings(config, worker_id)
+            scopes = {}
+            for observation in item['observations']:
+                diagnostics = observation['provider_diagnostics']
+                value = {'used_percent': observation['consumed_percent'],
+                         'observed_at': observation['observed_at']}
+                if observation['reset_at'] is not None:
+                    value['reset_at'] = observation['reset_at']
+                scopes[diagnostics['capacity_scope']] = value
+            workers.setdefault(worker_id, {})[settings['account']] = {
+                'provider': 'openai', 'model': settings['model'],
+                'capacity_mode': 'percentage', 'scopes': scopes,
+            }
+        current = {'workers': workers}
+        validate_usage(current)
+        save(path, current)
+
+
+def select(issue, allowed):
+    labels = {x['name'] for x in issue['labels']}
+    agents = labels & {'agent:codex-a','agent:codex-b','agent:claude'}
+    if issue['author']['login'] not in allowed or len(agents) != 1:
+        raise ValueError('Queue issue requires an allowed author and exactly one agent label')
+    if labels & {'runner:running','runner:review','runner:failed'}:
+        raise ValueError('Issue already running, failed, or awaiting review')
+    return next(iter(agents)).split(':')[1], normalized_contract(issue)
 
 
 def usage_policy_enabled(config):
@@ -876,7 +939,28 @@ def main():
     def g(*a,cwd=repo): return monitored_run([git,*a],cwd=cwd,env=env)
     # Dry-run performs only read-only GitHub/Git calls: no directories, labels, or fetch.
     github('api','repos/'+c['github'],'--jq','.full_name')
-    issues=json.loads(github('issue','list','--repo',c['github'],'--state','open','--label','runner:ready','--limit','100','--json','number,title,body,labels,author'))
+    control_scope = (
+        registry_control.registry.dispatch_control().get('bounded_run')
+        if registry_control is not None else None
+    )
+    bounded_registry_mode = isinstance(control_scope, dict)
+    if bounded_registry_mode and not c.get('capacity_collectors'):
+        raise ValueError('bounded Registry mode requires configured capacity_collectors')
+    issue_list = ['issue','list','--repo',c['github'],'--state','open','--limit','100',
+                  '--json','number,title,body,labels,author']
+    if bounded_registry_mode:
+        issues = []
+        for source_issue in registry_control.bounded_source_issues():
+            issue = json.loads(github(
+                'issue', 'view', str(source_issue), '--repo', c['github'],
+                '--json', 'number,title,body,labels,author,state',
+            ))
+            if issue.get('state') != 'OPEN':
+                continue
+            issues.append(issue)
+    else:
+        issue_list.extend(['--label', 'runner:ready'])
+        issues=json.loads(github(*issue_list))
     if args.retry:
         issue=json.loads(github('issue','view',str(args.retry),'--repo',c['github'],'--json','number,title,body,labels,author'))
         if 'runner:failed' not in {x['name'] for x in issue['labels']}:
@@ -896,9 +980,20 @@ def main():
                 usage_error = 'usage policy unavailable or invalid'
         for issue in issues:
             try:
-                agent,body=select(issue,c['allowed_authors'])
-                if args.agent and agent != args.agent:
-                    continue
+                if bounded_registry_mode:
+                    if issue['author']['login'] not in c['allowed_authors']:
+                        raise ValueError('Queue issue requires an allowed author')
+                    body = normalized_contract(issue)
+                    proposed = registry_control.proposed_worker(body['task'])
+                    if proposed is None:
+                        continue
+                    agent = proposed.rsplit('-', 1)[0] if proposed.rsplit('-', 1)[-1].isdigit() else proposed
+                    if args.agent and agent != args.agent:
+                        continue
+                else:
+                    agent,body=select(issue,c['allowed_authors'])
+                    if args.agent and agent != args.agent:
+                        continue
                 if usage_error:
                     print(json.dumps({'issue': issue['number'], 'skip': usage_error}))
                     continue
@@ -947,10 +1042,25 @@ def main():
         cwd=repo, env=env, timeout=10))
     write_heartbeat(state, status='polling', agent=heartbeat_agent,
                     worker=worker)
+    last_capacity_refresh = [None]
+    def refresh_capacity():
+        if registry_control is None or not c.get('capacity_collectors'):
+            return
+        now = time.monotonic()
+        if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
+            return
+        last_capacity_refresh[0] = now
+        try:
+            collected = registry_control.refresh_configured_capacity(c)
+            write_collected_usage(usage_path, c, collected)
+        except Exception as capacity_error:
+            print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                              'error_class': type(capacity_error).__name__}))
     if registry_control is not None:
-        # This is runner liveness only. It deliberately cannot refresh usage or
-        # provider capacity evidence.
+        # Liveness is separate from the optional configured read-only capacity
+        # producer below; neither path changes worker identity or ownership.
         registry_control.observe_worker_heartbeat(worker)
+        refresh_capacity()
     handled_disappearances = set()
     def close_disappeared_registry_attempt(stale):
         if registry_control is not None:
@@ -970,8 +1080,21 @@ def main():
         registry_lifecycle = None
         runtime_monitor = None
         try:
-            agent,body=select(issue,c['allowed_authors'])
-            if args.agent and agent != args.agent: continue
+            if bounded_registry_mode:
+                if issue['author']['login'] not in c['allowed_authors']:
+                    raise ValueError('Queue issue requires an allowed author')
+                body = normalized_contract(issue)
+                proposed_worker = registry_control.proposed_worker(body['task'])
+                if proposed_worker != lane:
+                    continue
+                agent = proposed_worker
+                if agent not in c['agents'] and agent.rsplit('-', 1)[-1].isdigit():
+                    agent = agent.rsplit('-', 1)[0]
+                if agent not in c['agents']:
+                    raise ValueError('Registry proposed worker is not enabled')
+            else:
+                agent,body=select(issue,c['allowed_authors'])
+                if args.agent and agent != args.agent: continue
             if agent not in c['agents']: raise ValueError('Agent is not enabled')
             if registry_control is not None:
                 registry_control.observe_worker_heartbeat(worker)
@@ -982,7 +1105,7 @@ def main():
             registry_review = (
                 registry_control is not None and body.get('kind') == 'REVIEW'
             )
-            blocked = [] if registry_review else [
+            blocked = [] if (registry_review or bounded_registry_mode) else [
                 dep for dep in body.get('depends_on', [])
                 if json.loads(github(
                     'issue', 'view', str(dep), '--repo', c['github'],
@@ -1020,13 +1143,27 @@ def main():
                                   'usage_state': usage_decision['state']}))
                 continue
             try:
+                review_input = (
+                    registry_control.review_input(body['task'])
+                    if registry_review and bounded_registry_mode else None
+                )
+                if registry_review and bounded_registry_mode:
+                    if not isinstance(review_input, ReviewInput):
+                        raise RegistryConflict('REVIEW_INPUT_REQUIRED')
+                    if bounded_registry_mode and not review_source_is_green(github, c['github'], review_input):
+                        print(json.dumps({'issue': n, 'status': 'defer',
+                                          'reason': 'REVIEW_SOURCE_OR_CI_NOT_GREEN'}))
+                        continue
                 registry_revision = (
-                    registry_control.pre_claim(body['task'], lane, task_contract=body)
+                    registry_control.pre_claim(
+                        body['task'], lane, task_contract=body,
+                        github_issue=n,
+                        github_labels=tuple(item['name'] for item in issue['labels']),
+                    )
                     if registry_control is not None else None
                 )
-                review_input = registry_control.review_input(body['task']) if registry_review else None
-                if registry_review and not isinstance(review_input, ReviewInput):
-                    raise RegistryConflict('REVIEW_INPUT_REQUIRED')
+                if registry_review and review_input is None:
+                    review_input = registry_control.review_input(body['task'])
                 if registry_review:
                     verify_review_packet(review_input)
             except RegistryConflict as error:
@@ -1049,7 +1186,8 @@ def main():
                 try:
                     registry_lease_id, registry_revision = registry_control.claim_with_retry(
                         body['task'], worker_id=lane, task_contract=body,
-                        lease_seconds=registry_lease_seconds,
+                        lease_seconds=registry_lease_seconds, github_issue=n,
+                        github_labels=tuple(item['name'] for item in issue['labels']),
                     )
                 except RegistryConflict as error:
                     if error.code not in DEFERRABLE_REGISTRY_CODES:
@@ -1072,6 +1210,7 @@ def main():
                 runtime_monitor = RegistryLeaseMonitor(
                     registry_control, attempt, registry_lease_id,
                     registry_lease_seconds, worker_id=lane,
+                    capacity_refresh=refresh_capacity,
                 )
                 runtime_monitor.check()
                 data['registry_attempt_id'] = attempt
@@ -1089,7 +1228,11 @@ def main():
             # Fetch and worktree-add touch shared Git metadata; serialize only these operations.
             with file_lock(state / 'git.lock'):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
-                g('fetch','origin','main');base=g('rev-parse','origin/main')
+                integration_base = (
+                    registry_control.integration_base() if registry_control is not None else 'main'
+                )
+                g('fetch','origin',integration_base)
+                base=g('rev-parse',f'origin/{integration_base}')
                 if review_input is not None:
                     g('fetch','origin',review_input.implementation_commit)
                     g('cat-file','-e',f'{review_input.implementation_commit}^{{commit}}')
@@ -1101,8 +1244,12 @@ def main():
             data.update(agent=agent,base=base,branch=branch,worktree=str(wt),log=str(log))
             record=state/f'issue-{n}.json'
             save_record(record, data)
-            github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
-            if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
+            try:
+                github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
+                if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
+            except Exception as label_error:
+                data['github_label_projection_error'] = type(label_error).__name__
+                save_record(record, data)
             with file_lock(state / 'git.lock'):
                 g('worktree','add','-b',branch,str(wt),review_input.implementation_commit if review_input is not None else base)
             if not registry_review:
@@ -1215,7 +1362,7 @@ def main():
                 g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             if not registry_review:
-                data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
+                data['pr']=github('pr','create','--repo',c['github'],'--base',integration_base,'--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
             else:
                 data['pr'] = review_input.pr_url
             if registry_lifecycle is not None:

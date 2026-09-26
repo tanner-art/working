@@ -11,7 +11,7 @@ Owner request, 26 September 2026: implement the focused consultation repairs, re
 - Dashboard salvage source: dashboard-only changes in `a86d13e`, `4df8725`, and `f752bfa` after `02a1496`. Do not merge the source branch's unrelated planning ancestry.
 - Installed controller remains `1532d86`; repair commits are not operationally installed merely because they pass tests or receive review.
 
-The owner-authorized implementation session uses Agent A's existing configured account directory. A GPT-6 Sol launch was explicitly rejected as unavailable for that account; the bounded repair therefore uses the existing GPT-5.6 Terra model at medium reasoning. No account switching or silent fallback to Agent B was performed. Claude review uses the existing keychain credential wrapper; credentials are never materialized in prompts or source files.
+The owner-authorized implementation session uses Agent A's existing configured account directory. A GPT-6 Sol launch was explicitly rejected as unavailable for that account; the bounded repair therefore used the existing GPT-5.6 Terra model at medium reasoning initially, then high reasoning for integration. Agent B/Orchestra inspected and corrected integration behavior and added verification; it did not substitute Agent-B child agents for the requested Agent A account. Claude review uses the existing keychain credential wrapper; credentials are never materialized in prompts or source files.
 
 ## Preservation inventory
 

@@ -266,6 +266,7 @@ def load_registry_report(config, observed_at):
                 'changed_at': control['changed_at'],
                 'reason': control['reason'],
                 'revision': control['revision'],
+                'bounded_run': control.get('bounded_run'),
             },
             'ownership': ownership,
         }

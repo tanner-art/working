@@ -1,5 +1,11 @@
 # Factory control-plane hardening reconciliation
 
+> September 26 owner-authorized sequencing note: the focused Registry bounded
+> pilot repair in [FACTORY_USABLE_RELEASE.md](FACTORY_USABLE_RELEASE.md) may
+> implement its one/two-pair supervised path before this historical CP plan is
+> resumed. This does not revise CP definitions, mark a CP complete, waive
+> independent review, or establish unattended eight-hour readiness.
+
 Date: 2026-09-25
 
 Status: authoritative pre-implementation reconciliation

@@ -14,6 +14,7 @@ import pathlib
 import signal
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 
@@ -25,6 +26,9 @@ from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome
 from scripts.factory_registry.repository import RegistryConflict  # noqa: E402
 from scripts.factory_registry.shadow_dispatch import decide_shadow  # noqa: E402
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E402
+from scripts.factory_registry.codex_capacity import (  # noqa: E402
+    CapacityCollectorError, collect_rate_limits, normalize_buckets,
+)
 
 
 def utc_now() -> str:
@@ -39,6 +43,18 @@ def queue_contract_digest(value) -> str:
         value, separators=(",", ":"), sort_keys=True, ensure_ascii=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def scope_dispatch_snapshot(snapshot, package_ids, parent_limit):
+    """Restrict scheduling, not persisted history or dependency evidence."""
+    allowed = set(package_ids)
+    return replace(snapshot,
+        active_parent_limit=min(snapshot.active_parent_limit, parent_limit),
+        work_packages=tuple(
+            {**item, "status": "ON_DECK"}
+            if item.get("id") not in allowed and item.get("status") == "READY"
+            else item for item in snapshot.work_packages
+        ))
 
 
 def terminate_recorded_process_group(pgid: int, timeout: float = 10) -> None:
@@ -90,6 +106,8 @@ class RunnerRegistryControl:
         worker_id: str | None = None,
         *,
         task_contract=None,
+        github_issue: int | None = None,
+        github_labels=(),
     ) -> int:
         """Return a revision only when the requested Registry pair is dispatchable."""
         if package_id is None and worker_id is None:
@@ -97,7 +115,7 @@ class RunnerRegistryControl:
         if not package_id or not worker_id:
             raise ValueError("package_id and worker_id are required together")
         observed_at = utc_now()
-        snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        snapshot = self._run_snapshot(observed_at)
         package = next(
             (
                 value for value in getattr(snapshot, "work_packages", ())
@@ -113,6 +131,12 @@ class RunnerRegistryControl:
             actual = queue_contract_digest(task_contract)
             if not isinstance(expected, str) or expected != actual:
                 raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
+        if (package is not None and github_issue is not None
+                and self.registry.dispatch_control().get("bounded_run")):
+            # In Registry-owned pilot mode, GitHub is a provenance/rendering
+            # source, never the mutable work contract or scheduler.
+            if package.get("source_system") != "github_issue" or package.get("source_ref") != str(github_issue):
+                raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
         if package is not None and package.get("kind") == "REVIEW":
             self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
@@ -141,6 +165,39 @@ class RunnerRegistryControl:
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
         return self.registry.require_live_dispatch(expected_revision=snapshot.revision)
 
+    def proposed_worker(self, package_id: str) -> str | None:
+        """Return the authoritative scheduler proposal, never GitHub labels."""
+        snapshot = self._run_snapshot(utc_now())
+        proposed = [
+            item.worker_id for item in decide_shadow(snapshot).proposed_assignments
+            if item.package_id == package_id
+        ]
+        return proposed[0] if len(proposed) == 1 else None
+
+    def _run_snapshot(self, observed_at):
+        snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        scope = self.registry.dispatch_control().get("bounded_run")
+        return scope_dispatch_snapshot(snapshot, scope["package_ids"], scope["parent_limit"]) if scope else snapshot
+
+    def bounded_source_issues(self) -> tuple[int, ...]:
+        """Return explicitly registered GitHub issue references for this run."""
+        control = self.registry.dispatch_control()
+        scope = control.get("bounded_run")
+        if not isinstance(scope, dict):
+            return ()
+        snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
+        by_id = {str(item.get("id")): item for item in snapshot.work_packages}
+        references = []
+        for package_id in scope["package_ids"]:
+            package = by_id.get(package_id)
+            if package is None or package.get("source_system") != "github_issue":
+                raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+            reference = package.get("source_ref")
+            if not isinstance(reference, str) or not reference.isdigit() or int(reference) <= 0:
+                raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+            references.append(int(reference))
+        return tuple(sorted(set(references)))
+
     def claim_package(
         self,
         package_id: str,
@@ -164,14 +221,16 @@ class RunnerRegistryControl:
 
     def claim_with_retry(
         self, package_id: str, *, worker_id: str, task_contract,
-        lease_seconds: int, max_attempts: int = 2,
+        lease_seconds: int, max_attempts: int = 2, github_issue: int | None = None,
+        github_labels=(),
     ) -> tuple[str, int]:
         """Re-decide only a bounded number of harmless revision races."""
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
         for index in range(max_attempts):
             revision = self.pre_claim(
-                package_id, worker_id, task_contract=task_contract
+                package_id, worker_id, task_contract=task_contract,
+                github_issue=github_issue, github_labels=github_labels,
             )
             try:
                 return self.claim_package(
@@ -203,6 +262,32 @@ class RunnerRegistryControl:
 
     def pre_launch(self) -> int:
         return self.registry.require_live_dispatch()
+
+    def integration_base(self) -> str:
+        """Read the activated base ref; legacy control remains pinned to main."""
+        scope = self.registry.dispatch_control().get("bounded_run")
+        return scope["base_ref"] if isinstance(scope, dict) else "main"
+
+    def refresh_configured_capacity(self, config) -> tuple[dict, ...]:
+        """Run configured read-only account observations without worker upserts."""
+        collectors = config.get("capacity_collectors", {})
+        if not isinstance(collectors, dict):
+            raise ValueError("capacity_collectors must be an object")
+        written = []
+        for worker_id, item in collectors.items():
+            if not isinstance(worker_id, str) or not isinstance(item, dict):
+                raise ValueError("capacity collector entries must be objects")
+            sample = collect_rate_limits(
+                item.get("executable", ""), item.get("codex_home", ""),
+                timeout=item.get("timeout_seconds", 10),
+                account_environment=item.get("environment", {}),
+            )
+            observations = normalize_buckets(worker_id, sample)
+            self.registry.record_worker_capacity_observations(
+                worker_id, observations, recorded_at=utc_now()
+            )
+            written.append({"worker_id": worker_id, "observations": observations})
+        return tuple(written)
 
     def record_process(self, attempt_id: str, *, pid: int, pgid: int) -> None:
         self.registry.record_attempt_process(

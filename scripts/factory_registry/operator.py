@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts.runner import install_launchd
-from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest
+from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
 
 from .models import (
     DispatchSnapshot,
@@ -105,6 +105,8 @@ USAGE_FRESH_SECONDS = 900
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
 REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/__init__.py",
+    "scripts/factory_registry/codex_capacity.py",
+    "scripts/factory_registry/codex_capacity_cli.py",
     "scripts/factory_registry/claude_telemetry.py",
     "scripts/factory_registry/claude_telemetry_cli.py",
     "scripts/factory_registry/control_center_projection.py",
@@ -1817,6 +1819,7 @@ def canary_worker_gate(
     review: WorkPackage,
     *,
     observed_at: str,
+    scoped: bool = False,
 ) -> Mapping[str, Any]:
     """Evaluate an unregistered canary against the current worker snapshot."""
 
@@ -1859,6 +1862,8 @@ def canary_worker_gate(
         active_leases=snapshot.active_leases,
         usage_observations=snapshot.usage_observations,
     )
+    if scoped:
+        candidate = scope_dispatch_snapshot(candidate, (implementation.id, review.id), 2)
     return _worker_gate(candidate, canary_feature_id=implementation.feature_id)
 
 
@@ -1912,6 +1917,75 @@ def followup_review_worker_gate(
     )
 
 
+def bounded_run_worker_gate(
+    snapshot: DispatchSnapshot, package_ids: Sequence[str]
+) -> Mapping[str, Any]:
+    """Evaluate only the reviewed pilot allowlist, not historical READY work."""
+    allowed = set(package_ids)
+    run_packages = tuple(item for item in snapshot.work_packages if item.get("id") in allowed)
+    if {str(item.get("id")) for item in run_packages} != allowed:
+        raise OperatorError("bounded run package allowlist is not registered READY work")
+    parents = [item for item in run_packages if item.get("kind") == "PARENT"]
+    reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
+    if not parents or len(parents) > 2 or len(reviews) != len(parents):
+        raise OperatorError("bounded run requires one or two implementation/review pairs")
+    dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
+    required_ids = allowed | {str(item.get("dependency_id")) for item in dependencies}
+    packages = tuple(item for item in snapshot.work_packages if item.get("id") in required_ids)
+    review_targets = {str(item.get("package_id")): str(item.get("dependency_id")) for item in dependencies}
+    if {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
+        raise OperatorError("bounded run review dependencies do not exactly match implementations")
+    candidate = DispatchSnapshot(
+        revision=snapshot.revision, observed_at=snapshot.observed_at,
+        active_parent_limit=snapshot.active_parent_limit,
+        orchestra_reserve_percent=snapshot.orchestra_reserve_percent,
+        features=snapshot.features, work_packages=packages, dependencies=dependencies,
+        workers=snapshot.workers, active_leases=snapshot.active_leases,
+        usage_observations=snapshot.usage_observations,
+    )
+    candidate = scope_dispatch_snapshot(candidate, allowed, 2)
+    decision = decide_shadow(candidate)
+    if decision.global_rejections:
+        raise OperatorError("global worker/capacity gate failed: " + ",".join(
+            value.code for value in decision.global_rejections
+        ))
+    workers = {str(item.get("id")): item for item in snapshot.workers}
+    evaluations = {item.id: item for item in decision.worker_evaluations}
+    eligible = {worker_id for worker_id, item in evaluations.items() if item.eligible}
+    assignments = {
+        str(parent.get("id")): {
+            item.worker_id for item in decision.pair_evaluations
+            if item.package_id == parent.get("id") and item.eligible
+        }
+        for parent in parents
+    }
+    if any(not choices for choices in assignments.values()):
+        raise OperatorError("no eligible implementation worker for a bounded run package")
+    reviewers = set(eligible)
+    for review in reviews:
+        required = set(review.get("required_capabilities", ()))
+        lane = review.get("lane")
+        reviewers &= {
+            worker_id for worker_id in eligible
+            if lane in workers[worker_id].get("approved_lanes", ())
+            and required <= set(workers[worker_id].get("capabilities", ()))
+        }
+    independent = sorted({
+        (parent_id, implementer, reviewer)
+        for parent_id, implementers in assignments.items()
+        for implementer in implementers for reviewer in reviewers if reviewer != implementer
+    })
+    if not independent:
+        raise OperatorError("bounded run has no independent reviewer")
+    return {
+        "run_package_ids": sorted(allowed),
+        "implementation_assignments": {key: sorted(value) for key, value in assignments.items()},
+        "eligible_reviewers": sorted(reviewers),
+        "independent_pairs": [list(value) for value in independent],
+        "decision_id": decision.decision_id,
+    }
+
+
 def preflight(
     database: Path,
     config_path: Path,
@@ -1928,6 +2002,7 @@ def preflight(
     require_workers: bool = False,
     require_kill_switch: bool = True,
     canary_feature_id: str | None = None,
+    run_package_ids: Sequence[str] | None = None,
 ) -> Mapping[str, Any]:
     observed_at = observed_at or utc_now()
     current = status(database, observed_at=observed_at)
@@ -1968,12 +2043,12 @@ def preflight(
         verify_permissions(database, config_path, release)
         if require_permissions_gate else {"gate": "deferred-to-prepare-dry-run"}
     )
+    dispatch = registry.dispatch_snapshot(observed_at=observed_at)
     workers = (
-        _worker_gate(
-            registry.dispatch_snapshot(observed_at=observed_at),
-            canary_feature_id=canary_feature_id,
-            review_implementer_worker=registry.review_implementer_worker,
-        )
+        bounded_run_worker_gate(dispatch, run_package_ids)
+        if require_workers and run_package_ids is not None else
+        _worker_gate(dispatch, canary_feature_id=canary_feature_id,
+                     review_implementer_worker=registry.review_implementer_worker)
         if require_workers else {"gate": "not-requested"}
     )
     return {
@@ -2090,6 +2165,8 @@ def validate_telemetry_payload(value: Mapping[str, Any], observed_at: str) -> tu
 def _package(value: Mapping[str, Any], *, queue_contract: Mapping[str, Any]) -> WorkPackage:
     diagnostics = dict(value.get("provider_diagnostics") or {})
     diagnostics["queue_contract_sha256"] = queue_contract_digest(dict(queue_contract))
+    if "source_ref" in value:
+        diagnostics["github_source_ref"] = str(value["source_ref"])
     try:
         return WorkPackage(
             id=str(value["id"]),
@@ -2217,6 +2294,26 @@ def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
     ):
         raise OperatorError("follow-up review spec is invalid")
     return review
+
+
+def parse_bounded_pilot_spec(
+    value: Mapping[str, Any],
+) -> tuple[tuple[Feature, WorkPackage, WorkPackage], ...]:
+    pairs = value.get("pairs") if isinstance(value, Mapping) else None
+    if not isinstance(pairs, list) or not 1 <= len(pairs) <= 2:
+        raise OperatorError("bounded pilot spec requires one or two pair objects")
+    parsed = tuple(parse_canary_spec(item) for item in pairs if isinstance(item, Mapping))
+    if len(parsed) != len(pairs):
+        raise OperatorError("bounded pilot pair is invalid")
+    identifiers = [value.id for pair in parsed for value in pair]
+    if len(set(identifiers)) != len(identifiers):
+        raise OperatorError("bounded pilot identifiers must be unique")
+    for _feature, implementation, review in parsed:
+        for package in (implementation, review):
+            source_ref = package.provider_diagnostics.get("github_source_ref")
+            if not isinstance(source_ref, str) or not source_ref.isdigit() or int(source_ref) <= 0:
+                raise OperatorError("bounded pilot package requires explicit GitHub source_ref")
+    return parsed
 
 
 def parse_review_outcome_spec(
@@ -2485,10 +2582,13 @@ def enable_live(
     home: Path | None = None,
     run=None,
     uid: int | None = None,
+    bounded_run: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
+    run_package_ids = tuple(bounded_run["package_ids"]) if bounded_run is not None else None
     evidence = preflight(
         database, config_path, release, preservation_path, expected_commit,
         expected_revision, require_workers=True, canary_feature_id=canary_feature_id,
+        run_package_ids=run_package_ids,
     )
     config = _load_object(config_path, "runner config")
     root = release / "scripts" / "runner"
@@ -2514,6 +2614,7 @@ def enable_live(
             database, config_path, release, preservation_path, expected_commit,
             expected_revision, require_workers=True,
             canary_feature_id=canary_feature_id,
+            run_package_ids=run_package_ids,
         )
         revision = registry.set_dispatch_control(
             expected_revision=expected_revision,
@@ -2523,6 +2624,7 @@ def enable_live(
             changed_at=utc_now(),
             reason=f"owner-approved bounded canary {canary_feature_id}",
             operation_id=f"enable-live:{canary_feature_id}:{expected_revision}",
+            bounded_run=bounded_run,
         )
     except Exception:
         # A stale revision after service promotion is handled as an emergency
@@ -2546,18 +2648,50 @@ def enable_live(
         "canary_feature_id": canary_feature_id,
         "services": sorted(label for label, _ in live_plan),
         "worker_gate": evidence["worker_gate"],
+        "bounded_run": dict(bounded_run) if bounded_run is not None else None,
     }
 
 
-def stop(database: Path, reason: str) -> Mapping[str, Any]:
+def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Operator-facing closed parser for a reviewed pilot run envelope."""
+    if _sensitive_paths(value):
+        raise OperatorError("bounded run spec contains secret-shaped fields")
+    expected = {"run_id", "package_ids", "deadline", "base_ref", "parent_limit"}
+    if set(value) != expected:
+        raise OperatorError("bounded run spec has unexpected fields")
+    run_id = value.get("run_id")
+    packages = value.get("package_ids")
+    base_ref = value.get("base_ref")
+    limit = value.get("parent_limit")
+    if (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id)
+            or not isinstance(packages, list) or not packages or len(set(packages)) != len(packages)
+            or any(not isinstance(item, str) or not item for item in packages)
+            or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
+            or base_ref.startswith("/") or ".." in base_ref.split("/")
+            or isinstance(limit, bool) or limit not in (1, 2)):
+        raise OperatorError("bounded run spec is invalid")
+    deadline = _parse_time(value.get("deadline"), "bounded run deadline")
+    if deadline <= datetime.now(timezone.utc):
+        raise OperatorError("bounded run deadline must be in the future")
+    return {
+        "run_id": run_id, "package_ids": sorted(packages),
+        "deadline": deadline.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "base_ref": base_ref, "parent_limit": limit,
+    }
+
+
+def stop(database: Path, reason: str, *, expected_run_id: str | None = None) -> Mapping[str, Any]:
     if not database.is_absolute() or not database.is_file():
         raise OperatorError("--database must be an existing absolute Registry path")
-    revision = RunnerRegistryControl(database).engage_stop(reason)
+    revision = SQLiteRegistry(database).engage_dispatch_kill_switch(
+        changed_at=utc_now(), reason=reason, expected_run_id=expected_run_id
+    )
     return {
         "kind": "threadline-factory-stop",
         "passed": True,
         "revision": revision,
         "control": dict(SQLiteRegistry(database).dispatch_control()),
+        "expected_run_id": expected_run_id,
     }
 
 

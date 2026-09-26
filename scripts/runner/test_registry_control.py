@@ -88,7 +88,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
 
     def test_pre_claim_requires_the_exact_registry_assignment_and_revision(self):
         control = RunnerRegistryControl(self.database)
-        control.registry = Mock()
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(revision=17)
         control.registry.require_live_dispatch.return_value = 17
         eligible = SimpleNamespace(package_id="TASK-1", worker_id="worker-a")
@@ -117,6 +117,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
         }
         control = RunnerRegistryControl(self.database)
         control.registry = Mock()
+        control.registry.dispatch_control.return_value = {}
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
             revision=17,
             work_packages=({
@@ -139,7 +140,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
 
     def test_review_preclaim_excludes_the_actual_implementer(self):
         control = RunnerRegistryControl(self.database)
-        control.registry = Mock()
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
             revision=17,
             work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
@@ -158,7 +159,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
 
     def test_review_preclaim_fails_closed_when_its_bound_input_is_missing(self):
         control = RunnerRegistryControl(self.database)
-        control.registry = Mock()
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
             revision=17,
             work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
