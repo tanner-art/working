@@ -407,12 +407,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         review_input = parse_review_input_spec(_load_object(args.spec, "review input spec"))
         preflight(**_preflight_args(args, observed_at=review_input.recorded_at, require_workers=False))
         registry = SQLiteRegistry(args.database)
-        if registry.dispatch_control()["revision"] != args.expect_revision:
-            raise OperatorError("Registry revision mismatch before review input")
-        registry.record_review_input(review_input)
+        revision = registry.record_operator_review_input(
+            review_input, expected_revision=args.expect_revision
+        )
         return {"kind": "threadline-factory-record-review-input", "passed": True,
                 "review_package_id": review_input.review_package_id, "review_input_id": review_input.id,
-                "revision": registry.dispatch_control()["revision"]}
+                "revision": revision}
     if args.command == "bind-legacy-source":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=False))

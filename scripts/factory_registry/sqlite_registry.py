@@ -104,6 +104,48 @@ def _review_input_evidence(review_input: ReviewInput) -> Evidence:
     )
 
 
+def _verify_operator_review_packet(review_input: ReviewInput) -> None:
+    """Verify historical input at the authoritative operator write boundary."""
+    packet = review_input.validation_evidence.get("review_packet")
+    ci = review_input.validation_evidence.get("ci")
+    if not isinstance(packet, Mapping) or not isinstance(ci, Mapping):
+        raise RegistryConflict("REVIEW_PACKET_REQUIRED")
+    if (ci.get("state") != "SUCCESS" or ci.get("implementation_commit") != review_input.implementation_commit
+            or ci.get("pr_url") != review_input.pr_url):
+        raise RegistryConflict("REVIEW_CI_PROVENANCE_INVALID")
+    path, manifest_sha256, files = packet.get("path"), packet.get("manifest_sha256"), packet.get("files")
+    if (not isinstance(path, str) or not Path(path).is_absolute()
+            or not isinstance(manifest_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+            or not isinstance(files, Mapping)):
+        raise RegistryConflict("REVIEW_PACKET_INVALID")
+    try:
+        manifest_bytes = (Path(path) / "manifest.json").read_bytes()
+        manifest = json.loads(manifest_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RegistryConflict("REVIEW_PACKET_UNAVAILABLE") from error
+    if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256:
+        raise RegistryConflict("REVIEW_PACKET_MANIFEST_MISMATCH")
+    if (not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1
+            or manifest.get("implementation_attempt_id") != review_input.implementation_attempt_id
+            or manifest.get("implementation_commit") != review_input.implementation_commit
+            or manifest.get("base_commit") != review_input.base_commit
+            or manifest.get("files") != files):
+        raise RegistryConflict("REVIEW_PACKET_BINDING_MISMATCH")
+    required_files = {"base-to-implementation.diff", "changed-files.txt", "contract.json", "validation-evidence.json"}
+    if (set(files) != required_files or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in files.values())):
+        raise RegistryConflict("REVIEW_PACKET_FILE_MANIFEST_INVALID")
+    try:
+        for name, digest in files.items():
+            if hashlib.sha256((Path(path) / name).read_bytes()).hexdigest() != digest:
+                raise RegistryConflict("REVIEW_PACKET_FILE_MISMATCH")
+        contract = json.loads((Path(path) / "contract.json").read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RegistryConflict("REVIEW_PACKET_UNAVAILABLE") from error
+    if (not isinstance(contract, Mapping) or dict(contract) != dict(review_input.contract)
+            or _review_contract_sha256(dict(contract)) != review_input.contract_sha256):
+        raise RegistryConflict("REVIEW_PACKET_CONTRACT_MISMATCH")
+
+
 def _utc_now() -> str:
     return _normalize_timestamp(datetime.now(timezone.utc).isoformat())
 
@@ -2245,6 +2287,11 @@ class SQLiteRegistry:
                     "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1"
                 ).fetchone():
                     raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                unrelated = connection.execute(
+                    "SELECT id FROM work_packages WHERE status IN ('READY', 'ACTIVE') LIMIT 1"
+                ).fetchone()
+                if unrelated is not None:
+                    raise RegistryConflict("CANARY_NOT_EXCLUSIVE", str(unrelated["id"]))
                 target = connection.execute(
                     "SELECT feature_id, kind, status FROM work_packages WHERE id=?",
                     (target_id,),
@@ -2401,6 +2448,18 @@ class SQLiteRegistry:
             raise RegistryConflict("SUCCESSFUL_PACKAGE_PROVENANCE_REQUIRED")
         return str(attempt["worker_id"])
 
+    def successful_attempt_worker(self, package_id: str, attempt_id: str) -> str:
+        """Return only the worker on the exact historical successful attempt."""
+        with self._connection() as connection:
+            attempt = connection.execute(
+                """SELECT worker_id FROM attempts WHERE id=? AND package_id=?
+                   AND outcome='SUCCEEDED' AND ended_at IS NOT NULL""",
+                (attempt_id, package_id),
+            ).fetchone()
+        if attempt is None or not attempt["worker_id"]:
+            raise RegistryConflict("SUCCESSFUL_ATTEMPT_PROVENANCE_REQUIRED")
+        return str(attempt["worker_id"])
+
     def record_review_input(self, review_input: ReviewInput, *, operation_id: str | None = None) -> None:
         """Record immutable review input separately from a reviewer verdict."""
         with self._connection() as connection:
@@ -2425,6 +2484,56 @@ class SQLiteRegistry:
             _review_input_evidence(review_input),
             operation_id=operation_id or f"review-input:{review_input.id}",
         )
+
+    def record_operator_review_input(
+        self, review_input: ReviewInput, *, expected_revision: int
+    ) -> int:
+        """Publish legacy review facts only from a drained PAUSED Registry."""
+        evidence = _review_input_evidence(review_input)
+        recorded_at = _normalize_timestamp(review_input.recorded_at)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("REVIEW_INPUT_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                _verify_operator_review_packet(review_input)
+                review = connection.execute("SELECT kind FROM work_packages WHERE id=?", (review_input.review_package_id,)).fetchone()
+                dependencies = connection.execute("SELECT dependency_id FROM task_dependencies WHERE package_id=?", (review_input.review_package_id,)).fetchall()
+                attempt = connection.execute(
+                    "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?", (review_input.implementation_attempt_id,)
+                ).fetchone()
+                if (review is None or review["kind"] != "REVIEW" or len(dependencies) != 1
+                        or dependencies[0]["dependency_id"] != review_input.target_package_id):
+                    raise RegistryConflict("REVIEW_INPUT_TARGET_MISMATCH")
+                if (attempt is None or attempt["package_id"] != review_input.target_package_id
+                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                    raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED")
+                existing = connection.execute("SELECT id FROM evidence WHERE package_id=? AND kind='review-input'", (review_input.review_package_id,)).fetchone()
+                if existing is not None:
+                    raise RegistryConflict("REVIEW_INPUT_ALREADY_RECORDED", str(existing["id"]))
+                connection.execute(
+                    "INSERT INTO evidence (id, package_id, kind, uri, summary, recorded_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (evidence.id, evidence.package_id, evidence.kind, evidence.uri, evidence.summary,
+                     recorded_at, _json(evidence.metadata)),
+                )
+                self._insert_event(connection, "OPERATOR_REVIEW_INPUT_RECORDED", recorded_at,
+                                   review_input.review_package_id, None, review_input.implementation_attempt_id,
+                                   {"review_input_id": review_input.id, "historical_attempt": True})
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
 
     def bind_legacy_package_source(
         self, package_id: str, *, github_issue: int, queue_contract: Mapping[str, Any],

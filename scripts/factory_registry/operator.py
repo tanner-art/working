@@ -1961,7 +1961,9 @@ def followup_review_worker_gate(
 
 
 def bounded_run_worker_gate(
-    snapshot: DispatchSnapshot, package_ids: Sequence[str]
+    snapshot: DispatchSnapshot, package_ids: Sequence[str], *,
+    review_input_lookup: Callable[[str], Mapping[str, Any]] | None = None,
+    successful_attempt_worker: Callable[[str, str], str] | None = None,
 ) -> Mapping[str, Any]:
     """Evaluate only the reviewed pilot allowlist, not historical READY work."""
     allowed = set(package_ids)
@@ -1982,12 +1984,23 @@ def bounded_run_worker_gate(
     if not review_only and {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
         raise OperatorError("bounded run review dependencies do not exactly match implementations")
     if review_only:
+        if review_input_lookup is None or successful_attempt_worker is None:
+            raise OperatorError("bounded review provenance lookup is required")
         targets = {str(item.get("id")): item for item in packages}
+        review_implementers: dict[str, str] = {}
         for review in reviews:
             target_id = review_targets.get(str(review.get("id")))
             target = targets.get(target_id or "")
             if target is None or target.get("kind") != "PARENT" or target.get("status") != "VERIFY_REVIEW":
                 raise OperatorError("bounded review target must be registered VERIFY_REVIEW parent")
+            try:
+                review_input = review_input_lookup(str(review["id"]))
+                attempt_id = review_input.get("implementation_attempt_id")
+                if review_input.get("target_package_id") != target_id or not isinstance(attempt_id, str) or not attempt_id:
+                    raise OperatorError("bounded review input does not bind its target")
+                review_implementers[str(review["id"])] = successful_attempt_worker(target_id, attempt_id)
+            except RegistryError as error:
+                raise OperatorError("bounded review provenance gate failed: " + str(error)) from error
     candidate = DispatchSnapshot(
         revision=snapshot.revision, observed_at=snapshot.observed_at,
         active_parent_limit=snapshot.active_parent_limit,
@@ -2024,10 +2037,11 @@ def bounded_run_worker_gate(
             and required <= set(workers[worker_id].get("capabilities", ()))
         }
     if review_only:
-        # Successful provenance and immutable packets are enforced by the
-        # Registry/runner; this pure gate receives a target-worker lookup only
-        # for normal pairs, so retain reviewer eligibility here.
-        independent = [(str(review.get("id")), reviewer) for review in reviews for reviewer in reviewers]
+        independent = [
+            (str(review.get("id")), review_implementers[str(review.get("id"))], reviewer)
+            for review in reviews for reviewer in reviewers
+            if reviewer != review_implementers[str(review.get("id"))]
+        ]
     else:
         independent = sorted({
             (parent_id, implementer, reviewer)
@@ -2104,7 +2118,11 @@ def preflight(
     )
     dispatch = registry.dispatch_snapshot(observed_at=observed_at)
     workers = (
-        bounded_run_worker_gate(dispatch, run_package_ids)
+        bounded_run_worker_gate(
+            dispatch, run_package_ids,
+            review_input_lookup=registry.review_input,
+            successful_attempt_worker=registry.successful_attempt_worker,
+        )
         if require_workers and run_package_ids is not None else
         _worker_gate(dispatch, canary_feature_id=canary_feature_id,
                      review_implementer_worker=registry.review_implementer_worker)

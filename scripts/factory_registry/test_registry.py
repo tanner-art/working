@@ -22,6 +22,8 @@ from scripts.factory_registry import (
     Worker,
     WorkPackage,
 )
+from scripts.factory_registry.models import ReviewInput
+from scripts.factory_registry.sqlite_registry import _verify_operator_review_packet
 from scripts.factory_registry.preservation_import import import_snapshot
 
 
@@ -106,6 +108,68 @@ class SQLiteRegistryTest(unittest.TestCase):
                 "TASK-LEGACY", github_issue=173, queue_contract={"task": "TASK-LEGACY"},
                 expected_revision=bound, recorded_at="2026-09-27T12:00:03Z",
             )
+        with self.assertRaisesRegex(RegistryConflict, "GITHUB_SOURCE_REPLACEMENT_FORBIDDEN"):
+            self.registry.bind_legacy_package_source(
+                "TASK-LEGACY", github_issue=174, queue_contract=contract,
+                expected_revision=bound, recorded_at="2026-09-27T12:00:04Z",
+            )
+        with self.registry._connection() as connection:
+            history = connection.execute(
+                "SELECT event_type FROM task_events WHERE package_id='TASK-LEGACY'"
+            ).fetchall()
+        self.assertEqual([row[0] for row in history], ["LEGACY_SOURCE_BOUND"])
+
+    def test_followup_registration_restores_global_ready_active_exclusivity(self) -> None:
+        self.feature()
+        self.registry.register_work_package(WorkPackage(
+            "UNRELATED", "FEATURE-1", "unrelated", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("preserved",), status=TaskStatus.READY,
+        ))
+        review = WorkPackage(
+            "FOLLOWUP", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("independent",), status=TaskStatus.READY,
+            kind=PackageKind.REVIEW, dependency_ids=("MISSING",),
+        )
+        for status in ("READY", "ACTIVE"):
+            with self.subTest(status=status):
+                with self.registry._connection() as connection:
+                    connection.execute("UPDATE work_packages SET status=? WHERE id='UNRELATED'", (status,))
+                with self.assertRaisesRegex(RegistryConflict, "CANARY_NOT_EXCLUSIVE"):
+                    self.registry.register_followup_review(
+                        review, expected_revision=self.registry.dispatch_control()["revision"],
+                        recorded_at="2026-09-27T12:00:00Z",
+                    )
+
+    def test_operator_review_packet_requires_exact_hashes_contract_and_green_ci(self) -> None:
+        packet = self.root / "packet"
+        packet.mkdir()
+        contract = {"task": "TASK-1"}
+        contents = {
+            "base-to-implementation.diff": b"diff", "changed-files.txt": b"file\n",
+            "contract.json": json.dumps(contract, sort_keys=True).encode(),
+            "validation-evidence.json": b"{}",
+        }
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+        files = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        manifest = {"schema_version": 1, "implementation_attempt_id": "attempt", "base_commit": "b" * 40,
+                    "implementation_commit": "a" * 40, "files": files}
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        review_input = ReviewInput(
+            id="input", review_package_id="REVIEW", target_package_id="TASK-1",
+            implementation_attempt_id="attempt", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr",
+            contract_sha256=hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            contract=contract,
+            validation_evidence={"ci": {"state": "SUCCESS", "implementation_commit": "a" * 40, "pr_url": "https://example.test/pr"},
+                                 "review_packet": {"path": str(packet), "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(), "files": files}},
+            recorded_at="2026-09-27T12:00:00Z",
+        )
+        _verify_operator_review_packet(review_input)
+        (packet / "contract.json").write_text('{"task":"tampered"}')
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_PACKET_FILE_MISMATCH"):
+            _verify_operator_review_packet(review_input)
 
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
         legacy_database = self.root / "legacy.sqlite3"
