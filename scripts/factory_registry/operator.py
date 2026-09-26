@@ -30,6 +30,7 @@ from .models import (
     PackageKind,
     ReviewOutcome,
     ReviewOutcomeState,
+    ReviewInput,
     TaskStatus,
     Worker,
     WorkPackage,
@@ -1892,7 +1893,12 @@ def followup_review_worker_gate(
     implementer_worker_id: str,
     observed_at: str,
 ) -> Mapping[str, Any]:
-    """Evaluate an unregistered follow-up review without mutating the Registry."""
+    """Evaluate one follow-up review against its exact historical target.
+
+    A preserved feature can contain many old parents.  They are evidence, not
+    canary members, so only the new review is schedulable here; its target is
+    retained solely for the REVIEW dependency check.
+    """
     candidate = DispatchSnapshot(
         revision=snapshot.revision,
         observed_at=snapshot.observed_at,
@@ -1928,11 +1934,30 @@ def followup_review_worker_gate(
         active_leases=snapshot.active_leases,
         usage_observations=snapshot.usage_observations,
     )
-    return _worker_gate(
-        candidate,
-        canary_feature_id=review.feature_id,
-        review_implementer_worker=lambda _package_id: implementer_worker_id,
+    candidate = scope_dispatch_snapshot(candidate, (review.id,), 1)
+    decision = decide_shadow(candidate)
+    if decision.global_rejections:
+        raise OperatorError("global worker/capacity gate failed: " + ",".join(
+            value.code for value in decision.global_rejections
+        ))
+    reviewers = {
+        item.worker_id for item in decision.pair_evaluations
+        if item.package_id == review.id and item.eligible
+    }
+    if not reviewers:
+        raise OperatorError("no eligible independent reviewer")
+    independent = sorted(
+        (implementer_worker_id, reviewer_id)
+        for reviewer_id in reviewers if reviewer_id != implementer_worker_id
     )
+    if not independent:
+        raise OperatorError("reviewer is not independent from the target implementer")
+    return {
+        "target_package_id": review.dependency_ids[0],
+        "eligible_reviewers": sorted(reviewers),
+        "independent_pairs": [list(value) for value in independent],
+        "decision_id": decision.decision_id,
+    }
 
 
 def bounded_run_worker_gate(
@@ -1945,14 +1970,24 @@ def bounded_run_worker_gate(
         raise OperatorError("bounded run package allowlist is not registered READY work")
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
-    if not parents or len(parents) > 2 or len(reviews) != len(parents):
-        raise OperatorError("bounded run requires one or two implementation/review pairs")
+    review_only = not parents
+    if ((not review_only and (len(parents) > 2 or len(reviews) != len(parents)))
+            or (review_only and not 1 <= len(reviews) <= 2)
+            or len(parents) + len(reviews) != len(run_packages)):
+        raise OperatorError("bounded run requires one or two implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
     required_ids = allowed | {str(item.get("dependency_id")) for item in dependencies}
     packages = tuple(item for item in snapshot.work_packages if item.get("id") in required_ids)
     review_targets = {str(item.get("package_id")): str(item.get("dependency_id")) for item in dependencies}
-    if {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
+    if not review_only and {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
         raise OperatorError("bounded run review dependencies do not exactly match implementations")
+    if review_only:
+        targets = {str(item.get("id")): item for item in packages}
+        for review in reviews:
+            target_id = review_targets.get(str(review.get("id")))
+            target = targets.get(target_id or "")
+            if target is None or target.get("kind") != "PARENT" or target.get("status") != "VERIFY_REVIEW":
+                raise OperatorError("bounded review target must be registered VERIFY_REVIEW parent")
     candidate = DispatchSnapshot(
         revision=snapshot.revision, observed_at=snapshot.observed_at,
         active_parent_limit=snapshot.active_parent_limit,
@@ -1977,7 +2012,7 @@ def bounded_run_worker_gate(
         }
         for parent in parents
     }
-    if any(not choices for choices in assignments.values()):
+    if not review_only and any(not choices for choices in assignments.values()):
         raise OperatorError("no eligible implementation worker for a bounded run package")
     reviewers = set(eligible)
     for review in reviews:
@@ -1988,11 +2023,17 @@ def bounded_run_worker_gate(
             if lane in workers[worker_id].get("approved_lanes", ())
             and required <= set(workers[worker_id].get("capabilities", ()))
         }
-    independent = sorted({
-        (parent_id, implementer, reviewer)
-        for parent_id, implementers in assignments.items()
-        for implementer in implementers for reviewer in reviewers if reviewer != implementer
-    })
+    if review_only:
+        # Successful provenance and immutable packets are enforced by the
+        # Registry/runner; this pure gate receives a target-worker lookup only
+        # for normal pairs, so retain reviewer eligibility here.
+        independent = [(str(review.get("id")), reviewer) for review in reviews for reviewer in reviewers]
+    else:
+        independent = sorted({
+            (parent_id, implementer, reviewer)
+            for parent_id, implementers in assignments.items()
+            for implementer in implementers for reviewer in reviewers if reviewer != implementer
+        })
     if not independent:
         raise OperatorError("bounded run has no independent reviewer")
     return {
@@ -2312,6 +2353,26 @@ def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
     ):
         raise OperatorError("follow-up review spec is invalid")
     return review
+
+
+def parse_review_input_spec(value: Mapping[str, Any]) -> ReviewInput:
+    """Parse supplied historical review facts; this never records an approval."""
+    if _sensitive_paths(value):
+        raise OperatorError("review input spec contains secret-shaped fields")
+    required = {"id", "review_package_id", "target_package_id", "implementation_attempt_id",
+                "implementation_commit", "base_commit", "pr_url", "contract", "validation_evidence", "recorded_at"}
+    if set(value) != required or not isinstance(value.get("contract"), Mapping) or not isinstance(value.get("validation_evidence"), Mapping):
+        raise OperatorError("review input spec is invalid")
+    if not value["validation_evidence"] or not re.fullmatch(r"[0-9a-f]{40,64}", str(value["implementation_commit"])) or not re.fullmatch(r"[0-9a-f]{40,64}", str(value["base_commit"])):
+        raise OperatorError("review input provenance is invalid")
+    _parse_time(value["recorded_at"], "review input recorded_at")
+    contract = dict(value["contract"])
+    return ReviewInput(
+        id=str(value["id"]), review_package_id=str(value["review_package_id"]), target_package_id=str(value["target_package_id"]),
+        implementation_attempt_id=str(value["implementation_attempt_id"]), implementation_commit=str(value["implementation_commit"]),
+        base_commit=str(value["base_commit"]), pr_url=str(value["pr_url"]), contract_sha256=queue_contract_digest(contract),
+        contract=contract, validation_evidence=dict(value["validation_evidence"]), recorded_at=str(value["recorded_at"]),
+    )
 
 
 def parse_bounded_pilot_spec(

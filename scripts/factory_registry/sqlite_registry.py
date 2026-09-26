@@ -619,6 +619,36 @@ class SQLiteRegistry:
                         }
                         if not set(scope["package_ids"]).issubset(known):
                             raise RegistryConflict("RUN_PACKAGE_NOT_READY")
+                        scoped = connection.execute(
+                            "SELECT id, kind FROM work_packages WHERE id IN ("
+                            + ",".join("?" for _ in scope["package_ids"]) + ")",
+                            tuple(scope["package_ids"]),
+                        ).fetchall()
+                        if scoped and all(row["kind"] == "REVIEW" for row in scoped):
+                            for row in scoped:
+                                target = connection.execute(
+                                    """SELECT target.id, target.status FROM task_dependencies AS dependency
+                                       JOIN work_packages AS target ON target.id=dependency.dependency_id
+                                       WHERE dependency.package_id=?""",
+                                    (row["id"],),
+                                ).fetchall()
+                                if len(target) != 1 or target[0]["status"] != "VERIFY_REVIEW":
+                                    raise RegistryConflict("BOUNDED_REVIEW_TARGET_INVALID", row["id"])
+                                packet = connection.execute(
+                                    "SELECT metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
+                                    (row["id"],),
+                                ).fetchall()
+                                if len(packet) != 1:
+                                    raise RegistryConflict("REVIEW_INPUT_REQUIRED", row["id"])
+                                metadata = json.loads(packet[0]["metadata_json"])
+                                attempt = connection.execute(
+                                    "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
+                                    (metadata.get("implementation_attempt_id"),),
+                                ).fetchone()
+                                if (metadata.get("target_package_id") != target[0]["id"]
+                                        or attempt is None or attempt["package_id"] != target[0]["id"]
+                                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                                    raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED", row["id"])
                     active = connection.execute(
                         "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
                     ).fetchone()
@@ -2215,10 +2245,6 @@ class SQLiteRegistry:
                     "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1"
                 ).fetchone():
                     raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
-                if connection.execute(
-                    "SELECT 1 FROM work_packages WHERE status IN ('READY', 'ACTIVE') LIMIT 1"
-                ).fetchone():
-                    raise RegistryConflict("CANARY_NOT_EXCLUSIVE")
                 target = connection.execute(
                     "SELECT feature_id, kind, status FROM work_packages WHERE id=?",
                     (target_id,),
@@ -2377,10 +2403,94 @@ class SQLiteRegistry:
 
     def record_review_input(self, review_input: ReviewInput, *, operation_id: str | None = None) -> None:
         """Record immutable review input separately from a reviewer verdict."""
+        with self._connection() as connection:
+            review = connection.execute(
+                "SELECT kind FROM work_packages WHERE id=?", (review_input.review_package_id,)
+            ).fetchone()
+            dependency = connection.execute(
+                "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                (review_input.review_package_id,),
+            ).fetchall()
+            attempt = connection.execute(
+                "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
+                (review_input.implementation_attempt_id,),
+            ).fetchone()
+        if (review is None or review["kind"] != PackageKind.REVIEW.value
+                or len(dependency) != 1
+                or dependency[0]["dependency_id"] != review_input.target_package_id):
+            raise RegistryConflict("REVIEW_INPUT_TARGET_MISMATCH")
+        if attempt is None or attempt["package_id"] != review_input.target_package_id or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None:
+            raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED")
         self.record_evidence(
             _review_input_evidence(review_input),
             operation_id=operation_id or f"review-input:{review_input.id}",
         )
+
+    def bind_legacy_package_source(
+        self, package_id: str, *, github_issue: int, queue_contract: Mapping[str, Any],
+        expected_revision: int, recorded_at: str,
+    ) -> int:
+        """CAS-bind an unstarted preserved queue item without rewriting it."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        if isinstance(github_issue, bool) or not isinstance(github_issue, int) or github_issue <= 0:
+            raise RegistryConflict("INVALID_GITHUB_SOURCE")
+        digest = _review_contract_sha256(queue_contract)
+        request = {"package_id": package_id, "github_issue": github_issue,
+                   "queue_contract_sha256": digest}
+        operation_id = f"legacy-source-bind:{package_id}:{github_issue}:{digest}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("LEGACY_SOURCE_BIND_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                package = connection.execute(
+                    "SELECT status, source_system, source_ref, provider_diagnostics_json "
+                    "FROM work_packages WHERE id=?", (package_id,)
+                ).fetchone()
+                if package is None:
+                    raise RegistryNotFound(f"work package {package_id}")
+                if package["status"] not in ("ON_DECK", "READY"):
+                    raise RegistryConflict("LEGACY_SOURCE_BIND_STATUS_INVALID", package["status"])
+                if connection.execute(
+                    "SELECT 1 FROM attempts WHERE package_id=? LIMIT 1", (package_id,)
+                ).fetchone():
+                    raise RegistryConflict("LEGACY_SOURCE_BIND_ATTEMPT_HISTORY")
+                diagnostics = json.loads(package["provider_diagnostics_json"])
+                if diagnostics.get("queue_contract_sha256") != digest:
+                    raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
+                existing = (package["source_system"], package["source_ref"])
+                wanted = ("github_issue", str(github_issue))
+                if existing == wanted:
+                    connection.rollback()
+                    return expected_revision
+                if existing != (None, None):
+                    raise RegistryConflict("GITHUB_SOURCE_REPLACEMENT_FORBIDDEN", package_id)
+                connection.execute(
+                    "UPDATE work_packages SET source_system=?, source_ref=?, updated_at=? WHERE id=?",
+                    (*wanted, recorded_at, package_id),
+                )
+                self._insert_event(
+                    connection, "LEGACY_SOURCE_BOUND", recorded_at, package_id, None, None,
+                    {"github_issue": github_issue, "queue_contract_sha256": digest},
+                )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id, operation_kind="LEGACY_SOURCE_BIND",
+                    request=request, result={"revision": revision}, recorded_at=recorded_at,
+                )
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback(); raise
 
     def review_input(self, review_package_id: str) -> Mapping[str, Any]:
         """Return the single immutable input assigned to a review package."""

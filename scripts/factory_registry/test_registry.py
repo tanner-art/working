@@ -78,6 +78,35 @@ class SQLiteRegistryTest(unittest.TestCase):
             {"schema_version": "5", "control_schema_version": "1"},
         )
 
+    def test_legacy_source_binding_is_contract_pinned_and_idempotent(self) -> None:
+        self.feature()
+        contract = {"task": "TASK-LEGACY", "depends_on": [], "paths": ["docs/legacy.md"]}
+        digest = hashlib.sha256(json.dumps(
+            contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
+        self.registry.register_work_package(WorkPackage(
+            "TASK-LEGACY", "FEATURE-1", "legacy", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("preserved",), status=TaskStatus.ON_DECK,
+            provider_diagnostics={"queue_contract_sha256": digest},
+        ))
+        revision = self.registry.dispatch_control()["revision"]
+        bound = self.registry.bind_legacy_package_source(
+            "TASK-LEGACY", github_issue=173, queue_contract=contract,
+            expected_revision=revision, recorded_at="2026-09-27T12:00:00Z",
+        )
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-27T12:00:01Z")
+        package = next(value for value in snapshot.work_packages if value["id"] == "TASK-LEGACY")
+        self.assertEqual((package["source_system"], package["source_ref"]), ("github_issue", "173"))
+        self.assertEqual(self.registry.bind_legacy_package_source(
+            "TASK-LEGACY", github_issue=173, queue_contract=contract,
+            expected_revision=bound, recorded_at="2026-09-27T12:00:02Z",
+        ), bound)
+        with self.assertRaisesRegex(RegistryConflict, "QUEUE_CONTRACT_MISMATCH"):
+            self.registry.bind_legacy_package_source(
+                "TASK-LEGACY", github_issue=173, queue_contract={"task": "TASK-LEGACY"},
+                expected_revision=bound, recorded_at="2026-09-27T12:00:03Z",
+            )
+
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
         legacy_database = self.root / "legacy.sqlite3"
         with sqlite3.connect(legacy_database) as connection:
