@@ -35,6 +35,21 @@ describe('Review resolution', () => {
     expect(result).toEqual({ status: 'recoverable-error', message: 'thought:review still needs action setup.' })
   })
 
+  it.each(['action', 'commitment', 'reminder'] as const)('keeps %s in Review when its registered continuation is unavailable', async kind => {
+    const object = pending()
+    const result = await resolveReviewCapture(object, kind)
+    expect(result.status).toBe('recoverable-error')
+    expect(object.status).toBe('review')
+    expect(object.history).toEqual([])
+  })
+
+  it('turns a thrown continuation into a recoverable error without mutating the capture', async () => {
+    const object = pending()
+    const result = await resolveReviewCapture(object, 'action', { action: () => { throw new Error('boom') } })
+    expect(result.status).toBe('recoverable-error')
+    expect(object.history).toEqual([])
+  })
+
   it('cannot resolve an item that has already left Review', async () => {
     const result = await resolveReviewCapture({ ...pending(), status: 'confirmed' }, 'idea')
     expect(result.status).toBe('recoverable-error')
