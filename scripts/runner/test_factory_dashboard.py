@@ -6,8 +6,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import factory_dashboard as fd
+from scripts.factory_registry import Feature, SQLiteRegistry, TaskStatus
 
 
 def write_json(path, data):
@@ -36,6 +38,156 @@ class RedactionTests(unittest.TestCase):
             self.assertIsNone(report['state_dir'])
             self.assertNotIn('/Users/alice/private/config.json', dumped)
             self.assertNotIn(str(state), dumped)
+
+    def test_registry_projection_is_authoritative_while_paused_without_legacy_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            state = root / 'state'
+            state.mkdir()
+            database = root / 'registry.sqlite3'
+            registry = SQLiteRegistry(database)
+            registry.initialize()
+            registry.register_feature(
+                Feature('FEATURE-1', 'Dashboard repair', 100, TaskStatus.READY)
+            )
+            before = registry.dispatch_control()
+
+            report = fd.build_report(
+                'cfg.json',
+                {'state': str(state), 'registry_database': str(database)},
+                now=1000.0,
+            )
+
+            self.assertTrue(report['registry']['available'])
+            self.assertEqual(report['registry']['control']['dispatch_mode'], 'PAUSED')
+            self.assertTrue(report['registry']['control']['kill_switch_engaged'])
+            self.assertEqual(report['registry']['projection']['registryRevision'], str(before['revision']))
+            self.assertFalse(report['heartbeat']['found'])
+            self.assertEqual(report['registry']['ownership'], {
+                'active_leases': 0,
+                'active_attempts': 0,
+                'active_runtimes': 0,
+                'active_unbound_leases': 0,
+                'runtime_orphans': 0,
+                'error': None,
+            })
+            self.assertEqual(registry.dispatch_control(), before)
+
+    def test_refresh_observation_advances_without_mutating_registry_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            state = root / 'state'
+            state.mkdir()
+            database = root / 'registry.sqlite3'
+            registry = SQLiteRegistry(database)
+            registry.initialize()
+            config = {'state': str(state), 'registry_database': str(database)}
+
+            first = fd.build_report('cfg.json', config, now=1000.0)
+            second = fd.build_report('cfg.json', config, now=1001.0)
+
+            self.assertNotEqual(first['generated_at'], second['generated_at'])
+            self.assertEqual(
+                first['registry']['projection']['registryRevision'],
+                second['registry']['projection']['registryRevision'],
+            )
+
+    def test_corrupt_legacy_telemetry_does_not_erase_registry_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            state = root / 'state'
+            state.mkdir()
+            (state / 'heartbeat.json').write_text('{broken')
+            (state / 'queue.json').write_text('{broken')
+            database = root / 'registry.sqlite3'
+            registry = SQLiteRegistry(database)
+            registry.initialize()
+
+            report = fd.build_report(
+                'cfg.json',
+                {'state': str(state), 'registry_database': str(database)},
+                now=1000.0,
+            )
+
+            self.assertTrue(report['registry']['available'])
+            self.assertEqual(report['registry']['control']['dispatch_mode'], 'PAUSED')
+            self.assertIsNotNone(report['heartbeat']['error'])
+            self.assertIsNotNone(report['queue']['snapshot_error'])
+
+    def test_runtime_count_failure_is_partial_and_keeps_registry_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            state = root / 'state'
+            state.mkdir()
+            database = root / 'registry.sqlite3'
+            registry = SQLiteRegistry(database)
+            registry.initialize()
+
+            with patch.object(SQLiteRegistry, 'active_attempt_runtimes', side_effect=RuntimeError('private')):
+                report = fd.build_report(
+                    'cfg.json',
+                    {'state': str(state), 'registry_database': str(database)},
+                    now=1000.0,
+                )
+
+            self.assertTrue(report['registry']['available'])
+            self.assertEqual(report['registry']['control']['dispatch_mode'], 'PAUSED')
+            self.assertEqual(
+                report['registry']['ownership']['error'],
+                'runtime ownership observation failed',
+            )
+            self.assertNotIn('private', json.dumps(report))
+
+    def test_registry_revision_drift_discards_mixed_ownership_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            state = root / 'state'
+            state.mkdir()
+            database = root / 'registry.sqlite3'
+            registry = SQLiteRegistry(database)
+            registry.initialize()
+            original_dispatch_control = SQLiteRegistry.dispatch_control
+            observation_count = 0
+
+            def dispatch_control_with_drift(instance):
+                nonlocal observation_count
+                observation_count += 1
+                control = dict(original_dispatch_control(instance))
+                if observation_count == 2:
+                    control['revision'] += 1
+                return control
+
+            with patch.object(
+                SQLiteRegistry,
+                'dispatch_control',
+                dispatch_control_with_drift,
+            ):
+                report = fd.build_report(
+                    'cfg.json',
+                    {'state': str(state), 'registry_database': str(database)},
+                    now=1000.0,
+                )
+
+            self.assertTrue(report['registry']['available'])
+            self.assertEqual(observation_count, 2)
+            self.assertEqual(report['registry']['ownership'], {
+                'active_leases': 0,
+                'active_attempts': 0,
+                'active_runtimes': None,
+                'active_unbound_leases': None,
+                'runtime_orphans': None,
+                'error': 'runtime ownership observation failed',
+            })
+
+    def test_dashboard_exposes_bounded_manual_refresh_control(self):
+        markup = fd.HTML_PATH.read_text(encoding='utf-8')
+        self.assertIn('Refresh Factory State', markup)
+        self.assertIn('AbortController', markup)
+        self.assertIn('REFRESH_TIMEOUT_MS', markup)
+        self.assertIn("fetch('/api/status'", markup)
+        self.assertNotIn('?observed=', markup)
+        self.assertIn('do not define execution mode', markup)
+        self.assertNotIn('while the Factory is paused', markup)
 
     def test_report_sanitizes_issue_and_worker_errors(self):
         with tempfile.TemporaryDirectory() as d:

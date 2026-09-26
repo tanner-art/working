@@ -653,6 +653,21 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
 
     reconciliation = _project_reconciliation(snapshot)
     projected_reviews = _project_reviews(snapshot)
+    # A feature card must show the recorded verdict, not merely that its
+    # review package reached DONE.  Keep the package history untouched; this
+    # is only the current authoritative summary of the target package.
+    latest_review_by_target: dict[str, Mapping[str, Any]] = {}
+    for review in projected_reviews:
+        if review.get("state") not in {"approved", "changes_requested"}:
+            continue
+        target_id = str(review.get("packageId", ""))
+        previous = latest_review_by_target.get(target_id)
+        if previous is None or str(review.get("requestedAt")) >= str(previous.get("requestedAt")):
+            latest_review_by_target[target_id] = review
+    for target_id, review in latest_review_by_target.items():
+        package = projected_packages.get(target_id)
+        if package is not None:
+            package["reviewState"] = review.get("state")
     failures = []
     package_state = {str(item.get("id")): item.get("status") for item in snapshot.work_packages}
     for item in snapshot.failures:

@@ -92,7 +92,13 @@ import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import factory_status as fstatus
+from scripts.factory_registry.control_center_projection import build_control_center_projection
+from scripts.factory_registry.sqlite_registry import SQLiteRegistry
 from usage_policy import (UsagePolicyError, agent_settings as runner_agent_settings,
                           dispatch_decision, validate_policy, validate_usage)
 
@@ -184,6 +190,90 @@ def format_duration(seconds):
         parts.append(f'{minutes}m')
     parts.append(f'{secs}s')
     return ' '.join(parts)
+
+
+def load_registry_report(config, observed_at):
+    """Build one sanitized, read-only view of authoritative Registry state."""
+    database_value = config.get('registry_database')
+    unavailable = {
+        'available': False,
+        'error': None,
+        'projection': None,
+        'control': None,
+        'ownership': None,
+    }
+    if database_value is None:
+        unavailable['error'] = 'registry_database is not configured'
+        return unavailable
+    if not isinstance(database_value, str) or not database_value:
+        unavailable['error'] = 'registry_database is invalid'
+        return unavailable
+    database = pathlib.Path(database_value)
+    if not database.is_absolute() or not database.is_file():
+        unavailable['error'] = 'authoritative Registry is unavailable'
+        return unavailable
+
+    try:
+        registry = SQLiteRegistry(database)
+        projection = build_control_center_projection(registry, observed_at=observed_at)
+        control = dict(registry.dispatch_control())
+        if int(projection['registryRevision']) != control['revision']:
+            raise RuntimeError('Registry changed during dashboard observation')
+        active_attempts = sum(
+            1
+            for feature in projection['features']
+            for package in feature['packages']
+            for attempt in package['attempts']
+            if attempt['outcome'] == 'active'
+        )
+        active_leases = sum(
+            1
+            for feature in projection['features']
+            for package in feature['packages']
+            if package['currentLease'] is not None
+        )
+        ownership = {
+            'active_leases': active_leases,
+            'active_attempts': active_attempts,
+            'active_runtimes': None,
+            'active_unbound_leases': None,
+            'runtime_orphans': None,
+            'error': None,
+        }
+        try:
+            ownership.update({
+                'active_runtimes': len(registry.active_attempt_runtimes()),
+                'active_unbound_leases': len(registry.active_unbound_leases()),
+                'runtime_orphans': len(registry.runtime_orphans(observed_at=observed_at)),
+            })
+            final_control = registry.dispatch_control()
+            if final_control['revision'] != control['revision']:
+                raise RuntimeError('Registry changed during ownership observation')
+        except Exception:
+            ownership['error'] = 'runtime ownership observation failed'
+            ownership.update({
+                'active_runtimes': None,
+                'active_unbound_leases': None,
+                'runtime_orphans': None,
+            })
+        return {
+            'available': True,
+            'error': None,
+            'projection': projection,
+            'control': {
+                'dispatch_mode': control['dispatch_mode'],
+                'kill_switch_engaged': control['kill_switch_engaged'],
+                'changed_at': control['changed_at'],
+                'reason': control['reason'],
+                'revision': control['revision'],
+                'bounded_run': control.get('bounded_run'),
+            },
+            'ownership': ownership,
+        }
+    except Exception:
+        # Never expose database paths or raw SQLite/provider diagnostics.
+        unavailable['error'] = 'authoritative Registry observation failed'
+        return unavailable
 
 
 def agent_definitions(config):
@@ -1133,7 +1223,9 @@ def build_report(config_path, config, state_dir_override=None, now=None,
                   caution_threshold_pct=None, checkpoint_threshold_pct=None,
                   hard_stop_threshold_pct=None):
     now = time.time() if now is None else now
+    observed_at = fstatus.iso(now)
     state_dir = pathlib.Path(state_dir_override if state_dir_override is not None else config['state'])
+    registry = load_registry_report(config, observed_at)
 
     heartbeat = fstatus.heartbeat_status(state_dir, stale_after_seconds, now)
     issue_summary = fstatus.issue_record_summary(state_dir)
@@ -1170,7 +1262,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
     )
 
     return {
-        'generated_at': fstatus.iso(now),
+        'generated_at': observed_at,
         # Keep the keys for API compatibility without disclosing host paths.
         'config_path': None,
         'state_dir': None,
@@ -1207,6 +1299,7 @@ def build_report(config_path, config, state_dir_override=None, now=None,
         },
         'capacity': capacity,
         'capacity_note': capacity['note'],
+        'registry': registry,
     }
 
 
@@ -1278,7 +1371,10 @@ def make_server(host, port, config_path, config, html_path=HTML_PATH,
 
 def build_arg_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--config', required=True, help='Path to the runner config.json (only "state" and "agents" fields are read)')
+    ap.add_argument(
+        '--config', required=True,
+        help='Path to the runner config.json (state, agents, and registry_database are read)',
+    )
     ap.add_argument('--host', type=loopback_host_arg, default=DEFAULT_HOST,
                     help=f'Bind host (fixed to {DEFAULT_HOST})')
     ap.add_argument('--port', type=int, default=DEFAULT_PORT, help=f'Bind port (default {DEFAULT_PORT})')

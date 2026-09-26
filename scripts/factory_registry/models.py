@@ -91,6 +91,33 @@ class ReviewOutcomeState(StringEnum):
 
 
 @dataclass(frozen=True)
+class ReviewInput:
+    """Immutable implementation facts that a review assignment must target."""
+    id: str
+    review_package_id: str
+    target_package_id: str
+    implementation_attempt_id: str
+    implementation_commit: str
+    base_commit: str
+    pr_url: str
+    contract_sha256: str
+    contract: Mapping[str, Any]
+    validation_evidence: Mapping[str, Any]
+    recorded_at: str
+
+
+@dataclass(frozen=True)
+class ReviewVerdict:
+    """The only provider output shape that can complete a review."""
+    state: ReviewOutcomeState
+    reviewed_commit: str
+    reviewed_base_commit: str
+    contract_sha256: str
+    findings: tuple[str, ...] = ()
+    changes_requested: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Feature:
     id: str
     title: str
@@ -185,6 +212,11 @@ class ReviewOutcome:
     findings: tuple[str, ...] = ()
     changes_requested: tuple[str, ...] = ()
     approval_evidence_ids: tuple[str, ...] = ()
+    reviewed_commit: str | None = None
+    reviewed_base_commit: str | None = None
+    contract_sha256: str | None = None
+    review_input_evidence_id: str | None = None
+    reviewer_attempt_id: str | None = None
 
 
 @dataclass(frozen=True)

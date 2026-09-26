@@ -1,11 +1,14 @@
 import unittest
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
-from runner import (build_agent_environment, build_agent_prompt,
+from runner import (build_agent_environment, build_agent_prompt, build_review_prompt,
+                    materialize_review_packet, review_command, verify_review_packet,
                     preserve_interrupted_attempt, publish_completion_telemetry,
                     recover_stale_claims, refresh_queue_snapshot,
                     RegistryAttemptLifecycle, run,
-                    run_repository_validation, select, usage_policy_enabled)
+                    run_repository_validation, select, stage_verified_changes,
+                    usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -63,6 +66,77 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('Run pnpm check.', prompt)
         self.assertIn('Read AGENTS.md', prompt)
         self.assertIn('Leave changes for the runner', prompt)
+
+    def test_claude_review_adapter_preserves_wrapper_and_replaces_unsafe_flags(self):
+        command = review_command({
+            'provider': 'anthropic',
+            'command': ['/usr/bin/python3', '/release/claude_keychain.py', 'exec',
+                        '/opt/bin/claude', '-p', '--tools', 'Read,Edit',
+                        '--permission-mode', 'acceptEdits', '--output-format', 'text'],
+        })
+        self.assertEqual(command[:5], ['/usr/bin/python3', '/release/claude_keychain.py',
+                                       'exec', '/opt/bin/claude', '-p'])
+        self.assertEqual(command[-8:], ['--output-format', 'json', '--tools', 'Read,Glob,Grep',
+                                        '--permission-mode', 'dontAsk', '--permission-prompts', 'none'])
+        schema = json.loads(command[command.index('--json-schema') + 1])
+        self.assertFalse(schema['additionalProperties'])
+        self.assertIn('reviewed_commit', schema['required'])
+        for config in (
+            {'provider': 'openai', 'command': ['/opt/bin/claude', '-p']},
+            {'provider': 'anthropic', 'command': ['/opt/bin/claude', '-p', '--tools=Read,Edit']},
+            {'provider': 'anthropic', 'command': ['/opt/bin/claude', '-p', '--add-dir', '/tmp']},
+            {'provider': 'anthropic', 'command': ['/opt/bin/not-claude', '-p']},
+        ):
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    review_command(config)
+
+    def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
+        import pathlib, tempfile
+        from scripts.factory_registry.models import ReviewInput
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            packet = materialize_review_packet(
+                state, implementation_attempt_id='attempt-1', base_commit='b' * 40,
+                implementation_commit='a' * 40, contract={'task': 'TASK-1'},
+                validation_evidence={'check': 'passed'}, diff='diff --git a/x b/x\n',
+                changed_files=['x'],
+            )
+            self.assertNotIn('checkout', packet['path'])
+            review_input = ReviewInput(
+                id='input', review_package_id='REVIEW-1', target_package_id='TASK-1',
+                implementation_attempt_id='attempt-1', implementation_commit='a' * 40,
+                base_commit='b' * 40, pr_url='https://example.test/pr',
+                contract_sha256=__import__('hashlib').sha256(
+                    b'{"task":"TASK-1"}'
+                ).hexdigest(), contract={'task': 'TASK-1'},
+                validation_evidence={'check': 'passed', 'review_packet': packet},
+                recorded_at='2026-09-26T12:00:00Z',
+            )
+            self.assertEqual(verify_review_packet(review_input), packet)
+            self.assertIn(packet['path'], build_review_prompt(
+                review_input, reviewer_worker_id='claude', review_attempt_id='review-attempt'
+            ))
+            manifest = pathlib.Path(packet['path']) / 'manifest.json'
+            manifest.chmod(0o644)
+            manifest.write_text('{}\n')
+            with self.assertRaisesRegex(Exception, 'packet manifest changed'):
+                verify_review_packet(review_input)
+
+    def test_safe_staging_skips_absent_optional_paths_stages_deletion_and_never_adds_out_of_scope(self):
+        calls = []
+        def git(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {
+                ('diff', '--name-only'): 'docs/deleted.md\n',
+                ('diff', '--cached', '--name-only'): '',
+                ('ls-files', '--others', '--exclude-standard'): '',
+            }.get(args, '')
+        changed = stage_verified_changes(git, '/checkout')
+        self.assertEqual(changed, ['docs/deleted.md'])
+        self.assertEqual(calls[-1][0], ('add', '-A', '--', 'docs/deleted.md'))
+        self.assertNotIn('docs/optional-absent.md', calls[-1][0])
+        self.assertNotIn('outside-scope.md', calls[-1][0])
 
 class ProcessTests(unittest.TestCase):
     def test_registry_terminal_mutation_is_attempted_exactly_once(self):
@@ -522,6 +596,9 @@ class LifecycleTests(unittest.TestCase):
             registry.claim_package.side_effect = lambda *args, **kwargs: (
                 calls.append(['registry', 'claim']) or 'lease-1'
             )
+            registry.claim_with_retry.side_effect = lambda *args, **kwargs: (
+                calls.append(['registry', 'claim']) or ('lease-1', 1)
+            )
             registry.pre_launch.side_effect = lambda: (
                 calls.append(['registry', 'pre-launch']) or 2
             )
@@ -571,9 +648,75 @@ class LifecycleTests(unittest.TestCase):
 
     def test_registry_review_dependency_defers_to_verify_review_preclaim(self):
         calls, record = self.exercise_poll(blocked=True, kind='REVIEW')
-        self.assertEqual(record['status'], 'failed')
+        self.assertIsNone(record)
         self.assertIn(['registry', 'pre-claim'], calls)
         self.assertNotIn(['gh', 'issue', 'view'], [call[:3] for call in calls])
+
+    def test_missing_review_input_defers_only_that_review_and_continues_the_poll(self):
+        import contextlib, io, json, pathlib, tempfile
+        import runner
+        from scripts.factory_registry.repository import RegistryConflict
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = {
+                'repo': directory, 'state': str(root / 'state'),
+                'worktrees': str(root / 'trees'), 'path': '/usr/bin:/bin',
+                'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm', 'github': 'owner/repo',
+                'allowed_authors': ['owner'],
+                'agents': {'codex-a': {'command': ['agent']}},
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+
+            def issue(number, kind):
+                return {
+                    'number': number, 'title': f'issue {number}',
+                    'author': {'login': 'owner'},
+                    'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}],
+                    'body': json.dumps({
+                        'task': f'TASK-{number}', 'paths': [f'docs/{number}.md'],
+                        'instructions': 'Bounded work.', 'depends_on': [],
+                        'kind': kind, 'lane': 'ASSURANCE' if kind == 'REVIEW' else 'FEATURE',
+                    }),
+                }
+
+            issues = [issue(1, 'REVIEW'), issue(2, 'PARENT')]
+            registry = Mock()
+            registry.pre_claim.side_effect = lambda task, *_args, **_kwargs: (
+                (_ for _ in ()).throw(RegistryConflict('REVIEW_INPUT_REQUIRED'))
+                if task == 'TASK-1' else 7
+            )
+            registry.claim_package.return_value = 'deferred'
+            registry.claim_with_retry.return_value = ('lease-2', 7)
+
+            commands = []
+            def fake_run(args, **_kwargs):
+                commands.append(args)
+                if args[:3] == ['gh', 'issue', 'list']:
+                    return json.dumps(issues)
+                return ''
+
+            output = io.StringIO()
+            with patch.object(runner, 'run', side_effect=fake_run), \
+                    patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                    patch('sys.argv', ['runner', '--config', str(config_path)]), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                runner.main()
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertIn(
+                {'issue': 1, 'status': 'defer', 'reason': 'REVIEW_INPUT_REQUIRED'}, events,
+            )
+            self.assertEqual(
+                [call.args[0] for call in registry.pre_claim.call_args_list],
+                ['TASK-1', 'TASK-2'],
+            )
+            registry.claim_with_retry.assert_called_once()
+            self.assertEqual(registry.claim_with_retry.call_args.args[0], 'TASK-2')
+            registry.reserve_attempt.assert_called_once()
+            self.assertEqual(registry.reserve_attempt.call_args.kwargs['package_id'], 'TASK-2')
+            self.assertEqual(commands.count(['agent']), 1)
 
     def test_preclaim_error_does_not_overwrite_existing_claim(self):
         calls, record = self.exercise_poll(preclaim_error=True)
@@ -586,6 +729,120 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(record['status'], 'failed')
         self.assertIn('outside allowed paths', record['error'])
         self.assertIn(['gh', 'issue', 'edit'], [call[:3] for call in calls])
+
+    def test_registry_review_main_loop_uses_exact_checkout_readonly_claude_and_records_only_valid_outcomes(self):
+        import contextlib, io, json, pathlib, tempfile
+        import runner
+        from scripts.factory_registry.models import ReviewInput, ReviewOutcomeState
+        commit, base = 'a' * 40, 'b' * 40
+        cases = (
+            ('APPROVED', {'state': 'APPROVED', 'changes_requested': []}, True),
+            ('CHANGES_REQUESTED', {'state': 'CHANGES_REQUESTED', 'changes_requested': ['Fix test']}, True),
+            ('wrong-sha', {'state': 'APPROVED', 'reviewed_commit': 'c' * 40, 'changes_requested': []}, False),
+            ('malformed', {'state': 'APPROVED', 'changes_requested': []}, False),
+        )
+        for name, changes, accepted in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                contract = {'task': 'TASK-1', 'paths': ['scripts/runner/runner.py'], 'instructions': 'Review only.'}
+                packet = materialize_review_packet(
+                    root / 'state', implementation_attempt_id='implementation-attempt',
+                    base_commit=base, implementation_commit=commit, contract=contract,
+                    validation_evidence={'repository_validation': 'passed'},
+                    diff='diff --git a/scripts/runner/runner.py b/scripts/runner/runner.py\n',
+                    changed_files=['scripts/runner/runner.py'],
+                )
+                digest = __import__('hashlib').sha256(
+                    json.dumps(contract, sort_keys=True, separators=(',', ':')).encode()
+                ).hexdigest()
+                review_input = ReviewInput(
+                    id='review-input', review_package_id='TASK-1', target_package_id='TASK-0',
+                    implementation_attempt_id='implementation-attempt', implementation_commit=commit,
+                    base_commit=base, pr_url='https://example.test/pr/1', contract_sha256=digest,
+                    contract=contract,
+                    validation_evidence={'repository_validation': 'passed', 'review_packet': packet},
+                    recorded_at='2026-09-26T12:00:00Z',
+                )
+                value = {
+                    'state': changes.get('state', 'APPROVED'),
+                    'reviewed_commit': changes.get('reviewed_commit', commit),
+                    'reviewed_base_commit': base,
+                    'contract_sha256': digest,
+                    'findings': ['reviewed exact packet'],
+                    'changes_requested': changes['changes_requested'],
+                }
+                provider_output = 'not-json' if name == 'malformed' else json.dumps({
+                    'type': 'result', 'is_error': False, 'subtype': 'success',
+                    'result': json.dumps(value),
+                })
+                config = {
+                    'repo': str(root / 'repo'), 'state': str(root / 'state'),
+                    'worktrees': str(root / 'worktrees'), 'path': '/usr/bin:/bin',
+                    'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm', 'github': 'owner/repo',
+                    'allowed_authors': ['owner'],
+                    'agents': {'claude': {'provider': 'anthropic', 'command': ['/opt/claude', '-p']}},
+                }
+                (root / 'repo').mkdir()
+                config_path = root / 'config.json'; config_path.write_text(json.dumps(config))
+                issue = {
+                    'number': 1, 'title': 'review', 'author': {'login': 'owner'},
+                    'labels': [{'name': 'runner:ready'}, {'name': 'agent:claude'}],
+                    'body': json.dumps({**contract, 'kind': 'REVIEW', 'lane': 'ASSURANCE'}),
+                }
+                calls, branch = [], {'value': None}
+                def fake_run(args, **kwargs):
+                    calls.append((args, kwargs))
+                    if args[:3] == ['gh', 'issue', 'list']:
+                        return json.dumps([issue])
+                    if args[:3] == ['git', 'worktree', 'add']:
+                        branch['value'] = args[4]
+                    if args[:3] == ['git', 'branch', '--show-current']:
+                        return branch['value']
+                    if args[:2] == ['git', 'rev-parse']:
+                        return commit if args[-1] == 'HEAD' else base
+                    if args[:2] == ['git', 'status'] or args[:3] == ['git', 'diff', '--name-only']:
+                        return ''
+                    if args[:3] == ['git', 'diff', '--cached'] or args[:3] == ['git', 'ls-files', '--others']:
+                        return ''
+                    if args[0] == '/opt/claude':
+                        self.assertTrue(kwargs['separate_stderr'])
+                        kwargs['on_start'](901)
+                        return provider_output, 'stderr is not machine JSON'
+                    return ''
+                registry = Mock()
+                registry.review_input.return_value = review_input
+                registry.claim_with_retry.return_value = ('lease-1', 2)
+                registry.pre_launch.return_value = 3
+                registry.registry.dispatch_control.return_value = {'revision': 4}
+                registry.registry.successful_package_worker.return_value = 'implementer'
+                with patch.object(runner, 'run', side_effect=fake_run), \
+                        patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                        patch.object(runner.os, 'getpgid', return_value=901), \
+                        patch('sys.argv', ['runner', '--config', str(config_path)]), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    runner.main()
+                checkout = next(args for args, _ in calls if args[:3] == ['git', 'worktree', 'add'])
+                self.assertEqual(checkout[-1], commit)
+                provider = next(args for args, _ in calls if args[0] == '/opt/claude')
+                self.assertIn('--tools', provider)
+                self.assertEqual(provider[provider.index('--tools') + 1], 'Read,Glob,Grep')
+                self.assertIn('--permission-mode', provider)
+                self.assertEqual(provider[provider.index('--permission-mode') + 1], 'dontAsk')
+                self.assertEqual(provider[provider.index('--add-dir') + 1], packet['path'])
+                if accepted:
+                    self.assertEqual(
+                        registry.record_review_outcome.call_count, 1,
+                        (root / 'state' / 'issue-1.json').read_text(),
+                    )
+                    self.assertEqual(
+                        registry.record_review_outcome.call_args.args[0].state,
+                        ReviewOutcomeState(changes['state']),
+                    )
+                else:
+                    registry.record_review_outcome.assert_not_called()
+                    saved = json.loads((root / 'state' / 'issue-1.json').read_text())
+                    self.assertEqual(saved['status'], 'failed')
+                    self.assertIn('review verdict rejected', saved['error'])
 
 if __name__ == '__main__':
     unittest.main()

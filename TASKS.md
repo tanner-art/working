@@ -57,6 +57,11 @@ Each numbered product area is an epic. The list is retained as the September 22 
   [September 25 reconciliation](docs/factory/CONTROL_PLANE_HARDENING_RECONCILIATION_2026-09-25.md)
   defines 10 pre-canary repair packages and one post-canary portfolio package.
   Committing that plan does not make any repair or product package runnable.
+- The owner-authorized September 26 focused repair is a supervised Registry
+  bounded-pilot sequence (one or two implementation/review pairs), documented
+  in [FACTORY_USABLE_RELEASE.md](docs/factory/FACTORY_USABLE_RELEASE.md). It
+  preserves the CP definitions and does not mark them complete or authorize
+  unattended eight-hour operation.
 - Broad product development remains paused until the control-plane repair
   program passes exact-commit independent review and its bounded unattended
   canary.

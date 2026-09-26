@@ -23,6 +23,7 @@ from scripts.factory_registry.models import (
     PackageKind,
     ReviewOutcome,
     ReviewOutcomeState,
+    ReviewInput,
     TaskStatus,
     Worker,
     WorkPackage,
@@ -143,6 +144,21 @@ class OperatorFixture(unittest.TestCase):
         self.approved_counts.stop()
         self.approved_hash.stop()
         self.temporary.cleanup()
+
+    def record_review_input(self, review_package_id, attempt_id, recorded_at):
+        contract = {"task": review_package_id, "paths": ["scripts/factory_registry/operator.py"]}
+        digest = hashlib.sha256(
+            json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        input_id = f"review-input:{review_package_id}:{attempt_id}"
+        self.registry.record_review_input(ReviewInput(
+            id=input_id, review_package_id=review_package_id, target_package_id="TASK-201",
+            implementation_attempt_id="implementation-attempt", implementation_commit=COMMIT,
+            base_commit="b" * 40, pr_url="https://example.invalid/pr/1",
+            contract_sha256=digest, contract=contract, validation_evidence={"focused_tests": "passed"},
+            recorded_at=recorded_at,
+        ))
+        return digest, input_id
 
     def _release(self):
         source_root = Path(__file__).resolve().parents[2]
@@ -432,44 +448,23 @@ class OperatorFixture(unittest.TestCase):
         original = runtime.read_bytes()
         runtime.write_bytes(original + b"\n# unreviewed change\n")
         with self.assertRaisesRegex(OperatorError, "manifest mismatch"):
-            preflight(
-                self.database,
-                self.config_path,
-                self.release,
-                self.preservation,
-                COMMIT,
-                self.registry.dispatch_control()["revision"],
-                require_permissions_gate=False,
-            )
+            preflight(self.database, self.config_path, self.release, self.preservation, COMMIT, self.registry.dispatch_control()["revision"], require_permissions_gate=False)
         runtime.write_bytes(original)
         extra = self.release / "scripts" / "runner" / "unreviewed.py"
         extra.write_text("raise RuntimeError('must not execute')\n")
         with self.assertRaisesRegex(OperatorError, "manifest is incomplete"):
-            preflight(
-                self.database,
-                self.config_path,
-                self.release,
-                self.preservation,
-                COMMIT,
-                self.registry.dispatch_control()["revision"],
-                require_permissions_gate=False,
-            )
+            preflight(self.database, self.config_path, self.release, self.preservation, COMMIT, self.registry.dispatch_control()["revision"], require_permissions_gate=False)
         extra.unlink()
         manifest = self.release / "MANIFEST.sha1"
-        manifest.write_text("\n".join(
-            line for line in manifest.read_text().splitlines()
-            if not line.endswith("  scripts/runner/registry_control.py")
-        ) + "\n")
+        manifest.write_text("\n".join(line for line in manifest.read_text().splitlines() if not line.endswith("  scripts/runner/registry_control.py")) + "\n")
         with self.assertRaisesRegex(OperatorError, "manifest is incomplete"):
-            preflight(
-                self.database,
-                self.config_path,
-                self.release,
-                self.preservation,
-                COMMIT,
-                self.registry.dispatch_control()["revision"],
-                require_permissions_gate=False,
-            )
+            preflight(self.database, self.config_path, self.release, self.preservation, COMMIT, self.registry.dispatch_control()["revision"], require_permissions_gate=False)
+
+    def test_release_gate_rejects_missing_review_protocol_runtime_dependency(self):
+        manifest = self.release / "MANIFEST.sha1"
+        manifest.write_text("\n".join(line for line in manifest.read_text().splitlines() if not line.endswith("  scripts/runner/review_protocol.py")) + "\n")
+        with self.assertRaisesRegex(OperatorError, "manifest is incomplete"):
+            preflight(self.database, self.config_path, self.release, self.preservation, COMMIT, self.registry.dispatch_control()["revision"], require_permissions_gate=False)
 
     def test_release_manifest_includes_commit_and_rejects_duplicate(self):
         manifest = self.release / "MANIFEST.sha1"
@@ -1250,6 +1245,9 @@ class OperatorFixture(unittest.TestCase):
         self.state.chmod(0o700)
         self.worktrees.chmod(0o700)
         harden_paths(self.database, self.config_path, self.release)
+        digest, input_id = self.record_review_input(
+            "TASK-202", "review-attempt", (now + timedelta(seconds=5)).isoformat()
+        )
         revision = self.registry.dispatch_control()["revision"]
         evidence = record_review_decision(
             self.database,
@@ -1266,7 +1264,11 @@ class OperatorFixture(unittest.TestCase):
                     "uri": "https://example.invalid/review",
                     "summary": "Independent review approved the bounded canary.",
                     "recorded_at": (now + timedelta(seconds=7)).isoformat(),
-                    "metadata": {"attempt_id": "review-attempt"},
+                    "metadata": {
+                        "attempt_id": "review-attempt", "reviewed_commit": COMMIT,
+                        "reviewed_base_commit": "b" * 40, "contract_sha256": digest,
+                        "review_input_evidence_id": input_id,
+                    },
                 },
                 "outcome": {
                     "id": "review-outcome",
@@ -1280,13 +1282,21 @@ class OperatorFixture(unittest.TestCase):
                     "findings": [],
                     "changes_requested": [],
                     "approval_evidence_ids": ["review-evidence"],
+                    "reviewed_commit": COMMIT,
+                    "reviewed_base_commit": "b" * 40,
+                    "contract_sha256": digest,
+                    "review_input_evidence_id": input_id,
+                    "reviewer_attempt_id": "review-attempt",
                 },
             },
         )
         self.assertEqual(evidence["reviewer_attempt_id"], "review-attempt")
         snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
         self.assertEqual(snapshot.review_outcomes[0]["state"], "APPROVED")
-        self.assertEqual(snapshot.evidence[0]["metadata"]["attempt_id"], "review-attempt")
+        self.assertEqual(
+            next(item for item in snapshot.evidence if item["id"] == "review-evidence")["metadata"]["attempt_id"],
+            "review-attempt",
+        )
         self.assertEqual(
             {
                 item["id"]: item["status"] for item in snapshot.work_packages
@@ -1361,6 +1371,9 @@ class OperatorFixture(unittest.TestCase):
                 expected_revision=self.registry.dispatch_control()["revision"],
                 recorded_at=(now + timedelta(seconds=10)).isoformat(),
             )
+        digest_1, input_id_1 = self.record_review_input(
+            "TASK-202", "review-attempt-1", (now + timedelta(seconds=5)).isoformat()
+        )
         self.registry.record_review_outcome(
             ReviewOutcome(
                 id="review-outcome-1", review_package_id="TASK-202",
@@ -1369,6 +1382,9 @@ class OperatorFixture(unittest.TestCase):
                 requested_at=(now + timedelta(seconds=5)).isoformat(),
                 decided_at=(now + timedelta(seconds=9)).isoformat(),
                 state=ReviewOutcomeState.CHANGES_REQUESTED,
+                reviewed_commit=COMMIT, reviewed_base_commit="b" * 40,
+                contract_sha256=digest_1, review_input_evidence_id=input_id_1,
+                reviewer_attempt_id="review-attempt-1",
                 findings=("Review targeted the wrong pull request.",),
                 changes_requested=("Run a fresh review against the bound canary commit.",),
             ),
@@ -1376,7 +1392,9 @@ class OperatorFixture(unittest.TestCase):
                 "review-evidence-1", "TASK-202", "review",
                 "https://example.invalid/review-1", "Wrong target recorded safely.",
                 (now + timedelta(seconds=8)).isoformat(),
-                {"attempt_id": "review-attempt-1"},
+                {"attempt_id": "review-attempt-1", "reviewed_commit": COMMIT,
+                 "reviewed_base_commit": "b" * 40, "contract_sha256": digest_1,
+                 "review_input_evidence_id": input_id_1},
             ),
             expected_revision=self.registry.dispatch_control()["revision"],
         )
@@ -1421,6 +1439,9 @@ class OperatorFixture(unittest.TestCase):
             changed_at=(now + timedelta(seconds=16)).isoformat(), reason="approval decision",
         )
         RunnerRegistryControl(self.database).finalize_paused(reason="ownership drained")
+        digest_2, input_id_2 = self.record_review_input(
+            "TASK-203", "review-attempt-2", (now + timedelta(seconds=12)).isoformat()
+        )
         self.registry.record_review_outcome(
             ReviewOutcome(
                 id="review-outcome-2", review_package_id="TASK-203",
@@ -1429,6 +1450,9 @@ class OperatorFixture(unittest.TestCase):
                 requested_at=(now + timedelta(seconds=12)).isoformat(),
                 decided_at=(now + timedelta(seconds=16)).isoformat(),
                 state=ReviewOutcomeState.APPROVED,
+                reviewed_commit=COMMIT, reviewed_base_commit="b" * 40,
+                contract_sha256=digest_2, review_input_evidence_id=input_id_2,
+                reviewer_attempt_id="review-attempt-2",
                 findings=("Bound canary commit passes review.",),
                 approval_evidence_ids=("review-evidence-2",),
             ),
@@ -1436,7 +1460,9 @@ class OperatorFixture(unittest.TestCase):
                 "review-evidence-2", "TASK-203", "review",
                 "https://example.invalid/review-2", "Fresh bound approval.",
                 (now + timedelta(seconds=15)).isoformat(),
-                {"attempt_id": "review-attempt-2"},
+                {"attempt_id": "review-attempt-2", "reviewed_commit": COMMIT,
+                 "reviewed_base_commit": "b" * 40, "contract_sha256": digest_2,
+                 "review_input_evidence_id": input_id_2},
             ),
             expected_revision=self.registry.dispatch_control()["revision"],
         )
@@ -1605,6 +1631,62 @@ class OperatorFixture(unittest.TestCase):
         payload["worker"]["provider_diagnostics"]["access_token"] = "do-not-store"
         with self.assertRaisesRegex(OperatorError, "secret-shaped"):
             validate_telemetry_payload(payload, "2026-09-25T08:00:01Z")
+
+    def test_bounded_enable_supports_two_pairs_without_rewriting_historical_ready(self):
+        self.config_path.write_text(json.dumps(self.config(strict=False)))
+        loaded = set()
+        def launchctl(arguments, **kwargs):
+            operation = arguments[1]
+            label = arguments[-1].rsplit('/', 1)[-1]
+            if operation == 'print':
+                return subprocess.CompletedProcess(arguments, 0 if label in loaded else 1)
+            if operation == 'bootout':
+                loaded.discard(label)
+            elif operation == 'bootstrap':
+                loaded.add(Path(arguments[-1]).stem)
+            else:
+                raise AssertionError(arguments)
+            return subprocess.CompletedProcess(arguments, 0)
+        prepare_dry_run(self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()['revision'], self.migration(),
+            home=self.root / 'home', run=launchctl, uid=501)
+        now = utc_now()
+        self.sync_workers(now)
+        worker, usage = validate_telemetry_payload(self.telemetry('codex-b', now=now), now)
+        self.registry.sync_worker_telemetry(worker, usage,
+            expected_revision=self.registry.dispatch_control()['revision'], recorded_at=now)
+        specs = []
+        for number in (201, 301):
+            spec = self.canary()
+            spec['feature']['id'] = 'PILOT-' + str(number)
+            for key, identifier in (('implementation', number), ('review', number + 1)):
+                package = spec[key]
+                package.update(id='TASK-' + str(identifier), feature_id=spec['feature']['id'], source_ref=str(identifier))
+                package['queue_contract']['task'] = package['id']
+                if key == 'review':
+                    package['dependency_ids'] = ['TASK-' + str(number)]
+                    package['queue_contract']['depends_on'] = [number]
+            specs.append(spec)
+        pairs = operator_module.parse_bounded_pilot_spec({'pairs': specs})
+        self.registry.register_feature(Feature('HISTORICAL', 'Preserved backlog', 999, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage('TASK-999', 'HISTORICAL', 'Unrelated',
+            'test', Lane.PLATFORM, ('documentation',), 999, ('preserve',), status=TaskStatus.READY))
+        self.registry.register_bounded_pilot(pairs,
+            expected_revision=self.registry.dispatch_control()['revision'], recorded_at=now)
+        scope = {'run_id': 'two-parent-pilot', 'package_ids': ['TASK-201', 'TASK-202', 'TASK-301', 'TASK-302'],
+            'deadline': '2099-01-01T00:00:00Z', 'base_ref': 'main', 'parent_limit': 2}
+        evidence = enable_live(self.database, self.config_path, self.release, self.preservation,
+            COMMIT, self.registry.dispatch_control()['revision'], 'two-parent-pilot',
+            home=self.root / 'home', run=launchctl, uid=501, bounded_run=scope)
+        self.assertTrue(evidence['passed'])
+        self.assertEqual(self.registry.dispatch_control()['bounded_run']['run_id'], scope['run_id'])
+        from scripts.runner.registry_control import RunnerRegistryControl
+        controller = RunnerRegistryControl(self.database)
+        self.assertIsNone(controller.proposed_worker('TASK-999'))
+        self.assertIsNotNone(controller.proposed_worker('TASK-201'))
+        self.assertIsNotNone(controller.proposed_worker('TASK-301'))
+        historical = next(p for p in self.registry.dispatch_snapshot(observed_at=now).work_packages if p['id'] == 'TASK-999')
+        self.assertEqual(historical['status'], 'READY')
 
 
 if __name__ == "__main__":

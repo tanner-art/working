@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -12,7 +13,9 @@ from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry import (
     Feature,
     Lane,
+    PackageKind,
     RegistryConflict,
+    ReviewInput,
     SQLiteRegistry,
     TaskStatus,
     Worker,
@@ -85,7 +88,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
 
     def test_pre_claim_requires_the_exact_registry_assignment_and_revision(self):
         control = RunnerRegistryControl(self.database)
-        control.registry = Mock()
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(revision=17)
         control.registry.require_live_dispatch.return_value = 17
         eligible = SimpleNamespace(package_id="TASK-1", worker_id="worker-a")
@@ -114,6 +117,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
         }
         control = RunnerRegistryControl(self.database)
         control.registry = Mock()
+        control.registry.dispatch_control.return_value = {}
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
             revision=17,
             work_packages=({
@@ -136,7 +140,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
 
     def test_review_preclaim_excludes_the_actual_implementer(self):
         control = RunnerRegistryControl(self.database)
-        control.registry = Mock()
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
             revision=17,
             work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
@@ -152,6 +156,40 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 control.pre_claim("TASK-REVIEW", "worker-a")
             self.assertEqual(control.pre_claim("TASK-REVIEW", "worker-b"), 17)
         control.registry.review_implementer_worker.assert_called_with("TASK-REVIEW")
+
+    def test_review_preclaim_fails_closed_when_its_bound_input_is_missing(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=({"id": "TASK-REVIEW", "kind": "REVIEW"},),
+        )
+        control.registry.review_input.side_effect = RegistryConflict("REVIEW_INPUT_REQUIRED")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_REQUIRED"):
+            control.pre_claim("TASK-REVIEW", "worker-b")
+        control.registry.review_implementer_worker.assert_not_called()
+
+    def test_review_preclaim_uses_real_sqlite_branch_when_no_review_input_exists(self):
+        self.registry.register_feature(
+            Feature("FEATURE", "Feature", 10, TaskStatus.READY)
+        )
+        self.registry.register_work_package(
+            WorkPackage(
+                "TASK-REVIEW", "FEATURE", "Review", "ORCHESTRATION",
+                Lane.ASSURANCE, ("review",), 10, ("review",),
+                kind=PackageKind.REVIEW, status=TaskStatus.READY,
+            )
+        )
+        with self.registry._connection() as connection:
+            evidence_count = connection.execute(
+                "SELECT COUNT(*) FROM evidence WHERE package_id=? AND kind='review-input'",
+                ("TASK-REVIEW",),
+            ).fetchone()[0]
+        self.assertEqual(evidence_count, 0)
+
+        control = RunnerRegistryControl(self.database)
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_REQUIRED"):
+            control.pre_claim("TASK-REVIEW", "worker-b")
 
     def test_claim_package_pins_dispatch_revision(self):
         control = RunnerRegistryControl(self.database)
@@ -170,6 +208,22 @@ class RunnerRegistryControlTests(unittest.TestCase):
             control.registry.acquire_lease.call_args.kwargs["expected_dispatch_revision"],
             9,
         )
+
+    def test_claim_retry_redecides_once_for_a_revision_race(self):
+        control = RunnerRegistryControl(self.database)
+        with patch.object(control, "pre_claim", side_effect=[11, 12]) as pre_claim, \
+                patch.object(control, "claim_package", side_effect=[
+                    RegistryConflict("DISPATCH_REVISION_CHANGED"), "lease-2",
+                ]) as claim:
+            self.assertEqual(
+                control.claim_with_retry(
+                    "TASK-1", worker_id="worker-a", task_contract={"task": "TASK-1"},
+                    lease_seconds=300,
+                ),
+                ("lease-2", 12),
+            )
+        self.assertEqual(pre_claim.call_count, 2)
+        self.assertEqual(claim.call_count, 2)
 
     def test_pre_claim_uses_live_registry_health_and_capacity_evidence(self):
         now = datetime.now(timezone.utc).isoformat()
@@ -271,12 +325,202 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 "SELECT outcome, failure_detail FROM attempts WHERE id='attempt-1'"
             ).fetchone()
             package = connection.execute(
-                "SELECT status FROM work_packages WHERE id='TASK-1'"
+                "SELECT status, runtime_seconds FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()
+            attempt_runtime = connection.execute(
+                "SELECT runtime_seconds FROM attempts WHERE id='attempt-1'"
             ).fetchone()[0]
         self.assertEqual(tuple(runtime[:3]), (900, 901, 901))
         self.assertIsNotNone(runtime[3])
         self.assertEqual(tuple(attempt), ("FAILED", "bounded failure"))
-        self.assertEqual(package, "BLOCKED")
+        self.assertEqual(package[0], "BLOCKED")
+        self.assertGreaterEqual(attempt_runtime, 0.0)
+        self.assertEqual(attempt_runtime, package[1])
+
+    def test_success_runtime_updates_attempt_and_package_once_on_replay(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        started = datetime.now(timezone.utc)
+        with patch("registry_control.utc_now", return_value=started.isoformat()), \
+                patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-runtime-success", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=control.pre_claim(),
+            )
+        ended = started + timedelta(seconds=12.5)
+        control.succeed(
+            "attempt-runtime-success", ended_at=ended.isoformat()
+        )
+        # Operation replay must not add a second duration even if its caller
+        # uses a later wall time.
+        control.succeed(
+            "attempt-runtime-success", ended_at=(ended + timedelta(seconds=5)).isoformat()
+        )
+        with self.registry._connection() as connection:
+            attempt = connection.execute(
+                "SELECT runtime_seconds FROM attempts WHERE id='attempt-runtime-success'"
+            ).fetchone()[0]
+            package = connection.execute(
+                "SELECT runtime_seconds FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()[0]
+        self.assertEqual(attempt, 12.5)
+        self.assertEqual(package, 12.5)
+
+    def test_failed_and_zero_duration_runtime_are_attempt_accounted(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        started = datetime.now(timezone.utc)
+        with patch("registry_control.utc_now", return_value=started.isoformat()), \
+                patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-runtime-zero", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=control.pre_claim(),
+            )
+        with patch("registry_control.utc_now", return_value=started.isoformat()):
+            control.fail("attempt-runtime-zero", "zero-duration failure")
+        with self.registry._connection() as connection:
+            attempt = connection.execute(
+                "SELECT outcome, runtime_seconds FROM attempts WHERE id='attempt-runtime-zero'"
+            ).fetchone()
+            package = connection.execute(
+                "SELECT runtime_seconds FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()[0]
+        self.assertEqual(tuple(attempt), ("FAILED", 0.0))
+        self.assertEqual(package, 0.0)
+
+    def test_bad_runtime_chronology_leaves_both_counters_unchanged(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        started = datetime.now(timezone.utc)
+        with patch("registry_control.utc_now", return_value=started.isoformat()), \
+                patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-runtime-bad-time", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=control.pre_claim(),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_ATTEMPT_CHRONOLOGY"):
+            control.succeed(
+                "attempt-runtime-bad-time",
+                ended_at=(started - timedelta(seconds=1)).isoformat(),
+            )
+        with self.registry._connection() as connection:
+            counters = connection.execute(
+                "SELECT (SELECT runtime_seconds FROM attempts WHERE id='attempt-runtime-bad-time'), "
+                "runtime_seconds FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()
+        self.assertEqual(tuple(counters), (0.0, 0.0))
+
+    def test_live_heartbeat_observation_preserves_busy_lease_and_worker_identity(self):
+        self.seed_assignment()
+        before = self.registry.dispatch_snapshot(observed_at=datetime.now(timezone.utc).isoformat())
+        worker = next(value for value in before.workers if value["id"] == "worker-a")
+        lease = next(value for value in before.active_leases if value["worker_id"] == "worker-a")
+        observed_at = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+        control = RunnerRegistryControl(self.database)
+        control.observe_worker_heartbeat("worker-a", observed_at=observed_at)
+        after = self.registry.dispatch_snapshot(observed_at=observed_at)
+        current = next(value for value in after.workers if value["id"] == "worker-a")
+        self.assertEqual(current["availability"], "BUSY")
+        self.assertEqual(current["capabilities"], worker["capabilities"])
+        self.assertEqual(current["approved_lanes"], worker["approved_lanes"])
+        self.assertEqual(current["last_heartbeat_at"], observed_at.replace("+00:00", "Z"))
+        self.assertEqual(
+            next(value for value in after.active_leases if value["id"] == lease["id"]),
+            lease,
+        )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_HEARTBEAT_CHRONOLOGY"):
+            control.observe_worker_heartbeat("worker-a", observed_at="2000-01-01T00:00:00Z")
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_HEARTBEAT_CHRONOLOGY"):
+            control.observe_worker_heartbeat("worker-a", observed_at=observed_at)
+
+    def test_idle_peer_liveness_can_be_refreshed_through_polling_without_usage_refresh(self):
+        now = datetime.now(timezone.utc)
+        self.registry.register_feature(Feature("FEATURE", "Feature", 10, TaskStatus.READY))
+        for worker_id in ("worker-a", "worker-b"):
+            self.registry.register_worker(Worker(
+                worker_id, worker_id, ("registry",), (Lane.PLATFORM,),
+                provider_diagnostics={"capacity_scope": "short_window"},
+                last_heartbeat_at=(now - timedelta(minutes=10)).isoformat(),
+            ))
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False, changed_at=now.isoformat(),
+            reason="polling fixture",
+        )
+        runner_a = RunnerRegistryControl(self.database)
+        runner_b = RunnerRegistryControl(self.database)
+        runner_a.observe_worker_heartbeat("worker-a", observed_at=now.isoformat())
+        peer_time = (now + timedelta(seconds=30)).isoformat()
+        runner_b.observe_worker_heartbeat("worker-b", observed_at=peer_time)
+        snapshot = self.registry.dispatch_snapshot(observed_at=peer_time)
+        workers = {worker["id"]: worker for worker in snapshot.workers}
+        self.assertEqual(workers["worker-a"]["availability"], "IDLE")
+        self.assertEqual(workers["worker-b"]["availability"], "IDLE")
+        self.assertEqual(workers["worker-b"]["last_heartbeat_at"], peer_time.replace("+00:00", "Z"))
+        self.assertEqual(
+            workers["worker-b"]["provider_diagnostics"],
+            {"capacity_scope": "short_window"},
+        )
+
+    def test_implementation_completion_and_review_input_are_atomic(self):
+        self.seed_assignment()
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW-1", "FEATURE", "Review", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 10, ("review",), kind=PackageKind.REVIEW,
+            dependency_ids=("TASK-1",), status=TaskStatus.READY,
+        ))
+        control = RunnerRegistryControl(self.database)
+        revision = control.pre_claim()
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt("attempt-atomic", package_id="TASK-1", worker_id="worker-a", expected_revision=revision)
+        completed_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        contract = {"task": "TASK-1", "instructions": "résumé"}
+        digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        review_input = ReviewInput(
+            id="review-input-atomic", review_package_id="REVIEW-1", target_package_id="TASK-1",
+            implementation_attempt_id="attempt-atomic", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1", contract_sha256=digest,
+            contract=contract, validation_evidence={"focused": "passed"}, recorded_at=completed_at,
+        )
+        control.succeed("attempt-atomic", review_inputs=(review_input,), ended_at=completed_at)
+        self.assertEqual(self.registry.review_input("REVIEW-1")["id"], "review-input-atomic")
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute("SELECT status FROM work_packages WHERE id='TASK-1'").fetchone()[0], "VERIFY_REVIEW")
+            runtime_seconds = connection.execute(
+                "SELECT runtime_seconds FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()[0]
+        self.assertGreater(runtime_seconds, 0)
+        self.assertLess(runtime_seconds, 2)
+
+    def test_review_inputs_require_successful_verify_completion_at_the_completion_timestamp(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        revision = control.pre_claim()
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt("attempt-invalid", package_id="TASK-1", worker_id="worker-a", expected_revision=revision)
+        ended_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        contract = {"task": "TASK-1"}
+        digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        review_input = ReviewInput(
+            id="review-input-invalid", review_package_id="REVIEW-1", target_package_id="TASK-1",
+            implementation_attempt_id="attempt-invalid", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1", contract_sha256=digest,
+            contract=contract, validation_evidence={"focused": "passed"}, recorded_at=ended_at,
+        )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_COMPLETION_INVALID"):
+            self.registry.finish_attempt_runtime(
+                "attempt-invalid", ended_at=ended_at, outcome="FAILED", next_status=TaskStatus.BLOCKED,
+                reason="failure", review_inputs=(review_input,),
+            )
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute("SELECT status FROM work_packages WHERE id='TASK-1'").fetchone()[0], "ACTIVE")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_TIMESTAMP_MISMATCH"):
+            control.succeed(
+                "attempt-invalid", review_inputs=(ReviewInput(
+                    **{**review_input.__dict__, "recorded_at": (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()}
+                ),), ended_at=ended_at,
+            )
 
     def test_lease_revocation_stops_renewal_and_recovery_closes_runtime(self):
         now = datetime.now(timezone.utc)

@@ -28,7 +28,9 @@ from scripts.factory_registry.operator import (  # noqa: E402
     migrate_registry_v3_to_v4,
     migrate_registry_v4_to_v5,
     parse_canary_spec,
+    parse_bounded_pilot_spec,
     parse_followup_review_spec,
+    parse_bounded_run_scope,
     preflight,
     prepare_dry_run,
     record_review_decision,
@@ -160,6 +162,11 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--spec", required=True, type=pathlib.Path)
     command.add_argument("--observed-at")
 
+    command = subparsers.add_parser("register-bounded-pilot", help="Atomically register one or two reviewed Registry pairs")
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
     command = subparsers.add_parser(
         "register-followup-review",
         help="Register one bounded review retry after changes were requested",
@@ -174,10 +181,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
     command.add_argument("--mode", choices=("serial", "lanes"), default="lanes")
     command.add_argument("--dashboard-port", type=int, default=8787)
+    command.add_argument("--bounded-run", type=pathlib.Path,
+                         help="reviewed JSON run envelope; omission preserves legacy canary mode")
 
-    command = subparsers.add_parser("stop", help="Unconditionally engage the Registry kill switch")
+    command = subparsers.add_parser("stop", help="Engage the Registry kill switch (or no-op for a superseded run timer)")
     command.add_argument("--database", required=True, type=pathlib.Path)
     command.add_argument("--reason", required=True)
+    command.add_argument("--run-id", help="scheduled run identity; omission is unconditional owner/emergency stop")
 
     command = subparsers.add_parser("reconcile", help="Terminate and close STOPPING ownership")
     _context(command)
@@ -321,11 +331,36 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "revision": revision,
             "worker_gate": worker_gate,
         }
+    if args.command == "register-bounded-pilot":
+        observed_at = args.observed_at or utc_now()
+        preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
+        pairs = parse_bounded_pilot_spec(_load_object(args.spec, "bounded pilot spec"))
+        registry = SQLiteRegistry(args.database)
+        # Registration is still PAUSED; evaluate the candidate packages before
+        # writing so the next activation has a real independent pair path.
+        for _feature, implementation, review in pairs:
+            canary_worker_gate(
+                registry.dispatch_snapshot(observed_at=observed_at), implementation, review,
+                observed_at=observed_at, scoped=True,
+            )
+        revision = registry.register_bounded_pilot(
+            pairs, expected_revision=args.expect_revision, recorded_at=observed_at,
+        )
+        return {
+            "kind": "threadline-factory-register-bounded-pilot", "passed": True,
+            "package_ids": [package.id for pair in pairs for package in pair[1:]],
+            "previous_revision": args.expect_revision, "revision": revision,
+        }
     if args.command == "enable-live":
+        bounded_run = (
+            parse_bounded_run_scope(_load_object(args.bounded_run, "bounded run spec"))
+            if args.bounded_run else None
+        )
         return dict(enable_live(
             args.database, args.config, args.release, args.preservation,
             args.release_commit, args.expect_revision, args.canary_feature,
             mode=args.mode, dashboard_port=args.dashboard_port,
+            bounded_run=bounded_run,
         ))
     if args.command == "register-followup-review":
         observed_at = args.observed_at or utc_now()
@@ -357,7 +392,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "worker_gate": worker_gate,
         }
     if args.command == "stop":
-        return dict(stop(args.database, args.reason))
+        return dict(stop(args.database, args.reason, expected_run_id=args.run_id))
     if args.command == "reconcile":
         preflight(**_preflight_args(
             args,
