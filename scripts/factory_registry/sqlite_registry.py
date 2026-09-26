@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import tempfile
 import uuid
@@ -26,6 +27,7 @@ from .models import (
     Lane,
     Lease,
     PackageKind,
+    ReviewInput,
     ReviewOutcome,
     ReviewOutcomeState,
     TaskStatus,
@@ -58,6 +60,13 @@ def _utc_now() -> str:
 
 def _request_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _contract_sha256(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _normalize_timestamp(value: str) -> str:
@@ -647,18 +656,21 @@ class SQLiteRegistry:
         runner_pid: int,
         started_at: str,
         expected_revision: int,
+        provider_diagnostics: Mapping[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> None:
         """Persist attempt and runner ownership before any provider launch."""
         if runner_pid <= 0:
             raise RegistryConflict("INVALID_PROCESS_ID")
         started_at = _normalize_timestamp(started_at)
+        diagnostics = dict(provider_diagnostics or {})
         request = {
             "attempt_id": attempt_id,
             "package_id": package_id,
             "worker_id": worker_id,
             "runner_pid": runner_pid,
             "expected_revision": expected_revision,
+            "provider_diagnostics": diagnostics,
         }
         with self._connection() as connection:
             self._require_control_schema(connection)
@@ -702,8 +714,11 @@ class SQLiteRegistry:
                     """INSERT INTO attempts
                        (id, package_id, worker_id, lease_id, started_at,
                         provider_diagnostics_json)
-                       VALUES (?, ?, ?, ?, ?, '{}')""",
-                    (attempt_id, package_id, worker_id, lease["id"], started_at),
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        attempt_id, package_id, worker_id, lease["id"], started_at,
+                        _json(diagnostics),
+                    ),
                 )
                 connection.execute(
                     """INSERT INTO attempt_runtime_ownership
@@ -749,6 +764,332 @@ class SQLiteRegistry:
                     request=request,
                     error=error,
                     recorded_at=started_at,
+                )
+                raise
+
+    def record_attempt_delivery(
+        self,
+        attempt_id: str,
+        *,
+        branch: str,
+        base_commit: str,
+        implementation_commit: str,
+        pr_url: str,
+        validation_evidence: Evidence,
+        operation_id: str | None = None,
+    ) -> None:
+        """Bind an active implementation attempt to its immutable delivery."""
+        if not all(
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+            for value in (base_commit, implementation_commit)
+        ):
+            raise RegistryConflict("INVALID_DELIVERY_COMMIT")
+        if base_commit == implementation_commit:
+            raise RegistryConflict("IMPLEMENTATION_COMMIT_REQUIRED")
+        if not isinstance(branch, str) or not branch:
+            raise RegistryConflict("DELIVERY_BRANCH_REQUIRED")
+        if not isinstance(pr_url, str) or not re.fullmatch(
+            r"https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*", pr_url
+        ):
+            raise RegistryConflict("DELIVERY_PR_REQUIRED")
+        recorded_at = _normalize_timestamp(validation_evidence.recorded_at)
+        if (
+            validation_evidence.kind.lower() != "validation"
+            or validation_evidence.metadata.get("attempt_id") != attempt_id
+        ):
+            raise RegistryConflict("VALIDATION_EVIDENCE_MISMATCH")
+        request = {
+            "attempt_id": attempt_id,
+            "branch": branch,
+            "base_commit": base_commit,
+            "implementation_commit": implementation_commit,
+            "pr_url": pr_url,
+            "validation_evidence": {
+                "id": validation_evidence.id,
+                "package_id": validation_evidence.package_id,
+                "kind": validation_evidence.kind,
+                "uri": validation_evidence.uri,
+                "summary": validation_evidence.summary,
+                "recorded_at": recorded_at,
+                "metadata": dict(validation_evidence.metadata),
+            },
+        }
+        operation_id = operation_id or f"attempt-delivery:{attempt_id}"
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_ATTEMPT_DELIVERY",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return
+                attempt = connection.execute(
+                    """SELECT package_id, ended_at, provider_diagnostics_json
+                       FROM attempts WHERE id=?""",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise RegistryNotFound(f"attempt {attempt_id}")
+                if attempt["ended_at"] is not None:
+                    raise RegistryConflict("ATTEMPT_NOT_ACTIVE")
+                package = connection.execute(
+                    "SELECT kind, status FROM work_packages WHERE id=?",
+                    (attempt["package_id"],),
+                ).fetchone()
+                if package is None or package["status"] != TaskStatus.ACTIVE.value:
+                    raise RegistryConflict("PACKAGE_NOT_ACTIVE")
+                if package["kind"] == PackageKind.REVIEW.value:
+                    raise RegistryConflict("REVIEW_DELIVERY_NOT_ALLOWED")
+                if validation_evidence.package_id != attempt["package_id"]:
+                    raise RegistryConflict("VALIDATION_EVIDENCE_MISMATCH")
+                diagnostics = json.loads(attempt["provider_diagnostics_json"])
+                if any(
+                    key in diagnostics
+                    for key in (
+                        "base_commit", "implementation_commit", "pr_url",
+                        "validation_evidence_ids",
+                    )
+                ):
+                    raise RegistryConflict("ATTEMPT_DELIVERY_ALREADY_RECORDED")
+                diagnostics.update({
+                    "base_commit": base_commit,
+                    "implementation_commit": implementation_commit,
+                    "commit_sha": implementation_commit,
+                    "pr_url": pr_url,
+                    "branch": branch,
+                    "validation_evidence_ids": [validation_evidence.id],
+                })
+                connection.execute(
+                    """INSERT INTO evidence
+                       (id, package_id, kind, uri, summary, recorded_at, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        validation_evidence.id, validation_evidence.package_id,
+                        validation_evidence.kind, validation_evidence.uri,
+                        validation_evidence.summary, recorded_at,
+                        _json(validation_evidence.metadata),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE attempts SET provider_diagnostics_json=? WHERE id=?",
+                    (_json(diagnostics), attempt_id),
+                )
+                connection.execute(
+                    """UPDATE work_packages SET branch=?, pr_url=?, updated_at=?
+                       WHERE id=?""",
+                    (branch, pr_url, recorded_at, attempt["package_id"]),
+                )
+                self._insert_event(
+                    connection, "ATTEMPT_DELIVERY_RECORDED", recorded_at,
+                    attempt["package_id"], None, attempt_id,
+                    {
+                        "base_commit": base_commit,
+                        "commit_sha": implementation_commit,
+                        "pr_url": pr_url,
+                        "validation_evidence_id": validation_evidence.id,
+                    },
+                )
+                self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="RECORD_ATTEMPT_DELIVERY",
+                    request=request,
+                    result={"attempt_id": attempt_id},
+                    recorded_at=recorded_at,
+                )
+                connection.commit()
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RECORD_ATTEMPT_DELIVERY",
+                    request=request,
+                    error=error,
+                    recorded_at=recorded_at,
+                )
+                raise
+
+    def prepare_review_input(
+        self,
+        review_package_id: str,
+        *,
+        reviewer_worker_id: str,
+        review_attempt_id: str,
+        requested_at: str,
+        operation_id: str | None = None,
+    ) -> ReviewInput:
+        """Persist and return the exact, self-contained review assignment."""
+        requested_at = _normalize_timestamp(requested_at)
+        evidence_id = f"review-input:{review_attempt_id}"
+        operation_id = operation_id or f"prepare-review-input:{review_attempt_id}"
+        request = {
+            "review_package_id": review_package_id,
+            "reviewer_worker_id": reviewer_worker_id,
+            "review_attempt_id": review_attempt_id,
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="PREPARE_REVIEW_INPUT",
+                    request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    replay_input = dict(replay["review_input"])
+                    replay_input["validation_evidence_ids"] = tuple(
+                        replay_input["validation_evidence_ids"]
+                    )
+                    return ReviewInput(**replay_input)
+                review_attempt = connection.execute(
+                    """SELECT package_id, worker_id, started_at, ended_at
+                       FROM attempts WHERE id=?""",
+                    (review_attempt_id,),
+                ).fetchone()
+                if (
+                    review_attempt is None
+                    or review_attempt["package_id"] != review_package_id
+                    or review_attempt["worker_id"] != reviewer_worker_id
+                    or review_attempt["ended_at"] is not None
+                ):
+                    raise RegistryConflict("REVIEW_ATTEMPT_MISMATCH")
+                # The review assignment becomes authoritative when the attempt
+                # starts. Preparation may happen a moment later, but the
+                # provenance window begins at that persisted start timestamp.
+                requested_at = str(review_attempt["started_at"])
+                review_package = connection.execute(
+                    "SELECT kind, status FROM work_packages WHERE id=?",
+                    (review_package_id,),
+                ).fetchone()
+                if (
+                    review_package is None
+                    or review_package["kind"] != PackageKind.REVIEW.value
+                    or review_package["status"] != TaskStatus.ACTIVE.value
+                ):
+                    raise RegistryConflict("REVIEW_PACKAGE_NOT_ACTIVE")
+                targets = connection.execute(
+                    "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                    (review_package_id,),
+                ).fetchall()
+                if len(targets) != 1:
+                    raise RegistryConflict("REVIEW_TARGET_MISMATCH")
+                target_package_id = str(targets[0]["dependency_id"])
+                implementation = connection.execute(
+                    """SELECT id, worker_id, ended_at, provider_diagnostics_json
+                       FROM attempts
+                       WHERE package_id=? AND outcome='SUCCEEDED' AND ended_at IS NOT NULL
+                       ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+                    (target_package_id,),
+                ).fetchone()
+                if implementation is None:
+                    raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
+                if implementation["worker_id"] == reviewer_worker_id:
+                    raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
+                if implementation["ended_at"] > requested_at:
+                    raise RegistryConflict("REVIEW_TARGET_CHANGED_DURING_REVIEW")
+                diagnostics = json.loads(implementation["provider_diagnostics_json"])
+                contract_content = diagnostics.get("task_contract")
+                contract_sha256 = diagnostics.get("task_contract_sha256")
+                if (
+                    not isinstance(contract_content, dict)
+                    or not isinstance(contract_sha256, str)
+                    or _contract_sha256(contract_content) != contract_sha256
+                ):
+                    raise RegistryConflict("REVIEW_CONTRACT_MISSING")
+                required = {
+                    key: diagnostics.get(key)
+                    for key in ("implementation_commit", "base_commit", "pr_url")
+                }
+                if (
+                    not all(isinstance(value, str) and value for value in required.values())
+                    or not re.fullmatch(r"[0-9a-f]{40}", required["implementation_commit"])
+                    or not re.fullmatch(r"[0-9a-f]{40}", required["base_commit"])
+                ):
+                    raise RegistryConflict("REVIEW_DELIVERY_MISSING")
+                validation_ids = diagnostics.get("validation_evidence_ids")
+                if not isinstance(validation_ids, list) or not validation_ids:
+                    raise RegistryConflict("REVIEW_VALIDATION_EVIDENCE_MISSING")
+                for validation_id in validation_ids:
+                    evidence = connection.execute(
+                        """SELECT package_id, kind, metadata_json FROM evidence WHERE id=?""",
+                        (validation_id,),
+                    ).fetchone()
+                    if evidence is None:
+                        raise RegistryConflict("REVIEW_VALIDATION_EVIDENCE_MISSING")
+                    metadata = json.loads(evidence["metadata_json"])
+                    if (
+                        evidence["package_id"] != target_package_id
+                        or evidence["kind"].lower() != "validation"
+                        or metadata.get("attempt_id") != implementation["id"]
+                    ):
+                        raise RegistryConflict("REVIEW_VALIDATION_EVIDENCE_MISMATCH")
+                review_input = ReviewInput(
+                    evidence_id=evidence_id,
+                    review_package_id=review_package_id,
+                    target_package_id=target_package_id,
+                    implementation_attempt_id=str(implementation["id"]),
+                    implementation_commit=required["implementation_commit"],
+                    base_commit=required["base_commit"],
+                    pr_url=required["pr_url"],
+                    contract_sha256=contract_sha256,
+                    contract_content=contract_content,
+                    validation_evidence_ids=tuple(str(item) for item in validation_ids),
+                    implementer_worker_id=str(implementation["worker_id"]),
+                    reviewer_worker_id=reviewer_worker_id,
+                    review_attempt_id=review_attempt_id,
+                    requested_at=requested_at,
+                )
+                payload = {
+                    **review_input.__dict__,
+                    "validation_evidence_ids": list(review_input.validation_evidence_ids),
+                    "contract_content": dict(review_input.contract_content),
+                }
+                connection.execute(
+                    """INSERT INTO evidence
+                       (id, package_id, kind, uri, summary, recorded_at, metadata_json)
+                       VALUES (?, ?, 'review_input', NULL, ?, ?, ?)""",
+                    (
+                        evidence_id, review_package_id,
+                        f"Review input for {target_package_id} at {required['implementation_commit']}",
+                        requested_at, _json(payload),
+                    ),
+                )
+                self._insert_event(
+                    connection, "REVIEW_INPUT_RECORDED", requested_at,
+                    review_package_id, reviewer_worker_id, review_attempt_id,
+                    {
+                        "review_input_evidence_id": evidence_id,
+                        "target_package_id": target_package_id,
+                        "implementation_attempt_id": implementation["id"],
+                        "implementation_commit": required["implementation_commit"],
+                    },
+                )
+                self._bump_revision(connection)
+                self._record_operation(
+                    connection,
+                    operation_id=operation_id,
+                    operation_kind="PREPARE_REVIEW_INPUT",
+                    request=request,
+                    result={"review_input": payload},
+                    recorded_at=requested_at,
+                )
+                connection.commit()
+                return review_input
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="PREPARE_REVIEW_INPUT",
+                    request=request,
+                    error=error,
+                    recorded_at=requested_at,
                 )
                 raise
 
@@ -2601,8 +2942,8 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_REVIEW_OUTCOME", "decided before requested")
         if outcome.implementer_worker_id == outcome.reviewer_worker_id:
             raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
-        if outcome.state is ReviewOutcomeState.APPROVED and not outcome.approval_evidence_ids:
-            raise RegistryConflict("REVIEW_APPROVAL_EVIDENCE_REQUIRED")
+        if not outcome.approval_evidence_ids:
+            raise RegistryConflict("STRUCTURED_REVIEW_EVIDENCE_REQUIRED")
         if outcome.state is ReviewOutcomeState.CHANGES_REQUESTED and not outcome.changes_requested:
             raise RegistryConflict("REVIEW_CHANGES_REQUIRED")
         if evidence is not None and (
@@ -2754,6 +3095,28 @@ class SQLiteRegistry:
                 if not reviewer_attempts:
                     raise RegistryConflict("REVIEWER_ATTEMPT_REQUIRED")
                 reviewer_attempt = reviewer_attempts[-1]
+                review_inputs = connection.execute(
+                    """SELECT id, metadata_json FROM evidence
+                       WHERE package_id=? AND kind='review_input'
+                       ORDER BY recorded_at, id""",
+                    (outcome.review_package_id,),
+                ).fetchall()
+                matching_inputs = []
+                for item in review_inputs:
+                    metadata = json.loads(item["metadata_json"])
+                    if metadata.get("review_attempt_id") == reviewer_attempt["id"]:
+                        matching_inputs.append((item["id"], metadata))
+                if len(matching_inputs) != 1:
+                    raise RegistryConflict("REVIEW_INPUT_REQUIRED")
+                review_input_id, review_input = matching_inputs[0]
+                if (
+                    review_input.get("target_package_id") != outcome.target_package_id
+                    or review_input.get("implementation_attempt_id") != actual_implementation["id"]
+                    or review_input.get("implementer_worker_id") != outcome.implementer_worker_id
+                    or review_input.get("reviewer_worker_id") != outcome.reviewer_worker_id
+                ):
+                    raise RegistryConflict("REVIEW_INPUT_MISMATCH")
+                structured_verdict_found = False
                 for evidence_id in outcome.approval_evidence_ids:
                     evidence = connection.execute(
                         """SELECT package_id, kind, recorded_at, metadata_json
@@ -2771,6 +3134,16 @@ class SQLiteRegistry:
                         or evidence["recorded_at"] > decided_at
                     ):
                         raise RegistryConflict("REVIEW_EVIDENCE_MISMATCH", evidence_id)
+                    if (
+                        evidence_metadata.get("schema_version") == 1
+                        and evidence_metadata.get("decision") == outcome.state.value
+                        and evidence_metadata.get("review_input_evidence_id") == review_input_id
+                        and evidence_metadata.get("reviewed_commit")
+                            == review_input.get("implementation_commit")
+                    ):
+                        structured_verdict_found = True
+                if not structured_verdict_found:
+                    raise RegistryConflict("STRUCTURED_REVIEW_VERDICT_REQUIRED")
                 connection.execute(
                     """INSERT INTO review_outcomes
                        (id, review_package_id, target_package_id,

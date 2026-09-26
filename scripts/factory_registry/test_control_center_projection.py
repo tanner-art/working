@@ -99,6 +99,11 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def _insert_extended_records(self) -> None:
+        contract_content = {"task": "PACKAGE-1", "instructions": "Project it"}
+        contract_sha256 = hashlib.sha256(json.dumps(
+            contract_content, separators=(",", ":"), sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
         with sqlite3.connect(self.database) as connection:
             connection.execute(
                 """INSERT INTO attempts
@@ -108,7 +113,10 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 (
                     "attempt-1", "PACKAGE-1", "agent-b", "2026-09-24T19:40:00Z",
                     "2026-09-24T19:50:00Z", "SUCCEEDED", 600, 0,
-                    json.dumps({"branch": "codex/projection", "commit_sha": "abc123"}),
+                    json.dumps({
+                        "branch": "codex/projection", "commit_sha": "abc123",
+                        "implementation_commit": "abc123",
+                    }),
                 ),
             )
             connection.execute(
@@ -153,6 +161,36 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 (
                     "event-1", "REVIEW", "2026-09-24T19:53:00Z", "REVIEW-1", "claude",
                     "review-attempt-1", json.dumps({"summary": "Independent review completed."}),
+                ),
+            )
+            connection.execute(
+                """INSERT INTO evidence
+                   (id, package_id, kind, uri, summary, recorded_at, metadata_json)
+                   VALUES (?, ?, ?, NULL, ?, ?, ?)""",
+                (
+                    "validation-attempt-1", "PACKAGE-1", "validation",
+                    "Validation passed", "2026-09-24T19:50:00Z",
+                    json.dumps({"attempt_id": "attempt-1"}),
+                ),
+            )
+            connection.execute(
+                """INSERT INTO evidence
+                   (id, package_id, kind, uri, summary, recorded_at, metadata_json)
+                   VALUES (?, ?, ?, NULL, ?, ?, ?)""",
+                (
+                    "review-input:review-attempt-1", "REVIEW-1", "review_input",
+                    "Exact review input", "2026-09-24T19:51:00Z",
+                    json.dumps({
+                        "review_attempt_id": "review-attempt-1",
+                        "target_package_id": "PACKAGE-1",
+                        "implementation_attempt_id": "attempt-1",
+                        "implementation_commit": "abc123",
+                        "contract_content": contract_content,
+                        "contract_sha256": contract_sha256,
+                        "validation_evidence_ids": ["validation-attempt-1"],
+                        "implementer_worker_id": "agent-b",
+                        "reviewer_worker_id": "claude",
+                    }),
                 ),
             )
             connection.execute(
@@ -204,7 +242,13 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "review-approval", "REVIEW-1", "review", "https://example.test/review",
             "Independent approval record", "2026-09-24T19:54:00Z",
-            {"attempt_id": "review-attempt-1"},
+            {
+                "schema_version": 1,
+                "attempt_id": "review-attempt-1",
+                "decision": "APPROVED",
+                "review_input_evidence_id": "review-input:review-attempt-1",
+                "reviewed_commit": "abc123",
+            },
         ))
         self.registry.record_review_outcome(ReviewOutcome(
             id="outcome-1",
@@ -389,7 +433,13 @@ class ControlCenterProjectionTest(unittest.TestCase):
         self.registry.record_evidence(Evidence(
             "review-overlap-evidence", "REVIEW-1", "review", None,
             "Bound reviewer evidence", "2026-09-24T19:54:00Z",
-            {"attempt_id": "review-attempt-1"},
+            {
+                "schema_version": 1,
+                "attempt_id": "review-attempt-1",
+                "decision": "APPROVED",
+                "review_input_evidence_id": "review-input:review-attempt-1",
+                "reviewed_commit": "abc123",
+            },
         ))
         self.registry.record_review_outcome(ReviewOutcome(
             id="outcome-overlap-check", review_package_id="REVIEW-1",

@@ -4,6 +4,12 @@ import argparse, contextlib, fcntl, json, os, pathlib, pwd, re, signal, subproce
 from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, validate_usage
 from queue_snapshot import write_queue_snapshot
 from registry_control import RunnerRegistryControl
+from review_protocol import (
+    ReviewBlockedError,
+    build_review_prompt,
+    parse_review_verdict,
+    review_input_mapping,
+)
 
 
 CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
@@ -45,6 +51,12 @@ class RegistryAttemptLifecycle:
 
     def fail(self, detail):
         return self._finish(self.control.fail, detail)
+
+    def complete_review(self, review_input, verdict):
+        return self._finish(self.control.complete_review, review_input, verdict)
+
+    def block(self, detail):
+        return self._finish(self.control.block, detail)
 
     def _finish(self, callback, *args):
         if self.finish_attempted:
@@ -769,6 +781,7 @@ def main():
         registry_lease_id = None
         registry_lifecycle = None
         runtime_monitor = None
+        review_input = None
         try:
             agent,body=select(issue,c['allowed_authors'])
             if args.agent and agent != args.agent: continue
@@ -843,6 +856,7 @@ def main():
                 registry_control.reserve_attempt(
                     attempt, package_id=body['task'], worker_id=lane,
                     expected_revision=reserve_revision,
+                    task_contract=body,
                 )
                 registry_lifecycle = RegistryAttemptLifecycle(
                     registry_control, attempt
@@ -854,6 +868,14 @@ def main():
                 runtime_monitor.check()
                 data['registry_attempt_id'] = attempt
                 save_record(record, data)
+                if registry_review:
+                    review_input = registry_control.prepare_review_input(
+                        body['task'], reviewer_worker_id=lane,
+                        review_attempt_id=attempt,
+                    )
+                    data['review_input_evidence_id'] = review_input.evidence_id
+                    data['review_target_commit'] = review_input.implementation_commit
+                    save_record(record, data)
             write_heartbeat(state, status='starting', issue=n,
                             task_id=body['task'], start_time=started_at,
                             agent=heartbeat_agent, worker=worker,
@@ -868,7 +890,10 @@ def main():
             with file_lock(state / 'git.lock'):
                 if g('status','--porcelain'): raise ValueError('Canonical checkout is dirty')
                 g('fetch','origin','main');base=g('rev-parse','origin/main')
-            branch=f'runner/{body["task"].lower()}-{n}-{attempt}'
+                if review_input is not None:
+                    g('cat-file', '-e', f'{review_input.implementation_commit}^{{commit}}')
+            branch=(None if registry_review else
+                    f'runner/{body["task"].lower()}-{n}-{attempt}')
             wt=pathlib.Path(c['worktrees'])/agent/f'issue-{n}-{attempt}'
             wt.parent.mkdir(parents=True,exist_ok=True)
             log=state/f'issue-{n}-{attempt}.log'
@@ -878,11 +903,24 @@ def main():
             github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:ready','--add-label','runner:running')
             if args.retry: github('issue','edit',str(n),'--repo',c['github'],'--remove-label','runner:failed')
             with file_lock(state / 'git.lock'):
-                g('worktree','add','-b',branch,str(wt),base)
+                if review_input is not None:
+                    g('worktree', 'add', '--detach', str(wt),
+                      review_input.implementation_commit)
+                else:
+                    g('worktree','add','-b',branch,str(wt),base)
             monitored_run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]
             agentenv=build_agent_environment(env, config.get('env', {}), c['path'])
-            prompt=build_agent_prompt(n, body, worker=lane, slot=args.slot)
+            review_packet = None
+            if review_input is not None:
+                review_packet = wt / '.factory-review-input.json'
+                packet_content = json.dumps(
+                    review_input_mapping(review_input), indent=2, sort_keys=True
+                ) + '\n'
+                review_packet.write_text(packet_content)
+                prompt = build_review_prompt(n, review_input, str(review_packet))
+            else:
+                prompt=build_agent_prompt(n, body, worker=lane, slot=args.slot)
             data['agent_process_group_state'] = 'unknown'
             save_record(record, data, 'agent')
             write_heartbeat(state, status='agent', issue=n,
@@ -913,11 +951,49 @@ def main():
                 save_record(record, data)
             if registry_control is not None:
                 registry_control.pre_launch()
-            monitored_run(
+            provider_output = monitored_run(
                 usage_decision['command'], cwd=wt, env=agentenv,
                 timeout=c.get('agent_timeout',1800), log=log, input=prompt,
                 on_start=record_agent_process_group, launch_barrier=True,
             )
+            if review_input is not None:
+                if g('rev-parse', 'HEAD', cwd=wt) != review_input.implementation_commit:
+                    raise ValueError('Reviewer changed the exact target commit')
+                if g('status', '--porcelain', '--untracked-files=no', cwd=wt):
+                    raise ValueError('Reviewer mutated the target worktree')
+                if review_packet.read_text() != packet_content:
+                    raise ValueError('Reviewer mutated the review input')
+                try:
+                    verdict = parse_review_verdict(provider_output, review_input)
+                except ReviewBlockedError as error:
+                    registry_lifecycle.block(str(error))
+                    data['registry_runtime_finished'] = True
+                    runtime_monitor = None
+                    raise
+                registry_lifecycle.complete_review(review_input, verdict)
+                data['registry_runtime_finished'] = True
+                data['review_decision'] = verdict.decision
+                runtime_monitor = None
+                review_packet.unlink()
+                save_record(record, data, 'review')
+                telemetry_errors = publish_completion_telemetry(
+                    state, issue=n, task_id=body['task'], title=issue.get('title'),
+                    agent=agent, base=review_input.base_commit,
+                    worktree_path=str(wt), commit=review_input.implementation_commit,
+                    pr=review_input.pr_url, validation_result='structured-review-recorded',
+                    elapsed_seconds=time.time() - started_at,
+                    stats={'files_changed': 0, 'additions': 0, 'deletions': 0},
+                    worker=lane, parent_agent=agent, slot=args.slot,
+                    heartbeat_kwargs={'status': 'review', 'issue': n,
+                                      'task_id': body['task'], 'start_time': started_at,
+                                      'agent': heartbeat_agent, 'worker': worker},
+                    github_callback=lambda: github(
+                        'issue','edit',str(n),'--repo',c['github'],
+                        '--remove-label','runner:running','--add-label','runner:review'))
+                if telemetry_errors:
+                    data['telemetry_errors'] = telemetry_errors
+                    save_record(record, data)
+                print(json.dumps(data));break
             def verify_changes():
                 if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=base:
                     raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
@@ -957,6 +1033,14 @@ def main():
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
             data['pr']=github('pr','create','--repo',c['github'],'--base','main','--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
             if registry_lifecycle is not None:
+                registry_control.record_delivery(
+                    attempt,
+                    package_id=body['task'],
+                    branch=branch,
+                    base_commit=base,
+                    implementation_commit=data['commit'],
+                    pr_url=data['pr'],
+                )
                 registry_lifecycle.succeed()
                 data['registry_runtime_finished'] = True
                 runtime_monitor = None

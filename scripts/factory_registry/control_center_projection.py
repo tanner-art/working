@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -429,6 +430,50 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
                 str(attempt.get("id")),
             ),
         )
+        matching_inputs = []
+        for item in snapshot.evidence:
+            metadata = _mapping(item.get("metadata"))
+            if (
+                item.get("package_id") == review_package_id
+                and str(item.get("kind", "")).lower() == "review_input"
+                and metadata.get("review_attempt_id") == reviewer_attempt.get("id")
+            ):
+                matching_inputs.append((str(item.get("id")), metadata))
+        if len(matching_inputs) != 1:
+            raise ControlCenterProjectionError("structured review input is missing")
+        review_input_id, review_input = matching_inputs[0]
+        contract_content = review_input.get("contract_content")
+        contract_sha256 = review_input.get("contract_sha256")
+        calculated_contract_sha256 = (
+            hashlib.sha256(json.dumps(
+                contract_content, separators=(",", ":"), sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")).hexdigest()
+            if isinstance(contract_content, dict) else None
+        )
+        validation_ids = _strings(review_input.get("validation_evidence_ids"))
+        validation_evidence_valid = bool(validation_ids) and all(
+            (item := evidence_by_id.get(evidence_id)) is not None
+            and item.get("package_id") == target_id
+            and str(item.get("kind", "")).lower() == "validation"
+            and _mapping(item.get("metadata")).get("attempt_id")
+                == actual_implementation.get("id")
+            for evidence_id in validation_ids
+        )
+        if (
+            review_input.get("target_package_id") != target_id
+            or review_input.get("implementation_attempt_id") != actual_implementation.get("id")
+            or review_input.get("implementer_worker_id") != implementer
+            or review_input.get("reviewer_worker_id") != reviewer
+            or review_input.get("implementation_commit")
+                != _mapping(actual_implementation.get("provider_diagnostics")).get(
+                    "implementation_commit"
+                )
+            or not isinstance(contract_sha256, str)
+            or calculated_contract_sha256 != contract_sha256
+            or not validation_evidence_valid
+        ):
+            raise ControlCenterProjectionError("structured review input is invalid")
         evidence_ids = _strings(outcome.get("approval_evidence_ids"))
         approval_evidence = []
         for evidence_id in evidence_ids:
@@ -442,6 +487,11 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
                 or _iso(item.get("recorded_at")) is None
                 or str(_iso(item.get("recorded_at"))) < str(_iso(reviewer_attempt.get("started_at")))
                 or str(_iso(item.get("recorded_at"))) > decided_at
+                or metadata.get("schema_version") != 1
+                or metadata.get("decision") != outcome.get("state")
+                or metadata.get("review_input_evidence_id") != review_input_id
+                or metadata.get("reviewed_commit")
+                    != review_input.get("implementation_commit")
             ):
                 raise ControlCenterProjectionError("structured review evidence is missing")
             approval_evidence.append(_evidence(item))

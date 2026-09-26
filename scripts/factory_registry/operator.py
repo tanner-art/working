@@ -2274,11 +2274,17 @@ def parse_review_outcome_spec(
     decided_at = _parse_time(outcome.decided_at, "review decided_at")
     if not requested_at <= recorded_at <= decided_at:
         raise OperatorError("review evidence timestamp is outside the review interval")
-    if outcome.state is ReviewOutcomeState.APPROVED:
-        if outcome.approval_evidence_ids != (evidence.id,):
-            raise OperatorError("approval must name exactly the bound review evidence")
-    elif outcome.approval_evidence_ids:
-        raise OperatorError("changes-requested outcome cannot name approval evidence")
+    if outcome.approval_evidence_ids != (evidence.id,):
+        raise OperatorError("structured outcome must name exactly the bound review evidence")
+    if (
+        evidence.metadata.get("schema_version") != 1
+        or evidence.metadata.get("decision") != outcome.state.value
+        or not isinstance(evidence.metadata.get("review_input_evidence_id"), str)
+        or not evidence.metadata["review_input_evidence_id"]
+        or not isinstance(evidence.metadata.get("reviewed_commit"), str)
+        or not evidence.metadata["reviewed_commit"]
+    ):
+        raise OperatorError("review evidence must contain one structured exact-target verdict")
     return evidence, outcome
 
 
