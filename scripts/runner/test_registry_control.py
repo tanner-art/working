@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from registry_control import RunnerRegistryControl, queue_contract_digest
 from runner import RegistryAttemptLifecycle, run
+from scripts.factory_registry.codex_capacity import CapacityCollectorError
 from scripts.factory_registry import (
     Feature,
     Lane,
@@ -462,6 +463,76 @@ class RunnerRegistryControlTests(unittest.TestCase):
             workers["worker-b"]["provider_diagnostics"],
             {"capacity_scope": "short_window"},
         )
+
+    def test_capacity_sources_are_isolated_and_alias_mismatch_does_not_block_claude(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            workers=(
+                {"id": "codex-a", "provider_diagnostics": {}},
+                {"id": "codex-b", "provider_diagnostics": {}},
+                {"id": "orchestra-agent-b", "provider_diagnostics": {"capacity_pool": "wrong"}},
+                {"id": "claude", "provider_diagnostics": {}},
+            ), active_leases=(), usage_observations=(),
+        )
+        sample = {"ordinary_usage_allowed": True, "account_identity_sha256": "pool-b",
+                  "observed_at": "2026-09-26T10:00:00Z",
+                  "primary": {"usedPercent": 12, "windowDurationMins": 300}}
+        config = {"capacity_collectors": {
+            "codex-a": {"executable": "/bin/a", "codex_home": "/tmp/a"},
+            "codex-b": {"executable": "/bin/b", "codex_home": "/tmp/b",
+                        "shared_account_aliases": ["orchestra-agent-b"]},
+        }, "claude_health_probe": {"worker_id": "claude", "command": ["python", "claude_keychain.py", "exec", "/claude"]}}
+        with patch("registry_control.collect_rate_limits", side_effect=[
+                CapacityCollectorError("unavailable"), sample]), \
+                patch("registry_control.probe_claude_health", return_value={
+                    "succeeded": True, "limit_signal": None, "returncode": 0,
+                    "observed_at": "2026-09-26T10:00:01Z"}), \
+                patch("registry_control.utc_now", return_value="2026-09-26T10:00:02Z"):
+            collected = control.refresh_configured_capacity(config)
+        self.assertEqual([item["worker_id"] for item in collected],
+                         ["codex-a", "codex-b", "orchestra-agent-b", "claude"])
+        self.assertEqual(collected[0]["observations"], ())
+        self.assertEqual(collected[2]["observations"], ())
+        self.assertEqual(collected[3]["observations"][0]["state"], "NORMAL")
+        self.assertEqual(control.registry.record_worker_capacity_observations.call_count, 2)
+
+    def test_busy_claude_is_skipped_and_malformed_probe_is_restrictive(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        snapshot = SimpleNamespace(
+            workers=({"id": "claude", "provider_diagnostics": {}},),
+            active_leases=({"worker_id": "claude"},), usage_observations=(),
+        )
+        control.registry.dispatch_snapshot.return_value = snapshot
+        config = {"capacity_collectors": {}, "claude_health_probe": {
+            "worker_id": "claude", "command": ["bad"], "cadence_seconds": 60}}
+        self.assertEqual(control.refresh_configured_capacity(config), ())
+        control.registry.record_worker_capacity_observations.assert_not_called()
+        # A still-active lease is intentionally not released or reconfigured;
+        # its expired provider signal remains constrained until real evidence.
+        snapshot.active_leases = ()
+        with patch("registry_control.utc_now", return_value="2026-09-26T10:00:00Z"):
+            collected = control.refresh_configured_capacity(config)
+        observation = collected[0]["observations"][0]
+        self.assertEqual(observation["state"], "HARD_STOP")
+        self.assertEqual(observation["provider_diagnostics"]["limit_signal"], "CAPACITY_LAUNCH_FAILURE")
+
+    def test_fresh_claude_signal_suppresses_duplicate_probe(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            workers=({"id": "claude", "provider_diagnostics": {}},), active_leases=(),
+            usage_observations=({"worker_id": "claude", "capacity_scope": "provider_signal",
+                                "observed_at": "2026-09-26T10:00:00Z"},),
+        )
+        config = {"capacity_collectors": {}, "claude_health_probe": {
+            "worker_id": "claude", "command": ["python", "claude_keychain.py", "exec", "/claude"],
+            "cadence_seconds": 60}}
+        with patch("registry_control.utc_now", return_value="2026-09-26T10:00:30Z"), \
+                patch("registry_control.probe_claude_health") as probe:
+            self.assertEqual(control.refresh_configured_capacity(config), ())
+        probe.assert_not_called()
 
     def test_implementation_completion_and_review_input_are_atomic(self):
         self.seed_assignment()

@@ -84,11 +84,17 @@ def probe_claude_health(command: Sequence[str], *, timeout: float = 20) -> Mappi
     """
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 30:
         raise ClaudeTelemetryError("Claude probe timeout must be between zero and 30 seconds")
-    if not isinstance(command, Sequence) or len(command) < 4 or "claude_keychain.py" not in " ".join(command):
+    if (not isinstance(command, Sequence) or isinstance(command, (str, bytes))
+            or len(command) < 4 or not all(isinstance(part, str) and part for part in command)
+            or "claude_keychain.py" not in " ".join(command)):
         raise ClaudeTelemetryError("Claude probe requires the Keychain wrapper command")
-    if "exec" not in command:
+    try:
+        exec_index = list(command).index("exec")
+    except ValueError as error:
+        raise ClaudeTelemetryError("Claude probe requires Keychain exec") from error
+    if exec_index < 2 or exec_index + 1 >= len(command) or not command[exec_index + 1].startswith("/"):
         raise ClaudeTelemetryError("Claude probe requires Keychain exec")
-    probe = list(command[:command.index("exec") + 2]) + [
+    probe = list(command[:exec_index + 2]) + [
         "-p", "Reply exactly HEALTHY.", "--output-format", "json",
         "--tools", "", "--permission-mode", "dontAsk", "--permission-prompts", "none",
     ]
