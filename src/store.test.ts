@@ -144,3 +144,26 @@ describe('TASK-046 review revision persistence', () => {
     expect(reloaded.state.model?.interpretations).toHaveLength(2)
   })
 })
+
+describe('interpretation provenance persistence', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('roundtrips a recorded provider method and still loads historical records without one', () => {
+    const provider = makeObject({ kind: 'idea', originalContent: 'Provider capture', source: 'text', confidence: .7,
+      interpretation: { summary: 'Provider meaning', rationale: 'Provider rationale', suggestedKind: 'idea', method: 'provider' } })
+    let raw: string | null = JSON.stringify({ objects: [provider], canvas: [] })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.state.objects[0].interpretation.method).toBe('provider')
+    expect(saveState(loaded.state)).toBeUndefined()
+    expect(loadStateResult().state.objects[0].interpretation.method).toBe('provider')
+
+    const historical = makeObject({ kind: 'idea', originalContent: 'Historical capture', source: 'text', confidence: .7,
+      interpretation: { summary: 'Historical meaning', rationale: 'Historical rationale', suggestedKind: 'idea' } })
+    raw = JSON.stringify({ objects: [historical], canvas: [] })
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.objects[0].interpretation.method).toBeUndefined()
+  })
+})

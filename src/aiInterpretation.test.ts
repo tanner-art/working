@@ -79,7 +79,7 @@ describe('validateInterpretationProposal', () => {
 
   it('forces reviewState to review even if the payload claims otherwise', () => {
     const result = validateInterpretationProposal(capture,
-      { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', reviewState: 'accepted' })
+      { summary: 's', rationale: 'r', confidence: .5, proposedKind: 'idea', reviewState: 'accepted', method: 'built-in' })
     expect(result.reviewState).toBe('review')
     expect(result.method).toBe('provider')
   })

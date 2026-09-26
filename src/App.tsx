@@ -543,6 +543,14 @@ function Capture({ draft, busy, success, onDraft, onCapture }: { draft: string; 
     </div>
   </div>
 }
+function interpretationSourceLabel(item: ThoughtObject) {
+  const edited = item.history.some(entry => entry.reviewRevision)
+  if (item.interpretation.method === 'provider') return edited ? 'Initially interpreted by AI; edited by you' : 'Interpreted by AI'
+  if (item.interpretation.method === 'built-in-fallback') return edited ? 'Initially built in after AI was unavailable; edited by you' : 'Built-in interpretation used because AI was unavailable'
+  if (item.interpretation.method === 'built-in') return edited ? 'Initially interpreted by built-in rules; edited by you' : 'Interpreted by built-in rules'
+  return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
+}
+
 export function Review({ objects, onResolve, onReject, onOpen }: { objects: ThoughtObject[]; onResolve: (object: ThoughtObject) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
   const pending = reviewObjects(objects)
@@ -551,7 +559,7 @@ export function Review({ objects, onResolve, onReject, onOpen }: { objects: Thou
   return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
-    <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{item.interpretation.method === 'provider' ? 'Interpreted by AI' : item.interpretation.method === 'built-in-fallback' ? 'Built-in interpretation used because AI was unavailable' : item.interpretation.method === 'built-in' ? 'Interpreted by built-in rules' : 'Interpretation source was not recorded'}</small>{item.kind === 'commitment' && <small>Commitment setup remains in Review until its continuation is available.</small>}{item.kind === 'reminder' && <small>Reminder setup remains in Review until its continuation is available.</small>}</div></div>
+    <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small>{item.kind === 'commitment' && <small>Commitment setup remains in Review until its continuation is available.</small>}{item.kind === 'reminder' && <small>Reminder setup remains in Review until its continuation is available.</small>}</div></div>
     {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>

@@ -85,7 +85,8 @@ export function canvasObjectDraft(element: CanvasElement) {
     interpretation: {
       summary: originalContent.length > 84 ? `${originalContent.slice(0, 81)}...` : originalContent,
       suggestedKind: 'idea' as ObjectKind,
-      rationale: 'Captured from canvas; review before turning spatial thought into structure.'
+      rationale: 'Captured from canvas; review before turning spatial thought into structure.',
+      method: 'built-in' as const,
     }
   }
 }

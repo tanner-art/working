@@ -42,4 +42,13 @@ describe('mounted Review surface', () => {
     const markup = renderToStaticMarkup(<Review objects={[thought('review', method)]} onResolve={() => undefined} onReject={() => undefined} onOpen={() => undefined} />)
     expect(markup).toContain(label)
   })
+
+  it('distinguishes a user-edited AI interpretation from untouched AI wording', () => {
+    const item = thought('review', 'provider')
+    item.history.push({ at: '2026-09-26T08:02:00.000Z', event: 'Revised interpretation', reviewRevision: { from: item.interpretation.summary, to: 'My wording' } })
+    item.interpretation.summary = 'My wording'
+    const markup = renderToStaticMarkup(<Review objects={[item]} onResolve={() => undefined} onReject={() => undefined} onOpen={() => undefined} />)
+    expect(markup).toContain('Initially interpreted by AI; edited by you')
+    expect(markup).not.toContain('>Interpreted by AI<')
+  })
 })
