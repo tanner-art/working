@@ -575,6 +575,71 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(['registry', 'pre-claim'], calls)
         self.assertNotIn(['gh', 'issue', 'view'], [call[:3] for call in calls])
 
+    def test_missing_review_input_defers_only_that_review_and_continues_the_poll(self):
+        import contextlib, io, json, pathlib, tempfile
+        import runner
+        from scripts.factory_registry.repository import RegistryConflict
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = {
+                'repo': directory, 'state': str(root / 'state'),
+                'worktrees': str(root / 'trees'), 'path': '/usr/bin:/bin',
+                'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm', 'github': 'owner/repo',
+                'allowed_authors': ['owner'],
+                'agents': {'codex-a': {'command': ['agent']}},
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+
+            def issue(number, kind):
+                return {
+                    'number': number, 'title': f'issue {number}',
+                    'author': {'login': 'owner'},
+                    'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}],
+                    'body': json.dumps({
+                        'task': f'TASK-{number}', 'paths': [f'docs/{number}.md'],
+                        'instructions': 'Bounded work.', 'depends_on': [],
+                        'kind': kind, 'lane': 'ASSURANCE' if kind == 'REVIEW' else 'FEATURE',
+                    }),
+                }
+
+            issues = [issue(1, 'REVIEW'), issue(2, 'PARENT')]
+            registry = Mock()
+            registry.pre_claim.side_effect = lambda task, *_args, **_kwargs: (
+                (_ for _ in ()).throw(RegistryConflict('REVIEW_INPUT_REQUIRED'))
+                if task == 'TASK-1' else 7
+            )
+            registry.claim_package.return_value = 'deferred'
+
+            commands = []
+            def fake_run(args, **_kwargs):
+                commands.append(args)
+                if args[:3] == ['gh', 'issue', 'list']:
+                    return json.dumps(issues)
+                return ''
+
+            output = io.StringIO()
+            with patch.object(runner, 'run', side_effect=fake_run), \
+                    patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                    patch('sys.argv', ['runner', '--config', str(config_path)]), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                runner.main()
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertIn(
+                {'issue': 1, 'status': 'defer', 'reason': 'REVIEW_INPUT_REQUIRED'}, events,
+            )
+            self.assertEqual(
+                [call.args[0] for call in registry.pre_claim.call_args_list],
+                ['TASK-1', 'TASK-2'],
+            )
+            registry.claim_package.assert_called_once()
+            self.assertEqual(registry.claim_package.call_args.args[0], 'TASK-2')
+            registry.reserve_attempt.assert_called_once()
+            self.assertEqual(registry.reserve_attempt.call_args.kwargs['package_id'], 'TASK-2')
+            self.assertEqual(commands.count(['agent']), 1)
+
     def test_preclaim_error_does_not_overwrite_existing_claim(self):
         calls, record = self.exercise_poll(preclaim_error=True)
         self.assertEqual(record['status'], 'agent')
