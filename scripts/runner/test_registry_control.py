@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from registry_control import RunnerRegistryControl, queue_contract_digest
 from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry.codex_capacity import CapacityCollectorError
+from scripts.factory_registry.claude_telemetry import claude_provider_signal
 from scripts.factory_registry import (
     Feature,
     Lane,
@@ -533,6 +534,44 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 patch("registry_control.probe_claude_health") as probe:
             self.assertEqual(control.refresh_configured_capacity(config), ())
         probe.assert_not_called()
+
+    def test_expired_claude_signal_is_reprobed_without_changing_ownership(self):
+        self.seed_assignment()
+        self.registry.register_worker(Worker(
+            "claude", "Claude", ("review",), (Lane.ASSURANCE,),
+            provider_diagnostics={"capacity_mode": "provider_signal",
+                                  "capacity_scopes": ["provider_signal"]},
+        ))
+        prior_at = "2026-09-26T10:00:00Z"
+        self.registry.record_worker_capacity_observations("claude", (
+            claude_provider_signal("claude", observed_at=prior_at, succeeded=True),
+        ), recorded_at=prior_at)
+        before = self.registry.dispatch_snapshot(observed_at="2026-09-26T10:05:00Z")
+        before_claude = next(item for item in before.workers if item["id"] == "claude")
+        before_leases = before.active_leases
+        fixture_at = "2026-09-26T10:02:00.000000Z"
+        control = RunnerRegistryControl(self.database)
+        config = {"capacity_collectors": {}, "claude_health_probe": {
+            "worker_id": "claude", "command": ["fake-claude"], "cadence_seconds": 60,
+        }}
+        with patch("registry_control.utc_now", return_value="2026-09-26T10:03:00Z"), \
+                patch("registry_control.probe_claude_health", return_value={
+                    "succeeded": True, "limit_signal": None, "returncode": 0,
+                    "observed_at": fixture_at,
+                }) as probe:
+            collected = control.refresh_configured_capacity(config)
+        probe.assert_called_once_with(["fake-claude"], timeout=20)
+        self.assertEqual(collected[0]["observations"][0]["observed_at"], fixture_at)
+        after = self.registry.dispatch_snapshot(observed_at="2026-09-26T10:03:00Z")
+        signals = [item for item in after.usage_observations if item["worker_id"] == "claude"]
+        self.assertEqual(
+            {item["observed_at"] for item in signals},
+            {"2026-09-26T10:00:00.000000Z", fixture_at},
+        )
+        self.assertEqual(
+            next(item for item in after.workers if item["id"] == "claude"), before_claude,
+        )
+        self.assertEqual(after.active_leases, before_leases)
 
     def test_implementation_completion_and_review_input_are_atomic(self):
         self.seed_assignment()

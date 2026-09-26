@@ -609,6 +609,43 @@ def write_collected_usage(path, config, collected):
         save(path, current)
 
 
+def refresh_capacity_observations(registry_control, config, worker, state, usage_path,
+                                  last_capacity_refresh):
+    """Refresh configured evidence once, without duplicating a concurrent poll."""
+    if registry_control is None or not (
+        config.get('capacity_collectors') or config.get('claude_health_probe')
+    ):
+        return False
+    now = time.monotonic()
+    if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
+        return False
+    last_capacity_refresh[0] = now
+    # All provider lanes share this short non-blocking critical section.
+    # A concurrent poll simply retains its prior evidence; it never
+    # reports fabricated freshness or launches a duplicate health probe.
+    try:
+        capacity_lock = file_lock(state / 'capacity-observation.lock', blocking=False)
+        capacity_lock.__enter__()
+    except BlockingIOError:
+        return False
+    try:
+        collected = registry_control.refresh_configured_capacity(
+            config, busy_workers=(worker,) if worker.startswith('claude') else (),
+        )
+        write_collected_usage(usage_path, config, collected)
+        for item in collected:
+            if item.get('error_class'):
+                print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                                  'worker': item['worker_id'],
+                                  'error_class': item['error_class']}))
+    except Exception as capacity_error:
+        print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                          'error_class': type(capacity_error).__name__}))
+    finally:
+        capacity_lock.__exit__(None, None, None)
+    return True
+
+
 def select(issue, allowed):
     labels = {x['name'] for x in issue['labels']}
     agents = labels & {'agent:codex-a','agent:codex-b','agent:claude'}
@@ -1065,35 +1102,9 @@ def main():
                     worker=worker)
     last_capacity_refresh = [None]
     def refresh_capacity():
-        if registry_control is None or not (c.get('capacity_collectors') or c.get('claude_health_probe')):
-            return
-        now = time.monotonic()
-        if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
-            return
-        last_capacity_refresh[0] = now
-        # All provider lanes share this short non-blocking critical section.
-        # A concurrent poll simply retains its prior evidence; it never
-        # reports fabricated freshness or launches a duplicate health probe.
-        try:
-            capacity_lock = file_lock(state / 'capacity-observation.lock', blocking=False)
-            capacity_lock.__enter__()
-        except BlockingIOError:
-            return
-        try:
-            collected = registry_control.refresh_configured_capacity(
-                c, busy_workers=(worker,) if worker.startswith('claude') else (),
-            )
-            write_collected_usage(usage_path, c, collected)
-            for item in collected:
-                if item.get('error_class'):
-                    print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
-                                      'worker': item['worker_id'],
-                                      'error_class': item['error_class']}))
-        except Exception as capacity_error:
-            print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
-                              'error_class': type(capacity_error).__name__}))
-        finally:
-            capacity_lock.__exit__(None, None, None)
+        refresh_capacity_observations(
+            registry_control, c, worker, state, usage_path, last_capacity_refresh,
+        )
     if registry_control is not None:
         # Liveness is separate from the optional configured read-only capacity
         # producer below; neither path changes worker identity or ownership.
