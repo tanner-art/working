@@ -1977,8 +1977,15 @@ class SQLiteRegistry:
                     scope = diagnostics.get("capacity_scope")
                     if not isinstance(scope, str) or not scope:
                         raise RegistryConflict("INVALID_USAGE_OBSERVATION", "capacity_scope")
+                    mode = diagnostics.get("capacity_mode")
                     consumed = value.get("consumed_percent")
-                    if isinstance(consumed, bool) or not isinstance(consumed, (int, float)) or not 0 <= consumed <= 100:
+                    if mode == "provider_signal":
+                        required = ("service_state", "authentication_state", "live_invocation_state", "limit_signal")
+                        if scope != "provider_signal" or any(not isinstance(diagnostics.get(key), str) for key in required):
+                            raise RegistryConflict("INVALID_USAGE_OBSERVATION", "provider_signal")
+                        if consumed is not None:
+                            raise RegistryConflict("INVALID_USAGE_OBSERVATION", "provider_signal consumed_percent")
+                    elif isinstance(consumed, bool) or not isinstance(consumed, (int, float)) or not 0 <= consumed <= 100:
                         raise RegistryConflict("INVALID_USAGE_OBSERVATION", "consumed_percent")
                     state = value.get("state")
                     if not isinstance(state, str) or not state:

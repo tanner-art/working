@@ -12,7 +12,9 @@ from unittest.mock import Mock, patch
 
 import runner
 from scripts.factory_registry.models import ReviewInput
+from scripts.factory_registry import Feature, Lane, SQLiteRegistry, TaskStatus, Worker, WorkPackage
 from scripts.factory_registry.repository import RegistryConflict
+from scripts.factory_registry.shadow_dispatch import RejectionCode, decide_shadow
 
 
 class ReviewValidationTests(unittest.TestCase):
@@ -51,6 +53,96 @@ class ReviewValidationTests(unittest.TestCase):
 
 
 class BoundedRunnerMainTests(unittest.TestCase):
+    def test_provider_signal_refreshes_keep_scheduler_eligible_then_fail_closed_when_stale_or_limited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = SQLiteRegistry(pathlib.Path(directory) / "registry.sqlite3")
+            registry.initialize()
+            base = __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ) + __import__("datetime").timedelta(minutes=1)
+            stamp = lambda moment: moment.isoformat().replace("+00:00", "Z")
+            registry.register_feature(Feature("FEATURE", "Feature", 10, TaskStatus.READY))
+            registry.register_work_package(WorkPackage(
+                "TASK-CLAUDE", "FEATURE", "Review", "ORCHESTRATION", Lane.ASSURANCE,
+                ("review",), 10, ("fixture",), status=TaskStatus.READY,
+            ))
+            registry.register_worker(Worker(
+                "claude", "Claude", ("review",), (Lane.ASSURANCE,),
+                provider_diagnostics={"capacity_mode": "provider_signal",
+                                      "capacity_scopes": ["provider_signal"]},
+                last_heartbeat_at=stamp(base), usage_state="NORMAL",
+            ))
+            registry.register_worker(Worker(
+                "orchestra", "Orchestra", (), (), role="ORCHESTRA",
+                provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["weekly"]},
+                last_heartbeat_at=stamp(base), usage_state="NORMAL",
+            ))
+            dispatch = registry.dispatch_control()
+            registry.set_dispatch_control(
+                expected_revision=dispatch["revision"], expected_mode="PAUSED",
+                new_mode="LIVE", kill_switch_engaged=False, changed_at=stamp(base),
+                reason="test provider-signal scheduler evidence",
+            )
+
+            def publish(worker_id, moment, *, limited=False):
+                before = registry.dispatch_snapshot(observed_at=stamp(moment))
+                observation = {
+                    "id": f"{worker_id}-{int((moment - base).total_seconds())}-{limited}",
+                    "worker_id": worker_id, "observed_at": stamp(moment), "reset_at": None,
+                    "consumed_percent": None if worker_id == "claude" else 10,
+                    "state": "HARD_STOP" if limited else "NORMAL",
+                    "provider_diagnostics": (
+                        {"capacity_mode": "provider_signal", "capacity_scope": "provider_signal",
+                         "service_state": "unhealthy" if limited else "healthy",
+                         "authentication_state": "valid",
+                         "live_invocation_state": "failed" if limited else "succeeded",
+                         "limit_signal": "RATE_LIMIT" if limited else "NONE"}
+                        if worker_id == "claude" else
+                        {"capacity_mode": "percentage", "capacity_scope": "weekly"}
+                    ),
+                }
+                registry.record_worker_capacity_observations(worker_id, (observation,), recorded_at=stamp(moment))
+                after = registry.dispatch_snapshot(observed_at=stamp(moment))
+                self.assertEqual(after.active_leases, before.active_leases)
+                for name in ("claude", "orchestra"):
+                    original = next(item for item in before.workers if item["id"] == name)
+                    current = next(item for item in after.workers if item["id"] == name)
+                    self.assertEqual(
+                        {key: current[key] for key in ("id", "capabilities", "approved_lanes", "role", "availability")},
+                        {key: original[key] for key in ("id", "capabilities", "approved_lanes", "role", "availability")},
+                    )
+
+            for elapsed in (0, 300, 600, 930):
+                moment = base + __import__("datetime").timedelta(seconds=elapsed)
+                if elapsed:
+                    registry.record_worker_heartbeat("claude", observed_at=stamp(moment))
+                    registry.record_worker_heartbeat("orchestra", observed_at=stamp(moment))
+                publish("claude", moment)
+                publish("orchestra", moment)
+                decision = decide_shadow(registry.dispatch_snapshot(observed_at=stamp(moment)))
+                self.assertIn(("TASK-CLAUDE", "claude"), {
+                    (item.package_id, item.worker_id) for item in decision.proposed_assignments
+                })
+
+            stale_at = base + __import__("datetime").timedelta(seconds=1831)
+            stale = decide_shadow(registry.dispatch_snapshot(observed_at=stamp(stale_at)))
+            stale_codes = {reason.code for item in stale.pair_evaluations
+                           if (item.package_id, item.worker_id) == ("TASK-CLAUDE", "claude")
+                           for reason in item.reasons}
+            self.assertIn(RejectionCode.USAGE_STALE, stale_codes)
+
+            limited_at = base + __import__("datetime").timedelta(seconds=1860)
+            registry.record_worker_heartbeat("claude", observed_at=stamp(limited_at))
+            registry.record_worker_heartbeat("orchestra", observed_at=stamp(limited_at))
+            publish("claude", limited_at, limited=True)
+            publish("orchestra", limited_at)
+            limited = decide_shadow(registry.dispatch_snapshot(observed_at=stamp(limited_at)))
+            limited_codes = {reason.code for item in limited.pair_evaluations
+                             if (item.package_id, item.worker_id) == ("TASK-CLAUDE", "claude")
+                             for reason in item.reasons}
+            self.assertIn(RejectionCode.PROVIDER_LIMIT_SIGNAL, limited_codes)
+            self.assertIn(RejectionCode.PROVIDER_SIGNAL_UNHEALTHY, limited_codes)
+
     def test_fetches_registered_source_ignores_labels_and_uses_scheduler_worker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

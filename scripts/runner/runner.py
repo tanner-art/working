@@ -570,8 +570,28 @@ def write_collected_usage(path, config, collected):
         except FileNotFoundError:
             workers = {}
         for item in collected:
+            # A failed percentage collection intentionally has no replacement
+            # observation.  Retain its prior usage record so normal staleness
+            # gating constrains it; never write a fabricated fresh timestamp.
+            if not item['observations']:
+                continue
             worker_id = item['worker_id']
             settings = agent_settings(config, worker_id)
+            first = item['observations'][0]
+            diagnostics = first['provider_diagnostics']
+            if diagnostics.get('capacity_mode') == 'provider_signal':
+                # Provider signal has no percentage scopes.  Preserve the
+                # exact provider observation timestamp and never invent one.
+                workers.setdefault(worker_id, {})[settings['account']] = {
+                    'provider': 'anthropic', 'model': settings['model'],
+                    'capacity_mode': 'provider_signal',
+                    'observed_at': first['observed_at'],
+                    'service_state': diagnostics['service_state'],
+                    'authentication_state': diagnostics['authentication_state'],
+                    'live_invocation_state': diagnostics['live_invocation_state'],
+                    'limit_signal': diagnostics['limit_signal'],
+                }
+                continue
             scopes = {}
             for observation in item['observations']:
                 diagnostics = observation['provider_diagnostics']
@@ -587,6 +607,43 @@ def write_collected_usage(path, config, collected):
         current = {'workers': workers}
         validate_usage(current)
         save(path, current)
+
+
+def refresh_capacity_observations(registry_control, config, worker, state, usage_path,
+                                  last_capacity_refresh):
+    """Refresh configured evidence once, without duplicating a concurrent poll."""
+    if registry_control is None or not (
+        config.get('capacity_collectors') or config.get('claude_health_probe')
+    ):
+        return False
+    now = time.monotonic()
+    if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
+        return False
+    last_capacity_refresh[0] = now
+    # All provider lanes share this short non-blocking critical section.
+    # A concurrent poll simply retains its prior evidence; it never
+    # reports fabricated freshness or launches a duplicate health probe.
+    try:
+        capacity_lock = file_lock(state / 'capacity-observation.lock', blocking=False)
+        capacity_lock.__enter__()
+    except BlockingIOError:
+        return False
+    try:
+        collected = registry_control.refresh_configured_capacity(
+            config, busy_workers=(worker,) if worker.startswith('claude') else (),
+        )
+        write_collected_usage(usage_path, config, collected)
+        for item in collected:
+            if item.get('error_class'):
+                print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                                  'worker': item['worker_id'],
+                                  'error_class': item['error_class']}))
+    except Exception as capacity_error:
+        print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                          'error_class': type(capacity_error).__name__}))
+    finally:
+        capacity_lock.__exit__(None, None, None)
+    return True
 
 
 def select(issue, allowed):
@@ -1045,18 +1102,9 @@ def main():
                     worker=worker)
     last_capacity_refresh = [None]
     def refresh_capacity():
-        if registry_control is None or not c.get('capacity_collectors'):
-            return
-        now = time.monotonic()
-        if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
-            return
-        last_capacity_refresh[0] = now
-        try:
-            collected = registry_control.refresh_configured_capacity(c)
-            write_collected_usage(usage_path, c, collected)
-        except Exception as capacity_error:
-            print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
-                              'error_class': type(capacity_error).__name__}))
+        refresh_capacity_observations(
+            registry_control, c, worker, state, usage_path, last_capacity_refresh,
+        )
     if registry_control is not None:
         # Liveness is separate from the optional configured read-only capacity
         # producer below; neither path changes worker identity or ownership.

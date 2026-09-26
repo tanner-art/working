@@ -78,6 +78,10 @@ class Registry(Protocol):
         recorded_at: str,
     ) -> int: ...
 
+    def record_worker_capacity_observations(
+        self, worker_id: str, observations: Sequence[Mapping[str, Any]], *, recorded_at: str
+    ) -> int: ...
+
     def register_canary_bundle(
         self,
         feature: Feature,

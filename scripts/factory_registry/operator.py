@@ -1576,6 +1576,24 @@ def _validate_config(config: Mapping[str, Any], database: Path, release: Path) -
     sensitive = _sensitive_paths(config)
     if sensitive:
         raise OperatorError("config contains secret-shaped fields: " + ",".join(sensitive))
+    collectors = config.get("capacity_collectors", {})
+    if not isinstance(collectors, Mapping):
+        raise OperatorError("capacity_collectors must be an object")
+    for worker_id, collector in collectors.items():
+        if worker_id not in agents or not isinstance(collector, Mapping):
+            raise OperatorError("capacity collector must name a configured worker")
+        aliases = collector.get("shared_account_aliases", ())
+        if not isinstance(aliases, list) or any(
+            not isinstance(alias, str) or not alias or alias == worker_id
+            for alias in aliases
+        ) or len(aliases) != len(set(aliases)):
+            raise OperatorError("shared_account_aliases must be distinct worker ids")
+    probe = config.get("claude_health_probe")
+    if probe is not None:
+        if not isinstance(probe, Mapping) or set(probe) - {"worker_id", "command", "timeout_seconds", "cadence_seconds"}:
+            raise OperatorError("claude_health_probe has unsupported fields")
+        if probe.get("worker_id", "claude") != "claude":
+            raise OperatorError("claude_health_probe must target claude")
 
 
 def migrate_config(

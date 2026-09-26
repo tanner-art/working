@@ -7,7 +7,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     preserve_interrupted_attempt, publish_completion_telemetry,
                     recover_stale_claims, refresh_queue_snapshot,
                     RegistryAttemptLifecycle, run,
-                    run_repository_validation, select, stage_verified_changes,
+                    refresh_capacity_observations, run_repository_validation, select, stage_verified_changes,
                     usage_policy_enabled)
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
@@ -139,6 +139,34 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('outside-scope.md', calls[-1][0])
 
 class ProcessTests(unittest.TestCase):
+    def test_concurrent_capacity_refresh_collects_and_publishes_once(self):
+        import pathlib, tempfile, threading
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / "state"
+            started = threading.Event()
+            release = threading.Event()
+            control = Mock()
+            control.refresh_configured_capacity.side_effect = lambda *_args, **_kwargs: (
+                started.set(), release.wait(timeout=2), ()
+            )[-1]
+            config = {"claude_health_probe": {"worker_id": "claude"}}
+            with patch("runner.write_collected_usage") as publish:
+                first = threading.Thread(target=refresh_capacity_observations, args=(
+                    control, config, "codex-a", state, state / "usage.json", [None],
+                ))
+                first.start()
+                self.assertTrue(started.wait(timeout=1))
+                self.assertFalse(refresh_capacity_observations(
+                    control, config, "codex-b", state, state / "usage.json", [None],
+                ))
+                self.assertEqual(control.refresh_configured_capacity.call_count, 1)
+                publish.assert_not_called()
+                release.set()
+                first.join(timeout=2)
+                self.assertFalse(first.is_alive())
+                publish.assert_called_once_with(state / "usage.json", config, ())
+            self.assertEqual(control.refresh_configured_capacity.call_count, 1)
+
     def test_registry_terminal_mutation_is_attempted_exactly_once(self):
         control = Mock()
         success = RegistryAttemptLifecycle(control, 'attempt-success')

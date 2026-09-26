@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import uuid
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -42,6 +43,75 @@ _LIMIT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 _STREAM_RECORD_TYPES = frozenset(("assistant", "result", "system", "user"))
+
+
+def claude_provider_signal(
+    worker_id: str, *, observed_at: str, succeeded: bool,
+    output: str = "", limit_signal: str | None = None, returncode: int | None = None,
+) -> Mapping[str, Any]:
+    """Make a content-free provider-signal observation from a health call.
+
+    Output is inspected only for explicit limit language and is never retained.
+    """
+    stamp = _timestamp(observed_at)
+    signal = limit_signal or (classify_limit_signal(output) if output else None)
+    if signal not in (None, "RATE_LIMIT", "EXHAUSTION", "THROTTLING"):
+        raise ClaudeTelemetryError("unrecognized Claude limit signal")
+    healthy = bool(succeeded) and signal is None
+    return {
+        "id": "claude-health:" + hashlib.sha256(
+            f"{worker_id}:{stamp}:{healthy}:{signal or 'NONE'}".encode()
+        ).hexdigest(),
+        "worker_id": worker_id, "observed_at": stamp, "reset_at": None,
+        "consumed_percent": None,
+        "state": "NORMAL" if healthy else "HARD_STOP",
+        "provider_diagnostics": {
+            "capacity_mode": "provider_signal", "capacity_scope": "provider_signal",
+            "service_state": "healthy" if healthy else "unhealthy",
+            "authentication_state": "valid" if returncode != 78 else "invalid",
+            "live_invocation_state": "succeeded" if healthy else "failed",
+            "limit_signal": signal or ("NONE" if healthy else "CAPACITY_LAUNCH_FAILURE"),
+            "source": "claude bounded health probe",
+        },
+    }
+
+
+def probe_claude_health(command: Sequence[str], *, timeout: float = 20) -> Mapping[str, Any]:
+    """Run a minimal source-free Claude probe through the reviewed wrapper.
+
+    The caller records only the returned sanitized observation.  No provider
+    output, prompt, token, or credential leaves this boundary.
+    """
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 30:
+        raise ClaudeTelemetryError("Claude probe timeout must be between zero and 30 seconds")
+    if (not isinstance(command, Sequence) or isinstance(command, (str, bytes))
+            or len(command) < 4 or not all(isinstance(part, str) and part for part in command)
+            or "claude_keychain.py" not in " ".join(command)):
+        raise ClaudeTelemetryError("Claude probe requires the Keychain wrapper command")
+    try:
+        exec_index = list(command).index("exec")
+    except ValueError as error:
+        raise ClaudeTelemetryError("Claude probe requires Keychain exec") from error
+    if exec_index < 2 or exec_index + 1 >= len(command) or not command[exec_index + 1].startswith("/"):
+        raise ClaudeTelemetryError("Claude probe requires Keychain exec")
+    probe = list(command[:exec_index + 2]) + [
+        "-p", "Reply exactly HEALTHY.", "--output-format", "json",
+        "--tools", "", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+    ]
+    try:
+        result = subprocess.run(probe, capture_output=True, text=True, timeout=timeout, check=False)
+        output, code = (result.stdout or "") + "\n" + (result.stderr or ""), result.returncode
+    except (OSError, subprocess.SubprocessError):
+        output, code = "", None
+    # A zero exit alone is not health: require the structured result envelope.
+    succeeded = False
+    try:
+        payload = json.loads(output)
+        succeeded = code == 0 and isinstance(payload, Mapping) and payload.get("type") == "result" and not payload.get("is_error")
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return {"succeeded": succeeded, "limit_signal": classify_limit_signal(output), "returncode": code,
+            "observed_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")}
 
 
 def _source_identity(kind: str, raw: bytes) -> str:

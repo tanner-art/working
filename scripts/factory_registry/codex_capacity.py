@@ -148,3 +148,27 @@ def normalize_buckets(worker_id: str, sample: Mapping[str, Any]) -> tuple[Mappin
     if not observations:
         raise CapacityCollectorError("no fresh timestamped rate-limit buckets")
     return tuple(observations)
+
+
+def share_buckets(worker_id: str, sample: Mapping[str, Any], *, expected_account_identity_sha256: str) -> tuple[Mapping[str, Any], ...]:
+    """Project one measured account sample onto an explicitly bound alias.
+
+    This is deliberately not a second collection.  The target's existing
+    capacity-pool binding must match the identity returned by the source
+    account read, otherwise no alias observation is emitted.
+    """
+    actual = sample.get("account_identity_sha256")
+    if not isinstance(expected_account_identity_sha256, str) or not expected_account_identity_sha256:
+        raise CapacityCollectorError("shared-account binding is unavailable")
+    if actual != expected_account_identity_sha256:
+        raise CapacityCollectorError("shared-account identity does not match binding")
+    return tuple({
+        **item,
+        "id": "codex-rate-limit:" + hashlib.sha256(
+            f"{worker_id}:{item['provider_diagnostics']['capacity_scope']}:{item['observed_at']}:{item['consumed_percent']}".encode()
+        ).hexdigest(),
+        "worker_id": worker_id,
+        "provider_diagnostics": {
+            **item["provider_diagnostics"], "shared_account_observation": True,
+        },
+    } for item in normalize_buckets(worker_id, sample))

@@ -27,7 +27,10 @@ from scripts.factory_registry.repository import RegistryConflict  # noqa: E402
 from scripts.factory_registry.shadow_dispatch import decide_shadow  # noqa: E402
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E402
 from scripts.factory_registry.codex_capacity import (  # noqa: E402
-    CapacityCollectorError, collect_rate_limits, normalize_buckets,
+    collect_rate_limits, normalize_buckets, share_buckets,
+)
+from scripts.factory_registry.claude_telemetry import (  # noqa: E402
+    claude_provider_signal, probe_claude_health,
 )
 
 
@@ -268,25 +271,94 @@ class RunnerRegistryControl:
         scope = self.registry.dispatch_control().get("bounded_run")
         return scope["base_ref"] if isinstance(scope, dict) else "main"
 
-    def refresh_configured_capacity(self, config) -> tuple[dict, ...]:
-        """Run configured read-only account observations without worker upserts."""
+    def refresh_configured_capacity(self, config, *, busy_workers=()) -> tuple[dict, ...]:
+        """Run independent read-only observations without worker upserts.
+
+        An unavailable source is returned as a content-free error item, rather
+        than preventing another configured source from publishing its own real
+        observation.  Percentage-collector failures deliberately publish no
+        replacement fact: the affected worker remains stale/constrained.
+        """
         collectors = config.get("capacity_collectors", {})
         if not isinstance(collectors, dict):
             raise ValueError("capacity_collectors must be an object")
         written = []
+        snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
+        workers = {item["id"]: item for item in snapshot.workers}
+        busy_workers = set(busy_workers) | {
+            lease["worker_id"] for lease in snapshot.active_leases
+            if isinstance(lease.get("worker_id"), str)
+        }
         for worker_id, item in collectors.items():
             if not isinstance(worker_id, str) or not isinstance(item, dict):
                 raise ValueError("capacity collector entries must be objects")
-            sample = collect_rate_limits(
-                item.get("executable", ""), item.get("codex_home", ""),
-                timeout=item.get("timeout_seconds", 10),
-                account_environment=item.get("environment", {}),
-            )
-            observations = normalize_buckets(worker_id, sample)
-            self.registry.record_worker_capacity_observations(
-                worker_id, observations, recorded_at=utc_now()
-            )
-            written.append({"worker_id": worker_id, "observations": observations})
+            try:
+                sample = collect_rate_limits(
+                    item.get("executable", ""), item.get("codex_home", ""),
+                    timeout=item.get("timeout_seconds", 10),
+                    account_environment=item.get("environment", {}),
+                )
+                observations = normalize_buckets(worker_id, sample)
+                self.registry.record_worker_capacity_observations(
+                    worker_id, observations, recorded_at=utc_now()
+                )
+                written.append({"worker_id": worker_id, "observations": observations})
+            except Exception as error:
+                # Do not turn a failed read into a fresh capacity observation.
+                written.append({"worker_id": worker_id, "observations": (),
+                                "error_class": type(error).__name__})
+                continue
+            # Aliases are declarative only.  Their existing Registry binding,
+            # rather than a config claim, is the authority for account identity.
+            for alias in item.get("shared_account_aliases", ()):
+                if not isinstance(alias, str) or not alias:
+                    raise ValueError("shared_account_aliases must contain worker ids")
+                try:
+                    target = workers.get(alias)
+                    binding = (target or {}).get("provider_diagnostics", {}).get("capacity_pool")
+                    shared = share_buckets(alias, sample, expected_account_identity_sha256=binding)
+                    self.registry.record_worker_capacity_observations(alias, shared, recorded_at=utc_now())
+                    written.append({"worker_id": alias, "observations": shared})
+                except Exception as error:
+                    # An alias mismatch is target-local; no other alias loses
+                    # its independently verified observation.
+                    written.append({"worker_id": alias, "observations": (),
+                                    "error_class": type(error).__name__})
+        probe = config.get("claude_health_probe")
+        if probe is not None:
+            if not isinstance(probe, dict):
+                raise ValueError("claude_health_probe must be an object")
+            worker_id = probe.get("worker_id", "claude")
+            if worker_id not in workers or worker_id in busy_workers:
+                return tuple(written)
+            cadence = probe.get("cadence_seconds", 60)
+            if isinstance(cadence, bool) or not isinstance(cadence, (int, float)) or not 1 <= cadence <= 900:
+                raise ValueError("claude_health_probe cadence_seconds must be between one and 900")
+            now = datetime.fromisoformat(utc_now().replace("Z", "+00:00"))
+            prior = [item for item in snapshot.usage_observations if item.get("worker_id") == worker_id
+                     and item.get("capacity_scope") == "provider_signal"]
+            if prior:
+                latest = max(item["observed_at"] for item in prior)
+                try:
+                    parsed = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    parsed = None
+                if parsed is not None and 0 <= (now - parsed).total_seconds() < cadence:
+                    return tuple(written)
+            command = probe.get("command")
+            if command is None:
+                command = config.get("agents", {}).get(worker_id, {}).get("command")
+            try:
+                result = probe_claude_health(command, timeout=probe.get("timeout_seconds", 20))
+            except Exception:
+                # The wrapper was not usable.  This is a real failed launch,
+                # not a healthy substitute for the expired signal.
+                result = {"succeeded": False, "limit_signal": None,
+                          "returncode": None, "observed_at": utc_now()}
+            observation = claude_provider_signal(worker_id, observed_at=result["observed_at"],
+                succeeded=result["succeeded"], limit_signal=result["limit_signal"], returncode=result["returncode"])
+            self.registry.record_worker_capacity_observations(worker_id, (observation,), recorded_at=utc_now())
+            written.append({"worker_id": worker_id, "observations": (observation,)})
         return tuple(written)
 
     def record_process(self, attempt_id: str, *, pid: int, pgid: int) -> None:
