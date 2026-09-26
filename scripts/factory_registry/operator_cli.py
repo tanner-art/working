@@ -26,6 +26,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     enable_live,
     followup_review_worker_gate,
     migrate_registry_v3_to_v4,
+    migrate_registry_v4_to_v5,
     parse_canary_spec,
     parse_followup_review_spec,
     preflight,
@@ -34,6 +35,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     reconcile,
     return_paused,
     restore_registry_v3_backup,
+    restore_registry_v4_backup,
     status,
     stop,
     store_preservation_evidence,
@@ -75,6 +77,30 @@ def _parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("status", help="Read Registry control and ownership state")
     command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "restore-registry-v4", help="Restore the verified v4 backup before v5 receipts exist"
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--backup", required=True, type=pathlib.Path)
+    command.add_argument("--backup-sha256", required=True)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "migrate-registry-v5",
+        help="Atomically migrate a quiescent PAUSED Registry from v4 to v5",
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--backup", type=pathlib.Path)
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser(
@@ -199,8 +225,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             backup_path=args.backup,
             observed_at=args.observed_at,
         ))
+    if args.command == "migrate-registry-v5":
+        return dict(migrate_registry_v4_to_v5(
+            args.database,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.expect_revision,
+            backup_path=args.backup,
+            observed_at=args.observed_at,
+        ))
     if args.command == "restore-registry-v3":
         return dict(restore_registry_v3_backup(
+            args.database,
+            args.backup,
+            args.release,
+            args.preservation,
+            args.release_commit,
+            args.backup_sha256,
+            args.expect_revision,
+            observed_at=args.observed_at,
+        ))
+    if args.command == "restore-registry-v4":
+        return dict(restore_registry_v4_backup(
             args.database,
             args.backup,
             args.release,

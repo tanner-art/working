@@ -24,6 +24,7 @@ from scripts.factory_registry.models import (
     ReviewOutcome,
     ReviewOutcomeState,
     TaskStatus,
+    Worker,
     WorkPackage,
 )
 from scripts.factory_registry.operator import (
@@ -35,12 +36,14 @@ from scripts.factory_registry.operator import (
     followup_review_worker_gate,
     harden_paths,
     migrate_registry_v3_to_v4,
+    migrate_registry_v4_to_v5,
     parse_canary_spec,
     parse_followup_review_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
     restore_registry_v3_backup,
+    restore_registry_v4_backup,
     status,
     store_preservation_evidence,
     utc_now,
@@ -555,6 +558,13 @@ class OperatorFixture(unittest.TestCase):
 
     def _downgrade_fixture_to_v3(self) -> int:
         with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_update")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_delete")
             connection.execute("DROP TABLE review_outcomes")
@@ -563,6 +573,253 @@ class OperatorFixture(unittest.TestCase):
             )
         harden_paths(self.database, self.config_path, self.release)
         return self.registry.dispatch_control()["revision"]
+
+    def _downgrade_fixture_to_v4(self) -> int:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER control_operation_receipts_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
+            )
+        harden_paths(self.database, self.config_path, self.release)
+        return self.registry.dispatch_control()["revision"]
+
+    def test_reviewed_registry_v5_migration_preserves_v4_history(self):
+        self.registry.register_feature(
+            Feature("HISTORY", "History", 1, TaskStatus.READY)
+        )
+        revision = self._downgrade_fixture_to_v4()
+        observed = status(self.database)
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["source_schema"], 4)
+        self.assertEqual(result["schema_version"], 5)
+        self.assertEqual(result["control"], observed["control"])
+        self.assertEqual(
+            status(self.database)["database_checks"]["schema_version"], "5"
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM control_operation_receipts"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT title FROM features WHERE id='HISTORY'"
+                ).fetchone()[0],
+                "History",
+            )
+
+    def test_reviewed_registry_v5_migration_can_restore_exact_v4_backup(self):
+        self.registry.register_feature(
+            Feature("HISTORY", "History", 1, TaskStatus.READY)
+        )
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        restored = restore_registry_v4_backup(
+            self.database,
+            backup,
+            self.release,
+            self.preservation,
+            COMMIT,
+            result["backup"]["sha256"],
+            revision,
+        )
+        self.assertTrue(restored["passed"])
+        self.assertEqual(restored["schema_version"], 4)
+        self.assertEqual(
+            status(self.database)["database_checks"]["schema_version"], "4"
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT title FROM features WHERE id='HISTORY'"
+            ).fetchone()[0], "History")
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM sqlite_schema "
+                "WHERE type='table' AND name='control_operation_receipts'"
+            ).fetchone()[0], 0)
+
+    def test_restore_v4_rejects_any_v5_operation_receipt(self):
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO control_operation_receipts "
+                "(operation_id, operation_kind, request_sha256, result_json, recorded_at) "
+                "VALUES ('used', 'TEST', ?, '{}', '2026-09-25T10:00:00Z')",
+                ("0" * 64,),
+            )
+        with self.assertRaisesRegex(OperatorError, "operation receipts exist"):
+            restore_registry_v4_backup(
+                self.database,
+                backup,
+                self.release,
+                self.preservation,
+                COMMIT,
+                result["backup"]["sha256"],
+                revision,
+            )
+        self.assertEqual(
+            status(self.database)["database_checks"]["schema_version"], "5"
+        )
+
+    def test_restore_v4_rejects_changed_backup(self):
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        with sqlite3.connect(backup) as connection:
+            connection.execute(
+                "UPDATE registry_metadata SET value='changed' WHERE key='revision'"
+            )
+        backup.chmod(0o600)
+        with self.assertRaisesRegex(OperatorError, "backup SHA-256 mismatch"):
+            restore_registry_v4_backup(
+                self.database,
+                backup,
+                self.release,
+                self.preservation,
+                COMMIT,
+                result["backup"]["sha256"],
+                revision,
+            )
+        self.assertEqual(
+            status(self.database)["database_checks"]["schema_version"], "5"
+        )
+
+    def test_restore_v4_rejects_same_count_ownership_provenance_change(self):
+        self.registry.register_feature(
+            Feature("OWNERSHIP", "Ownership", 1, TaskStatus.READY)
+        )
+        self.registry.register_worker(
+            Worker("worker", "Worker", ("registry",), (Lane.PLATFORM,), usage_state="GREEN")
+        )
+        self.registry.register_work_package(WorkPackage(
+            "OWNERSHIP-TASK", "OWNERSHIP", "Ownership task", "ORCHESTRATION",
+            Lane.PLATFORM, ("registry",), 1, ("lease history preserved",),
+            status=TaskStatus.READY,
+        ))
+        control = self.registry.dispatch_control()
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-09-25T10:00:00Z", reason="migration fixture",
+        )
+        lease = self.registry.acquire_lease(
+            "OWNERSHIP-TASK", "worker",
+            acquired_at="2026-09-25T10:01:00Z",
+            expires_at="2026-09-25T10:30:00Z",
+            expected_dispatch_revision=live_revision,
+        )
+        self.registry.release_lease(
+            lease.id,
+            released_at="2026-09-25T10:02:00Z",
+            reason="fixture complete",
+            next_status=TaskStatus.READY,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="LIVE",
+            new_mode="STOPPING", kill_switch_engaged=True,
+            changed_at="2026-09-25T10:03:00Z", reason="migration fixture stopping",
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="STOPPING",
+            new_mode="PAUSED", kill_switch_engaged=True,
+            changed_at="2026-09-25T10:04:00Z", reason="migration fixture stopped",
+        )
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE leases SET release_reason='rewritten' WHERE id=?",
+                (lease.id,),
+            )
+        with self.assertRaisesRegex(OperatorError, "ownership provenance changed"):
+            restore_registry_v4_backup(
+                self.database,
+                backup,
+                self.release,
+                self.preservation,
+                COMMIT,
+                result["backup"]["sha256"],
+                revision,
+            )
+
+    def test_restore_v4_preserves_mutation_racing_after_initial_validation(self):
+        revision = self._downgrade_fixture_to_v4()
+        result = migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        backup = Path(result["backup"]["path"])
+        original_verify = operator_module.verify_preservation
+        calls = 0
+
+        def inject_mutation(snapshot, preservation_path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                control = self.registry.dispatch_control()
+                self.registry.set_dispatch_control(
+                    expected_revision=control["revision"],
+                    expected_mode="PAUSED",
+                    new_mode="STOPPING",
+                    kill_switch_engaged=True,
+                    changed_at="2026-09-25T10:05:00Z",
+                    reason="concurrent authoritative stop",
+                    operation_id="racing-stop",
+                )
+            return original_verify(snapshot, preservation_path)
+
+        with mock.patch.object(
+            operator_module, "verify_preservation", side_effect=inject_mutation
+        ):
+            with self.assertRaisesRegex(
+                OperatorError, "revision changed before v4 restore"
+            ):
+                restore_registry_v4_backup(
+                    self.database,
+                    backup,
+                    self.release,
+                    self.preservation,
+                    COMMIT,
+                    result["backup"]["sha256"],
+                    revision,
+                )
+
+        current = status(self.database)
+        self.assertEqual(current["database_checks"]["schema_version"], "5")
+        self.assertEqual(current["control"]["dispatch_mode"], "STOPPING")
+        self.assertEqual(current["control"]["revision"], revision + 1)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM control_operation_receipts "
+                "WHERE operation_id='racing-stop'"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM task_events "
+                "WHERE event_type='DISPATCH_CONTROL_CHANGED'"
+            ).fetchone()[0], 1)
 
     def test_reviewed_registry_migration_and_restore(self):
         revision = self._downgrade_fixture_to_v3()

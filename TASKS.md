@@ -1,6 +1,6 @@
 # Threadline Current Task Log
 
-Updated: 2026-09-24 (Europe/Madrid)
+Updated: 2026-09-25 (Europe/Madrid)
 
 This is the active board. The previous board, including historical implementation notes and statuses, is preserved in [the September 22 archive](docs/TASKS_ARCHIVE_2026-09-22.md). Detailed product requirements remain in [Functional Design Priorities](docs/FUNCTIONAL_DESIGN_PRIORITIES.md). A merged PR is marked shipped here even when its real-device release check is still open.
 
@@ -53,9 +53,17 @@ Each numbered product area is an epic. The list is retained as the September 22 
 
 ## Current dispatch order
 
-- Broad product development remains paused until the migration canary passes.
+- Factory control-plane hardening is now the priority milestone. The
+  [September 25 reconciliation](docs/factory/CONTROL_PLANE_HARDENING_RECONCILIATION_2026-09-25.md)
+  defines 10 pre-canary repair packages and one post-canary portfolio package.
+  Committing that plan does not make any repair or product package runnable.
+- Broad product development remains paused until the control-plane repair
+  program passes exact-commit independent review and its bounded unattended
+  canary.
 - Open production release checks and other bounded production-relevant risks take precedence over speculative platform work.
-- RISK-003 is the active ASSURANCE documentation-reconciliation package. Its scope and evidence are in [TASK-RISK-GOVERNANCE-RECONCILIATION.md](docs/factory/TASK-RISK-GOVERNANCE-RECONCILIATION.md).
+- RISK-003 remains preserved in
+  [its reconciliation record](docs/factory/TASK-RISK-GOVERNANCE-RECONCILIATION.md),
+  but it is not current dispatch authority for this milestone.
 
 **Dispatch principle:** A known production-relevant risk with a small, bounded remediation outranks speculative platform expansion.
 

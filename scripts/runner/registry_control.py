@@ -157,6 +157,7 @@ class RunnerRegistryControl:
             acquired_at=acquired.isoformat(),
             expires_at=(acquired + timedelta(seconds=lease_seconds)).isoformat(),
             expected_dispatch_revision=expected_revision,
+            operation_id=f"claim:{package_id}:{worker_id}:{expected_revision}",
         )
         return lease.id
 
@@ -175,6 +176,7 @@ class RunnerRegistryControl:
             runner_pid=os.getpid(),
             started_at=utc_now(),
             expected_revision=expected_revision,
+            operation_id=f"attempt-start:{attempt_id}",
         )
 
     def pre_launch(self) -> int:
@@ -212,6 +214,7 @@ class RunnerRegistryControl:
             outcome="SUCCEEDED",
             next_status=TaskStatus.VERIFY_REVIEW,
             reason="runner completed and opened review",
+            operation_id=f"attempt-finish:{attempt_id}",
         )
 
     def fail(self, attempt_id: str, detail: str) -> None:
@@ -224,6 +227,7 @@ class RunnerRegistryControl:
                 next_status=TaskStatus.BLOCKED,
                 reason="runner attempt failed",
                 failure_detail=detail,
+                operation_id=f"attempt-finish:{attempt_id}",
             )
         except RegistryConflict as error:
             if error.code not in {
@@ -255,6 +259,7 @@ class RunnerRegistryControl:
             released_at=utc_now(),
             reason=detail,
             next_status=TaskStatus.BLOCKED,
+            operation_id=f"lease-abort:{lease_id}",
         )
 
     def engage_stop(self, reason: str) -> int:
@@ -351,4 +356,5 @@ class RunnerRegistryControl:
             kill_switch_engaged=True,
             changed_at=utc_now(),
             reason=reason,
+            operation_id=f"return-paused:{control['revision']}:{reason}",
         )

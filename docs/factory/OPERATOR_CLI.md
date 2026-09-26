@@ -85,6 +85,46 @@ when its schema and control metadata still look valid:
   --expect-revision REVISION
 ```
 
+For a schema-v4 Registry, schema v5 adds append-only replay receipts for
+retry-safe control mutations. This is a separate PAUSED-only operation; live
+commands never create the receipt store implicitly:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli migrate-registry-v5 \
+  --database "$DATABASE" \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION
+```
+
+The v5 migration requires the kill switch and empty active ownership. It makes
+a verified owner-only v4 backup, preserves historical leases and attempts,
+applies the receipt table and append-only triggers atomically, and verifies the
+unchanged control state, revision, ownership history, and preservation
+snapshot. Failed post-commit verification restores the verified v4 backup.
+Before any v5 control-operation receipt exists, an operator can explicitly
+restore that exact v4 backup. The command rejects a changed backup, changed
+Registry control or revision, changed ownership history, active ownership, or
+any evidence that v5 retry semantics have already been used:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli restore-registry-v4 \
+  --database "$DATABASE" \
+  --backup /absolute/path/from-the-v5-migration-evidence.sqlite3 \
+  --backup-sha256 SHA256_FROM_MIGRATION_EVIDENCE \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION
+```
+
+The rollback uses the verified backup as its reference artifact, then removes
+only the v5 receipt schema in one locked transaction. Its final revision,
+control, ownership-provenance, and zero-receipt checks share the same writer
+lock as the schema reversal, so a concurrent authoritative mutation makes the
+rollback fail instead of being overwritten.
+
 ## Evidence-only status and preflight
 
 Status is read-only and does not require a revision:
