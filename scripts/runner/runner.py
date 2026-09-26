@@ -570,6 +570,11 @@ def write_collected_usage(path, config, collected):
         except FileNotFoundError:
             workers = {}
         for item in collected:
+            # A failed percentage collection intentionally has no replacement
+            # observation.  Retain its prior usage record so normal staleness
+            # gating constrains it; never write a fabricated fresh timestamp.
+            if not item['observations']:
+                continue
             worker_id = item['worker_id']
             settings = agent_settings(config, worker_id)
             first = item['observations'][0]
@@ -1060,7 +1065,7 @@ def main():
                     worker=worker)
     last_capacity_refresh = [None]
     def refresh_capacity():
-        if registry_control is None or not c.get('capacity_collectors'):
+        if registry_control is None or not (c.get('capacity_collectors') or c.get('claude_health_probe')):
             return
         now = time.monotonic()
         if last_capacity_refresh[0] is not None and now - last_capacity_refresh[0] < 60:
@@ -1079,6 +1084,11 @@ def main():
                 c, busy_workers=(worker,) if worker.startswith('claude') else (),
             )
             write_collected_usage(usage_path, c, collected)
+            for item in collected:
+                if item.get('error_class'):
+                    print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
+                                      'worker': item['worker_id'],
+                                      'error_class': item['error_class']}))
         except Exception as capacity_error:
             print(json.dumps({'status': 'defer', 'reason': 'CAPACITY_COLLECTION_FAILED',
                               'error_class': type(capacity_error).__name__}))

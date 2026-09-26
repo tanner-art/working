@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +25,10 @@ from scripts.factory_registry import (
     parse_claude_stream_json,
     parse_claude_transcript,
 )
-from scripts.factory_registry.claude_telemetry import claude_provider_signal
+from scripts.factory_registry.claude_telemetry import (
+    claude_provider_signal, probe_claude_health,
+)
+from unittest.mock import Mock, patch
 
 
 def cli_result(**overrides: object) -> bytes:
@@ -53,6 +57,36 @@ def cli_result(**overrides: object) -> bytes:
 
 
 class ClaudeParserTest(unittest.TestCase):
+    def test_health_probe_requires_structured_success_and_never_retains_output(self) -> None:
+        command = ["/usr/bin/python3", "/release/claude_keychain.py", "exec", "/opt/claude"]
+        success = Mock(returncode=0, stdout='{"type":"result","is_error":false}', stderr="")
+        with patch("scripts.factory_registry.claude_telemetry.subprocess.run", return_value=success) as run:
+            result = probe_claude_health(command)
+        self.assertTrue(result["succeeded"])
+        probe = run.call_args.args[0]
+        self.assertIn("--tools", probe)
+        self.assertIn("dontAsk", probe)
+        self.assertNotIn("/release/claude_keychain.py", repr(result))
+        for response in (
+            Mock(returncode=0, stdout="garbled", stderr=""),
+            Mock(returncode=1, stdout='{"type":"result","is_error":false}', stderr=""),
+            Mock(returncode=None, stdout='{"type":"result","is_error":false}', stderr=""),
+            Mock(returncode=78, stdout="authentication failed", stderr=""),
+        ):
+            with patch("scripts.factory_registry.claude_telemetry.subprocess.run", return_value=response):
+                self.assertFalse(probe_claude_health(command)["succeeded"])
+
+    def test_health_probe_timeout_and_malformed_wrapper_fail_closed(self) -> None:
+        command = ["/usr/bin/python3", "/release/claude_keychain.py", "exec", "/opt/claude"]
+        with patch("scripts.factory_registry.claude_telemetry.subprocess.run", side_effect=subprocess.TimeoutExpired(command, 1)):
+            result = probe_claude_health(command)
+        self.assertFalse(result["succeeded"])
+        self.assertIsNone(result["returncode"])
+        for invalid in ([], ["exec", "/opt/claude"],
+                        ["/usr/bin/python3", "/release/claude_keychain.py", "exec", "claude"]):
+            with self.assertRaises(ClaudeTelemetryError):
+                probe_claude_health(invalid)
+
     def test_health_signal_is_content_free_and_limit_is_restrictive(self) -> None:
         healthy = claude_provider_signal("claude", observed_at="2026-09-26T10:00:00Z", succeeded=True)
         self.assertEqual(healthy["state"], "NORMAL")
