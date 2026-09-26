@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from scripts.factory_registry.codex_capacity import CapacityCollectorError, normalize_buckets, _read_reply
+from scripts.factory_registry.codex_capacity import CapacityCollectorError, normalize_buckets, share_buckets, _read_reply
 
 
 class CodexCapacityTests(unittest.TestCase):
@@ -49,6 +49,16 @@ class CodexCapacityTests(unittest.TestCase):
     def test_unavailable_account_is_not_reported_as_capacity(self):
         with self.assertRaisesRegex(CapacityCollectorError, "ordinary usage"):
             normalize_buckets("codex-a", {"ordinary_usage_allowed": False})
+
+    def test_shared_alias_reuses_one_sample_only_when_binding_matches(self):
+        sample = {"ordinary_usage_allowed": True, "account_identity_sha256": "pool-b",
+                  "observed_at": "2026-09-26T19:00:00Z",
+                  "primary": {"usedPercent": 12, "windowDurationMins": 300}}
+        values = share_buckets("orchestra-agent-b", sample, expected_account_identity_sha256="pool-b")
+        self.assertEqual(values[0]["worker_id"], "orchestra-agent-b")
+        self.assertTrue(values[0]["provider_diagnostics"]["shared_account_observation"])
+        with self.assertRaisesRegex(CapacityCollectorError, "does not match"):
+            share_buckets("orchestra-agent-b", sample, expected_account_identity_sha256="other")
 
     def test_partial_response_cannot_block_past_timeout(self):
         process = subprocess.Popen([sys.executable, '-u', '-c',

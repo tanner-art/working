@@ -39,3 +39,17 @@ class CapacityPublicationTests(unittest.TestCase):
         control.renew_runtime.assert_called_once()
         control.observe_worker_heartbeat.assert_called_once_with('codex-a')
         capacity.assert_called_once_with()
+
+    def test_provider_signal_publishes_without_fabricating_a_percentage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'usage.json'
+            config = {'agents': {'claude': {'model': 'sonnet', 'account': 'review',
+                'capacity_mode': 'provider_signal', 'capacity_scopes': ['provider_signal']}}}
+            observation = {'worker_id': 'claude', 'observed_at': '2026-09-26T10:01:00Z',
+                'consumed_percent': None, 'reset_at': None, 'provider_diagnostics': {
+                    'capacity_mode': 'provider_signal', 'capacity_scope': 'provider_signal',
+                    'service_state': 'unhealthy', 'authentication_state': 'valid',
+                    'live_invocation_state': 'failed', 'limit_signal': 'RATE_LIMIT'}}
+            write_collected_usage(path, config, [{'worker_id': 'claude', 'observations': (observation,)}])
+            result = validate_usage(json.loads(path.read_text()))
+            self.assertEqual(result['claude']['review']['limit_signal'], 'RATE_LIMIT')

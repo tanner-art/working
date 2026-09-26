@@ -24,6 +24,7 @@ from scripts.factory_registry import (
     parse_claude_stream_json,
     parse_claude_transcript,
 )
+from scripts.factory_registry.claude_telemetry import claude_provider_signal
 
 
 def cli_result(**overrides: object) -> bytes:
@@ -52,6 +53,14 @@ def cli_result(**overrides: object) -> bytes:
 
 
 class ClaudeParserTest(unittest.TestCase):
+    def test_health_signal_is_content_free_and_limit_is_restrictive(self) -> None:
+        healthy = claude_provider_signal("claude", observed_at="2026-09-26T10:00:00Z", succeeded=True)
+        self.assertEqual(healthy["state"], "NORMAL")
+        self.assertEqual(healthy["provider_diagnostics"]["limit_signal"], "NONE")
+        limited = claude_provider_signal("claude", observed_at="2026-09-26T10:00:01Z", succeeded=False,
+                                         output="HTTP 429 rate limit")
+        self.assertEqual(limited["state"], "HARD_STOP")
+        self.assertEqual(limited["provider_diagnostics"]["limit_signal"], "RATE_LIMIT")
     def test_json_captures_structured_usage_without_message_content(self) -> None:
         entry = parse_claude_json(
             cli_result(),
