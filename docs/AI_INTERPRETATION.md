@@ -127,9 +127,11 @@ closed. Every response uses `Cache-Control: no-store` and `X-Content-Type-Option
   documented limitation in `src/interpretationService.ts` — this slice does not change that.
 - No retry/backoff is implemented; a provider, authentication, or firewall outage falls back to
   deterministic interpretation for each capture independently.
-- Settings now shows whether the browser is in deterministic-only mode or whether provider
-  attempts are enabled by the client feature flag. This status is configuration-level only;
-  individual proposal provenance and provider success/fallback telemetry remain future work.
+- Settings shows whether the browser is in deterministic-only mode or whether provider
+  attempts are enabled by the client feature flag. Every new interpretation also records and
+  displays whether the exact proposal came from AI, built-in rules, or built-in fallback after
+  an unavailable AI attempt. Historical proposals whose producer was never recorded are labeled
+  honestly rather than guessed.
 - `api/interpret.ts` is type-checked by the dedicated `tsconfig.api.json` target, which is
   included in `pnpm check`. It still is not bundled into the Vite SPA and must not import from
   `src/`, because it runs in the Vercel Edge Function runtime.

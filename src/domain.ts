@@ -28,9 +28,12 @@ export interface LegacyInterpretation {
   summary: string
   suggestedKind: ObjectKind
   rationale: string
+  /** How this exact interpretation was produced; absent only on historical records. */
+  method?: InterpretationMethod
   suggestedProject?: string
   suggestedDate?: string
 }
+export type InterpretationMethod = 'provider' | 'built-in' | 'built-in-fallback'
 export interface ObjectMetadata {
   urgency?: 1 | 2 | 3 | 4 | 5
   deadline?: string
@@ -134,6 +137,8 @@ export interface Interpretation {
   readonly summary: string
   readonly rationale: string
   readonly confidence: number
+  /** Trusted client-side provenance; never accepted from provider output. */
+  readonly method?: InterpretationMethod
   readonly proposedKind: SemanticKind | 'unresolved'
   readonly proposedAction?: ProposedAction
   readonly reviewState: 'review' | 'accepted' | 'rejected'

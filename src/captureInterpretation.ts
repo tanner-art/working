@@ -31,5 +31,5 @@ export async function createInterpretedObject(
   const kind = proposal.proposedKind === 'unresolved' ? 'reminder' : proposal.proposedKind
   return { ...item, kind, confidence: proposal.confidence, status: 'review',
     interpretation: { summary: proposal.summary, rationale: proposal.rationale,
-      suggestedKind: kind, suggestedDate: proposal.suggestedDate } }
+      suggestedKind: kind, suggestedDate: proposal.suggestedDate, method: proposal.method } }
 }

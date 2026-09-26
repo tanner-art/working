@@ -66,6 +66,7 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
     id: `interpretation:${item.id}:${version}`, version, previousId: previous?.id,
     captureIds: [`capture:${item.id}`], recordedAt: item.history.at(-1)?.at ?? item.createdAt,
     summary: item.interpretation.summary, rationale: item.interpretation.rationale, confidence: item.confidence,
+    method: item.interpretation.method,
     proposedKind: item.kind === 'reminder' ? 'unresolved' : item.kind,
     proposedAction: item.kind === 'action' && !confirmation ? { summary: item.interpretation.summary } : undefined,
     reviewState: rejected ? 'rejected' : accepted ? 'accepted' : 'review', confirmation,

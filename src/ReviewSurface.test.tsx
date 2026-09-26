@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { Review } from './App'
 import type { ThoughtObject } from './domain'
 
-const thought = (status: ThoughtObject['status'] = 'review'): ThoughtObject => ({
+const thought = (status: ThoughtObject['status'] = 'review', method?: ThoughtObject['interpretation']['method']): ThoughtObject => ({
   id: `thought:${status}`,
   kind: 'idea',
   originalContent: 'Explore a calmer launch plan',
@@ -11,7 +11,7 @@ const thought = (status: ThoughtObject['status'] = 'review'): ThoughtObject => (
   confidence: .72,
   status,
   createdAt: '2026-09-26T08:00:00.000Z',
-  interpretation: { summary: 'Explore a calmer launch plan', suggestedKind: 'idea', rationale: 'An idea to consider.' },
+  interpretation: { summary: 'Explore a calmer launch plan', suggestedKind: 'idea', rationale: 'An idea to consider.', method },
   metadata: {},
   relationships: [],
   history: status === 'confirmed' ? [{ at: '2026-09-26T08:01:00.000Z', event: 'Confirmed as idea', confirmation: { objectId: `thought:${status}`, transition: 'idea', summary: 'Explore a calmer launch plan', source: 'review-confirmation' } }] : [],
@@ -31,5 +31,15 @@ describe('mounted Review surface', () => {
     expect(markup).toContain('id="ideas-heading"')
     expect(markup).toContain('Explore a calmer launch plan')
     expect(markup).not.toContain('No resolved ideas yet.')
+  })
+
+  it.each([
+    ['provider', 'Interpreted by AI'],
+    ['built-in', 'Interpreted by built-in rules'],
+    ['built-in-fallback', 'Built-in interpretation used because AI was unavailable'],
+    [undefined, 'Interpretation source was not recorded'],
+  ] as const)('shows trustworthy per-capture provenance for %s', (method, label) => {
+    const markup = renderToStaticMarkup(<Review objects={[thought('review', method)]} onResolve={() => undefined} onReject={() => undefined} onOpen={() => undefined} />)
+    expect(markup).toContain(label)
   })
 })
