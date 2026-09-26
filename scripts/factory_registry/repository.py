@@ -12,6 +12,7 @@ from .models import (
     Feature,
     Lease,
     ReviewOutcome,
+    ReviewInput,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -221,6 +222,10 @@ class Registry(Protocol):
         expected_revision: int | None = None,
         operation_id: str | None = None,
     ) -> int: ...
+
+    def record_review_input(self, review_input: ReviewInput, *, operation_id: str | None = None) -> None: ...
+
+    def review_input(self, review_package_id: str) -> Mapping[str, Any]: ...
 
     def register_attempt(self, attempt: Attempt) -> None: ...
 
