@@ -21,6 +21,13 @@ This optional runner path keeps real provider observations fresh during a bounde
 
 The collector reads Codex account identity and rate limits once, compares that identity to each alias's existing Registry binding, and emits the same sampled windows and timestamps for the alias. A missing or mismatched binding fails closed. It does not start a Codex model turn or create a separate `usage.json` account record for Orchestra.
 
+For `orchestra-agent-b`, the already-reconciled Registry
+`provider_diagnostics.capacity_pool` must contain the exact raw
+`account_identity_sha256` measured by the `codex-b` collector. The binding is
+not an alias-derived identity and is not re-hashed. Orchestra remains
+Registry-only unless it is explicitly added as a reviewed implementation agent;
+its alias observation is not a dispatchable `usage.json` worker record.
+
 Claude uses the configured reviewed Keychain-wrapper command (or the configured Claude agent command when no probe command is supplied). Its bounded probe has a fixed source-free prompt, JSON output, no tools, and no permission prompts. It records only health/auth/invocation/limit fields; provider output and credentials are not published. `cadence_seconds` is 60 by default (1–900); existing fresh Registry evidence suppresses concurrent lane polls. The runner also skips this probe whenever Claude has an active Registry lease and uses real invocation evidence instead. This does not extend or release that lease: an expired signal on a busy reviewer remains constrained until real invocation evidence is recorded.
 
 ## Activation
@@ -38,3 +45,8 @@ Each Codex collector, each alias, and the Claude path are isolated. A failed Cod
 - Fresh provider-signal evidence remains scheduler-eligible across 930 simulated seconds; stale and failed/rate-limited evidence constrains it without observation-driven ownership changes: `BoundedRunnerMainTests.test_provider_signal_refreshes_keep_scheduler_eligible_then_fail_closed_when_stale_or_limited`.
 
 Commands/results: `PYTHONPATH=scripts/runner:. python3 -m unittest scripts.runner.test_registry_control.RunnerRegistryControlTests.test_expired_claude_signal_is_reprobed_without_changing_ownership scripts.runner.test_runner.ProcessTests.test_concurrent_capacity_refresh_collects_and_publishes_once scripts.runner.test_usable_integration.BoundedRunnerMainTests.test_provider_signal_refreshes_keep_scheduler_eligible_then_fail_closed_when_stale_or_limited scripts.runner.test_capacity_publication` passed (7 tests). `pnpm test` passed (59 files, 725 tests) and `pnpm run check:api` passed. `PYTHONPATH=scripts/runner:. python3 -m unittest discover -s scripts/runner -p 'test_*.py'` ran 286 tests with 1 sandbox loopback error: `test_factory_dashboard.HttpRouteTests` could not bind `127.0.0.1` (`PermissionError: [Errno 1] Operation not permitted`). `PYTHONPATH=scripts/runner:. python3 -m unittest discover -s scripts/factory_registry -p 'test_*.py'` ran 232 tests with 29 equivalent sandbox loopback errors in `test_control_center_projection.ProjectionTransportTest` and one unrelated existing failure, `test_operator.OperatorFixture.test_preservation_is_pinned_and_installed_owner_only` (expected `OperatorError` was not raised). No live provider calls or simulated-window sleeps are used. The shared `pnpm check` remains runner-owned.
+
+## TASK-309 regression evidence
+
+- `CapacityPublicationTests.test_registry_only_alias_does_not_block_configured_usage_publication` invokes the real publisher with the reviewed three-agent (`codex-a`, `codex-b`, `claude`) configuration and A/B/Orchestra/Claude observations. It preserves the measured timestamps for configured workers and proves that `orchestra-agent-b` is not published as a dispatchable worker.
+- `ProcessTests.test_capacity_refresh_publishes_configured_workers_not_registry_only_alias` invokes the real refresh and usage publisher with a four-observation fake collector. It verifies no collection-failure output, a fresh on-disk publication for configured workers, and that stale percentage evidence and a restrictive Claude provider signal remain constrained.

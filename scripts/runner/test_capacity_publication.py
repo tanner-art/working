@@ -67,3 +67,52 @@ class CapacityPublicationTests(unittest.TestCase):
             result = validate_usage(json.loads(path.read_text()))
             self.assertEqual(result['codex-a']['agent-a']['scopes']['short_window']['observed_at'],
                              '2026-09-26T10:00:00+00:00')
+
+    def test_registry_only_alias_does_not_block_configured_usage_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'usage.json'
+            measured_at = '2026-09-26T10:01:00Z'
+            percentage = lambda worker_id: ({
+                'worker_id': worker_id, 'observed_at': measured_at,
+                'consumed_percent': 11, 'reset_at': None,
+                'provider_diagnostics': {
+                    'capacity_mode': 'percentage', 'capacity_scope': 'short_window',
+                    'capacity_pool': 'verified-account-hash',
+                },
+            },)
+            claude = ({
+                'worker_id': 'claude', 'observed_at': measured_at,
+                'consumed_percent': None, 'reset_at': None,
+                'provider_diagnostics': {
+                    'capacity_mode': 'provider_signal', 'capacity_scope': 'provider_signal',
+                    'service_state': 'healthy', 'authentication_state': 'valid',
+                    'live_invocation_state': 'succeeded', 'limit_signal': 'NONE',
+                },
+            },)
+            config = {'agents': {
+                'codex-a': {'model': 'gpt-5.6-terra', 'account': 'agent-a',
+                            'capacity_scopes': ['short_window']},
+                'codex-b': {'model': 'gpt-5.6-terra', 'account': 'agent-b',
+                            'capacity_scopes': ['short_window']},
+                'claude': {'model': 'sonnet', 'account': 'review',
+                           'capacity_mode': 'provider_signal'},
+            }}
+            write_collected_usage(path, config, [
+                {'worker_id': 'codex-a', 'observations': percentage('codex-a')},
+                {'worker_id': 'codex-b', 'observations': percentage('codex-b')},
+                {'worker_id': 'orchestra-agent-b',
+                 'observations': percentage('orchestra-agent-b')},
+                {'worker_id': 'claude', 'observations': claude},
+            ])
+            published = json.loads(path.read_text())['workers']
+            self.assertEqual(set(published), {'codex-a', 'codex-b', 'claude'})
+            self.assertNotIn('orchestra-agent-b', published)
+            self.assertEqual(
+                published['codex-a']['agent-a']['scopes']['short_window']['observed_at'],
+                measured_at,
+            )
+            self.assertEqual(
+                published['codex-b']['agent-b']['scopes']['short_window']['observed_at'],
+                measured_at,
+            )
+            self.assertEqual(published['claude']['review']['observed_at'], measured_at)
