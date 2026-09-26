@@ -278,6 +278,26 @@ class RunnerRegistryControlTests(unittest.TestCase):
         self.assertEqual(tuple(attempt), ("FAILED", "bounded failure"))
         self.assertEqual(package, "BLOCKED")
 
+    def test_blocked_review_is_a_terminal_non_approval_attempt(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        revision = control.pre_claim()
+        with patch("registry_control.os.getpid", return_value=900):
+            control.reserve_attempt(
+                "attempt-blocked", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=revision,
+            )
+        control.block("attempt-blocked", "assigned contract is unavailable")
+        with self.registry._connection() as connection:
+            attempt = connection.execute(
+                "SELECT outcome, failure_detail FROM attempts WHERE id='attempt-blocked'"
+            ).fetchone()
+            package = connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK-1'"
+            ).fetchone()[0]
+        self.assertEqual(tuple(attempt), ("BLOCKED", "assigned contract is unavailable"))
+        self.assertEqual(package, "BLOCKED")
+
     def test_lease_revocation_stops_renewal_and_recovery_closes_runtime(self):
         now = datetime.now(timezone.utc)
         self.registry.register_feature(

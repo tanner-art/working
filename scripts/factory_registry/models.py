@@ -91,6 +91,26 @@ class ReviewOutcomeState(StringEnum):
 
 
 @dataclass(frozen=True)
+class ReviewInput:
+    """Immutable handoff binding one review attempt to one implementation."""
+
+    evidence_id: str
+    review_package_id: str
+    target_package_id: str
+    implementation_attempt_id: str
+    implementation_commit: str
+    base_commit: str
+    pr_url: str
+    contract_sha256: str
+    contract_content: Mapping[str, Any]
+    validation_evidence_ids: tuple[str, ...]
+    implementer_worker_id: str
+    reviewer_worker_id: str
+    review_attempt_id: str
+    requested_at: str
+
+
+@dataclass(frozen=True)
 class Feature:
     id: str
     title: str

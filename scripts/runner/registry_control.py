@@ -21,7 +21,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.factory_registry.models import TaskStatus  # noqa: E402
+from scripts.factory_registry.models import (  # noqa: E402
+    Evidence,
+    ReviewOutcome,
+    ReviewOutcomeState,
+    TaskStatus,
+)
 from scripts.factory_registry.repository import RegistryConflict  # noqa: E402
 from scripts.factory_registry.shadow_dispatch import decide_shadow  # noqa: E402
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E402
@@ -168,7 +173,14 @@ class RunnerRegistryControl:
         package_id: str,
         worker_id: str,
         expected_revision: int,
+        task_contract=None,
     ) -> None:
+        diagnostics = {}
+        if task_contract is not None:
+            diagnostics = {
+                "task_contract": task_contract,
+                "task_contract_sha256": queue_contract_digest(task_contract),
+            }
         self.registry.begin_attempt_runtime(
             attempt_id,
             package_id=package_id,
@@ -176,7 +188,53 @@ class RunnerRegistryControl:
             runner_pid=os.getpid(),
             started_at=utc_now(),
             expected_revision=expected_revision,
+            provider_diagnostics=diagnostics,
             operation_id=f"attempt-start:{attempt_id}",
+        )
+
+    def record_delivery(
+        self,
+        attempt_id: str,
+        *,
+        package_id: str,
+        branch: str,
+        base_commit: str,
+        implementation_commit: str,
+        pr_url: str,
+    ) -> None:
+        recorded_at = utc_now()
+        self.registry.record_attempt_delivery(
+            attempt_id,
+            branch=branch,
+            base_commit=base_commit,
+            implementation_commit=implementation_commit,
+            pr_url=pr_url,
+            validation_evidence=Evidence(
+                id=f"validation:{attempt_id}",
+                package_id=package_id,
+                kind="validation",
+                uri=None,
+                summary="Runner validation passed for the delivered implementation commit.",
+                recorded_at=recorded_at,
+                metadata={
+                    "attempt_id": attempt_id,
+                    "base_commit": base_commit,
+                    "implementation_commit": implementation_commit,
+                    "checks": ["pnpm check", "git diff --check"],
+                },
+            ),
+            operation_id=f"attempt-delivery:{attempt_id}",
+        )
+
+    def prepare_review_input(
+        self, review_package_id: str, *, reviewer_worker_id: str, review_attempt_id: str
+    ):
+        return self.registry.prepare_review_input(
+            review_package_id,
+            reviewer_worker_id=reviewer_worker_id,
+            review_attempt_id=review_attempt_id,
+            requested_at=utc_now(),
+            operation_id=f"prepare-review-input:{review_attempt_id}",
         )
 
     def pre_launch(self) -> int:
@@ -217,6 +275,51 @@ class RunnerRegistryControl:
             operation_id=f"attempt-finish:{attempt_id}",
         )
 
+    def complete_review(self, attempt_id: str, review_input, verdict) -> None:
+        decided_at = utc_now()
+        self.registry.finish_attempt_runtime(
+            attempt_id,
+            ended_at=decided_at,
+            outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW,
+            reason="reviewer returned a valid structured verdict",
+            operation_id=f"attempt-finish:{attempt_id}",
+        )
+        evidence_id = f"review-verdict:{attempt_id}"
+        evidence = Evidence(
+            id=evidence_id,
+            package_id=review_input.review_package_id,
+            kind="review",
+            uri=None,
+            summary=f"Structured review verdict: {verdict.decision}",
+            recorded_at=decided_at,
+            metadata={
+                "schema_version": 1,
+                "attempt_id": attempt_id,
+                "decision": verdict.decision,
+                "review_input_evidence_id": verdict.review_input_evidence_id,
+                "reviewed_commit": verdict.reviewed_commit,
+            },
+        )
+        self.registry.record_review_outcome(
+            ReviewOutcome(
+                id=f"review-outcome:{attempt_id}",
+                review_package_id=review_input.review_package_id,
+                target_package_id=review_input.target_package_id,
+                implementer_worker_id=review_input.implementer_worker_id,
+                reviewer_worker_id=review_input.reviewer_worker_id,
+                requested_at=review_input.requested_at,
+                decided_at=decided_at,
+                state=ReviewOutcomeState(verdict.decision),
+                findings=verdict.findings,
+                changes_requested=verdict.changes_requested,
+                approval_evidence_ids=(evidence_id,),
+            ),
+            evidence=evidence,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            operation_id=f"review-outcome:{attempt_id}",
+        )
+
     def fail(self, attempt_id: str, detail: str) -> None:
         ended_at = utc_now()
         try:
@@ -242,6 +345,17 @@ class RunnerRegistryControl:
             )
             if not recovered:
                 raise
+
+    def block(self, attempt_id: str, detail: str) -> None:
+        self.registry.finish_attempt_runtime(
+            attempt_id,
+            ended_at=utc_now(),
+            outcome="BLOCKED",
+            next_status=TaskStatus.BLOCKED,
+            reason="reviewer could not inspect the assigned target",
+            failure_detail=detail,
+            operation_id=f"attempt-finish:{attempt_id}",
+        )
 
     def fail_if_active(self, attempt_id: str, detail: str) -> bool:
         """Close stale ownership once; an already terminal attempt is a safe no-op."""

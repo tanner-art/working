@@ -53,7 +53,7 @@ from scripts.factory_registry.operator import (
 from scripts.factory_registry.operator_cli import main as operator_main
 from scripts.factory_registry.repository import RegistryConflict
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry
-from scripts.runner.registry_control import RunnerRegistryControl
+from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest
 
 
 COMMIT = "a" * 40
@@ -1209,6 +1209,22 @@ class OperatorFixture(unittest.TestCase):
             runner_pid=os.getpid(),
             started_at=(now + timedelta(seconds=3)).isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
+            provider_diagnostics={
+                "task_contract": self.canary()["implementation"]["queue_contract"],
+                "task_contract_sha256": queue_contract_digest(
+                    self.canary()["implementation"]["queue_contract"]
+                ),
+            },
+        )
+        self.registry.record_attempt_delivery(
+            "implementation-attempt", branch="runner/canary",
+            base_commit="b" * 40, implementation_commit="a" * 40,
+            pr_url="https://github.com/tanner-art/working/pull/999",
+            validation_evidence=Evidence(
+                "implementation-validation", "TASK-201", "validation", None,
+                "Canary validation passed", (now + timedelta(seconds=3)).isoformat(),
+                {"attempt_id": "implementation-attempt"},
+            ),
         )
         self.registry.finish_attempt_runtime(
             "implementation-attempt",
@@ -1234,6 +1250,11 @@ class OperatorFixture(unittest.TestCase):
             runner_pid=os.getpid(),
             started_at=(now + timedelta(seconds=6)).isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        review_input = self.registry.prepare_review_input(
+            "TASK-202", reviewer_worker_id="claude",
+            review_attempt_id="review-attempt",
+            requested_at=(now + timedelta(seconds=6)).isoformat(),
         )
         self.registry.finish_attempt_runtime(
             "review-attempt",
@@ -1266,7 +1287,13 @@ class OperatorFixture(unittest.TestCase):
                     "uri": "https://example.invalid/review",
                     "summary": "Independent review approved the bounded canary.",
                     "recorded_at": (now + timedelta(seconds=7)).isoformat(),
-                    "metadata": {"attempt_id": "review-attempt"},
+                    "metadata": {
+                        "schema_version": 1,
+                        "attempt_id": "review-attempt",
+                        "decision": "APPROVED",
+                        "review_input_evidence_id": review_input.evidence_id,
+                        "reviewed_commit": "a" * 40,
+                    },
                 },
                 "outcome": {
                     "id": "review-outcome",
@@ -1286,7 +1313,10 @@ class OperatorFixture(unittest.TestCase):
         self.assertEqual(evidence["reviewer_attempt_id"], "review-attempt")
         snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
         self.assertEqual(snapshot.review_outcomes[0]["state"], "APPROVED")
-        self.assertEqual(snapshot.evidence[0]["metadata"]["attempt_id"], "review-attempt")
+        review_evidence = next(
+            item for item in snapshot.evidence if item["id"] == "review-evidence"
+        )
+        self.assertEqual(review_evidence["metadata"]["attempt_id"], "review-attempt")
         self.assertEqual(
             {
                 item["id"]: item["status"] for item in snapshot.work_packages
@@ -1327,6 +1357,22 @@ class OperatorFixture(unittest.TestCase):
             "implementation-attempt", package_id="TASK-201", worker_id="codex-a",
             runner_pid=os.getpid(), started_at=(now + timedelta(seconds=3)).isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
+            provider_diagnostics={
+                "task_contract": self.canary()["implementation"]["queue_contract"],
+                "task_contract_sha256": queue_contract_digest(
+                    self.canary()["implementation"]["queue_contract"]
+                ),
+            },
+        )
+        self.registry.record_attempt_delivery(
+            "implementation-attempt", branch="runner/canary",
+            base_commit="b" * 40, implementation_commit="a" * 40,
+            pr_url="https://github.com/tanner-art/working/pull/999",
+            validation_evidence=Evidence(
+                "implementation-validation", "TASK-201", "validation", None,
+                "Canary validation passed", (now + timedelta(seconds=3)).isoformat(),
+                {"attempt_id": "implementation-attempt"},
+            ),
         )
         self.registry.finish_attempt_runtime(
             "implementation-attempt", ended_at=(now + timedelta(seconds=4)).isoformat(),
@@ -1342,6 +1388,11 @@ class OperatorFixture(unittest.TestCase):
             "review-attempt-1", package_id="TASK-202", worker_id="claude",
             runner_pid=os.getpid(), started_at=(now + timedelta(seconds=6)).isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        review_input_1 = self.registry.prepare_review_input(
+            "TASK-202", reviewer_worker_id="claude",
+            review_attempt_id="review-attempt-1",
+            requested_at=(now + timedelta(seconds=6)).isoformat(),
         )
         self.registry.finish_attempt_runtime(
             "review-attempt-1", ended_at=(now + timedelta(seconds=8)).isoformat(),
@@ -1371,12 +1422,19 @@ class OperatorFixture(unittest.TestCase):
                 state=ReviewOutcomeState.CHANGES_REQUESTED,
                 findings=("Review targeted the wrong pull request.",),
                 changes_requested=("Run a fresh review against the bound canary commit.",),
+                approval_evidence_ids=("review-evidence-1",),
             ),
             evidence=Evidence(
                 "review-evidence-1", "TASK-202", "review",
                 "https://example.invalid/review-1", "Wrong target recorded safely.",
                 (now + timedelta(seconds=8)).isoformat(),
-                {"attempt_id": "review-attempt-1"},
+                {
+                    "schema_version": 1,
+                    "attempt_id": "review-attempt-1",
+                    "decision": "CHANGES_REQUESTED",
+                    "review_input_evidence_id": review_input_1.evidence_id,
+                    "reviewed_commit": "a" * 40,
+                },
             ),
             expected_revision=self.registry.dispatch_control()["revision"],
         )
@@ -1412,6 +1470,11 @@ class OperatorFixture(unittest.TestCase):
             runner_pid=os.getpid(), started_at=(now + timedelta(seconds=13)).isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
         )
+        review_input_2 = self.registry.prepare_review_input(
+            "TASK-203", reviewer_worker_id="claude",
+            review_attempt_id="review-attempt-2",
+            requested_at=(now + timedelta(seconds=13)).isoformat(),
+        )
         self.registry.finish_attempt_runtime(
             "review-attempt-2", ended_at=(now + timedelta(seconds=15)).isoformat(),
             outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
@@ -1436,7 +1499,13 @@ class OperatorFixture(unittest.TestCase):
                 "review-evidence-2", "TASK-203", "review",
                 "https://example.invalid/review-2", "Fresh bound approval.",
                 (now + timedelta(seconds=15)).isoformat(),
-                {"attempt_id": "review-attempt-2"},
+                {
+                    "schema_version": 1,
+                    "attempt_id": "review-attempt-2",
+                    "decision": "APPROVED",
+                    "review_input_evidence_id": review_input_2.evidence_id,
+                    "reviewed_commit": "a" * 40,
+                },
             ),
             expected_revision=self.registry.dispatch_control()["revision"],
         )

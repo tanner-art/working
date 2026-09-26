@@ -12,6 +12,7 @@ from .models import (
     Feature,
     Lease,
     ReviewOutcome,
+    ReviewInput,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -139,8 +140,31 @@ class Registry(Protocol):
         runner_pid: int,
         started_at: str,
         expected_revision: int,
+        provider_diagnostics: Mapping[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> None: ...
+
+    def record_attempt_delivery(
+        self,
+        attempt_id: str,
+        *,
+        branch: str,
+        base_commit: str,
+        implementation_commit: str,
+        pr_url: str,
+        validation_evidence: Evidence,
+        operation_id: str | None = None,
+    ) -> None: ...
+
+    def prepare_review_input(
+        self,
+        review_package_id: str,
+        *,
+        reviewer_worker_id: str,
+        review_attempt_id: str,
+        requested_at: str,
+        operation_id: str | None = None,
+    ) -> ReviewInput: ...
 
     def finish_attempt_runtime(
         self,

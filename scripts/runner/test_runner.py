@@ -534,6 +534,10 @@ class LifecycleTests(unittest.TestCase):
             registry.record_process.side_effect = lambda *args, **kwargs: calls.append(
                 ['registry', 'bind']
             )
+            if kind == 'REVIEW':
+                registry.prepare_review_input.side_effect = RuntimeError(
+                    'review input missing'
+                )
             with patch.object(runner, 'run', side_effect=fake_run), snapshot, \
                  patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
                  patch.object(runner.os, 'getpgid', return_value=901), \
