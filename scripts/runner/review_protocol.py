@@ -8,6 +8,22 @@ from scripts.factory_registry.models import ReviewInput, ReviewOutcomeState, Rev
 _SHA = re.compile(r"^[0-9a-f]{40,64}$")
 class ReviewProtocolError(ValueError):
     """The review was blocked, missing required input, or not parseable."""
+
+
+def _unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ReviewProtocolError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_json(value, *, message):
+    try:
+        return json.loads(value, object_pairs_hook=_unique_object)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ReviewProtocolError(message) from error
 def contract_digest(contract: Mapping[str, Any]) -> str:
     if not isinstance(contract, Mapping): raise ReviewProtocolError("review contract must be an object")
     return hashlib.sha256(json.dumps(dict(contract), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -25,8 +41,19 @@ def review_handoff(value: ReviewInput, *, reviewer_worker_id: str, review_attemp
     return json.dumps({"review_input_id": value.id, "target_package_id": value.target_package_id, "implementation_attempt_id": value.implementation_attempt_id, "implementation_commit": value.implementation_commit, "base_commit": value.base_commit, "pr_url": value.pr_url, "contract_sha256": value.contract_sha256, "contract": dict(value.contract), "validation_evidence": dict(value.validation_evidence), "reviewer_worker_id": reviewer_worker_id, "review_attempt_id": review_attempt_id}, sort_keys=True, indent=2, ensure_ascii=False)
 def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdict:
     validate_review_input(review_input)
-    try: raw = json.loads(output)
-    except (TypeError, json.JSONDecodeError) as error: raise ReviewProtocolError("review verdict is unparseable") from error
+    raw = _load_json(output, message="review verdict is unparseable")
+    # Claude's JSON mode wraps the model result.  Only accept its documented,
+    # successful result envelope; accepting arbitrary wrappers would make an
+    # error payload or a transcript look like a review decision.
+    if isinstance(raw, Mapping) and "type" in raw:
+        if (raw.get("type") != "result" or raw.get("is_error") is not False
+                or raw.get("subtype") not in (None, "success")
+                or "error" in raw):
+            raise ReviewProtocolError("review provider result was not successful")
+        result = raw.get("result")
+        if not isinstance(result, str):
+            raise ReviewProtocolError("review provider result is not verdict JSON")
+        raw = _load_json(result, message="review provider result is not verdict JSON")
     if not isinstance(raw, Mapping) or set(raw) != {"state", "reviewed_commit", "reviewed_base_commit", "contract_sha256", "findings", "changes_requested"}: raise ReviewProtocolError("review verdict schema is invalid")
     try: state = ReviewOutcomeState(raw["state"])
     except (KeyError, ValueError) as error: raise ReviewProtocolError("review verdict state is invalid") from error
@@ -37,4 +64,3 @@ def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdic
     if verdict.state is ReviewOutcomeState.APPROVED and verdict.changes_requested: raise ReviewProtocolError("approved verdict cannot request changes")
     if verdict.state is ReviewOutcomeState.CHANGES_REQUESTED and not verdict.changes_requested: raise ReviewProtocolError("changes-requested verdict requires requested changes")
     return verdict
-

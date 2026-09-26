@@ -26,6 +26,42 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
     def test_verdict_schema_rejects_extra_provider_text(self):
         with self.assertRaisesRegex(ReviewProtocolError, "schema"): parse_review_verdict(self.verdict(extra="not allowed"), self.input)
 
+    def test_successful_claude_json_envelope_is_normalized_but_errors_are_rejected(self):
+        envelope = json.dumps({
+            "type": "result", "is_error": False, "result": self.verdict(),
+            "session_id": "diagnostic-only",
+        })
+        self.assertEqual(
+            parse_review_verdict(envelope, self.input).state,
+            ReviewOutcomeState.APPROVED,
+        )
+        for value in (
+            {"type": "result", "is_error": True, "result": self.verdict()},
+            {"type": "assistant", "is_error": False, "result": self.verdict()},
+            {"type": "result", "is_error": False, "result": "prose"},
+            {"type": "result", "is_error": False, "subtype": "error_during_execution", "result": self.verdict()},
+            {"type": "result", "is_error": False, "error": {"message": "no"}, "result": self.verdict()},
+        ):
+            with self.subTest(value=value["type"]):
+                with self.assertRaises(ReviewProtocolError):
+                    parse_review_verdict(json.dumps(value), self.input)
+
+    def test_duplicate_keys_and_ambiguous_verdicts_are_rejected(self):
+        duplicate_state = (
+            '{"state":"APPROVED","state":"CHANGES_REQUESTED",'
+            f'"reviewed_commit":"{self.commit}","reviewed_base_commit":"{self.base}",'
+            f'"contract_sha256":"{self.input.contract_sha256}",'
+            '"findings":[],"changes_requested":[]}'
+        )
+        duplicate_envelope = (
+            '{"type":"result","is_error":false,"is_error":false,'
+            + '"result":' + json.dumps(self.verdict()) + '}'
+        )
+        for value in (duplicate_state, duplicate_envelope):
+            with self.subTest(value=value[:20]):
+                with self.assertRaisesRegex(ReviewProtocolError, "duplicate JSON key"):
+                    parse_review_verdict(value, self.input)
+
     def test_non_ascii_contract_digests_match_without_changing_receipt_digest(self):
         contract = {"task": "TÄSK-1", "instructions": "résumé ✅"}
         sqlite_review = _review_contract_sha256(contract)

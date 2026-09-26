@@ -1380,6 +1380,13 @@ class SQLiteRegistry:
                     raise RegistryConflict("ATTEMPT_RUNTIME_NOT_ACTIVE")
                 if ended_at < row["started_at"]:
                     raise RegistryConflict("INVALID_ATTEMPT_CHRONOLOGY")
+                # Wall-clock attempt occupancy is accounting metadata, never
+                # model/provider billing. Both counters receive exactly this
+                # normalized duration in this terminal transaction.
+                elapsed_seconds = (
+                    datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+                    - datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+                ).total_seconds()
                 lease = connection.execute(
                     "SELECT released_at FROM leases WHERE id=?", (row["lease_id"],)
                 ).fetchone()
@@ -1393,9 +1400,10 @@ class SQLiteRegistry:
                 )
                 connection.execute(
                     """UPDATE attempts
-                       SET ended_at=?, outcome=?, failure_detail=?
+                       SET ended_at=?, outcome=?, failure_detail=?,
+                           runtime_seconds=runtime_seconds + ?
                        WHERE id=?""",
-                    (ended_at, outcome, failure_detail, attempt_id),
+                    (ended_at, outcome, failure_detail, elapsed_seconds, attempt_id),
                 )
                 connection.execute(
                     "UPDATE leases SET released_at=?, release_reason=? WHERE id=?",
@@ -1403,12 +1411,14 @@ class SQLiteRegistry:
                 )
                 package_updated = connection.execute(
                     """UPDATE work_packages
-                       SET status=?, updated_at=?, failure_detail=?
+                       SET status=?, updated_at=?, failure_detail=?,
+                           runtime_seconds=runtime_seconds + ?
                        WHERE id=? AND status='ACTIVE'""",
                     (
                         next_status.value,
                         ended_at,
                         failure_detail,
+                        elapsed_seconds,
                         row["package_id"],
                     ),
                 ).rowcount
@@ -1646,6 +1656,46 @@ class SQLiteRegistry:
                 )
                 self._bump_revision(connection)
                 connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def record_worker_heartbeat(self, worker_id: str, *, observed_at: str) -> int:
+        """Atomically record a runner observation without reconfiguring a worker.
+
+        This deliberately changes only a truthful, monotonic heartbeat.  It is
+        safe for BUSY workers because it cannot alter their identity, capacity,
+        availability, lease, or ownership records.
+        """
+        observed_at = _normalize_timestamp(observed_at)
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                control = connection.execute(
+                    "SELECT dispatch_mode FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "LIVE":
+                    raise RegistryConflict("DISPATCH_PAUSED")
+                worker = connection.execute(
+                    "SELECT last_heartbeat_at FROM workers WHERE id=?", (worker_id,)
+                ).fetchone()
+                if worker is None:
+                    raise RegistryNotFound(f"worker {worker_id}")
+                prior = worker["last_heartbeat_at"]
+                if prior is not None and observed_at <= prior:
+                    raise RegistryConflict("INVALID_HEARTBEAT_CHRONOLOGY")
+                connection.execute(
+                    "UPDATE workers SET last_heartbeat_at=?, updated_at=? WHERE id=?",
+                    (observed_at, observed_at, worker_id),
+                )
+                self._insert_event(
+                    connection, "WORKER_HEARTBEAT_OBSERVED", observed_at,
+                    None, worker_id, None, {},
+                )
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
             except Exception:
                 connection.rollback()
                 raise

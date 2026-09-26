@@ -36,6 +36,19 @@
   }
   header h1 { font-size: 1.25rem; margin: 0; }
   header .meta { color: var(--muted); font-size: 0.85rem; }
+  .refresh-control { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  button {
+    border: 1px solid var(--blue);
+    border-radius: 8px;
+    background: rgba(74,134,232,0.16);
+    color: var(--text);
+    padding: 8px 12px;
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(74,134,232,0.28); }
+  button:disabled { cursor: progress; opacity: 0.65; }
   main {
     padding: clamp(12px, 3vw, 32px);
     display: grid;
@@ -126,23 +139,44 @@
   <h1>Threadline Factory Dashboard</h1>
   <span class="meta" id="generated-at">loading…</span>
   <span class="meta" id="stale-badge"></span>
+  <div class="refresh-control">
+    <button id="refresh-button" type="button">Refresh Factory State</button>
+    <span class="meta" id="refresh-status" aria-live="polite">Not refreshed yet</span>
+  </div>
 </header>
 <div id="error-banner"></div>
 <main>
 
+  <section id="section-registry">
+    <h2>Authoritative Factory State</h2>
+    <div class="kpis" id="registry-kpis"></div>
+    <p class="note" id="registry-note"></p>
+  </section>
+
+  <section id="section-registry-queue">
+    <h2>Registry Work Packages</h2>
+    <div class="table-wrap">
+      <table id="registry-packages-table">
+        <thead><tr><th>Package</th><th>State</th><th>Kind</th><th>Lane</th><th>Dependencies</th><th>Owner</th><th>Attempts</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="note">Read directly from the Registry projection. Refresh never registers, claims, or dispatches work.</p>
+  </section>
+
   <section id="section-heartbeat">
-    <h2>Runner Heartbeat</h2>
+    <h2>Runner / Observer Heartbeat</h2>
     <div id="heartbeat-body"><span class="unknown">Loading…</span></div>
   </section>
 
   <section id="section-workers">
-    <h2>Workers (Provider / Model)</h2>
+    <h2>Workers (Registry + Provider Capacity)</h2>
     <div class="grid" id="workers-grid"></div>
     <p class="note" id="workers-note"></p>
   </section>
 
   <section id="section-queue">
-    <h2>Queue</h2>
+    <h2>Legacy Queue Compatibility</h2>
     <div class="kpis" id="queue-kpis"></div>
     <div class="table-wrap">
       <table id="queue-status-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody></tbody></table>
@@ -151,7 +185,7 @@
   </section>
 
   <section id="section-issues">
-    <h2>Issues (current + completed)</h2>
+    <h2>Legacy Runner History</h2>
     <div class="table-wrap">
       <table id="issues-table">
         <thead>
@@ -190,6 +224,7 @@
 <script>
 (function () {
   var REFRESH_MS = 10000;
+  var REFRESH_TIMEOUT_MS = 8000;
 
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -220,7 +255,7 @@
     while (node.firstChild) node.removeChild(node.firstChild);
   }
 
-  function renderHeartbeat(hb) {
+  function renderHeartbeat(hb, registryAvailable) {
     var body = document.getElementById('heartbeat-body');
     clearChildren(body);
     var staleBadge = document.getElementById('stale-badge');
@@ -240,8 +275,92 @@
     ]);
     body.appendChild(lines);
     if (hb.stale) {
-      staleBadge.appendChild(badge('STALE', 'stop'));
+      staleBadge.appendChild(badge(registryAvailable ? 'OBSERVER STALE' : 'STALE',
+        registryAvailable ? 'unknown' : 'failed'));
     }
+  }
+
+  function registryPackages(registry) {
+    if (!registry || !registry.available || !registry.projection) return [];
+    var packages = [];
+    registry.projection.features.forEach(function (feature) {
+      feature.packages.forEach(function (pkg) { packages.push(pkg); });
+    });
+    return packages;
+  }
+
+  function renderRegistry(registry) {
+    var kpis = document.getElementById('registry-kpis');
+    var note = document.getElementById('registry-note');
+    var tbody = document.querySelector('#registry-packages-table tbody');
+    clearChildren(kpis);
+    clearChildren(tbody);
+    if (!registry || !registry.available) {
+      kpis.appendChild(unknown((registry && registry.error) || 'Registry is not configured'));
+      note.textContent = 'Legacy compatibility telemetry is shown below.';
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '7' }, [unknown('Registry projection unavailable')])]));
+      return;
+    }
+    var projection = registry.projection;
+    var control = registry.control;
+    var ownership = registry.ownership;
+    [
+      ['Registry revision', projection.registryRevision],
+      ['Mode', control.dispatch_mode],
+      ['Kill switch', control.kill_switch_engaged ? 'ENGAGED' : 'released'],
+      ['Factory health', projection.factory.health],
+      ['Ready', projection.factory.readyCount],
+      ['Verify / review', projection.factory.verifyReviewCount],
+      ['Blocked', projection.factory.blockedCount],
+      ['Active leases', ownership.active_leases],
+      ['Active attempts', ownership.active_attempts],
+      ['Active runtimes', ownership.active_runtimes],
+      ['Unbound leases', ownership.active_unbound_leases],
+      ['Runtime orphans', ownership.runtime_orphans]
+    ].forEach(function (pair) {
+      kpis.appendChild(el('div', { class: 'kpi' }, [
+        pair[1] == null
+          ? el('div', { class: 'value' }, [unknown('source unavailable')])
+          : el('div', { class: 'value', text: String(pair[1]) }),
+        el('div', { class: 'label', text: pair[0] })
+      ]));
+    });
+    note.textContent = 'Fresh Registry observation ' + projection.generatedAt
+      + '. The revision may remain unchanged when no Factory state was mutated.'
+      + (ownership.error ? ' Partial failure: ' + ownership.error + '.' : '');
+    var packages = registryPackages(registry);
+    if (!packages.length) {
+      tbody.appendChild(el('tr', {}, [el('td', { colspan: '7' }, [unknown('No packages are registered')])]));
+    }
+    packages.forEach(function (pkg) {
+      var badgeClass = pkg.state === 'ACTIVE' ? 'active' : (pkg.state === 'BLOCKED' ? 'blocked' : 'idle');
+      tbody.appendChild(el('tr', {}, [
+        el('td', { text: pkg.id + ' — ' + pkg.title }),
+        el('td', {}, [badge(pkg.state, badgeClass)]),
+        el('td', { text: pkg.kind }),
+        el('td', { text: pkg.lane || '—' }),
+        el('td', { text: pkg.dependencies.length ? pkg.dependencies.join(', ') : 'None' }),
+        el('td', { text: pkg.ownerWorkerId || 'Unclaimed' }),
+        el('td', { text: String(pkg.attemptNumber) })
+      ]));
+    });
+  }
+
+  function registryWorkers(registry) {
+    if (!registry || !registry.available) return null;
+    return registry.projection.workers.map(function (worker) {
+      return {
+        key: worker.id,
+        label: worker.displayName,
+        provider: worker.provider,
+        effective_model: worker.model,
+        dispatch_decision: worker.capacityState,
+        usage_state: worker.capacityState,
+        state: worker.currentPackageId ? 'active' : 'idle',
+        current_issue: worker.currentPackageId,
+        detail: 'Role: ' + worker.role + ' · Health: ' + worker.health
+      };
+    });
   }
 
   function renderWorkers(workers) {
@@ -273,6 +392,7 @@
       } else if (w.reason) {
         body.push(unknown(w.reason));
       }
+      if (w.detail) body.push(el('div', { class: 'note', text: w.detail }));
       grid.appendChild(el('div', { class: 'card' }, body));
     });
   }
@@ -409,13 +529,19 @@
   function render(report) {
     document.getElementById('generated-at').textContent = 'Generated ' + report.generated_at
       + ' — state directory ' + (report.state_dir_found ? 'configured' : 'not found');
-    renderHeartbeat(report.heartbeat);
-    renderWorkers(report.workers);
-    document.getElementById('workers-note').textContent = report.capacity_note;
+    renderRegistry(report.registry);
+    renderHeartbeat(report.heartbeat, report.registry && report.registry.available);
+    renderWorkers(registryWorkers(report.registry) || report.workers);
+    document.getElementById('workers-note').textContent = report.registry && report.registry.available
+      ? 'Worker identity, role, health, and ownership come from the Registry. Provider telemetry freshness is shown below.'
+      : report.capacity_note;
     renderQueue(report.queue);
     renderIssues(report.issues);
     renderUtilization(report.utilization, report.longest_blocked_duration);
-    document.getElementById('capacity-note').textContent = report.capacity_note;
+    document.getElementById('capacity-note').textContent = report.registry && report.registry.available
+      ? 'Authoritative execution mode: ' + report.registry.control.dispatch_mode
+        + '. Runner heartbeats are observer telemetry and do not define execution mode.'
+      : report.capacity_note;
     renderUsage(report.usage);
   }
 
@@ -429,8 +555,20 @@
     document.getElementById('error-banner').style.display = 'none';
   }
 
-  function refresh() {
-    fetch('/api/status', { cache: 'no-store' })
+  function refresh(manual) {
+    var attemptedAt = new Date();
+    var button = document.getElementById('refresh-button');
+    var status = document.getElementById('refresh-status');
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, REFRESH_TIMEOUT_MS);
+    if (manual) {
+      button.disabled = true;
+      button.textContent = 'Refreshing…';
+    }
+    status.textContent = 'Refresh attempted ' + attemptedAt.toLocaleTimeString();
+    fetch('/api/status', {
+      cache: 'no-store', signal: controller.signal
+    })
       .then(function (resp) {
         if (!resp.ok) throw new Error('status endpoint returned ' + resp.status);
         return resp.json();
@@ -438,14 +576,24 @@
       .then(function (report) {
         hideError();
         render(report);
+        status.textContent = 'Last successful refresh ' + new Date().toLocaleTimeString();
       })
       .catch(function (err) {
-        showError('Could not refresh dashboard: ' + err.message);
+        showError('Could not refresh dashboard: '
+          + (err.name === 'AbortError' ? 'request timed out' : err.message));
+      })
+      .finally(function () {
+        clearTimeout(timeout);
+        if (manual) {
+          button.disabled = false;
+          button.textContent = 'Refresh Factory State';
+        }
       });
   }
 
-  refresh();
-  setInterval(refresh, REFRESH_MS);
+  document.getElementById('refresh-button').addEventListener('click', function () { refresh(true); });
+  refresh(false);
+  setInterval(function () { refresh(false); }, REFRESH_MS);
 })();
 </script>
 </body>

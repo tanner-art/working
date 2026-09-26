@@ -162,6 +162,27 @@ class RunnerRegistryControl:
         )
         return lease.id
 
+    def claim_with_retry(
+        self, package_id: str, *, worker_id: str, task_contract,
+        lease_seconds: int, max_attempts: int = 2,
+    ) -> tuple[str, int]:
+        """Re-decide only a bounded number of harmless revision races."""
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        for index in range(max_attempts):
+            revision = self.pre_claim(
+                package_id, worker_id, task_contract=task_contract
+            )
+            try:
+                return self.claim_package(
+                    package_id, worker_id=worker_id,
+                    expected_revision=revision, lease_seconds=lease_seconds,
+                ), revision
+            except RegistryConflict as error:
+                if error.code != "DISPATCH_REVISION_CHANGED" or index + 1 == max_attempts:
+                    raise
+        raise AssertionError("bounded claim retry did not return")
+
     def reserve_attempt(
         self,
         attempt_id: str,
@@ -206,6 +227,12 @@ class RunnerRegistryControl:
             lease_id,
             now=now.isoformat(),
             expires_at=(now + timedelta(seconds=lease_seconds)).isoformat(),
+        )
+
+    def observe_worker_heartbeat(self, worker_id: str, *, observed_at: str | None = None) -> int:
+        """Record runner liveness without invoking worker reconfiguration."""
+        return self.registry.record_worker_heartbeat(
+            worker_id, observed_at=observed_at or utc_now()
         )
 
     def succeed(self, attempt_id: str, *, review_inputs: tuple[ReviewInput, ...] = (), ended_at: str | None = None) -> None:
