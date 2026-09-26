@@ -23,7 +23,28 @@ class CodexCapacityTests(unittest.TestCase):
     def test_missing_fresh_collection_timestamp_fails_closed(self):
         with self.assertRaisesRegex(CapacityCollectorError, "timestamped"):
             normalize_buckets("codex-a", {"ordinary_usage_allowed": True,
-                "account_identity_sha256": "pool-a", "primary": {"usedPercent": 10, "resetsAt": 1}})
+                "account_identity_sha256": "pool-a", "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1}})
+
+    def test_weekly_only_primary_is_not_mislabeled_as_short_window(self):
+        values = normalize_buckets("codex-b", {
+            "ordinary_usage_allowed": True,
+            "account_identity_sha256": "pool-b", "observed_at": "2026-09-26T19:00:00Z",
+            "primary": {"usedPercent": 12, "windowDurationMins": 10080, "resetsAt": 1791016800},
+            "secondary": None,
+        })
+        self.assertEqual(len(values), 1)
+        self.assertEqual(values[0]["provider_diagnostics"]["capacity_scope"], "weekly_window")
+
+    def test_unknown_or_duplicate_window_fails_closed(self):
+        base = {"ordinary_usage_allowed": True, "account_identity_sha256": "pool-a",
+                "observed_at": "2026-09-26T19:00:00Z"}
+        with self.assertRaisesRegex(CapacityCollectorError, "unrecognized"):
+            normalize_buckets("codex-a", {**base, "primary": {
+                "usedPercent": 10, "windowDurationMins": 60}})
+        with self.assertRaisesRegex(CapacityCollectorError, "duplicate"):
+            normalize_buckets("codex-a", {**base,
+                "primary": {"usedPercent": 10, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 20, "windowDurationMins": 300}})
 
     def test_unavailable_account_is_not_reported_as_capacity(self):
         with self.assertRaisesRegex(CapacityCollectorError, "ordinary usage"):
