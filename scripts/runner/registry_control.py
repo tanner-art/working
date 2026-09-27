@@ -32,6 +32,7 @@ from scripts.factory_registry.codex_capacity import (  # noqa: E402
 from scripts.factory_registry.claude_telemetry import (  # noqa: E402
     claude_provider_signal, probe_claude_health,
 )
+from scripts.runner.task_readiness import check_packet  # noqa: E402
 try:  # Support both the installed runner script and package imports in tests.
     from scripts.runner.session_queue import (  # noqa: E402
         ordered_assignments, ordered_assignments_for_worker,
@@ -110,11 +111,12 @@ def terminate_recorded_process_group(pgid: int, timeout: float = 10) -> None:
 
 
 class RunnerRegistryControl:
-    def __init__(self, database: pathlib.Path) -> None:
+    def __init__(self, database: pathlib.Path, repository: pathlib.Path | None = None) -> None:
         self.database = pathlib.Path(database)
         if not self.database.is_absolute():
             raise ValueError("registry_database must be an absolute path")
         self.registry = SQLiteRegistry(self.database)
+        self.repository = pathlib.Path(repository) if repository is not None else None
 
     @classmethod
     def from_config(cls, config):
@@ -123,7 +125,8 @@ class RunnerRegistryControl:
             return None
         if not isinstance(database, str) or not database:
             raise ValueError("registry_database must be a non-empty absolute path")
-        return cls(pathlib.Path(database))
+        repository = config.get("repo")
+        return cls(pathlib.Path(database), pathlib.Path(repository) if repository else None)
 
     def pre_claim(
         self,
@@ -162,6 +165,16 @@ class RunnerRegistryControl:
             # source, never the mutable work contract or scheduler.
             if package.get("source_system") != "github_issue" or package.get("source_ref") != str(github_issue):
                 raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+        if isinstance(task_contract, dict) and task_contract.get("schema_version") == 2:
+            if package is None:
+                raise RegistryConflict("TASK_NOT_READY", "PACKAGE_MISSING")
+            readiness = check_packet(
+                task_contract, repository=self.repository,
+                run_base=self.integration_base(), package=package,
+                snapshot=snapshot, github_issue=github_issue,
+            )
+            if readiness.state != "READY":
+                raise RegistryConflict("TASK_NOT_READY", ",".join(readiness.reasons))
         if package is not None and package.get("kind") == "REVIEW":
             self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
