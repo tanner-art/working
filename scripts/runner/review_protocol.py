@@ -36,6 +36,37 @@ def _load_json(value, *, message):
         return json.loads(value, object_pairs_hook=_unique_object)
     except (TypeError, json.JSONDecodeError) as error:
         raise ReviewProtocolError(message) from error
+
+
+def _codex_structured_output(value):
+    """Extract one successful final agent message from a Codex JSONL stream.
+
+    ``codex exec --json`` deliberately emits progress records as well as its
+    final message.  Progress, a clean process exit, or an error record cannot
+    stand in for a review verdict.
+    """
+    if not isinstance(value, str):
+        raise ReviewProtocolError("Codex review output is unparseable")
+    events = [_load_json(line, message="Codex review event is unparseable")
+              for line in value.splitlines() if line.strip()]
+    if not events or not all(isinstance(event, Mapping) for event in events):
+        raise ReviewProtocolError("Codex review event is invalid")
+    failed_types = {"error", "turn.failed", "turn.cancelled"}
+    if any(event.get("type") in failed_types
+           or str(event.get("type", "")).endswith(".error")
+           for event in events):
+        raise ReviewProtocolError("Codex review provider result was not successful")
+    messages = [event["item"]["text"] for event in events
+                if event.get("type") == "item.completed"
+                and isinstance(event.get("item"), Mapping)
+                and event["item"].get("type") == "agent_message"
+                and isinstance(event["item"].get("text"), str)]
+    terminals = [event for event in events if event.get("type") == "turn.completed"]
+    if (len(messages) != 1 or len(terminals) != 1
+            or events[-1] is not terminals[0]
+            or terminals[0].get("status") not in (None, "completed", "success")):
+        raise ReviewProtocolError("Codex review output lacks one successful final verdict")
+    return _load_json(messages[0], message="Codex structured output is not verdict JSON")
 def contract_digest(contract: Mapping[str, Any]) -> str:
     if not isinstance(contract, Mapping): raise ReviewProtocolError("review contract must be an object")
     return hashlib.sha256(json.dumps(dict(contract), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -56,9 +87,25 @@ def review_handoff(value: ReviewInput, *, reviewer_worker_id: str, review_attemp
         "contract_sha256": value.contract_sha256,
     }
     return json.dumps({"review_input_id": value.id, "target_package_id": value.target_package_id, "implementation_attempt_id": value.implementation_attempt_id, "implementation_commit": value.implementation_commit, "base_commit": value.base_commit, "pr_url": value.pr_url, "contract_sha256": value.contract_sha256, "expected_verdict_identity": expected_verdict_identity, "contract": dict(value.contract), "validation_evidence": dict(value.validation_evidence), "reviewer_worker_id": reviewer_worker_id, "review_attempt_id": review_attempt_id}, sort_keys=True, indent=2, ensure_ascii=False)
-def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdict:
+def parse_review_verdict(output: str, review_input: ReviewInput, *,
+                         provider: str | None = None) -> ReviewVerdict:
     validate_review_input(review_input)
-    raw = _load_json(output, message="review verdict is unparseable")
+    # A configured provider is an input-integrity boundary.  In particular,
+    # Codex's JSONL transcript must never fall back to accepting a convenient
+    # bare JSON object or a Claude-shaped envelope.
+    if provider == "openai":
+        raw = _codex_structured_output(output)
+    elif provider == "anthropic":
+        raw = _load_json(output, message="review verdict is unparseable")
+    elif provider is None:
+        # Explicit legacy/API compatibility only.  The production caller
+        # supplies provider identity and therefore never takes this branch.
+        try:
+            raw = _load_json(output, message="review verdict is unparseable")
+        except ReviewProtocolError:
+            raw = _codex_structured_output(output)
+    else:
+        raise ReviewProtocolError("review provider is unsupported")
     # Claude's JSON mode wraps the model result.  Only accept its documented,
     # successful result envelope; accepting arbitrary wrappers would make an
     # error payload or a transcript look like a review decision.

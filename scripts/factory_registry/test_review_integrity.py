@@ -75,6 +75,52 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewProtocolError, "duplicate JSON key"):
                     parse_review_verdict(value, self.input)
 
+    def test_codex_jsonl_requires_one_successful_exact_final_verdict(self):
+        verdict = self.verdict()
+        def codex_stream(message=verdict, terminal='turn.completed'):
+            return '\n'.join((
+                json.dumps({'type': 'thread.started'}),
+                json.dumps({'type': 'turn.started'}),
+                json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': message}}),
+                json.dumps({'type': terminal}),
+            ))
+        stream = codex_stream()
+        self.assertEqual(parse_review_verdict(
+            stream, self.input, provider="openai"
+        ).state, ReviewOutcomeState.APPROVED)
+        bad_streams = (
+            codex_stream(terminal='turn.failed'),
+            stream + '\n' + json.dumps({'type': 'turn.completed'}),
+            codex_stream(terminal='error'),
+            codex_stream(self.verdict(reviewed_commit='c' * 40)),
+            codex_stream('{"state":"APPROVED","state":"CHANGES_REQUESTED"}'),
+        )
+        for value in bad_streams:
+            with self.subTest(value=value[-60:]):
+                with self.assertRaises(ReviewProtocolError):
+                    parse_review_verdict(value, self.input, provider="openai")
+
+    def test_configured_codex_path_rejects_bare_or_claude_shaped_verdicts(self):
+        claude_envelope = json.dumps({
+            "type": "result", "is_error": False, "result": self.verdict(),
+        })
+        incomplete_stream = json.dumps({
+            "type": "item.completed", "item": {
+                "type": "agent_message", "text": self.verdict(),
+            },
+        })
+        for output in (self.verdict(), claude_envelope, incomplete_stream):
+            with self.subTest(output=output[:30]):
+                with self.assertRaises(ReviewProtocolError):
+                    parse_review_verdict(output, self.input, provider="openai")
+
+        # Bare verdicts remain explicit API compatibility only; no configured
+        # provider path may silently take that fallback.
+        self.assertEqual(
+            parse_review_verdict(self.verdict(), self.input).state,
+            ReviewOutcomeState.APPROVED,
+        )
+
     def test_schema_output_is_authoritative_and_prose_is_never_salvaged(self):
         envelope = {"type": "result", "subtype": "success", "is_error": False,
             "result": "Review complete. See structured output.",

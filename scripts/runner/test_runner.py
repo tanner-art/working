@@ -190,6 +190,60 @@ class QueueTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     review_command(config)
 
+    def test_codex_review_adapter_normalizes_json_sandbox_and_schema_controls(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            packet = pathlib.Path(directory); (packet / 'review-verdict-schema.json').write_text('{}')
+            command = review_command({'provider': 'openai', 'command': [
+                '/path/to/codex', 'exec', '--model', 'gpt-6-sol', '-c',
+                'model_reasoning_effort="high"', '--json',
+                '--sandbox', 'workspace-write', '-']}, review_packet_path=str(packet))
+            self.assertEqual(command, ['codex', 'exec', '--model', 'gpt-6-sol', '-c',
+                'model_reasoning_effort="high"', '--sandbox',
+                'read-only', '--json', '--output-schema', str(packet / 'review-verdict-schema.json'), '-'])
+            for source in (
+                ['/path/to/codex', 'exec', '--sandbox=workspace-write', '--output-schema=x', '--json=true', '--json', '-'],
+                ['/path/to/codex', 'exec', '-s', 'workspace-write', '-o', 'x', '-'],
+                ['/path/to/codex', 'exec', '--full-auto', '-'],
+                ['/path/to/codex', 'exec', '--sandbox', '--json', '-'],
+                ['/path/to/codex', 'exec', '--model', '-'],
+                ['/path/to/not-codex', 'exec', '-'],
+                ['/path/to/codex', 'run', '-'],
+            ):
+                with self.subTest(source=source):
+                    if ('--full-auto' in source or source[-2:] == ['--model', '-']
+                            or source[1] == 'run' or 'not-codex' in source[0]
+                            or source[2:4] == ['--sandbox', '--json']):
+                        with self.assertRaises(ValueError): review_command({'provider': 'openai', 'command': source}, review_packet_path=str(packet))
+                    else:
+                        result = review_command({'provider': 'openai', 'command': source}, review_packet_path=str(packet))
+                        self.assertEqual(result.count('--output-schema'), 1)
+                        self.assertEqual(result[result.index('--sandbox') + 1], 'read-only')
+
+    def test_codex_review_adapter_rejects_config_override_bypasses_before_invocation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            packet = pathlib.Path(directory)
+            (packet / 'review-verdict-schema.json').write_text('{}')
+            dangerous = (
+                ('-c', 'sandbox_mode="workspace-write"'),
+                ('--config', 'approval_policy="never"'),
+                ('-c', 'shell_environment_policy.inherit="all"'),
+                ('--config', 'tools.mcp.enabled=true'),
+                ('-c', '"sandbox_mode"="workspace-write"'),
+                ('--config=sandbox_mode="workspace-write"',),
+                ('-c=sandbox_mode="workspace-write"',),
+                ('--config', 'model_reasoning_effort.nested="high"'),
+                ('-c', 'model_reasoning_effort="high"', '--config', 'model_reasoning_effort="low"'),
+                ('--disable', 'sandbox'),
+            )
+            for arguments in dangerous:
+                with self.subTest(arguments=arguments):
+                    source = ['/path/to/codex', 'exec', *arguments, '-']
+                    with self.assertRaises(ValueError):
+                        review_command({'provider': 'openai', 'command': source},
+                                       review_packet_path=str(packet))
+
     def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
         import pathlib, tempfile
         from scripts.factory_registry.models import ReviewInput
@@ -220,6 +274,7 @@ class QueueTests(unittest.TestCase):
             self.assertNotEqual(review_input.contract_sha256, packet['contract_json_file_sha256'])
             self.assertNotEqual(review_input.contract_sha256, packet['manifest_sha256'])
             self.assertNotEqual(packet['contract_json_file_sha256'], packet['manifest_sha256'])
+            self.assertIn('review-verdict-schema.json', packet['files'])
             self.assertIn('expected_verdict_identity', prompt)
             self.assertIn(review_input.contract_sha256, prompt)
             self.assertIn(packet['contract_json_file_sha256'], prompt)
@@ -956,6 +1011,8 @@ class LifecycleTests(unittest.TestCase):
             ('CHANGES_REQUESTED', {'state': 'CHANGES_REQUESTED', 'changes_requested': ['Fix test']}, True),
             ('wrong-sha', {'state': 'APPROVED', 'reviewed_commit': 'c' * 40, 'changes_requested': []}, False),
             ('malformed', {'state': 'APPROVED', 'changes_requested': []}, False),
+            ('codex-approved', {'state': 'APPROVED', 'changes_requested': []}, True),
+            ('codex-bare-json', {'state': 'APPROVED', 'changes_requested': []}, False),
         )
         for name, changes, accepted in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -987,16 +1044,30 @@ class LifecycleTests(unittest.TestCase):
                     'findings': ['reviewed exact packet'],
                     'changes_requested': changes['changes_requested'],
                 }
-                provider_output = 'not-json' if name == 'malformed' else json.dumps({
-                    'type': 'result', 'is_error': False, 'subtype': 'success',
-                    'result': json.dumps(value),
-                })
+                codex = name.startswith('codex-')
+                provider_output = (
+                    '\n'.join((
+                        json.dumps({'type': 'thread.started'}),
+                        json.dumps({'type': 'item.completed', 'item': {
+                            'type': 'agent_message', 'text': json.dumps(value),
+                        }}),
+                        json.dumps({'type': 'turn.completed'}),
+                    )) if name == 'codex-approved' else
+                    (json.dumps(value) if codex else
+                    ('not-json' if name == 'malformed' else json.dumps({
+                        'type': 'result', 'is_error': False, 'subtype': 'success',
+                        'result': json.dumps(value),
+                    })))
+                )
                 config = {
                     'repo': str(root / 'repo'), 'state': str(root / 'state'),
                     'worktrees': str(root / 'worktrees'), 'path': '/usr/bin:/bin',
                     'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm', 'github': 'owner/repo',
                     'allowed_authors': ['owner'],
-                    'agents': {'claude': {'provider': 'anthropic', 'command': ['/opt/claude', '-p']}},
+                    'agents': {'claude': ({'provider': 'openai', 'command': [
+                        '/opt/codex', 'exec', '--model', 'gpt-6-sol', '--json',
+                        '--sandbox', 'workspace-write', '-']} if codex else
+                        {'provider': 'anthropic', 'command': ['/opt/claude', '-p']})},
                 }
                 (root / 'repo').mkdir()
                 config_path = root / 'config.json'; config_path.write_text(json.dumps(config))
@@ -1020,7 +1091,7 @@ class LifecycleTests(unittest.TestCase):
                         return ''
                     if args[:3] == ['git', 'diff', '--cached'] or args[:3] == ['git', 'ls-files', '--others']:
                         return ''
-                    if args[0] == '/opt/claude':
+                    if args[0] in ('/opt/claude', 'codex'):
                         self.assertTrue(kwargs['separate_stderr'])
                         kwargs['on_start'](901)
                         return provider_output, 'stderr is not machine JSON'
@@ -1039,12 +1110,21 @@ class LifecycleTests(unittest.TestCase):
                     runner.main()
                 checkout = next(args for args, _ in calls if args[:3] == ['git', 'worktree', 'add'])
                 self.assertEqual(checkout[-1], commit)
-                provider = next(args for args, _ in calls if args[0] == '/opt/claude')
-                self.assertIn('--tools', provider)
-                self.assertEqual(provider[provider.index('--tools') + 1], 'Read,Glob,Grep')
-                self.assertIn('--permission-mode', provider)
-                self.assertEqual(provider[provider.index('--permission-mode') + 1], 'dontAsk')
-                self.assertEqual(provider[provider.index('--add-dir') + 1], packet['path'])
+                provider = next(args for args, _ in calls if args[0] == ('codex' if codex else '/opt/claude'))
+                if codex:
+                    self.assertEqual(provider[:4], ['codex', 'exec', '--model', 'gpt-6-sol'])
+                    self.assertEqual(provider[provider.index('--sandbox') + 1], 'read-only')
+                    self.assertTrue((pathlib.Path(packet['path']) / 'review-verdict-schema.json').is_file())
+                    self.assertEqual(provider[provider.index('--output-schema') + 1],
+                                     str(pathlib.Path(packet['path']) / 'review-verdict-schema.json'))
+                    self.assertNotIn('Read,Glob,Grep', build_review_prompt(
+                        review_input, reviewer_worker_id='claude', review_attempt_id='test', provider='openai'))
+                else:
+                    self.assertIn('--tools', provider)
+                    self.assertEqual(provider[provider.index('--tools') + 1], 'Read,Glob,Grep')
+                    self.assertIn('--permission-mode', provider)
+                    self.assertEqual(provider[provider.index('--permission-mode') + 1], 'dontAsk')
+                    self.assertEqual(provider[provider.index('--add-dir') + 1], packet['path'])
                 if accepted:
                     self.assertEqual(
                         registry.record_review_outcome.call_count, 1,
