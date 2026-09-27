@@ -2266,6 +2266,8 @@ def validate_telemetry_payload(value: Mapping[str, Any], observed_at: str) -> tu
 def _package(value: Mapping[str, Any], *, queue_contract: Mapping[str, Any]) -> WorkPackage:
     diagnostics = dict(value.get("provider_diagnostics") or {})
     diagnostics["queue_contract_sha256"] = queue_contract_digest(dict(queue_contract))
+    if queue_contract.get("schema_version") == 2:
+        diagnostics["readiness_schema_version"] = 2
     declared_source_ref = value.get("source_ref")
     diagnostic_source_ref = diagnostics.get("github_source_ref")
     if declared_source_ref is not None:

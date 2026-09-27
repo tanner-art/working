@@ -2,7 +2,6 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -132,7 +131,8 @@ class TaskReadinessTests(unittest.TestCase):
         registry.register_work_package(WorkPackage(
             "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
             ("registry",), 10, ("verified",), status=TaskStatus.READY,
-            provider_diagnostics={"queue_contract_sha256": queue_contract_digest(self.contract)},
+            provider_diagnostics={"queue_contract_sha256": queue_contract_digest(self.contract),
+                                  "readiness_schema_version": 2},
         ))
         incomplete = {**self.contract, "readiness": {**self.contract["readiness"],
                       "planning_paths": ["docs/MISSING.md"]}}
@@ -141,11 +141,12 @@ class TaskReadinessTests(unittest.TestCase):
             ("registry",), 5, ("verified",), status=TaskStatus.READY,
             provider_diagnostics={"queue_contract_sha256": queue_contract_digest(incomplete)},
         ))
-        # The real package source binding is immutable once registered; the
-        # fixture supplies it via the reviewed operator's Registry schema.
-        with registry._connection() as connection:
-            connection.execute("UPDATE work_packages SET source_system='github_issue', source_ref='101' WHERE id='TASK-1'")
-            connection.execute("UPDATE work_packages SET source_system='github_issue', source_ref='102' WHERE id='TASK-2'")
+        for package_id, issue, contract in (("TASK-1", 101, self.contract),
+                                            ("TASK-2", 102, incomplete)):
+            registry.bind_legacy_package_source(
+                package_id, github_issue=issue, queue_contract=contract,
+                expected_revision=registry.dispatch_control()["revision"], recorded_at=now,
+            )
         control = registry.dispatch_control()
         registry.set_dispatch_control(
             expected_revision=control["revision"], expected_mode="PAUSED",
@@ -153,6 +154,8 @@ class TaskReadinessTests(unittest.TestCase):
             reason="disposable readiness test",
         )
         controller = RunnerRegistryControl(database, self.repo)
+        with self.assertRaisesRegex(RegistryConflict, "V2_CONTRACT_REQUIRED"):
+            controller.pre_claim("TASK-1", "worker-a", github_issue=101)
         with self.assertRaisesRegex(RegistryConflict, "TASK_NOT_READY"):
             controller.pre_claim("TASK-1", "worker-a", task_contract=self.contract, github_issue=102)
         with self.assertRaisesRegex(RegistryConflict, "EXISTING_PATH_MISSING:docs/MISSING.md"):

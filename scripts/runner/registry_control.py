@@ -165,9 +165,15 @@ class RunnerRegistryControl:
             # source, never the mutable work contract or scheduler.
             if package.get("source_system") != "github_issue" or package.get("source_ref") != str(github_issue):
                 raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
-        if isinstance(task_contract, dict) and task_contract.get("schema_version") == 2:
+        requires_readiness = (
+            (package is not None and (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2)
+            or (isinstance(task_contract, dict) and task_contract.get("schema_version") == 2)
+        )
+        if requires_readiness:
             if package is None:
                 raise RegistryConflict("TASK_NOT_READY", "PACKAGE_MISSING")
+            if not isinstance(task_contract, dict) or task_contract.get("schema_version") != 2:
+                raise RegistryConflict("TASK_NOT_READY", "V2_CONTRACT_REQUIRED")
             readiness = check_packet(
                 task_contract, repository=self.repository,
                 run_base=self.integration_base(), package=package,
