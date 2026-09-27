@@ -75,6 +75,28 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewProtocolError, "duplicate JSON key"):
                     parse_review_verdict(value, self.input)
 
+    def test_codex_jsonl_requires_one_successful_exact_final_verdict(self):
+        verdict = self.verdict()
+        def codex_stream(message=verdict, terminal='turn.completed'):
+            return '\n'.join((
+                json.dumps({'type': 'thread.started'}),
+                json.dumps({'type': 'turn.started'}),
+                json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': message}}),
+                json.dumps({'type': terminal}),
+            ))
+        stream = codex_stream()
+        self.assertEqual(parse_review_verdict(stream, self.input).state, ReviewOutcomeState.APPROVED)
+        bad_streams = (
+            codex_stream(terminal='turn.failed'),
+            stream + '\n' + json.dumps({'type': 'turn.completed'}),
+            codex_stream(terminal='error'),
+            codex_stream(self.verdict(reviewed_commit='c' * 40)),
+            codex_stream('{"state":"APPROVED","state":"CHANGES_REQUESTED"}'),
+        )
+        for value in bad_streams:
+            with self.subTest(value=value[-60:]):
+                with self.assertRaises(ReviewProtocolError): parse_review_verdict(value, self.input)
+
     def test_schema_output_is_authoritative_and_prose_is_never_salvaged(self):
         envelope = {"type": "result", "subtype": "success", "is_error": False,
             "result": "Review complete. See structured output.",
