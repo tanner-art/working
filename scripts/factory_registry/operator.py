@@ -1973,10 +1973,10 @@ def bounded_run_worker_gate(
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
     review_only = not parents
-    if ((not review_only and (len(parents) > 2 or len(reviews) != len(parents)))
-            or (review_only and not 1 <= len(reviews) <= 2)
+    if ((not review_only and len(reviews) != len(parents))
+            or (review_only and not reviews)
             or len(parents) + len(reviews) != len(run_packages)):
-        raise OperatorError("bounded run requires one or two implementation/review pairs or reviews")
+        raise OperatorError("bounded run requires matched implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
     dependency_rows = {
         str(review.get("id")): [
@@ -2018,7 +2018,9 @@ def bounded_run_worker_gate(
         workers=snapshot.workers, active_leases=snapshot.active_leases,
         usage_observations=snapshot.usage_observations,
     )
-    candidate = scope_dispatch_snapshot(candidate, allowed, 2)
+    # The allowlist may contain a longer approved backlog.  Scheduling still
+    # sees only the configured/global concurrent-parent limit.
+    candidate = scope_dispatch_snapshot(candidate, allowed, snapshot.active_parent_limit)
     decision = decide_shadow(candidate)
     if decision.global_rejections:
         raise OperatorError("global worker/capacity gate failed: " + ",".join(
@@ -2414,8 +2416,8 @@ def parse_bounded_pilot_spec(
     value: Mapping[str, Any],
 ) -> tuple[tuple[Feature, WorkPackage, WorkPackage], ...]:
     pairs = value.get("pairs") if isinstance(value, Mapping) else None
-    if not isinstance(pairs, list) or not 1 <= len(pairs) <= 2:
-        raise OperatorError("bounded pilot spec requires one or two pair objects")
+    if not isinstance(pairs, list) or not pairs:
+        raise OperatorError("bounded pilot spec requires one or more pair objects")
     parsed = tuple(parse_canary_spec(item) for item in pairs if isinstance(item, Mapping))
     if len(parsed) != len(pairs):
         raise OperatorError("bounded pilot pair is invalid")
@@ -2782,7 +2784,7 @@ def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
             or any(not isinstance(item, str) or not item for item in packages)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
-            or isinstance(limit, bool) or limit not in (1, 2)):
+            or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 3):
         raise OperatorError("bounded run spec is invalid")
     deadline = _parse_time(value.get("deadline"), "bounded run deadline")
     if deadline <= datetime.now(timezone.utc):
