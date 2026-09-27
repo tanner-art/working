@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import re
 import uuid
+from dataclasses import replace
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -193,7 +194,7 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
             or isinstance(parent_limit, bool) or not isinstance(parent_limit, int)
-            or not 1 <= parent_limit <= min(DEFAULT_BOUNDED_RUN_PARENT_LIMIT, active_parent_limit)):
+            or not 1 <= parent_limit <= active_parent_limit):
         raise RegistryConflict("INVALID_BOUNDED_RUN_SCOPE")
     normalized_deadline = _normalize_timestamp(str(deadline))
     return {
@@ -2178,7 +2179,7 @@ class SQLiteRegistry:
         expected_revision: int,
         recorded_at: str,
     ) -> int:
-        """Atomically register up to two independent implementation/review pairs.
+        """Atomically register an approved implementation/review backlog.
 
         The pilot is intentionally not a fleet scheduler: every package is
         registered before activation, each review depends only on its paired
@@ -2186,9 +2187,10 @@ class SQLiteRegistry:
         force.
         """
         recorded_at = _normalize_timestamp(recorded_at)
-        if not pairs or len(pairs) > DEFAULT_BOUNDED_RUN_PARENT_LIMIT:
+        if not pairs:
             raise RegistryConflict("INVALID_BOUNDED_PILOT_SIZE")
         ids: set[str] = set()
+        features: dict[str, Feature] = {}
         for feature, implementation, review in pairs:
             if (implementation.feature_id != feature.id or review.feature_id != feature.id
                     or implementation.kind != PackageKind.PARENT or review.kind != PackageKind.REVIEW
@@ -2196,8 +2198,11 @@ class SQLiteRegistry:
                     or review.lane != Lane.ASSURANCE or tuple(review.dependency_ids) != (implementation.id,)
                     or not {item.lower() for item in review.required_capabilities} & {"review", "independent-review"}):
                 raise RegistryConflict("INVALID_BOUNDED_PILOT_PAIR")
-            ids.update((feature.id, implementation.id, review.id))
-        if len(ids) != len(pairs) * 3:
+            prior = features.setdefault(feature.id, feature)
+            if prior != feature:
+                raise RegistryConflict("BOUNDED_PILOT_FEATURE_CONFLICT")
+            ids.update((implementation.id, review.id))
+        if len(ids) != len(pairs) * 2:
             raise RegistryConflict("BOUNDED_PILOT_ID_CONFLICT")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2214,18 +2219,36 @@ class SQLiteRegistry:
                     raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
                 if connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone():
                     raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
-                for feature, implementation, review in pairs:
+                for feature in features.values():
                     connection.execute(
                         "INSERT INTO features (id,title,description,priority,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
                         (feature.id, feature.title, feature.description, feature.priority, feature.status.value, recorded_at, recorded_at),
                     )
+                for feature, implementation, review in pairs:
+                    remediation_of = implementation.provider_diagnostics.get("remediation_of")
+                    if remediation_of is not None:
+                        if (not isinstance(remediation_of, str) or not remediation_of
+                                or implementation.provider_diagnostics.get("remediation_index") not in (1, 2)
+                                or not isinstance(implementation.provider_diagnostics.get("remediation_author"), str)):
+                            raise RegistryConflict("INVALID_REMEDIATION_SLOT")
+                        if implementation.provider_diagnostics.get("queue_contract_sha256") != review.provider_diagnostics.get("queue_contract_sha256"):
+                            raise RegistryConflict("INVALID_REMEDIATION_SLOT")
                     for package in (implementation, review):
                         source_ref = package.provider_diagnostics.get("github_source_ref")
                         if not isinstance(source_ref, str) or not source_ref.isdigit() or int(source_ref) <= 0:
                             raise RegistryConflict("BOUNDED_PILOT_SOURCE_REQUIRED", package.id)
+                        # Dormant slots cannot be claimed until the exact
+                        # matching changes-requested receipt activates them.
+                        registered = (replace(package, status=TaskStatus.ON_DECK)
+                                      if remediation_of is not None else package)
                         self._insert_package(
-                            connection, package, recorded_at, source_system="github_issue",
+                            connection, registered, recorded_at, source_system="github_issue",
                             source_ref=source_ref,
+                        )
+                    for dependency_id in implementation.dependency_ids:
+                        connection.execute(
+                            "INSERT INTO task_dependencies(package_id, dependency_id) VALUES (?, ?)",
+                            (implementation.id, dependency_id),
                         )
                     connection.execute(
                         "INSERT INTO task_dependencies(package_id, dependency_id) VALUES (?, ?)",
@@ -2771,6 +2794,10 @@ class SQLiteRegistry:
                     raise RegistryNotFound(f"worker {worker_id}")
                 if worker["role"] != "WORKER":
                     raise RegistryConflict("ORCHESTRA_CANNOT_CLAIM")
+                diagnostics = json.loads(package["provider_diagnostics_json"])
+                remedial_author = diagnostics.get("remediation_author")
+                if remedial_author is not None and remedial_author != worker_id:
+                    raise RegistryConflict("REMEDIATION_AUTHOR_REQUIRED", package_id)
                 if package["status"] != TaskStatus.READY.value:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
                 if scope is not None and package["kind"] == PackageKind.PARENT.value:
@@ -3345,7 +3372,7 @@ class SQLiteRegistry:
                     (outcome.review_package_id,),
                 ).fetchone()
                 target_package = connection.execute(
-                    "SELECT feature_id, status FROM work_packages WHERE id=?",
+                    "SELECT feature_id, status, provider_diagnostics_json FROM work_packages WHERE id=?",
                     (outcome.target_package_id,),
                 ).fetchone()
                 if review_package is None:
@@ -3504,6 +3531,55 @@ class SQLiteRegistry:
                             "UPDATE features SET status='DONE', updated_at=? WHERE id=?",
                             (decided_at, review_package["feature_id"]),
                         )
+                else:
+                    # A requested change is not silently requeued.  It can
+                    # activate only one pre-registered same-feature slot with
+                    # the original source, contract, and author binding.
+                    target_diagnostics = json.loads(target_package["provider_diagnostics_json"]) if "provider_diagnostics_json" in target_package.keys() else {}
+                    lineage = target_diagnostics.get("remediation_of", outcome.target_package_id)
+                    root = connection.execute(
+                        "SELECT source_system, source_ref, provider_diagnostics_json FROM work_packages WHERE id=?",
+                        (lineage,),
+                    ).fetchone()
+                    root_diagnostics = json.loads(root["provider_diagnostics_json"]) if root else {}
+                    required_contract = root_diagnostics.get("queue_contract_sha256")
+                    slots = connection.execute(
+                        "SELECT id, provider_diagnostics_json, source_system, source_ref FROM work_packages "
+                        "WHERE feature_id=? AND kind='PARENT' AND status='ON_DECK' ORDER BY id",
+                        (review_package["feature_id"],),
+                    ).fetchall()
+                    selected = None
+                    for slot in slots:
+                        metadata = json.loads(slot["provider_diagnostics_json"])
+                        if (metadata.get("remediation_of") == lineage
+                                and metadata.get("remediation_author") == outcome.implementer_worker_id
+                                and metadata.get("remediation_index") in (1, 2)
+                                and metadata.get("queue_contract_sha256") == required_contract
+                                and root is not None
+                                and slot["source_system"] == root["source_system"]
+                                and slot["source_ref"] == root["source_ref"]):
+                            selected = slot["id"]
+                            break
+                    connection.execute(
+                        "UPDATE work_packages SET failure_code='REVIEW_FAILURE', "
+                        "failure_detail=?, updated_at=? WHERE id=?",
+                        (("REMEDIATION_ACTIVATED:" + selected) if selected else
+                         "NEEDS_SCOPE: no authorized same-feature remediation slot", decided_at,
+                         outcome.target_package_id),
+                    )
+                    if selected:
+                        connection.execute(
+                            "UPDATE work_packages SET status='READY', ready_at=?, updated_at=? WHERE id=?",
+                            (decided_at, decided_at, selected),
+                        )
+                        self._insert_event(connection, "REMEDIATION_SLOT_ACTIVATED", decided_at,
+                                           selected, outcome.implementer_worker_id, None,
+                                           {"lineage": lineage, "changes_requested_outcome": outcome.id,
+                                            "target_package_id": outcome.target_package_id})
+                    else:
+                        self._insert_event(connection, "REMEDIATION_PARKED_NEEDS_SCOPE", decided_at,
+                                           outcome.target_package_id, outcome.implementer_worker_id, None,
+                                           {"lineage": lineage, "changes_requested_outcome": outcome.id})
                 self._insert_event(
                     connection, "REVIEW_OUTCOME_RECORDED", decided_at,
                     outcome.target_package_id, outcome.reviewer_worker_id, None,

@@ -90,6 +90,22 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
         with self.assertRaises(ReviewProtocolError):
             parse_review_verdict(json.dumps(envelope), self.input)
 
+    def test_codex_jsonl_requires_one_complete_successful_final_message(self):
+        event = json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": self.verdict()}})
+        good = '\n'.join((json.dumps({"type": "thread.started"}), event,
+                          json.dumps({"type": "turn.completed", "status": "completed"})))
+        self.assertEqual(parse_review_verdict(good, self.input).state,
+                         ReviewOutcomeState.APPROVED)
+        for bad in (
+            event,
+            good + '\n' + json.dumps({"type": "turn.completed"}),
+            good.replace('turn.completed', 'turn.failed'),
+        ):
+            with self.subTest(bad=bad[:30]):
+                with self.assertRaises(ReviewProtocolError):
+                    parse_review_verdict(bad, self.input)
+
     def test_non_ascii_contract_digests_match_without_changing_receipt_digest(self):
         contract = {"task": "TÄSK-1", "instructions": "résumé ✅"}
         sqlite_review = _review_contract_sha256(contract)
