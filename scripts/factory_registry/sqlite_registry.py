@@ -2255,6 +2255,7 @@ class SQLiteRegistry:
     ) -> int:
         """Register one review retry after an evidence-bound changes request."""
         recorded_at = _normalize_timestamp(recorded_at)
+        source_ref = review.provider_diagnostics.get("github_source_ref")
         if (
             review.kind != PackageKind.REVIEW
             or review.status != TaskStatus.READY
@@ -2262,6 +2263,8 @@ class SQLiteRegistry:
             or len(review.dependency_ids) != 1
             or not {value.lower() for value in review.required_capabilities}
             & {"review", "independent-review"}
+            or not isinstance(source_ref, str)
+            or not re.fullmatch(r"[1-9]\d*", source_ref)
         ):
             raise RegistryConflict("INVALID_FOLLOWUP_REVIEW")
         target_id = review.dependency_ids[0]
@@ -2336,7 +2339,7 @@ class SQLiteRegistry:
                     raise RegistryConflict("CHANGES_REQUESTED_REVIEW_REQUIRED")
                 self._insert_package(
                     connection, review, recorded_at,
-                    source_system="github_issue", source_ref=review.id.removeprefix("TASK-"),
+                    source_system="github_issue", source_ref=source_ref,
                 )
                 connection.execute(
                     "INSERT INTO task_dependencies(package_id, dependency_id) VALUES (?, ?)",
