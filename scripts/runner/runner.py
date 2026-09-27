@@ -731,12 +731,19 @@ read-only packet named below. Do not use Bash or any write-capable tool.
 Return exactly one JSON verdict object, with no prose.
 
 Read-only packet: {packet['path']}
-Packet manifest SHA-256: {packet.get('manifest_sha256')}
+Packet integrity only (never verdict values):
+- packet manifest SHA-256: {packet.get('manifest_sha256')}
+- formatted contract.json file SHA-256: {packet.get('contract_json_file_sha256')}
 
 {review_handoff(review_input, reviewer_worker_id=reviewer_worker_id, review_attempt_id=review_attempt_id)}
 
 The verdict must contain exactly: state, reviewed_commit, reviewed_base_commit,
-contract_sha256, findings, changes_requested.
+contract_sha256, findings, changes_requested. Copy the expected_verdict_identity
+values above exactly. contract_sha256 is the canonical semantic digest of the
+contract object. It is not the packet manifest SHA-256 or the formatted
+contract.json file SHA-256; do not calculate or copy either packet hash into
+the verdict. These identity values do not determine whether to return APPROVED
+or CHANGES_REQUESTED.
 '''
 
 
@@ -829,6 +836,7 @@ def materialize_review_packet(state, *, implementation_attempt_id, base_commit,
     return {
         'path': str(packet),
         'manifest_sha256': _packet_sha256(manifest_bytes),
+        'contract_json_file_sha256': file_hashes['contract.json'],
         'files': file_hashes,
     }
 

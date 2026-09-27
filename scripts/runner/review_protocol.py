@@ -50,7 +50,12 @@ def validate_review_input(value: ReviewInput) -> ReviewInput:
 def review_handoff(value: ReviewInput, *, reviewer_worker_id: str, review_attempt_id: str) -> str:
     validate_review_input(value)
     if not reviewer_worker_id or not review_attempt_id: raise ReviewProtocolError("reviewer and review attempt are required")
-    return json.dumps({"review_input_id": value.id, "target_package_id": value.target_package_id, "implementation_attempt_id": value.implementation_attempt_id, "implementation_commit": value.implementation_commit, "base_commit": value.base_commit, "pr_url": value.pr_url, "contract_sha256": value.contract_sha256, "contract": dict(value.contract), "validation_evidence": dict(value.validation_evidence), "reviewer_worker_id": reviewer_worker_id, "review_attempt_id": review_attempt_id}, sort_keys=True, indent=2, ensure_ascii=False)
+    expected_verdict_identity = {
+        "reviewed_commit": value.implementation_commit,
+        "reviewed_base_commit": value.base_commit,
+        "contract_sha256": value.contract_sha256,
+    }
+    return json.dumps({"review_input_id": value.id, "target_package_id": value.target_package_id, "implementation_attempt_id": value.implementation_attempt_id, "implementation_commit": value.implementation_commit, "base_commit": value.base_commit, "pr_url": value.pr_url, "contract_sha256": value.contract_sha256, "expected_verdict_identity": expected_verdict_identity, "contract": dict(value.contract), "validation_evidence": dict(value.validation_evidence), "reviewer_worker_id": reviewer_worker_id, "review_attempt_id": review_attempt_id}, sort_keys=True, indent=2, ensure_ascii=False)
 def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdict:
     validate_review_input(review_input)
     raw = _load_json(output, message="review verdict is unparseable")
