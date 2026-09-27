@@ -451,6 +451,36 @@ class OperatorFixture(unittest.TestCase):
             },
         }
 
+    def test_v2_canary_registration_rejects_incomplete_readiness_shape(self):
+        spec = self.canary()
+        contract = spec["implementation"]["queue_contract"]
+        contract["schema_version"] = 2
+        contract["readiness"] = {
+            "base_commit": "a" * 40, "planning_paths": ["docs/NORTH_STAR.md"],
+            "existing_paths": [], "new_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "integration_paths": [], "test_paths": ["scripts/runner/test_registry_control.py"],
+            "dependency_kinds": {},
+        }
+        with self.assertRaisesRegex(OperatorError, "INTEGRATION_PATHS_INVALID"):
+            parse_canary_spec(spec)
+
+    def test_v2_canary_registration_pins_exclusive_paths(self):
+        spec = self.canary()
+        contract = spec["implementation"]["queue_contract"]
+        contract["schema_version"] = 2
+        contract["readiness"] = {
+            "base_commit": "a" * 40, "planning_paths": ["docs/NORTH_STAR.md"],
+            "existing_paths": [], "new_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "integration_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "test_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "dependency_kinds": {},
+        }
+        _, implementation, _ = parse_canary_spec(spec)
+        self.assertEqual(implementation.provider_diagnostics["exclusive_paths"], contract["paths"])
+        spec["implementation"]["provider_diagnostics"] = {"exclusive_paths": ["other.py"]}
+        with self.assertRaisesRegex(OperatorError, "exclusive paths mismatch"):
+            parse_canary_spec(spec)
+
     def followup_review(self):
         contract = {
             "task": "TASK-203",
@@ -1799,6 +1829,42 @@ class OperatorFixture(unittest.TestCase):
         )
         self.assertEqual(evidence["run_package_ids"], ["TASK-201", "TASK-202"])
         self.assertIn(["TASK-201", "codex-a", "claude"], evidence["independent_pairs"])
+
+    def test_bounded_run_gate_accepts_a_capable_pair_waiting_on_a_blocked_parent(self):
+        now = utc_now()
+        self.sync_workers(now)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=now,
+        )
+        self.registry.transition_work_package(
+            implementation.id, expected_status=TaskStatus.READY,
+            new_status=TaskStatus.BLOCKED, changed_at=now,
+        )
+
+        evidence = operator_module.bounded_run_worker_gate(
+            self.registry.dispatch_snapshot(observed_at=now), [implementation.id, review.id],
+        )
+
+        self.assertEqual(evidence["implementation_assignments"][implementation.id], [])
+        self.assertIn("codex-a", evidence["potential_implementation_assignments"][implementation.id])
+
+    def test_bounded_pilot_parser_accepts_a_backlog_larger_than_wip(self):
+        pairs = []
+        for number in (401, 411, 421):
+            spec = self.canary()
+            spec["feature"]["id"] = f"BACKLOG-{number}"
+            for key, identifier in (("implementation", number), ("review", number + 1)):
+                package = spec[key]
+                package.update(id=f"TASK-{identifier}", feature_id=spec["feature"]["id"],
+                               source_ref=str(identifier))
+                package["queue_contract"]["task"] = package["id"]
+                if key == "review":
+                    package["dependency_ids"] = [f"TASK-{number}"]
+                    package["queue_contract"]["depends_on"] = [number]
+            pairs.append(spec)
+        self.assertEqual(len(operator_module.parse_bounded_pilot_spec({"pairs": pairs})), 3)
 
     def test_bounded_review_preflight_accepts_immutable_target_scoped_followup(self):
         now, _spec = self._bounded_review_fixture()

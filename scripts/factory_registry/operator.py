@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
+from scripts.runner.task_readiness import contract_shape_reasons
 
 from .models import (
     DispatchSnapshot,
@@ -1973,10 +1974,10 @@ def bounded_run_worker_gate(
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
     review_only = not parents
-    if ((not review_only and (len(parents) > 2 or len(reviews) != len(parents)))
-            or (review_only and not 1 <= len(reviews) <= 2)
+    if ((not review_only and len(reviews) != len(parents))
+            or (review_only and not reviews)
             or len(parents) + len(reviews) != len(run_packages)):
-        raise OperatorError("bounded run requires one or two implementation/review pairs or reviews")
+        raise OperatorError("bounded run requires matched implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
     dependency_rows = {
         str(review.get("id")): [
@@ -2018,15 +2019,13 @@ def bounded_run_worker_gate(
         workers=snapshot.workers, active_leases=snapshot.active_leases,
         usage_observations=snapshot.usage_observations,
     )
-    candidate = scope_dispatch_snapshot(candidate, allowed, 2)
+    candidate = scope_dispatch_snapshot(candidate, allowed, snapshot.active_parent_limit)
     decision = decide_shadow(candidate)
     if decision.global_rejections:
         raise OperatorError("global worker/capacity gate failed: " + ",".join(
             value.code for value in decision.global_rejections
         ))
     workers = {str(item.get("id")): item for item in snapshot.workers}
-    evaluations = {item.id: item for item in decision.worker_evaluations}
-    eligible = {worker_id for worker_id, item in evaluations.items() if item.eligible}
     assignments = {
         str(parent.get("id")): {
             item.worker_id for item in decision.pair_evaluations
@@ -2034,35 +2033,51 @@ def bounded_run_worker_gate(
         }
         for parent in parents
     }
-    if not review_only and any(not choices for choices in assignments.values()):
-        raise OperatorError("no eligible implementation worker for a bounded run package")
-    reviewers = set(eligible)
+    # A waiting pair need not be claimable at activation time. Check its
+    # durable capability feasibility separately from current WIP/dependencies.
+    potential = {worker_id for worker_id, worker in workers.items()
+                 if worker.get("role") == "WORKER"}
+    potential_assignments = {
+        str(parent.get("id")): {
+            worker_id for worker_id in potential
+            if parent.get("lane") in workers[worker_id].get("approved_lanes", ())
+            and set(parent.get("required_capabilities", ())) <= set(workers[worker_id].get("capabilities", ()))
+        } for parent in parents
+    }
+    if not review_only and any(not choices for choices in potential_assignments.values()):
+        raise OperatorError("no capable implementation worker for a bounded run package")
+    review_choices = {}
     for review in reviews:
         required = set(review.get("required_capabilities", ()))
         lane = review.get("lane")
-        reviewers &= {
-            worker_id for worker_id in eligible
+        review_choices[str(review.get("id"))] = {
+            worker_id for worker_id in potential
             if lane in workers[worker_id].get("approved_lanes", ())
             and required <= set(workers[worker_id].get("capabilities", ()))
         }
+        if not review_choices[str(review.get("id"))]:
+            raise OperatorError("bounded run has no capable independent reviewer")
     if review_only:
         independent = [
             (str(review.get("id")), review_implementers[str(review.get("id"))], reviewer)
-            for review in reviews for reviewer in reviewers
+            for review in reviews for reviewer in review_choices[str(review.get("id"))]
             if reviewer != review_implementers[str(review.get("id"))]
         ]
     else:
         independent = sorted({
             (parent_id, implementer, reviewer)
-            for parent_id, implementers in assignments.items()
-            for implementer in implementers for reviewer in reviewers if reviewer != implementer
+            for parent_id, implementers in potential_assignments.items()
+            for implementer in implementers
+            for review in reviews if review_targets[str(review.get("id"))] == parent_id
+            for reviewer in review_choices[str(review.get("id"))] if reviewer != implementer
         })
     if not independent:
         raise OperatorError("bounded run has no independent reviewer")
     return {
         "run_package_ids": sorted(allowed),
         "implementation_assignments": {key: sorted(value) for key, value in assignments.items()},
-        "eligible_reviewers": sorted(reviewers),
+        "potential_implementation_assignments": {key: sorted(value) for key, value in potential_assignments.items()},
+        "eligible_reviewers": sorted({worker for choices in review_choices.values() for worker in choices}),
         "independent_pairs": [list(value) for value in independent],
         "decision_id": decision.decision_id,
     }
@@ -2251,6 +2266,12 @@ def validate_telemetry_payload(value: Mapping[str, Any], observed_at: str) -> tu
 def _package(value: Mapping[str, Any], *, queue_contract: Mapping[str, Any]) -> WorkPackage:
     diagnostics = dict(value.get("provider_diagnostics") or {})
     diagnostics["queue_contract_sha256"] = queue_contract_digest(dict(queue_contract))
+    if queue_contract.get("schema_version") == 2:
+        diagnostics["readiness_schema_version"] = 2
+        paths = queue_contract.get("paths")
+        if "exclusive_paths" in diagnostics and diagnostics["exclusive_paths"] != paths:
+            raise OperatorError("queue contract exclusive paths mismatch")
+        diagnostics["exclusive_paths"] = paths
     declared_source_ref = value.get("source_ref")
     diagnostic_source_ref = diagnostics.get("github_source_ref")
     if declared_source_ref is not None:
@@ -2305,6 +2326,9 @@ def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, W
     implementation = _package(raw_impl, queue_contract=impl_contract)
     review = _package(raw_review, queue_contract=review_contract)
     for package, contract in ((implementation, impl_contract), (review, review_contract)):
+        shape_reasons = contract_shape_reasons(contract)
+        if shape_reasons:
+            raise OperatorError("queue contract readiness invalid: " + ",".join(shape_reasons))
         expected = {
             "task": package.id,
             "lane": package.lane.value,
@@ -2414,8 +2438,8 @@ def parse_bounded_pilot_spec(
     value: Mapping[str, Any],
 ) -> tuple[tuple[Feature, WorkPackage, WorkPackage], ...]:
     pairs = value.get("pairs") if isinstance(value, Mapping) else None
-    if not isinstance(pairs, list) or not 1 <= len(pairs) <= 2:
-        raise OperatorError("bounded pilot spec requires one or two pair objects")
+    if not isinstance(pairs, list) or not pairs:
+        raise OperatorError("bounded pilot spec requires one or more pair objects")
     parsed = tuple(parse_canary_spec(item) for item in pairs if isinstance(item, Mapping))
     if len(parsed) != len(pairs):
         raise OperatorError("bounded pilot pair is invalid")
@@ -2782,7 +2806,7 @@ def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
             or any(not isinstance(item, str) or not item for item in packages)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
-            or isinstance(limit, bool) or limit not in (1, 2)):
+            or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 3):
         raise OperatorError("bounded run spec is invalid")
     deadline = _parse_time(value.get("deadline"), "bounded run deadline")
     if deadline <= datetime.now(timezone.utc):

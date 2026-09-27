@@ -1021,6 +1021,7 @@ DEFERRABLE_REGISTRY_CODES = frozenset({
     'DISPATCH_REVISION_CHANGED', 'LEASE_CONFLICT', 'PACKAGE_NOT_READY',
     'WORKER_NOT_IDLE', 'WORKER_HAS_ACTIVE_LEASE', 'LANE_NOT_APPROVED',
     'CAPABILITY_MISMATCH', 'ACTIVE_PARENT_LIMIT',
+    'BUILDER_WIP_LIMIT',
 })
 
 
@@ -1382,7 +1383,7 @@ def main():
                 reserve_revision = registry_control.pre_launch()
                 registry_control.reserve_attempt(
                     attempt, package_id=body['task'], worker_id=lane,
-                    expected_revision=reserve_revision,
+                    expected_revision=reserve_revision, lease_id=registry_lease_id,
                 )
                 registry_lifecycle = RegistryAttemptLifecycle(
                     registry_control, attempt

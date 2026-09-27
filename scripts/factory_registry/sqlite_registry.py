@@ -51,7 +51,8 @@ CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
-DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 2
+DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 3
+BUILDER_WIP_LIMIT = 2
 def _json(value: Any) -> str:
     """Canonical JSON for existing Registry records and operation receipts."""
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
@@ -193,7 +194,7 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
             or isinstance(parent_limit, bool) or not isinstance(parent_limit, int)
-            or not 1 <= parent_limit <= min(DEFAULT_BOUNDED_RUN_PARENT_LIMIT, active_parent_limit)):
+            or not 1 <= parent_limit <= active_parent_limit):
         raise RegistryConflict("INVALID_BOUNDED_RUN_SCOPE")
     normalized_deadline = _normalize_timestamp(str(deadline))
     return {
@@ -1220,6 +1221,13 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def attempt_exists(self, attempt_id: str) -> bool:
+        """Read-only replay guard for pre-provider reservation revalidation."""
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM attempts WHERE id=?", (attempt_id,)
+            ).fetchone() is not None
+
     def recover_attempt_runtime(
         self,
         attempt_id: str,
@@ -2178,7 +2186,7 @@ class SQLiteRegistry:
         expected_revision: int,
         recorded_at: str,
     ) -> int:
-        """Atomically register up to two independent implementation/review pairs.
+        """Atomically register an approved implementation/review backlog.
 
         The pilot is intentionally not a fleet scheduler: every package is
         registered before activation, each review depends only on its paired
@@ -2186,7 +2194,7 @@ class SQLiteRegistry:
         force.
         """
         recorded_at = _normalize_timestamp(recorded_at)
-        if not pairs or len(pairs) > DEFAULT_BOUNDED_RUN_PARENT_LIMIT:
+        if not pairs:
             raise RegistryConflict("INVALID_BOUNDED_PILOT_SIZE")
         ids: set[str] = set()
         for feature, implementation, review in pairs:
@@ -2759,6 +2767,20 @@ class SQLiteRegistry:
                     ):
                         raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
                     scope = self._assert_scope_membership(connection, package_id, acquired_at)
+                elif connection.execute(
+                    "SELECT 1 FROM registry_metadata WHERE key=?",
+                    (BOUNDED_RUN_METADATA_KEY,),
+                ).fetchone():
+                    control = connection.execute(
+                        "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                    ).fetchone()
+                    if (control is None or control["dispatch_mode"] != "LIVE"
+                            or control["kill_switch_engaged"]):
+                        raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                    # The bounded envelope is authoritative for direct
+                    # Registry callers too; it defines submitted-review WIP
+                    # lineage without rewriting historical work.
+                    scope = self._assert_scope_membership(connection, package_id, acquired_at)
                 package = connection.execute(
                     "SELECT * FROM work_packages WHERE id=?", (package_id,)
                 ).fetchone()
@@ -2781,6 +2803,53 @@ class SQLiteRegistry:
                     ).fetchone()[0]
                     if active_in_run >= scope["parent_limit"]:
                         raise RegistryConflict("RUN_PARENT_LIMIT")
+                if package["kind"] == PackageKind.PARENT.value:
+                    # A submitted parent continues to consume its original
+                    # builder's WIP slot while it waits for independent review.
+                    # Attribution is derived from successful attempts, never a
+                    # caller-supplied worker label.
+                    scope_clause = ""
+                    scope_args: tuple[Any, ...] = ()
+                    waiting_review_clause = ""
+                    waiting_review_args: tuple[Any, ...] = ()
+                    if scope is not None:
+                        placeholders = ",".join("?" for _ in scope["package_ids"])
+                        scope_clause = f" AND parent.id IN ({placeholders})"
+                        scope_args = tuple(scope["package_ids"])
+                        # A submitted parent belongs to this run's WIP only
+                        # when its independent review is also still able to
+                        # progress inside this exact immutable allowlist.
+                        waiting_review_clause = (
+                            " AND EXISTS (SELECT 1 FROM task_dependencies AS review_dependency "
+                            "JOIN work_packages AS review ON review.id=review_dependency.package_id "
+                            "WHERE review_dependency.dependency_id=parent.id "
+                            "AND review.kind='REVIEW' AND review.id IN ("
+                            + placeholders + ") AND review.status IN ('READY','ACTIVE','VERIFY_REVIEW'))"
+                        )
+                        waiting_review_args = tuple(scope["package_ids"])
+                    builder_wip = connection.execute(
+                        """SELECT COUNT(*) FROM work_packages AS parent
+                           WHERE parent.kind='PARENT' AND (
+                             (parent.status='ACTIVE' AND EXISTS (
+                               SELECT 1 FROM leases AS active
+                               WHERE active.package_id=parent.id
+                                 AND active.worker_id=?
+                                 AND active.released_at IS NULL
+                                 AND active.expires_at > ?
+                             ))
+                             OR (parent.status='VERIFY_REVIEW' AND (
+                               SELECT attempt.worker_id FROM attempts AS attempt
+                               WHERE attempt.package_id=parent.id
+                                 AND attempt.outcome='SUCCEEDED'
+                                 AND attempt.ended_at IS NOT NULL
+                               ORDER BY attempt.ended_at DESC, attempt.started_at DESC, attempt.id DESC
+                               LIMIT 1
+                             )=?""" + waiting_review_clause + """)
+                           )""" + scope_clause,
+                        (worker_id, acquired_at, worker_id, *waiting_review_args, *scope_args),
+                    ).fetchone()[0]
+                    if builder_wip >= BUILDER_WIP_LIMIT:
+                        raise RegistryConflict("BUILDER_WIP_LIMIT", worker_id)
                 validate_package_transition(
                     TaskStatus.READY,
                     TaskStatus.ACTIVE,
@@ -4491,6 +4560,20 @@ class SQLiteRegistry:
                 ):
                     item[key.removesuffix("_json")] = json.loads(item.pop(key))
                 packages.append(item)
+            # The scheduler needs durable author provenance for submitted
+            # parents.  Keep it projection-only: attempts remain the source.
+            for item in packages:
+                if item["kind"] != PackageKind.PARENT.value or item["status"] != TaskStatus.VERIFY_REVIEW.value:
+                    continue
+                attempt = connection.execute(
+                    """SELECT worker_id FROM attempts WHERE package_id=?
+                       AND outcome='SUCCEEDED' AND ended_at IS NOT NULL
+                       AND worker_id IS NOT NULL
+                       ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+                    (item["id"],),
+                ).fetchone()
+                if attempt is not None:
+                    item["wip_implementer_worker_id"] = attempt["worker_id"]
             dependencies = tuple(
                 dict(row) for row in connection.execute(
                     "SELECT package_id, dependency_id FROM task_dependencies ORDER BY package_id, dependency_id"

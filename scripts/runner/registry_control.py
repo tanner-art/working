@@ -32,6 +32,7 @@ from scripts.factory_registry.codex_capacity import (  # noqa: E402
 from scripts.factory_registry.claude_telemetry import (  # noqa: E402
     claude_provider_signal, probe_claude_health,
 )
+from scripts.runner.task_readiness import check_packet  # noqa: E402
 
 
 def utc_now() -> str:
@@ -51,12 +52,28 @@ def queue_contract_digest(value) -> str:
 def scope_dispatch_snapshot(snapshot, package_ids, parent_limit):
     """Restrict scheduling, not persisted history or dependency evidence."""
     allowed = set(package_ids)
+    by_id = {str(item.get("id")): item for item in snapshot.work_packages}
+    waiting_review_parents = {
+        str(edge.get("dependency_id"))
+        for edge in getattr(snapshot, "dependencies", ())
+        if edge.get("package_id") in allowed
+        and (review := by_id.get(str(edge.get("package_id")))) is not None
+        and review.get("kind") == "REVIEW"
+        and review.get("status") in ("READY", "ACTIVE", "VERIFY_REVIEW")
+    }
     return replace(snapshot,
         active_parent_limit=min(snapshot.active_parent_limit, parent_limit),
         work_packages=tuple(
-            {**item, "status": "ON_DECK"}
-            if item.get("id") not in allowed and item.get("status") == "READY"
-            else item for item in snapshot.work_packages
+            {
+                **item,
+                **({"status": "ON_DECK"} if item.get("id") not in allowed and item.get("status") == "READY" else {}),
+                **({"wip_implementer_worker_id": None}
+                   if item.get("status") == "VERIFY_REVIEW"
+                   and item.get("kind") == "PARENT"
+                   and (item.get("id") not in allowed
+                        or item.get("id") not in waiting_review_parents) else {}),
+            }
+            for item in snapshot.work_packages
         ))
 
 
@@ -88,11 +105,12 @@ def terminate_recorded_process_group(pgid: int, timeout: float = 10) -> None:
 
 
 class RunnerRegistryControl:
-    def __init__(self, database: pathlib.Path) -> None:
+    def __init__(self, database: pathlib.Path, repository: pathlib.Path | None = None) -> None:
         self.database = pathlib.Path(database)
         if not self.database.is_absolute():
             raise ValueError("registry_database must be an absolute path")
         self.registry = SQLiteRegistry(self.database)
+        self.repository = pathlib.Path(repository) if repository is not None else None
 
     @classmethod
     def from_config(cls, config):
@@ -101,7 +119,8 @@ class RunnerRegistryControl:
             return None
         if not isinstance(database, str) or not database:
             raise ValueError("registry_database must be a non-empty absolute path")
-        return cls(pathlib.Path(database))
+        repository = config.get("repo")
+        return cls(pathlib.Path(database), pathlib.Path(repository) if repository else None)
 
     def pre_claim(
         self,
@@ -140,6 +159,22 @@ class RunnerRegistryControl:
             # source, never the mutable work contract or scheduler.
             if package.get("source_system") != "github_issue" or package.get("source_ref") != str(github_issue):
                 raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+        requires_readiness = (
+            (package is not None and (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2)
+            or (isinstance(task_contract, dict) and task_contract.get("schema_version") == 2)
+        )
+        if requires_readiness:
+            if package is None:
+                raise RegistryConflict("TASK_NOT_READY", "PACKAGE_MISSING")
+            if not isinstance(task_contract, dict) or task_contract.get("schema_version") != 2:
+                raise RegistryConflict("TASK_NOT_READY", "V2_CONTRACT_REQUIRED")
+            readiness = check_packet(
+                task_contract, repository=self.repository,
+                run_base=self.integration_base(), package=package,
+                snapshot=snapshot, github_issue=github_issue,
+            )
+            if readiness.state != "READY":
+                raise RegistryConflict("TASK_NOT_READY", ",".join(readiness.reasons))
         if package is not None and package.get("kind") == "REVIEW":
             self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
@@ -171,10 +206,8 @@ class RunnerRegistryControl:
     def proposed_worker(self, package_id: str) -> str | None:
         """Return the authoritative scheduler proposal, never GitHub labels."""
         snapshot = self._run_snapshot(utc_now())
-        proposed = [
-            item.worker_id for item in decide_shadow(snapshot).proposed_assignments
-            if item.package_id == package_id
-        ]
+        proposed = [item.worker_id for item in decide_shadow(snapshot).proposed_assignments
+                    if item.package_id == package_id]
         return proposed[0] if len(proposed) == 1 else None
 
     def _run_snapshot(self, observed_at):
@@ -252,16 +285,98 @@ class RunnerRegistryControl:
         package_id: str,
         worker_id: str,
         expected_revision: int,
+        lease_id: str | None = None,
     ) -> None:
-        self.registry.begin_attempt_runtime(
-            attempt_id,
-            package_id=package_id,
-            worker_id=worker_id,
-            runner_pid=os.getpid(),
-            started_at=utc_now(),
-            expected_revision=expected_revision,
-            operation_id=f"attempt-start:{attempt_id}",
+        baseline = self._reservation_facts(
+            attempt_id, package_id, worker_id, lease_id
         )
+        if not baseline["eligible"]:
+            raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
+        revision = expected_revision
+        for retry in range(2):
+            try:
+                self.registry.begin_attempt_runtime(
+                    attempt_id, package_id=package_id, worker_id=worker_id,
+                    runner_pid=os.getpid(), started_at=utc_now(),
+                    expected_revision=revision,
+                    operation_id=f"attempt-start:{attempt_id}:{revision}",
+                )
+                return
+            except RegistryConflict as error:
+                if error.code != "DISPATCH_NOT_AUTHORIZED" or retry:
+                    raise
+                # A heartbeat is the only harmless revision race.  Re-read the
+                # exact lease, bounded-run envelope, ownership, and dispatch
+                # eligibility before the one retry; any replacement or lost
+                # authority fails closed.
+                current = self._reservation_facts(
+                    attempt_id, package_id, worker_id, baseline["lease_id"]
+                )
+                if not current["eligible"]:
+                    raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
+                if ({key: value for key, value in current.items() if key != "revision"}
+                        != {key: value for key, value in baseline.items() if key != "revision"}):
+                    raise
+                revision = int(current["revision"])
+
+    def _reservation_facts(self, attempt_id, package_id, worker_id, lease_id):
+        """Read every fact that must survive a pre-launch retry unchanged."""
+        observed_at = utc_now()
+        control = self.registry.dispatch_control()
+        scope = control.get("bounded_run")
+        if (control.get("dispatch_mode") != "LIVE"
+                or control.get("kill_switch_engaged")
+                or (isinstance(scope, dict) and observed_at >= scope.get("deadline", ""))):
+            raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+        snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        active = [item for item in snapshot.active_leases
+                  if item.get("package_id") == package_id
+                  and item.get("worker_id") == worker_id and not item.get("expired")]
+        if len(active) != 1 or (lease_id is not None and active[0].get("id") != lease_id):
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        package = next((item for item in snapshot.work_packages if item.get("id") == package_id), None)
+        if package is None or package.get("status") != "ACTIVE" or self.registry.attempt_exists(attempt_id):
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        # Reconstruct the pre-claim view to prove lane, capability, capacity,
+        # path/allowlist and reviewer eligibility still hold without treating
+        # this already-acquired lease as a competing assignment.
+        worker = next((item for item in snapshot.workers if item.get("id") == worker_id), None)
+        if worker is None:
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        candidate = replace(
+            snapshot,
+            work_packages=tuple(
+                {**item, "status": "READY"} if item.get("id") == package_id else item
+                for item in snapshot.work_packages
+            ),
+            workers=tuple(
+                {**item, "availability": "IDLE"} if item.get("id") == worker_id else item
+                for item in snapshot.workers
+            ),
+            active_leases=tuple(item for item in snapshot.active_leases if item.get("id") != active[0].get("id")),
+        )
+        if isinstance(scope, dict):
+            candidate = scope_dispatch_snapshot(
+                candidate, scope["package_ids"], scope["parent_limit"]
+            )
+        eligible = {
+            (item.package_id, item.worker_id)
+            for item in decide_shadow(candidate).pair_evaluations if item.eligible
+        }
+        return {
+            "revision": int(control["revision"]),
+            "lease_id": active[0].get("id"),
+            "lease_expires_at": active[0].get("expires_at"),
+            "package_id": package_id,
+            "worker_id": worker_id,
+            "package_status": package.get("status"),
+            "bounded_run": scope,
+            "deadline": scope.get("deadline") if isinstance(scope, dict) else None,
+            # reserve_attempt checks this at both the baseline and retry.
+            # Returning the real scheduler result keeps those explicit
+            # fail-closed guards reachable when capacity or paths change.
+            "eligible": (package_id, worker_id) in eligible,
+        }
 
     def pre_launch(self) -> int:
         return self.registry.require_live_dispatch()

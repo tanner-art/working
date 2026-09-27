@@ -172,6 +172,25 @@ def reason_codes(evaluation) -> set[str]:
 
 
 class ShadowDispatchTest(unittest.TestCase):
+    def test_ready_review_wins_competing_idle_worker_without_stalling_builder(self) -> None:
+        implementation = package("implementation", status="VERIFY_REVIEW")
+        review = package(
+            "review", priority=1, lane="ASSURANCE", capabilities=("review",),
+            kind="REVIEW", capacity_size="VERY_SMALL",
+        )
+        parent = package("next-parent", priority=99)
+        hybrid = worker(
+            "hybrid", capabilities=("registry", "review"),
+            lanes=("PLATFORM", "ASSURANCE"),
+        )
+        builder = worker("builder")
+        decision = decide_shadow(snapshot(
+            packages=(implementation, review, parent), workers=(hybrid, builder),
+            dependencies=({"package_id": "review", "dependency_id": "implementation"},),
+        ))
+        self.assertIn(Assignment("review", "hybrid"), decision.proposed_assignments)
+        self.assertIn(Assignment("next-parent", "builder"), decision.proposed_assignments)
+
     def test_review_dependency_is_eligible_at_verify_review(self) -> None:
         implementation = package("implementation", status="VERIFY_REVIEW")
         review = package(
