@@ -190,6 +190,14 @@ class QueueTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     review_command(config)
 
+    def test_codex_review_adapter_is_read_only_and_prompt_is_not_claude_specific(self):
+        command = review_command({"provider": "openai", "command": ["/opt/bin/codex"]},
+                                 review_packet_path="/private/tmp/review-packet")
+        self.assertEqual(command, ["/opt/bin/codex", "exec", "--json", "--sandbox",
+                                   "read-only", "--add-dir", "/private/tmp/review-packet"])
+        with self.assertRaisesRegex(ValueError, "alternate review flag"):
+            review_command({"provider": "openai", "command": ["/opt/bin/codex", "--sandbox=workspace-write"]})
+
     def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
         import pathlib, tempfile
         from scripts.factory_registry.models import ReviewInput

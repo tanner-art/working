@@ -112,6 +112,18 @@ class RunnerRegistryControlTests(unittest.TestCase):
             with self.assertRaisesRegex(RegistryConflict, "PAIR_NOT_FOUND"):
                 control.pre_claim("TASK-1", "worker-a")
 
+    def test_reservation_retries_only_a_benign_heartbeat_revision_race(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        stale_revision = self.registry.dispatch_control()["revision"]
+        # This is the interleaving that used to reject a valid leased attempt:
+        # a Registry liveness fact changes the revision after pre-launch.
+        self.registry.record_worker_heartbeat("worker-a", observed_at=datetime.now(timezone.utc).isoformat())
+        with patch("registry_control.os.getpid", return_value=901):
+            control.reserve_attempt("attempt-heartbeat-race", package_id="TASK-1",
+                                    worker_id="worker-a", expected_revision=stale_revision)
+        self.assertTrue(self.registry.attempt_exists("attempt-heartbeat-race"))
+
     def test_pre_claim_pins_the_normalized_queue_contract(self):
         body = {
             "task": "TASK-1", "paths": ["docs/canary.md"],

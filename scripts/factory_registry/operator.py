@@ -1973,8 +1973,8 @@ def bounded_run_worker_gate(
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
     review_only = not parents
-    if ((not review_only and (len(parents) > 2 or len(reviews) != len(parents)))
-            or (review_only and not 1 <= len(reviews) <= 2)
+    if ((not review_only and (len(parents) > 3 or len(reviews) != len(parents)))
+            or (review_only and not 1 <= len(reviews) <= 3)
             or len(parents) + len(reviews) != len(run_packages)):
         raise OperatorError("bounded run requires one or two implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
@@ -2027,6 +2027,11 @@ def bounded_run_worker_gate(
     workers = {str(item.get("id")): item for item in snapshot.workers}
     evaluations = {item.id: item for item in decision.worker_evaluations}
     eligible = {worker_id for worker_id, item in evaluations.items() if item.eligible}
+    # ``decide_shadow`` answers what can be claimed *now*.  Registration must
+    # additionally accept a dormant pair whose dependency or WIP slot is not
+    # presently claimable: it is an immutable potential capability check, not
+    # a claim authorization.  Otherwise one waiting pair freezes an unrelated
+    # eligible pair and a bounded session cannot hold remediation slots.
     assignments = {
         str(parent.get("id")): {
             item.worker_id for item in decision.pair_evaluations
@@ -2034,35 +2039,55 @@ def bounded_run_worker_gate(
         }
         for parent in parents
     }
-    if not review_only and any(not choices for choices in assignments.values()):
-        raise OperatorError("no eligible implementation worker for a bounded run package")
-    reviewers = set(eligible)
-    for review in reviews:
-        required = set(review.get("required_capabilities", ()))
-        lane = review.get("lane")
-        reviewers &= {
-            worker_id for worker_id in eligible
+    potential = {
+        worker_id for worker_id, worker in workers.items()
+        if worker.get("role") == "WORKER"
+    }
+    potential_assignments = {}
+    for parent in parents:
+        required = set(parent.get("required_capabilities", ()))
+        lane = parent.get("lane")
+        potential_assignments[str(parent.get("id"))] = {
+            worker_id for worker_id in potential
             if lane in workers[worker_id].get("approved_lanes", ())
             and required <= set(workers[worker_id].get("capabilities", ()))
         }
+    if not review_only and any(not choices for choices in potential_assignments.values()):
+        raise OperatorError("no capable implementation worker for a bounded run package")
+    # Review capability is pair-local.  Intersecting every review's required
+    # capabilities globally incorrectly rejects valid mixed-provider sessions.
+    review_choices = {}
+    for review in reviews:
+        required = set(review.get("required_capabilities", ()))
+        lane = review.get("lane")
+        review_choices[str(review.get("id"))] = {
+            worker_id for worker_id in potential
+            if lane in workers[worker_id].get("approved_lanes", ())
+            and required <= set(workers[worker_id].get("capabilities", ()))
+        }
+        if not review_choices[str(review.get("id"))]:
+            raise OperatorError("bounded run has no capable independent reviewer")
     if review_only:
         independent = [
             (str(review.get("id")), review_implementers[str(review.get("id"))], reviewer)
-            for review in reviews for reviewer in reviewers
+            for review in reviews for reviewer in review_choices[str(review.get("id"))]
             if reviewer != review_implementers[str(review.get("id"))]
         ]
     else:
         independent = sorted({
             (parent_id, implementer, reviewer)
-            for parent_id, implementers in assignments.items()
-            for implementer in implementers for reviewer in reviewers if reviewer != implementer
+            for parent_id, implementers in potential_assignments.items()
+            for implementer in implementers
+            for review in reviews if review_targets[str(review.get("id"))] == parent_id
+            for reviewer in review_choices[str(review.get("id"))] if reviewer != implementer
         })
     if not independent:
         raise OperatorError("bounded run has no independent reviewer")
     return {
         "run_package_ids": sorted(allowed),
         "implementation_assignments": {key: sorted(value) for key, value in assignments.items()},
-        "eligible_reviewers": sorted(reviewers),
+        "potential_implementation_assignments": {key: sorted(value) for key, value in potential_assignments.items()},
+        "eligible_reviewers": sorted({worker for choices in review_choices.values() for worker in choices}),
         "independent_pairs": [list(value) for value in independent],
         "decision_id": decision.decision_id,
     }

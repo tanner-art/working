@@ -51,7 +51,9 @@ CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
-DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 2
+# A session may retain more than two independently auditable pairs.  This is
+# deliberately still bounded by the registry-wide three-parent invariant.
+DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 3
 def _json(value: Any) -> str:
     """Canonical JSON for existing Registry records and operation receipts."""
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
@@ -1219,6 +1221,13 @@ class SQLiteRegistry:
             except Exception:
                 connection.rollback()
                 raise
+
+    def attempt_exists(self, attempt_id: str) -> bool:
+        """Read-only replay guard used before retrying a reservation race."""
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM attempts WHERE id=?", (attempt_id,)
+            ).fetchone() is not None
 
     def recover_attempt_runtime(
         self,

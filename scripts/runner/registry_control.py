@@ -32,6 +32,7 @@ from scripts.factory_registry.codex_capacity import (  # noqa: E402
 from scripts.factory_registry.claude_telemetry import (  # noqa: E402
     claude_provider_signal, probe_claude_health,
 )
+from session_queue import ordered_assignments  # noqa: E402
 
 
 def utc_now() -> str:
@@ -149,6 +150,7 @@ class RunnerRegistryControl:
                     f"{worker_id} implemented the target package",
                 )
         decision = decide_shadow(snapshot)
+        ordered = ordered_assignments(snapshot, decision.proposed_assignments)
         assignment = (package_id, worker_id)
         eligible = {
             (item.package_id, item.worker_id) for item in decision.proposed_assignments
@@ -166,15 +168,16 @@ class RunnerRegistryControl:
                 if matching is not None else "PAIR_NOT_FOUND"
             )
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
+        if ordered and (ordered[0].package_id, ordered[0].worker_id) != assignment:
+            raise RegistryConflict("SESSION_QUEUE_PRIORITY", ordered[0].package_id)
         return self.registry.require_live_dispatch(expected_revision=snapshot.revision)
 
     def proposed_worker(self, package_id: str) -> str | None:
         """Return the authoritative scheduler proposal, never GitHub labels."""
         snapshot = self._run_snapshot(utc_now())
-        proposed = [
-            item.worker_id for item in decide_shadow(snapshot).proposed_assignments
-            if item.package_id == package_id
-        ]
+        proposed = [item.worker_id for item in ordered_assignments(
+            snapshot, decide_shadow(snapshot).proposed_assignments)
+                    if item.package_id == package_id]
         return proposed[0] if len(proposed) == 1 else None
 
     def _run_snapshot(self, observed_at):
@@ -253,15 +256,40 @@ class RunnerRegistryControl:
         worker_id: str,
         expected_revision: int,
     ) -> None:
-        self.registry.begin_attempt_runtime(
-            attempt_id,
-            package_id=package_id,
-            worker_id=worker_id,
-            runner_pid=os.getpid(),
-            started_at=utc_now(),
-            expected_revision=expected_revision,
-            operation_id=f"attempt-start:{attempt_id}",
-        )
+        # A heartbeat is allowed to advance the Registry revision between a
+        # successful lease claim and the pre-provider reservation.  Retry only
+        # that harmless optimistic-concurrency race; do not turn a changed
+        # stop/deadline/lease/owner into an attempt.
+        revision = expected_revision
+        for index in range(2):
+            started_at = utc_now()
+            try:
+                self.registry.begin_attempt_runtime(
+                    attempt_id, package_id=package_id, worker_id=worker_id,
+                    runner_pid=os.getpid(), started_at=started_at,
+                    expected_revision=revision,
+                    operation_id=f"attempt-start:{attempt_id}:{revision}",
+                )
+                return
+            except RegistryConflict as error:
+                if error.code != "DISPATCH_NOT_AUTHORIZED" or index:
+                    raise
+                control = self.registry.dispatch_control()
+                if control.get("dispatch_mode") != "LIVE" or control.get("kill_switch_engaged"):
+                    raise
+                scope = control.get("bounded_run")
+                if isinstance(scope, dict) and utc_now() >= scope.get("deadline", ""):
+                    raise
+                snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
+                active = [lease for lease in snapshot.active_leases
+                          if lease.get("package_id") == package_id
+                          and lease.get("worker_id") == worker_id]
+                prior = self.registry.attempt_exists(attempt_id)
+                package = next((item for item in snapshot.work_packages
+                                if item.get("id") == package_id), None)
+                if len(active) != 1 or prior or package is None or package.get("status") != "ACTIVE":
+                    raise
+                revision = int(control["revision"])
 
     def pre_launch(self) -> int:
         return self.registry.require_live_dispatch()
