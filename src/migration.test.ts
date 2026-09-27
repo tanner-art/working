@@ -7,6 +7,7 @@ import { confirmObject, confirmedActions, reverseObject, setObjectKind, setObjec
 import { loadStateResult, saveState } from './store'
 import { createInterpretedObject } from './captureInterpretation'
 import { correctOriginal, reviseInterpretation } from './reviewRevision'
+import { resolveReminderInState } from './reminderWorkflow'
 
 const key = 'thoughtflow-state-v1'
 const thought = (patch: Partial<ThoughtObject> = {}): ThoughtObject => ({
@@ -28,6 +29,17 @@ function storage(initial: string | null) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('TASK-002 migration', () => {
+  it('reconstructs confirmed reminder audit evidence and rejects forged or invalid lifecycle history', () => {
+    const target = thought({ id: 'target', kind: 'idea', status: 'confirmed' })
+    const source = thought({ id: 'source', kind: 'reminder', status: 'review' })
+    const resolved = resolveReminderInState(legacyUiProjection(migrateLegacyState(legacy([target, source]))), 'source', { targetId: 'target', mode: 'specific', dueAt: '2026-09-28T08:00:00.000Z' })
+    const model = resolved.model!
+    expect(isPersistedState(structuredClone(model))).toBe(true)
+    expect(model.reminderInstructions?.[0]).toMatchObject({ targetId: 'target', sourceInterpretationId: expect.any(String), deliveryState: 'active' })
+    const forged = structuredClone(model)
+    forged.interpretations.at(-1)!.legacy.history.at(-1)!.reminderInstruction = { instructionId: 'reminder:source', action: 'handled' }
+    expect(isPersistedState(forged)).toBe(false)
+  })
   it('roundtrips exact captures, IDs, canvas, confidence, rationale and relationship evidence', () => {
     const original = legacy([thought({ relationships: [{ type: 'belongs_to', targetId: 'missing-old-object' }] })])
     const before = structuredClone(original)

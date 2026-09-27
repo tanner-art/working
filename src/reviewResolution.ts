@@ -10,6 +10,7 @@ export type ReviewResolutionKind = typeof reviewResolutionKinds[number]
 
 export type ReviewContinuationResult =
   | { status: 'completed'; object: ThoughtObject }
+  | { status: 'needs-input'; message: string }
   | { status: 'unavailable'; message: string }
 
 export type ReviewContinuation = (object: ThoughtObject) => Promise<ReviewContinuationResult> | ReviewContinuationResult
@@ -32,6 +33,7 @@ export const registeredReviewContinuations: ReviewContinuations = Object.freeze(
 
 export type ReviewResolutionResult =
   | { status: 'completed'; object: ThoughtObject }
+  | { status: 'needs-input'; message: string }
   | { status: 'recoverable-error'; message: string }
 
 const unavailable = (kind: Exclude<ReviewResolutionKind, 'idea'>): ReviewResolutionResult => ({
@@ -61,6 +63,7 @@ export async function resolveReviewCapture(
   if (!continuation) return unavailable(kind)
   try {
     const result = await continuation(classified)
+    if (result.status === 'needs-input') return result
     if (result.status !== 'completed') return { status: 'recoverable-error', message: result.message }
     return result
   } catch {

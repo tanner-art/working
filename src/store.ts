@@ -129,7 +129,17 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
   return typeof item.at === 'string' && typeof item.event === 'string' &&
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
-    (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string'))
+    (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&
+    (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction))
+}
+
+function isReminderInstructionAudit(value: NonNullable<HistoryEvent['reminderInstruction']>): boolean {
+  if (!value || typeof value !== 'object' || typeof value.instructionId !== 'string' || !value.instructionId) return false
+  if (!['created', 'handled', 'dismissed'].includes(value.action)) return false
+  if (value.action === 'created') return typeof value.targetId === 'string' && !!value.targetId &&
+    (value.mode === 'specific' || value.mode === 'daily-log') &&
+    (value.mode === 'specific' ? typeof value.dueAt === 'string' : value.dueAt === undefined)
+  return value.targetId === undefined && value.mode === undefined && value.dueAt === undefined
 }
 
 function isMetadata(value: unknown): value is ObjectMetadata {

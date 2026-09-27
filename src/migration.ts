@@ -1,6 +1,6 @@
 import { validTemporalHistory } from './temporalConfirmation'
 import { isGroupingReviewState } from './groupingProposal'
-import type { ActionPriority, AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, SemanticObject, StagedAction, ThoughtObject } from './domain'
+import type { ActionPriority, AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
 import { bankFromLegacy, isCanvasBank } from './canvasBank'
 import { isAppState } from './store'
@@ -19,6 +19,45 @@ export function hasConfirmation(object: ThoughtObject): boolean {
       confirmation.source === 'review-confirmation' && Number.isFinite(Date.parse(entry.at))
   }
   return false
+}
+
+/** Rebuild reminder instructions from append-only source-capture audit events. */
+function materializeReminderInstructions(model: PersistedState) {
+  const records = new Map<string, ResolvedReminderInstruction>()
+  const latestReadings = new Map<string, Interpretation>()
+  for (const reading of model.interpretations) latestReadings.set(reading.legacy.id, reading)
+  for (const reading of latestReadings.values()) {
+    for (const entry of reading.legacy.history) {
+      const audit = entry.reminderInstruction
+      if (!audit) continue
+      const existing = records.get(audit.instructionId)
+      if (audit.action === 'created') {
+        if (existing || reading.legacy.kind !== 'reminder' || !audit.targetId || !audit.mode || !Number.isFinite(Date.parse(entry.at)) ||
+          (audit.mode === 'specific' && (!audit.dueAt || !Number.isFinite(Date.parse(audit.dueAt)))) ||
+          (audit.mode === 'daily-log' && audit.dueAt !== undefined)) fail()
+        const targetId = audit.targetId!
+        const mode = audit.mode!
+        const sourceInterpretationId = model.interpretations.find(candidate => candidate.legacy.id === reading.legacy.id &&
+          candidate.legacy.history.some(candidateEntry => candidateEntry.reminderInstruction?.instructionId === audit.instructionId && candidateEntry.reminderInstruction.action === 'created'))?.id ?? fail()
+        records.set(audit.instructionId, { id: audit.instructionId, targetId, captureIds: reading.captureIds,
+          sourceInterpretationId, mode, ...(mode === 'specific' ? { dueAt: audit.dueAt! } : {}),
+          deliveryState: 'active', createdAt: entry.at })
+        continue
+      }
+      const active = existing ?? fail()
+      if (active.deliveryState !== 'active' || !Number.isFinite(Date.parse(entry.at))) fail()
+      records.set(audit.instructionId, audit.action === 'handled'
+        ? { ...active, deliveryState: 'handled', handledAt: entry.at }
+        : { ...active, deliveryState: 'dismissed', dismissedAt: entry.at })
+    }
+  }
+  const instructions = [...records.values()]
+  if (instructions.some(instruction => !model.semanticObjects.some(target => target.id === instruction.targetId))) fail()
+  if (instructions.length || model.reminderInstructions !== undefined) model.reminderInstructions = instructions
+  for (const target of model.semanticObjects) {
+    const legacy = target.reminders.filter(reminder => !('targetId' in reminder))
+    target.reminders = [...legacy, ...instructions.filter(instruction => instruction.targetId === target.id).map(copy)]
+  }
 }
 
 const copy = <T>(value: T): T => structuredClone(value)
@@ -145,7 +184,7 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
       reminders: interpretation.proposedReminder ? [copy(interpretation.proposedReminder)] : [] }
     model.semanticObjects.push(object)
   }
-  if ((withdrawn || (historicalSchedules.length && item.kind !== 'reminder')) && !model.semanticObjects.some(o => o.id === item.id)) {
+  if (((withdrawn && item.kind !== 'reminder') || (historicalSchedules.length && item.kind !== 'reminder')) && !model.semanticObjects.some(o => o.id === item.id)) {
     model.semanticObjects.push(withdrawn ? { ...withdrawn, status: 'review' } : { id: item.id, kind: item.kind as SemanticObject['kind'], captureIds: interpretation.captureIds,
       interpretationIds: model.interpretations.filter(i => i.legacy.id === item.id).map(i => i.id), summary: interpretation.summary,
       status: 'review', metadata: copy(item.metadata), reminders: [] })
@@ -162,6 +201,7 @@ export function migrateLegacyState(value: unknown): PersistedState {
   const model: PersistedState = { schemaVersion: 2, captures: [], interpretations: [], semanticObjects: [], stagedActions: [],
     calendarEvents: [], relationships: [], legacyUiIds: value.objects.map(o => o.id), canvas: copy(value.canvas) }
   value.objects.forEach(item => append(model, item))
+  materializeReminderInstructions(model)
   return model
 }
 
@@ -184,10 +224,12 @@ function projectModel(model: PersistedState): AppState {
     const capture = model.captures.find(c => c.id === reading.captureIds[0]) ?? fail()
     const semantic = model.semanticObjects.find(o => o.id === id)
     const correction = (model.sourceCorrections ?? []).filter(value => value.captureId === capture.id).at(-1)
+    const resolvedReminder = (model.reminderInstructions ?? []).find(instruction => instruction.captureIds.includes(capture.id)) ??
+      reading.legacy.history.find(entry => entry.reminderInstruction?.action === 'created')
     const item: ThoughtObject = { ...copy(reading.legacy), originalContent: capture.originalContent,
       ...(correction ? { currentContent: correction.correctedContent } : {}), source: capture.source,
       createdAt: capture.createdAt, status: semantic?.status ??
-        (reading.legacy.kind !== 'action' && reading.legacy.kind !== 'commitment' &&
+        (resolvedReminder ? reading.legacy.status : reading.legacy.kind !== 'action' && reading.legacy.kind !== 'commitment' &&
           (reading.legacy.status === 'archived' || reading.legacy.status === 'complete') ? reading.legacy.status : 'review' as const) }
     if (reading.confirmation) registerCompatibility(item, reading.confirmation)
     return item
@@ -274,6 +316,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       model.temporalHistory = [...(model.temporalHistory ?? []), { id: `action-reversal:${event.id}`, at: reversalAt, source: 'review-temporal-confirmation', decision: 'reversed', target: copy(confirmed.target), reverses: confirmed.id }]
     }
   }
+  materializeReminderInstructions(model)
   if (!isPersistedState(model)) return fail()
   return model
 }
@@ -322,7 +365,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'stagedActions', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory', 'groupingReview'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'reminderInstructions', 'stagedActions', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory', 'groupingReview'].includes(key))) return false
     if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
     if (m.canvasBank !== undefined && !isCanvasBank(m.canvasBank)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,
@@ -336,7 +379,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
     if (!validCorrectionAudit(m)) return false
     // Reconstruct supported adapter versions to verify semantic derivations and history links.
     const rebuilt: PersistedState = { schemaVersion: 2, captures: copy(m.captures), interpretations: [],
-      semanticObjects: [], ...(m.stagedActions === undefined ? {} : { stagedActions: [] }), calendarEvents: [], relationships: [], legacyUiIds: copy(m.legacyUiIds), canvas: copy(m.canvas) }
+      semanticObjects: [], ...(m.reminderInstructions === undefined ? {} : { reminderInstructions: [] }), ...(m.stagedActions === undefined ? {} : { stagedActions: [] }), calendarEvents: [], relationships: [], legacyUiIds: copy(m.legacyUiIds), canvas: copy(m.canvas) }
     for (const reading of m.interpretations) {
       const capture = m.captures.find(c => c.id === reading.captureIds?.[0])
       if (!capture || capture.id !== `capture:${reading.legacy.id}`) return false
@@ -347,7 +390,8 @@ export function isPersistedState(value: unknown): value is PersistedState {
       append(rebuilt, item, previous, reading.confirmation)
       if (!equal(rebuilt.interpretations.at(-1), reading)) return false
     }
-    if (!equal(rebuilt.semanticObjects, m.semanticObjects) || !equal(rebuilt.relationships, m.relationships) || !equal(rebuilt.stagedActions ?? [], m.stagedActions ?? [])) return false
+    materializeReminderInstructions(rebuilt)
+    if (!equal(rebuilt.semanticObjects, m.semanticObjects) || !equal(rebuilt.reminderInstructions ?? [], m.reminderInstructions ?? []) || !equal(rebuilt.relationships, m.relationships) || !equal(rebuilt.stagedActions ?? [], m.stagedActions ?? [])) return false
     const latestReadings = m.legacyUiIds.map(id => m.interpretations.filter(reading => reading.legacy.id === id).at(-1)!).filter(Boolean)
     const activeActionSchedules = new Map((m.stagedActions ?? []).filter(stage => stage.status === 'scheduled' && stage.schedule).map(stage => [stage.schedule!.eventId, stage]))
     for (const reading of latestReadings) {
