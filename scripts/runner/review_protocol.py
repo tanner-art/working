@@ -87,12 +87,25 @@ def review_handoff(value: ReviewInput, *, reviewer_worker_id: str, review_attemp
         "contract_sha256": value.contract_sha256,
     }
     return json.dumps({"review_input_id": value.id, "target_package_id": value.target_package_id, "implementation_attempt_id": value.implementation_attempt_id, "implementation_commit": value.implementation_commit, "base_commit": value.base_commit, "pr_url": value.pr_url, "contract_sha256": value.contract_sha256, "expected_verdict_identity": expected_verdict_identity, "contract": dict(value.contract), "validation_evidence": dict(value.validation_evidence), "reviewer_worker_id": reviewer_worker_id, "review_attempt_id": review_attempt_id}, sort_keys=True, indent=2, ensure_ascii=False)
-def parse_review_verdict(output: str, review_input: ReviewInput) -> ReviewVerdict:
+def parse_review_verdict(output: str, review_input: ReviewInput, *,
+                         provider: str | None = None) -> ReviewVerdict:
     validate_review_input(review_input)
-    try:
-        raw = _load_json(output, message="review verdict is unparseable")
-    except ReviewProtocolError:
+    # A configured provider is an input-integrity boundary.  In particular,
+    # Codex's JSONL transcript must never fall back to accepting a convenient
+    # bare JSON object or a Claude-shaped envelope.
+    if provider == "openai":
         raw = _codex_structured_output(output)
+    elif provider == "anthropic":
+        raw = _load_json(output, message="review verdict is unparseable")
+    elif provider is None:
+        # Explicit legacy/API compatibility only.  The production caller
+        # supplies provider identity and therefore never takes this branch.
+        try:
+            raw = _load_json(output, message="review verdict is unparseable")
+        except ReviewProtocolError:
+            raw = _codex_structured_output(output)
+    else:
+        raise ReviewProtocolError("review provider is unsupported")
     # Claude's JSON mode wraps the model result.  Only accept its documented,
     # successful result envelope; accepting arbitrary wrappers would make an
     # error payload or a transcript look like a review decision.

@@ -196,10 +196,10 @@ class QueueTests(unittest.TestCase):
             packet = pathlib.Path(directory); (packet / 'review-verdict-schema.json').write_text('{}')
             command = review_command({'provider': 'openai', 'command': [
                 '/path/to/codex', 'exec', '--model', 'gpt-6-sol', '-c',
-                'model_reasoning_effort="high"', '--disable', 'multi_agent', '--json',
+                'model_reasoning_effort="high"', '--json',
                 '--sandbox', 'workspace-write', '-']}, review_packet_path=str(packet))
             self.assertEqual(command, ['codex', 'exec', '--model', 'gpt-6-sol', '-c',
-                'model_reasoning_effort="high"', '--disable', 'multi_agent', '--sandbox',
+                'model_reasoning_effort="high"', '--sandbox',
                 'read-only', '--json', '--output-schema', str(packet / 'review-verdict-schema.json'), '-'])
             for source in (
                 ['/path/to/codex', 'exec', '--sandbox=workspace-write', '--output-schema=x', '--json=true', '--json', '-'],
@@ -219,6 +219,30 @@ class QueueTests(unittest.TestCase):
                         result = review_command({'provider': 'openai', 'command': source}, review_packet_path=str(packet))
                         self.assertEqual(result.count('--output-schema'), 1)
                         self.assertEqual(result[result.index('--sandbox') + 1], 'read-only')
+
+    def test_codex_review_adapter_rejects_config_override_bypasses_before_invocation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            packet = pathlib.Path(directory)
+            (packet / 'review-verdict-schema.json').write_text('{}')
+            dangerous = (
+                ('-c', 'sandbox_mode="workspace-write"'),
+                ('--config', 'approval_policy="never"'),
+                ('-c', 'shell_environment_policy.inherit="all"'),
+                ('--config', 'tools.mcp.enabled=true'),
+                ('-c', '"sandbox_mode"="workspace-write"'),
+                ('--config=sandbox_mode="workspace-write"',),
+                ('-c=sandbox_mode="workspace-write"',),
+                ('--config', 'model_reasoning_effort.nested="high"'),
+                ('-c', 'model_reasoning_effort="high"', '--config', 'model_reasoning_effort="low"'),
+                ('--disable', 'sandbox'),
+            )
+            for arguments in dangerous:
+                with self.subTest(arguments=arguments):
+                    source = ['/path/to/codex', 'exec', *arguments, '-']
+                    with self.assertRaises(ValueError):
+                        review_command({'provider': 'openai', 'command': source},
+                                       review_packet_path=str(packet))
 
     def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
         import pathlib, tempfile
@@ -988,6 +1012,7 @@ class LifecycleTests(unittest.TestCase):
             ('wrong-sha', {'state': 'APPROVED', 'reviewed_commit': 'c' * 40, 'changes_requested': []}, False),
             ('malformed', {'state': 'APPROVED', 'changes_requested': []}, False),
             ('codex-approved', {'state': 'APPROVED', 'changes_requested': []}, True),
+            ('codex-bare-json', {'state': 'APPROVED', 'changes_requested': []}, False),
         )
         for name, changes, accepted in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1019,7 +1044,7 @@ class LifecycleTests(unittest.TestCase):
                     'findings': ['reviewed exact packet'],
                     'changes_requested': changes['changes_requested'],
                 }
-                codex = name == 'codex-approved'
+                codex = name.startswith('codex-')
                 provider_output = (
                     '\n'.join((
                         json.dumps({'type': 'thread.started'}),
@@ -1027,11 +1052,12 @@ class LifecycleTests(unittest.TestCase):
                             'type': 'agent_message', 'text': json.dumps(value),
                         }}),
                         json.dumps({'type': 'turn.completed'}),
-                    )) if codex else
+                    )) if name == 'codex-approved' else
+                    (json.dumps(value) if codex else
                     ('not-json' if name == 'malformed' else json.dumps({
                         'type': 'result', 'is_error': False, 'subtype': 'success',
                         'result': json.dumps(value),
-                    }))
+                    })))
                 )
                 config = {
                     'repo': str(root / 'repo'), 'state': str(root / 'state'),

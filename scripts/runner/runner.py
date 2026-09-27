@@ -811,15 +811,21 @@ def review_command(config, *, review_packet_path=None):
         schema = pathlib.Path(review_packet_path) / 'review-verdict-schema.json'
         if not pathlib.Path(review_packet_path).is_absolute() or not schema.is_file():
             raise ValueError('Codex review packet schema is unavailable')
-        # Existing model and config selection is diagnostic/configuration, not
-        # an authority grant.  Strip every execution/output control and add
-        # exactly one known-safe replacement below.
+        # Existing model selection is diagnostic/configuration, not an
+        # authority grant.  Only the two model-related forms actually needed
+        # by the configured command are retained.  In particular, ``-c`` is
+        # not a generic passthrough: it could otherwise set sandbox, approval,
+        # shell, tool, or MCP policy through nested configuration.
         value_controls = {'--sandbox', '-s', '--output-schema', '-o', '--add-dir', '-C', '--cd',
                           '--ask-for-approval', '-a'}
         unsafe = {'--full-auto', '--yolo', '--approve-for-me',
                   '--dangerously-bypass-approvals-and-sandbox',
                   '--dangerously-bypass-hook-trust', '--worktree'}
-        retained, index = ['codex', 'exec'], 2
+        config_value = re.compile(
+            r'^(?:model\s*=\s*"?[A-Za-z0-9._:-]+"?|'
+            r'model_reasoning_effort\s*=\s*"?(?:low|medium|high|xhigh)"?)$'
+        )
+        retained, index, seen = ['codex', 'exec'], 2, set()
         while index < len(source):
             item = source[index]
             if item == '-':
@@ -839,18 +845,25 @@ def review_command(config, *, review_packet_path=None):
             if item == '--json' or item.startswith('--json='):
                 index += 1
                 continue
-            if not item.startswith('-'):
-                raise ValueError(f'unsupported Codex review argument: {item}')
-            retained.append(item)
-            # Preserve only known value-bearing configuration flags.  A bare
-            # one is malformed rather than accidentally consuming a control.
-            if item in {'--model', '-m', '-c', '--config', '--disable', '--enable'}:
+            if item in {'--model', '-m', '-c', '--config'}:
                 if index + 1 >= len(source) or source[index + 1].startswith('-'):
                     raise ValueError(f'Codex review flag lacks value: {item}')
-                retained.append(source[index + 1])
+                value = source[index + 1]
+                if item in {'--model', '-m'}:
+                    key = 'model'
+                    if not re.fullmatch(r'[A-Za-z0-9._:-]+', value):
+                        raise ValueError('Codex review model is invalid')
+                else:
+                    if not config_value.fullmatch(value):
+                        raise ValueError('Codex review config override is unsafe or unsupported')
+                    key = value.split('=', 1)[0].strip()
+                if key in seen:
+                    raise ValueError(f'duplicate Codex review configuration: {key}')
+                seen.add(key)
+                retained.extend((item, value))
                 index += 2
             else:
-                index += 1
+                raise ValueError(f'unsupported Codex review argument: {item}')
         return retained + ['--sandbox', 'read-only', '--json', '--output-schema', str(schema), '-']
     if config.get('provider') != 'anthropic':
         raise ValueError('Registry review requires the supported anthropic Claude adapter')
@@ -1489,7 +1502,11 @@ def main():
                 if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
             verify_changes()
             if registry_review:
-                try: verdict = parse_review_verdict(provider_output, review_input)
+                try:
+                    verdict = parse_review_verdict(
+                        provider_output, review_input,
+                        provider=config.get('provider', 'anthropic'),
+                    )
                 except ReviewProtocolError as error: raise RuntimeError(f'review verdict rejected: {error}') from error
             save_record(record, data, 'validation')
             write_heartbeat(state, status='validation', issue=n,
