@@ -54,6 +54,9 @@ export interface HistoryEvent {
   at: string
   event: string
   confirmation?: ConfirmationGesture
+  actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
+  actionPriority?: { priority: ActionPriority; source: 'schedule-priority-selection' }
+  actionSchedule?: { eventId: string; startsAt: string; temporalContext: string }
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
   reviewRevision?: { from: string; to: string }
   sourceCorrection?: { correctionId: string; from: string; to: string }
@@ -163,6 +166,16 @@ export interface SemanticObject {
   metadata: ObjectMetadata
   reminders: ReminderInstruction[]
 }
+export type ActionPriority = 1 | 2 | 3 | 4 | 5
+export interface StagedAction {
+  id: string
+  objectId: string
+  captureId: string
+  priority: ActionPriority
+  status: 'staged' | 'scheduled' | 'reversed'
+  stagedAt: string
+  schedule?: { eventId: string; startsAt: string; temporalContext: string }
+}
 export interface Commitment extends SemanticObject { kind: 'commitment' }
 export interface CalendarEvent {
   id: string
@@ -187,6 +200,7 @@ export interface PersistedState {
   sourceCorrections?: SourceCorrection[]
   interpretations: Interpretation[]
   semanticObjects: SemanticObject[]
+  stagedActions?: StagedAction[]
   calendarEvents: CalendarEvent[]
   relationships: SemanticRelationship[]
   /** Active UI identities include unresolved proposals without semantic objects. */
