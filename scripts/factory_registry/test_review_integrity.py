@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, pathlib, sys, unittest
+import hashlib, json, pathlib, sys, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "runner"
 if str(RUNNER) not in sys.path: sys.path.insert(0, str(RUNNER))
@@ -15,11 +15,24 @@ class ReviewIntegrityProtocolTests(unittest.TestCase):
         value = {"state": "APPROVED", "reviewed_commit": self.commit, "reviewed_base_commit": self.base, "contract_sha256": self.input.contract_sha256, "findings": ["Reviewed exact target."], "changes_requested": []}; value.update(changes); return json.dumps(value)
     def test_handoff_contains_contract_and_exact_target(self):
         handoff = json.loads(review_handoff(self.input, reviewer_worker_id="reviewer", review_attempt_id="attempt")); self.assertEqual(handoff["implementation_commit"], self.commit); self.assertEqual(handoff["contract"], self.contract)
+        self.assertEqual(handoff["expected_verdict_identity"], {"reviewed_commit": self.commit, "reviewed_base_commit": self.base, "contract_sha256": self.input.contract_sha256})
     def test_approval_requires_exact_commit_base_and_contract(self):
         self.assertEqual(parse_review_verdict(self.verdict(), self.input).state, ReviewOutcomeState.APPROVED)
         for field, value in (("reviewed_commit", "c" * 40), ("reviewed_base_commit", "d" * 40), ("contract_sha256", "e" * 64)):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ReviewProtocolError, "different implementation input"): parse_review_verdict(self.verdict(**{field: value}), self.input)
+    def test_parser_rejects_packet_integrity_hashes_with_the_correct_head(self):
+        formatted_contract_hash = hashlib.sha256(
+            (json.dumps(self.contract, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
+        ).hexdigest()
+        manifest_hash = hashlib.sha256(b'{"packet":"integrity-only"}\n').hexdigest()
+        self.assertNotEqual(self.input.contract_sha256, formatted_contract_hash)
+        self.assertNotEqual(self.input.contract_sha256, manifest_hash)
+        self.assertNotEqual(formatted_contract_hash, manifest_hash)
+        for packet_hash in (formatted_contract_hash, manifest_hash):
+            with self.subTest(packet_hash=packet_hash):
+                with self.assertRaisesRegex(ReviewProtocolError, "different implementation input"):
+                    parse_review_verdict(self.verdict(contract_sha256=packet_hash), self.input)
     def test_unparseable_or_blocked_provider_output_is_not_approval(self):
         with self.assertRaisesRegex(ReviewProtocolError, "unparseable"): parse_review_verdict("provider unavailable", self.input)
         with self.assertRaisesRegex(ReviewProtocolError, "changes-requested"): parse_review_verdict(self.verdict(state="CHANGES_REQUESTED"), self.input)

@@ -120,9 +120,19 @@ class QueueTests(unittest.TestCase):
                 recorded_at='2026-09-26T12:00:00Z',
             )
             self.assertEqual(verify_review_packet(review_input), packet)
-            self.assertIn(packet['path'], build_review_prompt(
+            prompt = build_review_prompt(
                 review_input, reviewer_worker_id='claude', review_attempt_id='review-attempt'
-            ))
+            )
+            self.assertIn(packet['path'], prompt)
+            self.assertNotEqual(review_input.contract_sha256, packet['contract_json_file_sha256'])
+            self.assertNotEqual(review_input.contract_sha256, packet['manifest_sha256'])
+            self.assertNotEqual(packet['contract_json_file_sha256'], packet['manifest_sha256'])
+            self.assertIn('expected_verdict_identity', prompt)
+            self.assertIn(review_input.contract_sha256, prompt)
+            self.assertIn(packet['contract_json_file_sha256'], prompt)
+            self.assertIn(packet['manifest_sha256'], prompt)
+            self.assertIn('do not calculate or copy either packet hash into\n'
+                          'the verdict', prompt)
             manifest = pathlib.Path(packet['path']) / 'manifest.json'
             manifest.chmod(0o644)
             manifest.write_text('{}\n')
