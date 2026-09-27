@@ -291,14 +291,21 @@ class SQLiteRegistryTest(unittest.TestCase):
 
     def test_followup_registration_restores_global_ready_active_exclusivity(self) -> None:
         self.feature()
+        contract = {"task": "TASK-351", "depends_on": [173], "paths": ["docs/review.md"]}
+        digest = hashlib.sha256(json.dumps(
+            contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
         self.registry.register_work_package(WorkPackage(
             "UNRELATED", "FEATURE-1", "unrelated", "ORCHESTRATION", Lane.PLATFORM,
             ("registry",), 1, ("preserved",), status=TaskStatus.READY,
         ))
         review = WorkPackage(
-            "FOLLOWUP", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
+            "TASK-351", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
             ("independent-review",), 1, ("independent",), status=TaskStatus.READY,
             kind=PackageKind.REVIEW, dependency_ids=("MISSING",),
+            provider_diagnostics={
+                "github_source_ref": "312", "queue_contract_sha256": digest,
+            },
         )
         for status in ("READY", "ACTIVE"):
             with self.subTest(status=status):
@@ -312,6 +319,10 @@ class SQLiteRegistryTest(unittest.TestCase):
 
     def test_followup_registration_ignores_only_ready_review_with_blocked_parent(self) -> None:
         self.feature()
+        contract = {"task": "TASK-351", "depends_on": [173], "paths": ["docs/review.md"]}
+        digest = hashlib.sha256(json.dumps(
+            contract, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
         self.registry.register_work_package(WorkPackage(
             "TASK173", "FEATURE-1", "target", "ORCHESTRATION", Lane.PLATFORM,
             ("registry",), 1, ("preserved",), status=TaskStatus.VERIFY_REVIEW,
@@ -349,9 +360,12 @@ class SQLiteRegistryTest(unittest.TestCase):
                 ),
             )
         review = WorkPackage(
-            "TASK331", "FEATURE-1", "follow-up review", "ASSURANCE", Lane.ASSURANCE,
+            "TASK-351", "FEATURE-1", "follow-up review", "ASSURANCE", Lane.ASSURANCE,
             ("independent-review",), 1, ("independent",), status=TaskStatus.READY,
             kind=PackageKind.REVIEW, dependency_ids=("TASK173",),
+            provider_diagnostics={
+                "github_source_ref": "312", "queue_contract_sha256": digest,
+            },
         )
 
         self.registry.register_followup_review(
@@ -362,9 +376,10 @@ class SQLiteRegistryTest(unittest.TestCase):
         snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-27T12:00:01Z")
         packages = {package["id"]: package for package in snapshot.work_packages}
         self.assertEqual(packages["TASK330"]["status"], TaskStatus.READY.value)
-        self.assertEqual(packages["TASK331"]["status"], TaskStatus.READY.value)
+        self.assertEqual(packages["TASK-351"]["status"], TaskStatus.READY.value)
+        self.assertEqual(packages["TASK-351"]["source_ref"], "312")
         self.assertIn(
-            {"package_id": "TASK331", "dependency_id": "TASK173"},
+            {"package_id": "TASK-351", "dependency_id": "TASK173"},
             snapshot.dependencies,
         )
 
