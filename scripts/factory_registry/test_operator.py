@@ -475,6 +475,7 @@ class OperatorFixture(unittest.TestCase):
                 "acceptance_criteria": ["Reviewer differs from implementer"],
                 "capacity_size": "VERY_SMALL",
                 "capacity_risk": "BOUNDED",
+                "source_ref": 307,
                 "dependency_ids": ["TASK-201"],
                 "queue_contract": contract,
             }
@@ -1504,6 +1505,12 @@ class OperatorFixture(unittest.TestCase):
             expected_revision=self.registry.dispatch_control()["revision"],
             recorded_at=(now + timedelta(seconds=10)).isoformat(),
         )
+        snapshot = self.registry.dispatch_snapshot(
+            observed_at=(now + timedelta(seconds=10)).isoformat()
+        )
+        registered = next(item for item in snapshot.work_packages if item["id"] == "TASK-203")
+        self.assertEqual(registered["source_system"], "github_issue")
+        self.assertEqual(registered["source_ref"], "307")
         control = self.registry.dispatch_control()
         self.registry.set_dispatch_control(
             expected_revision=control["revision"], expected_mode="PAUSED",
@@ -1809,6 +1816,34 @@ class OperatorFixture(unittest.TestCase):
             observed_at=observed_at,
         )
         self.assertEqual(followup_gate["independent_pairs"], [["codex-a", "claude"]])
+
+    def test_followup_review_source_requires_a_positive_consistent_github_issue(self):
+        cases = (
+            ("missing", lambda spec: spec["review"].pop("source_ref")),
+            ("zero", lambda spec: spec["review"].update(source_ref=0)),
+            ("non-numeric", lambda spec: spec["review"].update(source_ref="issue-307")),
+            ("inconsistent", lambda spec: spec["review"].update(
+                provider_diagnostics={"github_source_ref": "308"}
+            )),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                spec = self.followup_review()
+                mutate(spec)
+                with self.assertRaisesRegex(OperatorError, "source_ref|invalid"):
+                    parse_followup_review_spec(spec)
+
+        invalid = WorkPackage(
+            "TASK-999", "A5-CANARY", "invalid source", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("review",), status=TaskStatus.READY,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-201",),
+            provider_diagnostics={"github_source_ref": "0"},
+        )
+        with self.assertRaisesRegex(RegistryConflict, "INVALID_FOLLOWUP_REVIEW"):
+            self.registry.register_followup_review(
+                invalid, expected_revision=self.registry.dispatch_control()["revision"],
+                recorded_at=utc_now(),
+            )
 
     def test_bounded_review_gate_rejects_each_isolated_target_and_provenance_failure(self):
         cases = (

@@ -2251,8 +2251,13 @@ def validate_telemetry_payload(value: Mapping[str, Any], observed_at: str) -> tu
 def _package(value: Mapping[str, Any], *, queue_contract: Mapping[str, Any]) -> WorkPackage:
     diagnostics = dict(value.get("provider_diagnostics") or {})
     diagnostics["queue_contract_sha256"] = queue_contract_digest(dict(queue_contract))
-    if "source_ref" in value:
-        diagnostics["github_source_ref"] = str(value["source_ref"])
+    declared_source_ref = value.get("source_ref")
+    diagnostic_source_ref = diagnostics.get("github_source_ref")
+    if declared_source_ref is not None:
+        declared_source_ref = str(declared_source_ref)
+        if diagnostic_source_ref is not None and str(diagnostic_source_ref) != declared_source_ref:
+            raise OperatorError("package source_ref/provider diagnostics mismatch")
+        diagnostics["github_source_ref"] = declared_source_ref
     try:
         return WorkPackage(
             id=str(value["id"]),
@@ -2341,6 +2346,7 @@ def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
     if not isinstance(contract, Mapping):
         raise OperatorError("follow-up review requires a normalized queue_contract")
     review = _package(raw_review, queue_contract=contract)
+    source_ref = review.provider_diagnostics.get("github_source_ref")
     expected = {
         "task": review.id,
         "lane": review.lane.value,
@@ -2367,6 +2373,8 @@ def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
         or len(review.dependency_ids) != 1
         or contract.get("depends_on") != [dependency_task_number]
         or not re.fullmatch(r"TASK-\d+", review.id)
+        or not isinstance(source_ref, str)
+        or not re.fullmatch(r"[1-9]\d*", source_ref)
         or not isinstance(paths, list)
         or not paths
         or any(

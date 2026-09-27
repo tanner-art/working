@@ -267,24 +267,43 @@ class RunnerRegistryControlTests(unittest.TestCase):
             {"attempt_id": "old-review", "reviewed_commit": "a" * 40, "reviewed_base_commit": "b" * 40, "contract_sha256": digest, "review_input_evidence_id": "old-input"}), expected_revision=self.registry.dispatch_control()["revision"])
         followup = WorkPackage("TASK-FOLLOWUP", "LEGACY", "fresh review", "ASSURANCE", Lane.ASSURANCE,
             ("review",), 10, ("independent review",), status=TaskStatus.READY, kind=PackageKind.REVIEW,
-            dependency_ids=("TASK-TARGET",), provider_diagnostics={"queue_contract_sha256": digest})
+            dependency_ids=("TASK-TARGET",), provider_diagnostics={
+                "queue_contract_sha256": digest, "github_source_ref": "307",
+            })
         self.registry.register_followup_review(followup, expected_revision=self.registry.dispatch_control()["revision"], recorded_at=stamp(now + timedelta(seconds=10)))
+        snapshot = self.registry.dispatch_snapshot(observed_at=stamp(now + timedelta(seconds=10)))
+        registered = next(item for item in snapshot.work_packages if item["id"] == "TASK-FOLLOWUP")
+        self.assertEqual(registered["source_ref"], "307")
         self.registry.record_operator_review_input(review_input("TASK-FOLLOWUP", "followup-input"), expected_revision=self.registry.dispatch_control()["revision"])
+        deadline_contract = {"task": "TASK-DEADLINE", "paths": ["docs/review.md"]}
         self.registry.register_work_package(WorkPackage(
             "TASK-DEADLINE", "LEGACY", "deadline probe", "ORCHESTRATION", Lane.PLATFORM,
             ("registry",), 1, ("deadline enforcement",), status=TaskStatus.READY,
+            provider_diagnostics={"queue_contract_sha256": queue_contract_digest(deadline_contract)},
         ))
+        self.registry.bind_legacy_package_source(
+            "TASK-DEADLINE", github_issue=999, queue_contract=deadline_contract,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=stamp(now + timedelta(seconds=10)),
+        )
 
         live = self.registry.dispatch_control()
         deadline = now + timedelta(minutes=2)
         self.registry.set_dispatch_control(expected_revision=live["revision"], expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False, changed_at=stamp(now + timedelta(seconds=11)), reason="bounded followup", bounded_run={"run_id": "review-261", "package_ids": ["TASK-FOLLOWUP", "TASK-DEADLINE"], "deadline": stamp(deadline), "base_ref": "main", "parent_limit": 1})
         runner_control = RunnerRegistryControl(self.database)
+        self.assertEqual(runner_control.bounded_source_issues(), (307, 999))
         with patch("registry_control.utc_now", return_value=stamp(now + timedelta(seconds=12))):
             with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
                 runner_control.pre_claim("TASK-TARGET", "implementer")
             with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
                 runner_control.pre_claim("TASK-FOLLOWUP", "implementer", task_contract=contract)
-            revision = runner_control.pre_claim("TASK-FOLLOWUP", "reviewer", task_contract=contract)
+            with self.assertRaisesRegex(RegistryConflict, "GITHUB_SOURCE_MISMATCH"):
+                runner_control.pre_claim(
+                    "TASK-FOLLOWUP", "reviewer", task_contract=contract, github_issue=348,
+                )
+            revision = runner_control.pre_claim(
+                "TASK-FOLLOWUP", "reviewer", task_contract=contract, github_issue=307,
+            )
             lease_id = runner_control.claim_package("TASK-FOLLOWUP", worker_id="reviewer", expected_revision=revision, lease_seconds=300)
         self.assertTrue(lease_id)
         github = lambda *args: json.dumps({"headRefOid": "a" * 40}) if args[:2] == ("pr", "view") else json.dumps([{"name": "verify", "workflow": "Validate app", "state": "SUCCESS"}])
