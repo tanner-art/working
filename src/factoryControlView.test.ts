@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { factoryControlFixture } from './factoryControl.fixture'
 import { actualSoakCanaryProjectionFixture, preservedCanaryProjectionFixture } from './factoryControl.canary.fixture'
-import { capacitySummary, effectiveWorkerHealth, emptyQueueFilters, failureClassification, filterFactoryFeatures, packageIndex, readinessReason, recommendedFailureAction, visibleAttention, visibleReviews, workerConstraintDetails } from './buildDashboard'
+import { capacitySummary, effectiveWorkerHealth, emptyQueueFilters, failureClassification, featureStage, featureStageLabel, filterFactoryFeatures, packageIndex, readinessReason, recommendedFailureAction, visibleAttention, visibleReviews, workerConstraintDetails } from './buildDashboard'
 
 describe('Factory Control Center view helpers', () => {
+  it('derives feature stage from recorded review and integration evidence, never commits alone', () => {
+    expect(featureStage(factoryControlFixture.features[0], factoryControlFixture)).toBe('awaiting_review')
+    expect(featureStage(factoryControlFixture.features[1], factoryControlFixture)).toBe('changes_requested')
+    const done = structuredClone(factoryControlFixture.features[1])
+    done.state = 'DONE'
+    done.packages.forEach(item => { item.state = 'DONE'; item.reviewState = null })
+    expect(featureStage(done, { reviews: [] })).toBe('awaiting_integration')
+    done.packages[0].reviewState = 'approved'
+    expect(featureStage(done, { reviews: [] })).toBe('accepted')
+    expect(featureStageLabel('awaiting_integration')).toBe('Awaiting integration')
+  })
   it('filters packages while retaining feature-level organization', () => {
     const result = filterFactoryFeatures(factoryControlFixture.features, { ...emptyQueueFilters, state: 'READY' })
     expect(result).toHaveLength(1)
