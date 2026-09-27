@@ -58,6 +58,21 @@ class BoundedRunTests(unittest.TestCase):
                 expected_dispatch_revision=self.registry.dispatch_control()["revision"],
             )
 
+    def test_long_approved_backlog_uses_parent_limit_as_concurrency_not_size(self) -> None:
+        self.enable(("TASK-1", "TASK-2", "TASK-3"))
+        for package_id, worker_id in (("TASK-1", "builder-a"), ("TASK-2", "builder-b")):
+            self.registry.acquire_lease(
+                package_id, worker_id, acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+        with self.assertRaisesRegex(RegistryConflict, "RUN_PARENT_LIMIT"):
+            self.registry.acquire_lease(
+                "TASK-3", "builder-c", acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+
     def test_expired_run_cannot_claim_and_old_timer_cannot_stop_successor(self) -> None:
         self.enable(deadline=self.now - timedelta(seconds=1))
         with self.assertRaisesRegex(RegistryConflict, "RUN_DEADLINE_EXPIRED"):

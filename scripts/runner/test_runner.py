@@ -15,6 +15,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     refresh_capacity_observations, run_repository_validation, select, stage_verified_changes,
                     usage_policy_enabled, review_source_is_green)
 from usage_policy import worker_state
+from review_protocol import ReviewProtocolError, _codex_structured_output
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -189,6 +190,25 @@ class QueueTests(unittest.TestCase):
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
                     review_command(config)
+
+    def test_codex_review_adapter_is_read_only_and_structured(self):
+        command = review_command({'provider': 'openai', 'command': ['/opt/bin/codex']})
+        self.assertEqual(command[:4], ['/opt/bin/codex', 'exec', '--sandbox', 'read-only'])
+        self.assertIn('--json', command)
+        self.assertIn('--output-schema', command)
+        with self.assertRaises(ValueError):
+            review_command({'provider': 'openai', 'command': ['/opt/bin/codex', '--full-auto']})
+
+    def test_codex_review_output_requires_one_successful_structured_final_message(self):
+        verdict = '{"changes_requested":[],"contract_sha256":"' + ('a' * 64) + '","findings":[],"reviewed_base_commit":"' + ('b' * 40) + '","reviewed_commit":"' + ('c' * 40) + '","state":"APPROVED"}'
+        output = '\n'.join((
+            '{"type":"thread.started"}',
+            json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': verdict}}),
+            '{"type":"turn.completed","status":"completed"}',
+        ))
+        self.assertEqual(_codex_structured_output(output)['state'], 'APPROVED')
+        with self.assertRaises(ReviewProtocolError):
+            _codex_structured_output('{"type":"turn.completed","status":"completed"}')
 
     def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
         import pathlib, tempfile

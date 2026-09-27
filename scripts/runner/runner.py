@@ -794,9 +794,29 @@ or CHANGES_REQUESTED.
 
 
 def review_command(config, *, review_packet_path=None):
-    """Adapt only the supported Claude envelope to a read-only review call."""
-    if config.get('provider') != 'anthropic':
-        raise ValueError('Registry review requires the supported anthropic Claude adapter')
+    """Build a strict, read-only provider adapter for Registry review."""
+    provider = config.get('provider')
+    if provider == 'openai':
+        command = list(config.get('review_command') or config['command'])
+        if (not command or not all(isinstance(item, str) and item for item in command)
+                or pathlib.Path(command[0]).name != 'codex'):
+            raise ValueError('Registry Codex review command must invoke codex')
+        forbidden = {'--full-auto', '--dangerously-bypass-approvals-and-sandbox',
+                     '--sandbox', '--output-schema', '--json'}
+        if any(item in forbidden or any(item.startswith(flag + '=') for flag in forbidden)
+               for item in command[1:]):
+            raise ValueError('unsafe Codex review capability flag')
+        # codex exec emits machine events; review_protocol accepts only the
+        # successful final structured agent-message event, never prose.
+        command.extend(['exec', '--sandbox', 'read-only', '--json',
+                        '--output-schema', json.dumps(REVIEW_VERDICT_SCHEMA, separators=(',', ':'))])
+        if review_packet_path is not None:
+            if not isinstance(review_packet_path, str) or not pathlib.Path(review_packet_path).is_absolute():
+                raise ValueError('review packet path must be absolute')
+            command.extend(['--add-dir', review_packet_path])
+        return command
+    if provider != 'anthropic':
+        raise ValueError('Registry review requires a supported provider adapter')
     command = list(config.get('review_command') or config['command'])
     if not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError('review command must be a non-empty string command')

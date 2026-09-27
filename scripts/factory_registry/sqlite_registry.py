@@ -193,7 +193,11 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
             or isinstance(parent_limit, bool) or not isinstance(parent_limit, int)
-            or not 1 <= parent_limit <= min(DEFAULT_BOUNDED_RUN_PARENT_LIMIT, active_parent_limit)):
+            # ``package_ids`` is the approved backlog, not a concurrency
+            # budget.  Preserve the legacy default of two when omitted, but
+            # permit an explicitly configured limit up to the Registry's
+            # global parent ceiling.
+            or not 1 <= parent_limit <= active_parent_limit):
         raise RegistryConflict("INVALID_BOUNDED_RUN_SCOPE")
     normalized_deadline = _normalize_timestamp(str(deadline))
     return {
@@ -2178,7 +2182,7 @@ class SQLiteRegistry:
         expected_revision: int,
         recorded_at: str,
     ) -> int:
-        """Atomically register up to two independent implementation/review pairs.
+        """Atomically register an approved implementation/review backlog.
 
         The pilot is intentionally not a fleet scheduler: every package is
         registered before activation, each review depends only on its paired
@@ -2186,7 +2190,7 @@ class SQLiteRegistry:
         force.
         """
         recorded_at = _normalize_timestamp(recorded_at)
-        if not pairs or len(pairs) > DEFAULT_BOUNDED_RUN_PARENT_LIMIT:
+        if not pairs:
             raise RegistryConflict("INVALID_BOUNDED_PILOT_SIZE")
         ids: set[str] = set()
         for feature, implementation, review in pairs:
