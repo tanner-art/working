@@ -376,7 +376,35 @@ class RunnerRegistryControlTests(unittest.TestCase):
             )
         self.assertFalse(self.registry.attempt_exists("attempt-stopped"))
 
-    def test_pre_claim_enforces_ready_review_priority_at_the_controller(self):
+    def test_reservation_does_not_retry_when_the_claimed_lease_is_replaced(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        old = next(item for item in self.registry.dispatch_snapshot(
+            observed_at=datetime.now(timezone.utc).isoformat()
+        ).active_leases if item["package_id"] == "TASK-1")
+        revision = self.registry.dispatch_control()["revision"]
+
+        def replace_lease(*args, **kwargs):
+            now = datetime.now(timezone.utc)
+            self.registry.release_lease(
+                old["id"], released_at=now.isoformat(), reason="replacement",
+                next_status=TaskStatus.READY,
+            )
+            self.registry.acquire_lease(
+                "TASK-1", "worker-a", acquired_at=(now + timedelta(seconds=1)).isoformat(),
+                expires_at=(now + timedelta(minutes=5)).isoformat(),
+            )
+            raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+
+        with patch.object(control.registry, "begin_attempt_runtime", side_effect=replace_lease):
+            with self.assertRaisesRegex(RegistryConflict, "REGISTRY_OWNERSHIP_REQUIRED"):
+                control.reserve_attempt(
+                    "attempt-replaced-lease", package_id="TASK-1", worker_id="worker-a",
+                    expected_revision=revision, lease_id=old["id"],
+                )
+        self.assertFalse(self.registry.attempt_exists("attempt-replaced-lease"))
+
+    def test_pre_claim_orders_ready_review_only_for_the_competing_worker(self):
         control = RunnerRegistryControl(self.database)
         control.registry = Mock(dispatch_control=Mock(return_value={}))
         control.registry.dispatch_snapshot.return_value = SimpleNamespace(
@@ -393,9 +421,16 @@ class RunnerRegistryControlTests(unittest.TestCase):
             SimpleNamespace(package_id="TASK-REVIEW", worker_id="reviewer"),
         ), pair_evaluations=())
         with patch("registry_control.decide_shadow", return_value=decision):
+            self.assertEqual(control.pre_claim("TASK-PARENT", "builder"), 17)
+            self.assertEqual(control.pre_claim("TASK-REVIEW", "reviewer"), 17)
+
+        same_worker = SimpleNamespace(proposed_assignments=(
+            SimpleNamespace(package_id="TASK-PARENT", worker_id="builder"),
+            SimpleNamespace(package_id="TASK-REVIEW", worker_id="builder"),
+        ), pair_evaluations=())
+        with patch("registry_control.decide_shadow", return_value=same_worker):
             with self.assertRaisesRegex(RegistryConflict, "SESSION_QUEUE_PRIORITY"):
                 control.pre_claim("TASK-PARENT", "builder")
-            self.assertEqual(control.pre_claim("TASK-REVIEW", "reviewer"), 17)
 
     def test_pre_claim_uses_live_registry_health_and_capacity_evidence(self):
         now = datetime.now(timezone.utc).isoformat()

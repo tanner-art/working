@@ -33,9 +33,11 @@ from scripts.factory_registry.claude_telemetry import (  # noqa: E402
     claude_provider_signal, probe_claude_health,
 )
 try:  # Support both the installed runner script and package imports in tests.
-    from scripts.runner.session_queue import ordered_assignments  # noqa: E402
+    from scripts.runner.session_queue import (  # noqa: E402
+        ordered_assignments, ordered_assignments_for_worker,
+    )
 except ImportError:  # pragma: no cover - exercised by direct script invocation.
-    from session_queue import ordered_assignments  # type: ignore # noqa: E402
+    from session_queue import ordered_assignments, ordered_assignments_for_worker  # type: ignore # noqa: E402
 
 
 def utc_now() -> str:
@@ -171,8 +173,13 @@ class RunnerRegistryControl:
                 if matching is not None else "PAIR_NOT_FOUND"
             )
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
-        if ordered and (ordered[0].package_id, ordered[0].worker_id) != assignment:
-            raise RegistryConflict("SESSION_QUEUE_PRIORITY", ordered[0].package_id)
+        worker_ordered = ordered_assignments_for_worker(
+            snapshot, decision.proposed_assignments, worker_id
+        )
+        if worker_ordered and (
+            worker_ordered[0].package_id, worker_ordered[0].worker_id
+        ) != assignment:
+            raise RegistryConflict("SESSION_QUEUE_PRIORITY", worker_ordered[0].package_id)
         return self.registry.require_live_dispatch(expected_revision=snapshot.revision)
 
     def proposed_worker(self, package_id: str) -> str | None:
@@ -258,7 +265,11 @@ class RunnerRegistryControl:
         package_id: str,
         worker_id: str,
         expected_revision: int,
+        lease_id: str | None = None,
     ) -> None:
+        baseline = self._reservation_facts(
+            attempt_id, package_id, worker_id, lease_id
+        )
         revision = expected_revision
         for retry in range(2):
             try:
@@ -272,25 +283,69 @@ class RunnerRegistryControl:
             except RegistryConflict as error:
                 if error.code != "DISPATCH_NOT_AUTHORIZED" or retry:
                     raise
-                # A liveness write may race this pre-provider reservation. Re-read
-                # all authority facts; never retry through a stop, deadline,
-                # released lease, changed owner, or an already-created attempt.
-                control = self.registry.dispatch_control()
-                if control.get("dispatch_mode") != "LIVE" or control.get("kill_switch_engaged"):
+                # A heartbeat is the only harmless revision race.  Re-read the
+                # exact lease, bounded-run envelope, ownership, and dispatch
+                # eligibility before the one retry; any replacement or lost
+                # authority fails closed.
+                current = self._reservation_facts(
+                    attempt_id, package_id, worker_id, baseline["lease_id"]
+                )
+                if ({key: value for key, value in current.items() if key != "revision"}
+                        != {key: value for key, value in baseline.items() if key != "revision"}):
                     raise
-                scope = control.get("bounded_run")
-                if isinstance(scope, dict) and utc_now() >= scope.get("deadline", ""):
-                    raise
-                snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
-                active = [lease for lease in snapshot.active_leases
-                          if lease.get("package_id") == package_id
-                          and lease.get("worker_id") == worker_id]
-                package = next((item for item in snapshot.work_packages
-                                if item.get("id") == package_id), None)
-                if (len(active) != 1 or self.registry.attempt_exists(attempt_id)
-                        or package is None or package.get("status") != "ACTIVE"):
-                    raise
-                revision = int(control["revision"])
+                revision = int(current["revision"])
+
+    def _reservation_facts(self, attempt_id, package_id, worker_id, lease_id):
+        """Read every fact that must survive a pre-launch retry unchanged."""
+        observed_at = utc_now()
+        control = self.registry.dispatch_control()
+        scope = control.get("bounded_run")
+        if (control.get("dispatch_mode") != "LIVE"
+                or control.get("kill_switch_engaged")
+                or (isinstance(scope, dict) and observed_at >= scope.get("deadline", ""))):
+            raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+        snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+        active = [item for item in snapshot.active_leases
+                  if item.get("package_id") == package_id
+                  and item.get("worker_id") == worker_id and not item.get("expired")]
+        if len(active) != 1 or (lease_id is not None and active[0].get("id") != lease_id):
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        package = next((item for item in snapshot.work_packages if item.get("id") == package_id), None)
+        if package is None or package.get("status") != "ACTIVE" or self.registry.attempt_exists(attempt_id):
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        # Reconstruct the pre-claim view to prove lane, capability, capacity,
+        # path/allowlist and reviewer eligibility still hold without treating
+        # this already-acquired lease as a competing assignment.
+        worker = next((item for item in snapshot.workers if item.get("id") == worker_id), None)
+        if worker is None:
+            raise RegistryConflict("REGISTRY_OWNERSHIP_REQUIRED")
+        candidate = replace(
+            snapshot,
+            work_packages=tuple(
+                {**item, "status": "READY"} if item.get("id") == package_id else item
+                for item in snapshot.work_packages
+            ),
+            workers=tuple(
+                {**item, "availability": "IDLE"} if item.get("id") == worker_id else item
+                for item in snapshot.workers
+            ),
+            active_leases=tuple(item for item in snapshot.active_leases if item.get("id") != active[0].get("id")),
+        )
+        if isinstance(scope, dict):
+            candidate = scope_dispatch_snapshot(
+                candidate, scope["package_ids"], scope["parent_limit"]
+            )
+        eligible = {
+            (item.package_id, item.worker_id)
+            for item in decide_shadow(candidate).pair_evaluations if item.eligible
+        }
+        return {
+            "revision": int(control["revision"]),
+            "lease_id": active[0].get("id"),
+            "bounded_run": scope,
+            "deadline": scope.get("deadline") if isinstance(scope, dict) else None,
+            "eligible": (package_id, worker_id) in eligible,
+        }
 
     def pre_launch(self) -> int:
         return self.registry.require_live_dispatch()
