@@ -10,6 +10,7 @@ import argparse
 import json
 import pathlib
 import re
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,46 @@ def _git(repo: pathlib.Path, *args: str) -> bool:
         ["git", "-C", str(repo), *args], stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, check=False,
     ).returncode == 0
+
+
+def contract_shape_reasons(contract: Mapping[str, Any]) -> tuple[str, ...]:
+    """Pure registration-time checks; Git and Registry facts are checked again at claim."""
+    if contract.get("schema_version") != 2:
+        return ()
+    declared = contract.get("readiness")
+    if not isinstance(declared, Mapping):
+        return ("READINESS_CONTRACT_MISSING",)
+    reasons: list[str] = []
+    if not isinstance(declared.get("base_commit"), str) or not _SHA.fullmatch(declared["base_commit"]):
+        reasons.append("BASE_COMMIT_INVALID")
+    names = ("planning_paths", "existing_paths", "new_paths", "integration_paths", "test_paths")
+    lists = {}
+    for name in names:
+        value = declared.get(name)
+        if (not isinstance(value, list) or (name in {"planning_paths", "integration_paths", "test_paths"} and not value)
+                or any(not _safe_path(path) for path in value)
+                or len(value) != len(set(value))):
+            reasons.append(f"{name.upper()}_INVALID")
+            lists[name] = []
+        else:
+            lists[name] = value
+    paths = contract.get("paths")
+    existing = set(lists["existing_paths"])
+    new = set(lists["new_paths"])
+    if (not isinstance(paths, list) or any(not _safe_path(path) for path in paths)
+            or len(paths) != len(set(paths)) or not (existing | new)
+            or set(paths) != existing | new or existing & new):
+        reasons.append("PATH_DECLARATION_MISMATCH")
+    if not set(lists["integration_paths"] + lists["test_paths"]).issubset(existing | new):
+        reasons.append("INTEGRATION_OR_TEST_UNOWNED")
+    dependencies = contract.get("depends_on")
+    expected = ({f"TASK-{item}" if str(item).isdigit() else str(item) for item in dependencies}
+                if isinstance(dependencies, list) else None)
+    kinds = declared.get("dependency_kinds")
+    if (expected is None or not isinstance(kinds, Mapping) or set(kinds) != expected
+            or any(value not in _KINDS for value in kinds.values())):
+        reasons.append("DEPENDENCY_KIND_MISMATCH")
+    return tuple(sorted(set(reasons)))
 
 
 def check_packet(
@@ -136,13 +177,36 @@ def check_packet(
     return Readiness("READY" if not reasons else "BLOCKED", tuple(sorted(set(reasons))), base_commit)
 
 
-def inventory(snapshot: Any) -> list[dict[str, Any]]:
+def inventory(snapshot: Any, *, outcomes=(), evidence=()) -> list[dict[str, Any]]:
     """Non-destructive queue inventory; never infer integration from DONE."""
+    latest_outcome = {}
+    for outcome in sorted(outcomes, key=lambda item: (item["decided_at"], item["id"])):
+        latest_outcome[outcome["target_package_id"]] = outcome
+    integrated = {item["package_id"] for item in evidence
+                  if item["kind"] == "integration-acceptance"}
+    by_id = {str(item.get("id")): item for item in snapshot.work_packages}
     items = []
     for package in snapshot.work_packages:
         status = str(package.get("status"))
         diagnostics = package.get("provider_diagnostics") or {}
-        if status == "BLOCKED":
+        dependencies = [edge["dependency_id"] for edge in snapshot.dependencies
+                        if edge["package_id"] == package.get("id")]
+        blocked_dependencies = [item for item in dependencies
+                                if by_id.get(item, {}).get("status") != "DONE"]
+        last_review = latest_outcome.get(package.get("id"))
+        if diagnostics.get("superseded_by") in by_id:
+            group = "SUPERSEDED_WITH_LINEAGE"
+        elif package.get("id") in integrated and status == "DONE":
+            group = "RECORDED_INTEGRATION_EVIDENCE_UNVERIFIED"
+        elif last_review is not None and last_review["state"] == "CHANGES_REQUESTED":
+            group = "CHANGES_REQUESTED"
+        elif last_review is not None and last_review["state"] == "APPROVED":
+            group = "APPROVED_INTEGRATION_UNVERIFIED"
+        elif diagnostics.get("device_gate") is True:
+            group = "PHYSICAL_DEVICE_GATE"
+        elif blocked_dependencies:
+            group = "BLOCKED_DEPENDENCY"
+        elif status == "BLOCKED":
             group = "BLOCKED"
         elif status == "VERIFY_REVIEW":
             group = "AWAITING_REVIEW_OR_INTEGRATION"
@@ -156,8 +220,8 @@ def inventory(snapshot: Any) -> list[dict[str, Any]]:
             group = "ON_DECK_OR_UNKNOWN"
         items.append({"id": package.get("id"), "status": status, "group": group,
                       "source_ref": package.get("source_ref"),
-                      "dependencies": [edge["dependency_id"] for edge in snapshot.dependencies
-                                       if edge["package_id"] == package.get("id")]})
+                      "dependencies": dependencies, "blocked_dependencies": blocked_dependencies,
+                      "review_outcome_id": last_review["id"] if last_review else None})
     return items
 
 
@@ -166,8 +230,20 @@ def main() -> None:
     parser.add_argument("--database", type=pathlib.Path, required=True)
     args = parser.parse_args()
     from scripts.factory_registry.sqlite_registry import SQLiteRegistry
-    snapshot = SQLiteRegistry(args.database).dispatch_snapshot(observed_at=datetime.now(timezone.utc).isoformat())
-    print(json.dumps({"revision": snapshot.revision, "items": inventory(snapshot)}, indent=2))
+    registry = SQLiteRegistry(args.database)
+    snapshot = registry.dispatch_snapshot(observed_at=datetime.now(timezone.utc).isoformat())
+    with sqlite3.connect(args.database.as_uri() + "?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+        outcomes = [dict(item) for item in connection.execute(
+            "SELECT id,target_package_id,state,decided_at FROM review_outcomes"
+        )]
+        evidence = [dict(item) for item in connection.execute(
+            "SELECT package_id,kind FROM evidence WHERE kind='integration-acceptance'"
+        )]
+    if registry.dispatch_control()["revision"] != snapshot.revision:
+        raise SystemExit("Registry changed while collecting inventory; retry")
+    print(json.dumps({"revision": snapshot.revision,
+                      "items": inventory(snapshot, outcomes=outcomes, evidence=evidence)}, indent=2))
 
 
 if __name__ == "__main__":

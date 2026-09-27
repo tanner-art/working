@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from task_readiness import check_packet, inventory
+from task_readiness import check_packet, contract_shape_reasons, inventory
 from registry_control import RunnerRegistryControl, queue_contract_digest
 from scripts.factory_registry import Feature, Lane, RegistryConflict, SQLiteRegistry, TaskStatus, Worker, WorkPackage
 
@@ -50,6 +50,14 @@ class TaskReadinessTests(unittest.TestCase):
     def test_complete_packet_is_ready_and_legacy_is_not_falsely_approved(self):
         self.assertEqual(self.check().state, "READY")
         self.assertEqual(self.check({"paths": ["src/existing.py"]}).state, "NEEDS_PREPARATION")
+        self.assertEqual(contract_shape_reasons(self.contract), ())
+
+    def test_registration_shape_fails_closed_without_git_access(self):
+        contract = {**self.contract, "readiness": {**self.contract["readiness"],
+                    "integration_paths": []}}
+        self.assertIn("INTEGRATION_PATHS_INVALID", contract_shape_reasons(contract))
+        contract = {**self.contract, "paths": ["../escape.py"]}
+        self.assertIn("PATH_DECLARATION_MISMATCH", contract_shape_reasons(contract))
 
     def test_missing_files_base_source_and_unsafe_path_are_precise(self):
         self.assertIn("SOURCE_BINDING_MISMATCH", self.check(github_issue=102).reasons)
@@ -83,10 +91,19 @@ class TaskReadinessTests(unittest.TestCase):
         snapshot = SimpleNamespace(work_packages=(
             {"id": "A", "status": "DONE", "source_ref": "101"},
             {"id": "B", "status": "BLOCKED", "source_ref": "102"},
-        ), dependencies=())
+            {"id": "C", "status": "ON_DECK", "provider_diagnostics": {"device_gate": True}},
+            {"id": "D", "status": "READY"},
+        ), dependencies=({"package_id": "D", "dependency_id": "B"},))
         groups = {item["id"]: item["group"] for item in inventory(snapshot)}
         self.assertEqual(groups["A"], "RECORDED_DONE_INTEGRATION_UNVERIFIED")
         self.assertEqual(groups["B"], "BLOCKED")
+        self.assertEqual(groups["C"], "PHYSICAL_DEVICE_GATE")
+        self.assertEqual(groups["D"], "BLOCKED_DEPENDENCY")
+        outcomes = ({"id": "review-1", "target_package_id": "A", "state": "APPROVED",
+                     "decided_at": "2026-09-27T00:00:00Z"},)
+        result = {item["id"]: item for item in inventory(snapshot, outcomes=outcomes)}
+        self.assertEqual(result["A"]["group"], "APPROVED_INTEGRATION_UNVERIFIED")
+        self.assertEqual(result["A"]["review_outcome_id"], "review-1")
 
     def test_real_registry_preclaim_blocks_unready_before_provider_and_allows_ready(self):
         database = self.repo / "registry.sqlite3"
@@ -117,10 +134,18 @@ class TaskReadinessTests(unittest.TestCase):
             ("registry",), 10, ("verified",), status=TaskStatus.READY,
             provider_diagnostics={"queue_contract_sha256": queue_contract_digest(self.contract)},
         ))
+        incomplete = {**self.contract, "readiness": {**self.contract["readiness"],
+                      "planning_paths": ["docs/MISSING.md"]}}
+        registry.register_work_package(WorkPackage(
+            "TASK-2", "FEATURE", "Incomplete task", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 5, ("verified",), status=TaskStatus.READY,
+            provider_diagnostics={"queue_contract_sha256": queue_contract_digest(incomplete)},
+        ))
         # The real package source binding is immutable once registered; the
         # fixture supplies it via the reviewed operator's Registry schema.
         with registry._connection() as connection:
             connection.execute("UPDATE work_packages SET source_system='github_issue', source_ref='101' WHERE id='TASK-1'")
+            connection.execute("UPDATE work_packages SET source_system='github_issue', source_ref='102' WHERE id='TASK-2'")
         control = registry.dispatch_control()
         registry.set_dispatch_control(
             expected_revision=control["revision"], expected_mode="PAUSED",
@@ -130,6 +155,8 @@ class TaskReadinessTests(unittest.TestCase):
         controller = RunnerRegistryControl(database, self.repo)
         with self.assertRaisesRegex(RegistryConflict, "TASK_NOT_READY"):
             controller.pre_claim("TASK-1", "worker-a", task_contract=self.contract, github_issue=102)
+        with self.assertRaisesRegex(RegistryConflict, "EXISTING_PATH_MISSING:docs/MISSING.md"):
+            controller.pre_claim("TASK-2", "worker-a", task_contract=incomplete, github_issue=102)
         revision = controller.pre_claim("TASK-1", "worker-a", task_contract=self.contract, github_issue=101)
         lease = controller.claim_package("TASK-1", worker_id="worker-a", expected_revision=revision,
                                          lease_seconds=120)

@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
+from scripts.runner.task_readiness import contract_shape_reasons
 
 from .models import (
     DispatchSnapshot,
@@ -2319,6 +2320,9 @@ def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, W
     implementation = _package(raw_impl, queue_contract=impl_contract)
     review = _package(raw_review, queue_contract=review_contract)
     for package, contract in ((implementation, impl_contract), (review, review_contract)):
+        shape_reasons = contract_shape_reasons(contract)
+        if shape_reasons:
+            raise OperatorError("queue contract readiness invalid: " + ",".join(shape_reasons))
         expected = {
             "task": package.id,
             "lane": package.lane.value,

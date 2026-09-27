@@ -451,6 +451,19 @@ class OperatorFixture(unittest.TestCase):
             },
         }
 
+    def test_v2_canary_registration_rejects_incomplete_readiness_shape(self):
+        spec = self.canary()
+        contract = spec["implementation"]["queue_contract"]
+        contract["schema_version"] = 2
+        contract["readiness"] = {
+            "base_commit": "a" * 40, "planning_paths": ["docs/NORTH_STAR.md"],
+            "existing_paths": [], "new_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "integration_paths": [], "test_paths": ["scripts/runner/test_registry_control.py"],
+            "dependency_kinds": {},
+        }
+        with self.assertRaisesRegex(OperatorError, "INTEGRATION_PATHS_INVALID"):
+            parse_canary_spec(spec)
+
     def followup_review(self):
         contract = {
             "task": "TASK-203",
