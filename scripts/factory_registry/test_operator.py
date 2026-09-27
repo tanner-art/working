@@ -464,6 +464,23 @@ class OperatorFixture(unittest.TestCase):
         with self.assertRaisesRegex(OperatorError, "INTEGRATION_PATHS_INVALID"):
             parse_canary_spec(spec)
 
+    def test_v2_canary_registration_pins_exclusive_paths(self):
+        spec = self.canary()
+        contract = spec["implementation"]["queue_contract"]
+        contract["schema_version"] = 2
+        contract["readiness"] = {
+            "base_commit": "a" * 40, "planning_paths": ["docs/NORTH_STAR.md"],
+            "existing_paths": [], "new_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "integration_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "test_paths": ["docs/factory/A5_CANARY_RESULT.md"],
+            "dependency_kinds": {},
+        }
+        _, implementation, _ = parse_canary_spec(spec)
+        self.assertEqual(implementation.provider_diagnostics["exclusive_paths"], contract["paths"])
+        spec["implementation"]["provider_diagnostics"] = {"exclusive_paths": ["other.py"]}
+        with self.assertRaisesRegex(OperatorError, "exclusive paths mismatch"):
+            parse_canary_spec(spec)
+
     def followup_review(self):
         contract = {
             "task": "TASK-203",
