@@ -30,7 +30,7 @@ from scripts.factory_registry import (
     serialize_control_center_projection,
     validate_control_center_projection,
 )
-from scripts.factory_registry.control_center_projection import ControlCenterProjectionError
+from scripts.factory_registry.control_center_projection import ControlCenterProjectionError, _feature_stage
 from scripts.factory_registry.control_center_server import (
     SIGNATURE_HEADER,
     create_projection_handler,
@@ -739,6 +739,27 @@ class ControlCenterProjectionTest(unittest.TestCase):
         first = serialize_control_center_projection(projection)
         second = serialize_control_center_projection(dict(reversed(list(projection.items()))))
         self.assertEqual(first, second)
+
+
+class FeatureStageRegressionTest(unittest.TestCase):
+    def test_stages_are_conservative_and_unrelated_approval_cannot_clear_changes(self) -> None:
+        parent = {"id": "parent", "kind": "PARENT", "status": "READY"}
+        cases = {
+            "ready": ([parent], [], {}),
+            "building": ([{**parent, "status": "ACTIVE"}], [], {}),
+            "awaiting_review": ([{**parent, "status": "VERIFY_REVIEW"}], [], {}),
+            "blocked": ([{**parent, "status": "BLOCKED"}], [], {}),
+            "unknown": ([{**parent, "status": "DONE"}], [], {}),
+            "awaiting_integration": ([{**parent, "status": "DONE"}], [{"packageId": "parent", "state": "approved", "requestedAt": NOW, "id": "ok"}], {}),
+            "changes_requested": ([parent], [{"packageId": "parent", "state": "changes_requested", "requestedAt": NOW, "id": "reject"}, {"packageId": "other", "state": "approved", "requestedAt": "2026-09-25T00:00:00Z", "id": "unrelated"}], {}),
+            "awaiting_review_after_remediation": ([parent], [{"packageId": "parent", "state": "changes_requested", "requestedAt": NOW, "id": "reject"}], {"parent": [{"ended_at": "2026-09-25T00:00:00Z", "outcome": "SUCCEEDED"}]}),
+        }
+        expected = {"awaiting_review_after_remediation": "awaiting_review"}
+        for name, (packages, reviews, attempts) in cases.items():
+            with self.subTest(name=name):
+                stage, reason = _feature_stage({}, packages, reviews, attempts)
+                self.assertEqual(stage, expected.get(name, name))
+                self.assertTrue(reason)
 
 
 class ProjectionTransportTest(ControlCenterProjectionTest):

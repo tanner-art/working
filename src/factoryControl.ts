@@ -7,6 +7,7 @@ export type AuthenticationState = 'valid' | 'invalid' | 'unknown'
 export type CapacityState = 'normal' | 'caution' | 'checkpoint' | 'hard_stop' | 'limited' | 'unknown'
 export type CapacitySource = 'provider_reported' | 'factory_measured' | 'inferred' | 'unknown'
 export type ReviewState = 'waiting' | 'assigned' | 'changes_requested' | 'approved'
+export type FeatureStage = 'ready' | 'building' | 'awaiting_review' | 'changes_requested' | 'awaiting_integration' | 'accepted' | 'blocked' | 'unknown'
 export type EventKind = 'READY' | 'CLAIMED' | 'LAUNCHED' | 'HEARTBEAT' | 'VALIDATION' | 'REVIEW' | 'FAILURE' | 'RETRY' | 'DONE' | 'LEASE_RELEASED' | 'LEASE_EXPIRED'
 
 export interface FactoryEvidence {
@@ -67,6 +68,8 @@ export interface FactoryFeature {
   description: string
   priority: number
   state: FactoryState
+  stage: FeatureStage
+  stageReason: string
   packages: FactoryPackage[]
 }
 
@@ -188,6 +191,15 @@ export interface FactoryFailure {
   requiresHuman: boolean
 }
 
+export interface FactoryThroughput {
+  window: { startAt: string; endAt: string; seconds: number; meaning: string }
+  parentAttemptSeconds: number; implementationAttemptSeconds: number; reviewAttemptSeconds: number
+  workerAttemptUnionSeconds: number; noWorkerAttemptSeconds: number | null; partialIntervalCount: number
+  retryCount: number; implementedCount: number; approvedCount: number; acceptedCount: number | null
+  acceptedCountReason: string; reviewWaitSeconds: number | null; reviewWaitMeaning: string; activeReviewWait: boolean
+  coordinatorTurnSeconds: number | null; identifiableWaitingSeconds: number | null; coordinatorTelemetry: string
+}
+
 export interface FactoryProjectionPayload {
   schemaVersion: typeof FACTORY_SNAPSHOT_SCHEMA_VERSION
   registryRevision: string
@@ -202,6 +214,7 @@ export interface FactoryProjectionPayload {
     verifyReviewCount: number
     blockedCount: number
     attentionCount: number
+    throughput: FactoryThroughput
   }
   reconciliation: {
     status: 'clean' | 'mismatch' | 'unknown'
@@ -295,7 +308,11 @@ function parsePackage(value: unknown, path: string): FactoryPackage {
 }
 function parseFeature(value: unknown, path: string): FactoryFeature {
   const v = object(value, path)
-  return { id: string(v.id, `${path}.id`), title: string(v.title, `${path}.title`), description: string(v.description, `${path}.description`), priority: number(v.priority, `${path}.priority`), state: oneOf(v.state, factoryStates, `${path}.state`), packages: list(v.packages, `${path}.packages`, parsePackage) }
+  return { id: string(v.id, `${path}.id`), title: string(v.title, `${path}.title`), description: string(v.description, `${path}.description`), priority: number(v.priority, `${path}.priority`), state: oneOf(v.state, factoryStates, `${path}.state`), stage: oneOf(v.stage, ['ready', 'building', 'awaiting_review', 'changes_requested', 'awaiting_integration', 'accepted', 'blocked', 'unknown'] as const, `${path}.stage`), stageReason: string(v.stageReason, `${path}.stageReason`), packages: list(v.packages, `${path}.packages`, parsePackage) }
+}
+function parseThroughput(value: unknown, path: string): FactoryThroughput {
+  const v = object(value, path), window = object(v.window, `${path}.window`)
+  return { window: { startAt: timestamp(window.startAt, `${path}.window.startAt`), endAt: timestamp(window.endAt, `${path}.window.endAt`), seconds: number(window.seconds, `${path}.window.seconds`), meaning: string(window.meaning, `${path}.window.meaning`) }, parentAttemptSeconds: number(v.parentAttemptSeconds, `${path}.parentAttemptSeconds`), implementationAttemptSeconds: number(v.implementationAttemptSeconds, `${path}.implementationAttemptSeconds`), reviewAttemptSeconds: number(v.reviewAttemptSeconds, `${path}.reviewAttemptSeconds`), workerAttemptUnionSeconds: number(v.workerAttemptUnionSeconds, `${path}.workerAttemptUnionSeconds`), noWorkerAttemptSeconds: nullableNumber(v.noWorkerAttemptSeconds, `${path}.noWorkerAttemptSeconds`), partialIntervalCount: number(v.partialIntervalCount, `${path}.partialIntervalCount`), retryCount: number(v.retryCount, `${path}.retryCount`), implementedCount: number(v.implementedCount, `${path}.implementedCount`), approvedCount: number(v.approvedCount, `${path}.approvedCount`), acceptedCount: nullableNumber(v.acceptedCount, `${path}.acceptedCount`), acceptedCountReason: string(v.acceptedCountReason, `${path}.acceptedCountReason`), reviewWaitSeconds: nullableNumber(v.reviewWaitSeconds, `${path}.reviewWaitSeconds`), reviewWaitMeaning: string(v.reviewWaitMeaning, `${path}.reviewWaitMeaning`), activeReviewWait: boolean(v.activeReviewWait, `${path}.activeReviewWait`), coordinatorTurnSeconds: nullableNumber(v.coordinatorTurnSeconds, `${path}.coordinatorTurnSeconds`), identifiableWaitingSeconds: nullableNumber(v.identifiableWaitingSeconds, `${path}.identifiableWaitingSeconds`), coordinatorTelemetry: string(v.coordinatorTelemetry, `${path}.coordinatorTelemetry`) }
 }
 function parseWorker(value: unknown, path: string): FactoryWorker {
   const v = object(value, path)
@@ -349,7 +366,7 @@ export function parseFactoryProjection(value: unknown): FactoryProjectionPayload
     registryRevision: string(v.registryRevision, 'snapshot.registryRevision'),
     generatedAt: timestamp(v.generatedAt, 'snapshot.generatedAt'),
     source: { kind: oneOf(source.kind, ['registry-projection'] as const, 'snapshot.source.kind'), projectionId: string(source.projectionId, 'snapshot.source.projectionId') },
-    factory: { health: oneOf(factory.health, healthStates, 'snapshot.factory.health'), activeParentCount: number(factory.activeParentCount, 'snapshot.factory.activeParentCount'), activeParentLimit: number(factory.activeParentLimit, 'snapshot.factory.activeParentLimit'), orchestraReservePercent: nullableNumber(factory.orchestraReservePercent, 'snapshot.factory.orchestraReservePercent'), readyCount: number(factory.readyCount, 'snapshot.factory.readyCount'), verifyReviewCount: number(factory.verifyReviewCount, 'snapshot.factory.verifyReviewCount'), blockedCount: number(factory.blockedCount, 'snapshot.factory.blockedCount'), attentionCount: number(factory.attentionCount, 'snapshot.factory.attentionCount') },
+    factory: { health: oneOf(factory.health, healthStates, 'snapshot.factory.health'), activeParentCount: number(factory.activeParentCount, 'snapshot.factory.activeParentCount'), activeParentLimit: number(factory.activeParentLimit, 'snapshot.factory.activeParentLimit'), orchestraReservePercent: nullableNumber(factory.orchestraReservePercent, 'snapshot.factory.orchestraReservePercent'), readyCount: number(factory.readyCount, 'snapshot.factory.readyCount'), verifyReviewCount: number(factory.verifyReviewCount, 'snapshot.factory.verifyReviewCount'), blockedCount: number(factory.blockedCount, 'snapshot.factory.blockedCount'), attentionCount: number(factory.attentionCount, 'snapshot.factory.attentionCount'), throughput: parseThroughput(factory.throughput, 'snapshot.factory.throughput') },
     reconciliation: { status: oneOf(reconciliation.status, ['clean', 'mismatch', 'unknown'] as const, 'snapshot.reconciliation.status'), worktreeCount: nullableNumber(reconciliation.worktreeCount, 'snapshot.reconciliation.worktreeCount'), dirtyWorktreeCount: nullableNumber(reconciliation.dirtyWorktreeCount, 'snapshot.reconciliation.dirtyWorktreeCount'), unmergedBranchCount: nullableNumber(reconciliation.unmergedBranchCount, 'snapshot.reconciliation.unmergedBranchCount'), unexplainedRecordCount: nullableNumber(reconciliation.unexplainedRecordCount, 'snapshot.reconciliation.unexplainedRecordCount'), activeStaleLeaseCount: nullableNumber(reconciliation.activeStaleLeaseCount, 'snapshot.reconciliation.activeStaleLeaseCount'), observedAt: nullableTimestamp(reconciliation.observedAt, 'snapshot.reconciliation.observedAt') },
     features: list(v.features, 'snapshot.features', parseFeature), workers: list(v.workers, 'snapshot.workers', parseWorker), reviews: list(v.reviews, 'snapshot.reviews', parseReview), capacity: list(v.capacity, 'snapshot.capacity', parseCapacity), usageInvocations: list(v.usageInvocations, 'snapshot.usageInvocations', parseUsageInvocation), events: list(v.events, 'snapshot.events', parseEvent), failures: list(v.failures, 'snapshot.failures', parseFailure),
   }
