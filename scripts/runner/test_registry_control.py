@@ -348,6 +348,55 @@ class RunnerRegistryControlTests(unittest.TestCase):
         self.assertEqual(pre_claim.call_count, 2)
         self.assertEqual(claim.call_count, 2)
 
+    def test_reservation_revalidates_only_a_benign_heartbeat_revision_race(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        stale_revision = self.registry.dispatch_control()["revision"]
+        self.registry.record_worker_heartbeat(
+            "worker-a", observed_at=datetime.now(timezone.utc).isoformat()
+        )
+        with patch("registry_control.os.getpid", return_value=901):
+            control.reserve_attempt(
+                "attempt-heartbeat-race", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=stale_revision,
+            )
+        self.assertTrue(self.registry.attempt_exists("attempt-heartbeat-race"))
+
+    def test_reservation_does_not_retry_across_a_stop(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        stale_revision = self.registry.dispatch_control()["revision"]
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=datetime.now(timezone.utc).isoformat(), reason="stop"
+        )
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_NOT_AUTHORIZED"):
+            control.reserve_attempt(
+                "attempt-stopped", package_id="TASK-1", worker_id="worker-a",
+                expected_revision=stale_revision,
+            )
+        self.assertFalse(self.registry.attempt_exists("attempt-stopped"))
+
+    def test_pre_claim_enforces_ready_review_priority_at_the_controller(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock(dispatch_control=Mock(return_value={}))
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17,
+            work_packages=(
+                {"id": "TASK-PARENT", "kind": "PARENT", "status": "READY", "priority": 99},
+                {"id": "TASK-REVIEW", "kind": "REVIEW", "status": "READY", "priority": 1},
+            ),
+        )
+        control.registry.require_live_dispatch.return_value = 17
+        control.registry.review_implementer_worker.return_value = "builder"
+        decision = SimpleNamespace(proposed_assignments=(
+            SimpleNamespace(package_id="TASK-PARENT", worker_id="builder"),
+            SimpleNamespace(package_id="TASK-REVIEW", worker_id="reviewer"),
+        ), pair_evaluations=())
+        with patch("registry_control.decide_shadow", return_value=decision):
+            with self.assertRaisesRegex(RegistryConflict, "SESSION_QUEUE_PRIORITY"):
+                control.pre_claim("TASK-PARENT", "builder")
+            self.assertEqual(control.pre_claim("TASK-REVIEW", "reviewer"), 17)
+
     def test_pre_claim_uses_live_registry_health_and_capacity_evidence(self):
         now = datetime.now(timezone.utc).isoformat()
         self.registry.register_feature(

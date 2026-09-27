@@ -1800,6 +1800,42 @@ class OperatorFixture(unittest.TestCase):
         self.assertEqual(evidence["run_package_ids"], ["TASK-201", "TASK-202"])
         self.assertIn(["TASK-201", "codex-a", "claude"], evidence["independent_pairs"])
 
+    def test_bounded_run_gate_accepts_a_capable_pair_waiting_on_a_blocked_parent(self):
+        now = utc_now()
+        self.sync_workers(now)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=now,
+        )
+        self.registry.transition_work_package(
+            implementation.id, expected_status=TaskStatus.READY,
+            new_status=TaskStatus.BLOCKED, changed_at=now,
+        )
+
+        evidence = operator_module.bounded_run_worker_gate(
+            self.registry.dispatch_snapshot(observed_at=now), [implementation.id, review.id],
+        )
+
+        self.assertEqual(evidence["implementation_assignments"][implementation.id], [])
+        self.assertIn("codex-a", evidence["potential_implementation_assignments"][implementation.id])
+
+    def test_bounded_pilot_parser_accepts_a_backlog_larger_than_wip(self):
+        pairs = []
+        for number in (401, 411, 421):
+            spec = self.canary()
+            spec["feature"]["id"] = f"BACKLOG-{number}"
+            for key, identifier in (("implementation", number), ("review", number + 1)):
+                package = spec[key]
+                package.update(id=f"TASK-{identifier}", feature_id=spec["feature"]["id"],
+                               source_ref=str(identifier))
+                package["queue_contract"]["task"] = package["id"]
+                if key == "review":
+                    package["dependency_ids"] = [f"TASK-{number}"]
+                    package["queue_contract"]["depends_on"] = [number]
+            pairs.append(spec)
+        self.assertEqual(len(operator_module.parse_bounded_pilot_spec({"pairs": pairs})), 3)
+
     def test_bounded_review_preflight_accepts_immutable_target_scoped_followup(self):
         now, _spec = self._bounded_review_fixture()
         observed_at = (now + timedelta(seconds=7)).isoformat()

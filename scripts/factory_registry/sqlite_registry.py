@@ -51,7 +51,7 @@ CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
-DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 2
+DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 3
 def _json(value: Any) -> str:
     """Canonical JSON for existing Registry records and operation receipts."""
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
@@ -193,7 +193,7 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")
             or isinstance(parent_limit, bool) or not isinstance(parent_limit, int)
-            or not 1 <= parent_limit <= min(DEFAULT_BOUNDED_RUN_PARENT_LIMIT, active_parent_limit)):
+            or not 1 <= parent_limit <= active_parent_limit):
         raise RegistryConflict("INVALID_BOUNDED_RUN_SCOPE")
     normalized_deadline = _normalize_timestamp(str(deadline))
     return {
@@ -1220,6 +1220,13 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def attempt_exists(self, attempt_id: str) -> bool:
+        """Read-only replay guard for pre-provider reservation revalidation."""
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM attempts WHERE id=?", (attempt_id,)
+            ).fetchone() is not None
+
     def recover_attempt_runtime(
         self,
         attempt_id: str,
@@ -2178,7 +2185,7 @@ class SQLiteRegistry:
         expected_revision: int,
         recorded_at: str,
     ) -> int:
-        """Atomically register up to two independent implementation/review pairs.
+        """Atomically register an approved implementation/review backlog.
 
         The pilot is intentionally not a fleet scheduler: every package is
         registered before activation, each review depends only on its paired
@@ -2186,7 +2193,7 @@ class SQLiteRegistry:
         force.
         """
         recorded_at = _normalize_timestamp(recorded_at)
-        if not pairs or len(pairs) > DEFAULT_BOUNDED_RUN_PARENT_LIMIT:
+        if not pairs:
             raise RegistryConflict("INVALID_BOUNDED_PILOT_SIZE")
         ids: set[str] = set()
         for feature, implementation, review in pairs:

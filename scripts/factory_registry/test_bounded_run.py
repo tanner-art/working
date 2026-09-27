@@ -32,14 +32,15 @@ class BoundedRunTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def enable(self, package_ids=("TASK-1", "TASK-2"), *, run_id="pilot-new", deadline=None) -> None:
+    def enable(self, package_ids=("TASK-1", "TASK-2"), *, run_id="pilot-new", deadline=None,
+               parent_limit=2) -> None:
         control = self.registry.dispatch_control()
         self.registry.set_dispatch_control(
             expected_revision=control["revision"], expected_mode="PAUSED", new_mode="LIVE",
             kill_switch_engaged=False, changed_at=self.now.isoformat(), reason="test pilot",
             bounded_run={
                 "run_id": run_id, "package_ids": list(package_ids), "base_ref": "main",
-                "deadline": (deadline or self.now + timedelta(minutes=5)).isoformat(), "parent_limit": 2,
+                "deadline": (deadline or self.now + timedelta(minutes=5)).isoformat(), "parent_limit": parent_limit,
             },
         )
 
@@ -57,6 +58,21 @@ class BoundedRunTests(unittest.TestCase):
                 expires_at=(self.now + timedelta(minutes=1)).isoformat(),
                 expected_dispatch_revision=self.registry.dispatch_control()["revision"],
             )
+
+    def test_long_allowlist_is_bounded_by_wip_not_registered_queue_size(self) -> None:
+        self.enable(("TASK-1", "TASK-2", "TASK-3"), parent_limit=3)
+        for package_id, worker_id in (("TASK-1", "builder-a"), ("TASK-2", "builder-b"),
+                                      ("TASK-3", "builder-c")):
+            self.registry.acquire_lease(
+                package_id, worker_id, acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+        self.assertEqual(
+            sum(item["package_id"] in {"TASK-1", "TASK-2", "TASK-3"}
+                for item in self.registry.dispatch_snapshot(observed_at=self.now.isoformat()).active_leases),
+            3,
+        )
 
     def test_expired_run_cannot_claim_and_old_timer_cannot_stop_successor(self) -> None:
         self.enable(deadline=self.now - timedelta(seconds=1))
