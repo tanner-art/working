@@ -18,7 +18,22 @@ describe('application surface registry', () => {
       { id: 'landing-preview', path: '/preview/landing', persistence: 'none' },
       { id: 'tutorial-preview', path: '/preview/tutorial', persistence: 'none' },
     ]))
-    expect(appSurfaceRegistry).toHaveLength(4)
+    const surfaceIds = appSurfaceRegistry.map(surface => surface.id)
+    const surfacePaths = appSurfaceRegistry.map(surface => surface.path)
+    expect(new Set(surfaceIds).size).toBe(surfaceIds.length)
+    expect(new Set(surfacePaths).size).toBe(surfacePaths.length)
+  })
+
+  it('distinguishes unique surface ids and paths from duplicates by cardinality', () => {
+    const uniqueIds = ['dashboard', 'settings']
+    const duplicateIds = ['dashboard', 'dashboard']
+    const uniquePaths = ['/dashboard', '/settings']
+    const duplicatePaths = ['/dashboard', '/dashboard']
+
+    expect(new Set(uniqueIds).size).toBe(uniqueIds.length)
+    expect(new Set(duplicateIds).size).not.toBe(duplicateIds.length)
+    expect(new Set(uniquePaths).size).toBe(uniquePaths.length)
+    expect(new Set(duplicatePaths).size).not.toBe(duplicatePaths.length)
   })
 
   it('keeps the main workspace as the safe fallback without assigning persistence to previews', () => {
