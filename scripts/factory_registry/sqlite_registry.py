@@ -2771,6 +2771,12 @@ class SQLiteRegistry:
                     "SELECT 1 FROM registry_metadata WHERE key=?",
                     (BOUNDED_RUN_METADATA_KEY,),
                 ).fetchone():
+                    control = connection.execute(
+                        "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                    ).fetchone()
+                    if (control is None or control["dispatch_mode"] != "LIVE"
+                            or control["kill_switch_engaged"]):
+                        raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
                     # The bounded envelope is authoritative for direct
                     # Registry callers too; it defines submitted-review WIP
                     # lineage without rewriting historical work.

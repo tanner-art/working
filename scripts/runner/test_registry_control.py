@@ -270,7 +270,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
         ))
         for worker in (
             Worker("implementer", "Implementer", ("registry",), (Lane.PLATFORM,), provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["implementer"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
-            Worker("reviewer", "Reviewer", ("review",), (Lane.ASSURANCE,), provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["reviewer"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
+            Worker("reviewer", "Reviewer", ("review", "registry"), (Lane.ASSURANCE, Lane.PLATFORM), provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["reviewer"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
             Worker("orchestra", "Orchestra", (), (), role="ORCHESTRA", provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["orchestra"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
         ):
             self.registry.register_worker(worker)
@@ -335,7 +335,7 @@ class RunnerRegistryControlTests(unittest.TestCase):
         deadline_contract = {"task": "TASK-DEADLINE", "paths": ["docs/review.md"]}
         self.registry.register_work_package(WorkPackage(
             "TASK-DEADLINE", "LEGACY", "deadline probe", "ORCHESTRATION", Lane.PLATFORM,
-            ("registry",), 1, ("deadline enforcement",), status=TaskStatus.READY,
+            ("registry",), 99, ("deadline enforcement",), status=TaskStatus.READY,
             provider_diagnostics={"queue_contract_sha256": queue_contract_digest(deadline_contract)},
         ))
         self.registry.bind_legacy_package_source(
@@ -350,6 +350,12 @@ class RunnerRegistryControlTests(unittest.TestCase):
         runner_control = RunnerRegistryControl(self.database)
         self.assertEqual(runner_control.bounded_source_issues(), (312, 999))
         with patch("registry_control.utc_now", return_value=stamp(now + timedelta(seconds=12))):
+            proposals = runner_control._run_snapshot(stamp(now + timedelta(seconds=12)))
+            from scripts.factory_registry.shadow_dispatch import Assignment, decide_shadow
+            self.assertEqual(
+                set(decide_shadow(proposals).proposed_assignments),
+                {Assignment("TASK-FOLLOWUP", "reviewer"), Assignment("TASK-DEADLINE", "implementer")},
+            )
             with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
                 runner_control.pre_claim("TASK-TARGET", "implementer")
             with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
@@ -567,34 +573,6 @@ class RunnerRegistryControlTests(unittest.TestCase):
                     expected_revision=10, lease_id="lease-1",
                 )
         begin.assert_not_called()
-
-    def test_pre_claim_orders_ready_review_only_for_the_competing_worker(self):
-        control = RunnerRegistryControl(self.database)
-        control.registry = Mock(dispatch_control=Mock(return_value={}))
-        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
-            revision=17,
-            work_packages=(
-                {"id": "TASK-PARENT", "kind": "PARENT", "status": "READY", "priority": 99},
-                {"id": "TASK-REVIEW", "kind": "REVIEW", "status": "READY", "priority": 1},
-            ),
-        )
-        control.registry.require_live_dispatch.return_value = 17
-        control.registry.review_implementer_worker.return_value = "builder"
-        decision = SimpleNamespace(proposed_assignments=(
-            SimpleNamespace(package_id="TASK-PARENT", worker_id="builder"),
-            SimpleNamespace(package_id="TASK-REVIEW", worker_id="reviewer"),
-        ), pair_evaluations=())
-        with patch("registry_control.decide_shadow", return_value=decision):
-            self.assertEqual(control.pre_claim("TASK-PARENT", "builder"), 17)
-            self.assertEqual(control.pre_claim("TASK-REVIEW", "reviewer"), 17)
-
-        same_worker = SimpleNamespace(proposed_assignments=(
-            SimpleNamespace(package_id="TASK-PARENT", worker_id="builder"),
-            SimpleNamespace(package_id="TASK-REVIEW", worker_id="builder"),
-        ), pair_evaluations=())
-        with patch("registry_control.decide_shadow", return_value=same_worker):
-            with self.assertRaisesRegex(RegistryConflict, "SESSION_QUEUE_PRIORITY"):
-                control.pre_claim("TASK-PARENT", "builder")
 
     def test_pre_claim_uses_live_registry_health_and_capacity_evidence(self):
         now = datetime.now(timezone.utc).isoformat()

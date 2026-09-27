@@ -1022,7 +1022,6 @@ DEFERRABLE_REGISTRY_CODES = frozenset({
     'WORKER_NOT_IDLE', 'WORKER_HAS_ACTIVE_LEASE', 'LANE_NOT_APPROVED',
     'CAPABILITY_MISMATCH', 'ACTIVE_PARENT_LIMIT',
     'BUILDER_WIP_LIMIT',
-    'SESSION_QUEUE_PRIORITY',
 })
 
 
@@ -1350,10 +1349,6 @@ def main():
                     verify_review_packet(review_input)
             except RegistryConflict as error:
                 if registry_review and error.code == 'REVIEW_INPUT_REQUIRED':
-                    print(json.dumps({'issue': n, 'status': 'defer',
-                                      'reason': error.code}))
-                    continue
-                if error.code == 'SESSION_QUEUE_PRIORITY':
                     print(json.dumps({'issue': n, 'status': 'defer',
                                       'reason': error.code}))
                     continue

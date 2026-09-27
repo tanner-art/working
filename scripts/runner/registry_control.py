@@ -33,12 +33,6 @@ from scripts.factory_registry.claude_telemetry import (  # noqa: E402
     claude_provider_signal, probe_claude_health,
 )
 from scripts.runner.task_readiness import check_packet  # noqa: E402
-try:  # Support both the installed runner script and package imports in tests.
-    from scripts.runner.session_queue import (  # noqa: E402
-        ordered_assignments, ordered_assignments_for_worker,
-    )
-except ImportError:  # pragma: no cover - exercised by direct script invocation.
-    from session_queue import ordered_assignments, ordered_assignments_for_worker  # type: ignore # noqa: E402
 
 
 def utc_now() -> str:
@@ -190,7 +184,6 @@ class RunnerRegistryControl:
                     f"{worker_id} implemented the target package",
                 )
         decision = decide_shadow(snapshot)
-        ordered = ordered_assignments(snapshot, decision.proposed_assignments)
         assignment = (package_id, worker_id)
         eligible = {
             (item.package_id, item.worker_id) for item in decision.proposed_assignments
@@ -208,21 +201,13 @@ class RunnerRegistryControl:
                 if matching is not None else "PAIR_NOT_FOUND"
             )
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
-        worker_ordered = ordered_assignments_for_worker(
-            snapshot, decision.proposed_assignments, worker_id
-        )
-        if worker_ordered and (
-            worker_ordered[0].package_id, worker_ordered[0].worker_id
-        ) != assignment:
-            raise RegistryConflict("SESSION_QUEUE_PRIORITY", worker_ordered[0].package_id)
         return self.registry.require_live_dispatch(expected_revision=snapshot.revision)
 
     def proposed_worker(self, package_id: str) -> str | None:
         """Return the authoritative scheduler proposal, never GitHub labels."""
         snapshot = self._run_snapshot(utc_now())
-        proposed = [item.worker_id for item in ordered_assignments(
-            snapshot, decide_shadow(snapshot).proposed_assignments
-        ) if item.package_id == package_id]
+        proposed = [item.worker_id for item in decide_shadow(snapshot).proposed_assignments
+                    if item.package_id == package_id]
         return proposed[0] if len(proposed) == 1 else None
 
     def _run_snapshot(self, observed_at):

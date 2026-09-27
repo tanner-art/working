@@ -811,6 +811,9 @@ def decide_shadow(
     eligible_pair_records = sorted(
         (value for value in pair_evaluations if value.eligible),
         key=lambda value: (
+            0 if package_by_id[value.package_id].get("capacity_risk") == "EMERGENCY_RECOVERY" else 1,
+            0 if package_by_id[value.package_id].get("kind") == "REVIEW"
+            and package_by_id[value.package_id].get("status") == "READY" else 1,
             -int(package_by_id[value.package_id].get("priority", 0)),
             value.capability_surplus,
             _package_order_key(package_by_id[value.package_id])[1],
@@ -836,11 +839,11 @@ def decide_shadow(
             if package_id in assigned_packages:
                 dynamic.append(_reason(RejectionCode.PACKAGE_ALREADY_PROPOSED))
                 continue
-            if worker_id in assigned_workers:
-                dynamic.append(_reason(RejectionCode.WORKER_ALREADY_PROPOSED))
-                continue
             if package.get("kind") == "PARENT" and parent_count >= snapshot.active_parent_limit:
                 dynamic.append(_reason(RejectionCode.ACTIVE_PARENT_LIMIT))
+                continue
+            if worker_id in assigned_workers:
+                dynamic.append(_reason(RejectionCode.WORKER_ALREADY_PROPOSED))
                 continue
             if package.get("kind") == "PARENT" and builder_wip[worker_id] >= 2:
                 dynamic.append(_reason(RejectionCode.BUILDER_WIP_LIMIT))

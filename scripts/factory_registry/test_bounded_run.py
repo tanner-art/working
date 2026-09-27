@@ -79,6 +79,18 @@ class BoundedRunTests(unittest.TestCase):
             3,
         )
 
+    def test_direct_lease_cannot_claim_retained_scope_after_kill(self) -> None:
+        self.enable()
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=self.now.isoformat(), reason="stop before direct claim"
+        )
+        self.assertEqual("STOPPING", self.registry.dispatch_control()["dispatch_mode"])
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_NOT_AUTHORIZED"):
+            self.registry.acquire_lease(
+                "TASK-1", "builder-a", acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+            )
+
     def test_expired_run_cannot_claim_and_old_timer_cannot_stop_successor(self) -> None:
         self.enable(deadline=self.now - timedelta(seconds=1))
         with self.assertRaisesRegex(RegistryConflict, "RUN_DEADLINE_EXPIRED"):
