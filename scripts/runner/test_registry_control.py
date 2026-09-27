@@ -37,6 +37,21 @@ class RunnerRegistryControlTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def register_reservation_capacity(self, now):
+        self.registry.register_worker(Worker(
+            "orchestra", "Orchestra", (), (), role="ORCHESTRA",
+            provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["orchestra"]},
+            last_heartbeat_at=now.isoformat(), usage_state="GREEN",
+        ))
+        for worker_id in ("worker-a", "orchestra"):
+            self.registry.record_worker_capacity_observations(worker_id, ({
+                "id": f"reservation-{worker_id}", "worker_id": worker_id,
+                "observed_at": now.isoformat(), "reset_at": None, "consumed_percent": 10,
+                "state": "NORMAL", "provider_diagnostics": {
+                    "capacity_mode": "percentage", "capacity_scope": worker_id,
+                },
+            },), recorded_at=now.isoformat())
+
     def seed_assignment(self):
         now = datetime.now(timezone.utc)
         self.registry.register_feature(
@@ -48,9 +63,29 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 "Worker A",
                 ("registry",),
                 (Lane.PLATFORM,),
+                provider_diagnostics={
+                    "capacity_mode": "percentage",
+                    "capacity_scopes": ["worker-a"],
+                },
+                last_heartbeat_at=now.isoformat(),
                 usage_state="GREEN",
             )
         )
+        self.registry.register_worker(Worker(
+            "orchestra", "Orchestra", (), (), role="ORCHESTRA",
+            provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["orchestra"]},
+            last_heartbeat_at=now.isoformat(), usage_state="GREEN",
+        ))
+        self.registry.record_worker_capacity_observations("worker-a", ({
+            "id": "seed-worker-a", "worker_id": "worker-a", "observed_at": now.isoformat(),
+            "reset_at": None, "consumed_percent": 10, "state": "NORMAL",
+            "provider_diagnostics": {"capacity_mode": "percentage", "capacity_scope": "worker-a"},
+        },), recorded_at=now.isoformat())
+        self.registry.record_worker_capacity_observations("orchestra", ({
+            "id": "seed-orchestra", "worker_id": "orchestra", "observed_at": now.isoformat(),
+            "reset_at": None, "consumed_percent": 10, "state": "NORMAL",
+            "provider_diagnostics": {"capacity_mode": "percentage", "capacity_scope": "orchestra"},
+        },), recorded_at=now.isoformat())
         self.registry.register_work_package(
             WorkPackage(
                 "TASK-1",
@@ -403,6 +438,45 @@ class RunnerRegistryControlTests(unittest.TestCase):
                     expected_revision=revision, lease_id=old["id"],
                 )
         self.assertFalse(self.registry.attempt_exists("attempt-replaced-lease"))
+
+    def test_reservation_does_not_retry_when_bounded_run_scope_changes(self):
+        """A heartbeat retry cannot cross a run rollover, scope, or deadline edit."""
+        control = RunnerRegistryControl(self.database)
+        baseline = {
+            "revision": 10, "lease_id": "lease-1", "lease_expires_at": "2026-09-27T12:10:00Z",
+            "package_id": "TASK-1", "worker_id": "worker-a", "package_status": "ACTIVE",
+            "bounded_run": {"run_id": "pilot-one", "package_ids": ["TASK-1"], "deadline": "2026-09-27T12:10:00Z", "base_ref": "main", "parent_limit": 1},
+            "deadline": "2026-09-27T12:10:00Z", "eligible": True,
+        }
+        changed = {
+            **baseline,
+            "revision": 11,
+            "bounded_run": {**baseline["bounded_run"], "run_id": "pilot-two", "package_ids": ["TASK-1", "TASK-2"], "deadline": "2026-09-27T12:20:00Z"},
+            "deadline": "2026-09-27T12:20:00Z",
+        }
+        with patch.object(control, "_reservation_facts", side_effect=(baseline, changed)), \
+                patch.object(control.registry, "begin_attempt_runtime", side_effect=RegistryConflict("DISPATCH_NOT_AUTHORIZED")):
+            with self.assertRaisesRegex(RegistryConflict, "DISPATCH_NOT_AUTHORIZED"):
+                control.reserve_attempt(
+                    "attempt-run-rollover", package_id="TASK-1", worker_id="worker-a",
+                    expected_revision=10, lease_id="lease-1",
+                )
+
+    def test_reservation_requires_eligible_baseline_and_retry(self):
+        control = RunnerRegistryControl(self.database)
+        ineligible = {
+            "revision": 10, "lease_id": "lease-1", "lease_expires_at": "2026-09-27T12:10:00Z",
+            "package_id": "TASK-1", "worker_id": "worker-a", "package_status": "ACTIVE",
+            "bounded_run": None, "deadline": None, "eligible": False,
+        }
+        with patch.object(control, "_reservation_facts", return_value=ineligible), \
+                patch.object(control.registry, "begin_attempt_runtime") as begin:
+            with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
+                control.reserve_attempt(
+                    "attempt-ineligible", package_id="TASK-1", worker_id="worker-a",
+                    expected_revision=10, lease_id="lease-1",
+                )
+        begin.assert_not_called()
 
     def test_pre_claim_orders_ready_review_only_for_the_competing_worker(self):
         control = RunnerRegistryControl(self.database)
@@ -843,8 +917,11 @@ class RunnerRegistryControlTests(unittest.TestCase):
             Feature("FEATURE", "Feature", 10, TaskStatus.READY)
         )
         self.registry.register_worker(
-            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,))
+            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,),
+                   provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["worker-a"]},
+                   last_heartbeat_at=now.isoformat(), usage_state="GREEN")
         )
+        self.register_reservation_capacity(now)
         self.registry.register_work_package(
             WorkPackage(
                 "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
@@ -902,8 +979,11 @@ class RunnerRegistryControlTests(unittest.TestCase):
             Feature("FEATURE", "Feature", 10, TaskStatus.READY)
         )
         self.registry.register_worker(
-            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,))
+            Worker("worker-a", "Worker A", ("registry",), (Lane.PLATFORM,),
+                   provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["worker-a"]},
+                   last_heartbeat_at=now.isoformat(), usage_state="GREEN")
         )
+        self.register_reservation_capacity(now)
         self.registry.register_work_package(
             WorkPackage(
                 "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
