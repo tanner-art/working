@@ -60,6 +60,8 @@ export interface HistoryEvent {
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
   reviewRevision?: { from: string; to: string }
   sourceCorrection?: { correctionId: string; from: string; to: string }
+  /** Reminder lifecycle evidence. The instruction itself remains attached to its semantic target. */
+  reminderInstruction?: ReminderInstructionAudit
 }
 /** Executable meaning still awaiting a dedicated confirmation gesture. */
 export interface ProposedAction { summary: string }
@@ -156,6 +158,28 @@ export interface ReminderInstruction {
   deliveryState: 'needs-review'
   captureIds: string[]
 }
+export type UnresolvedReminderInstruction = ReminderInstruction
+/** A confirmed notification instruction. It never changes the kind of its target. */
+export interface ResolvedReminderInstruction {
+  id: string
+  targetId: string
+  captureIds: string[]
+  sourceInterpretationId: string
+  mode: 'specific' | 'daily-log'
+  /** Required only for a Specific reminder and stored as an ISO instant. */
+  dueAt?: string
+  deliveryState: 'active' | 'handled' | 'dismissed'
+  createdAt: string
+  handledAt?: string
+  dismissedAt?: string
+}
+export interface ReminderInstructionAudit {
+  instructionId: string
+  action: 'created' | 'handled' | 'dismissed'
+  targetId?: string
+  mode?: 'specific' | 'daily-log'
+  dueAt?: string
+}
 export interface SemanticObject {
   id: string
   kind: SemanticKind
@@ -164,7 +188,7 @@ export interface SemanticObject {
   summary: string
   status: ObjectStatus
   metadata: ObjectMetadata
-  reminders: ReminderInstruction[]
+  reminders: (ReminderInstruction | ResolvedReminderInstruction)[]
 }
 export type ActionPriority = 1 | 2 | 3 | 4 | 5
 export interface StagedAction {
@@ -200,6 +224,8 @@ export interface PersistedState {
   sourceCorrections?: SourceCorrection[]
   interpretations: Interpretation[]
   semanticObjects: SemanticObject[]
+  /** Canonical reminder instructions; semantic-object `reminders` is an attached projection. */
+  reminderInstructions?: ResolvedReminderInstruction[]
   stagedActions?: StagedAction[]
   calendarEvents: CalendarEvent[]
   relationships: SemanticRelationship[]

@@ -20,7 +20,7 @@ import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
 import { useEffect, useRef, useState } from 'react'
-import type { AppState, CanvasElement, ObjectKind, SemanticRelationship, ThoughtObject } from './domain'
+import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
 import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
@@ -32,6 +32,8 @@ import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
+import { ReminderProjections } from './ReminderResolution'
+import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -331,6 +333,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     update(current => ({ ...current, objects: current.objects.map(item => item.id === resolved.id ? resolved : item) }))
     if (resolved.kind === 'action') navigate('schedule')
   }
+  const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice))
+  const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState))
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
   const saveObject = (updated: ThoughtObject) => update(current => ({ ...current, objects: current.objects.map(item => item.id === updated.id ? updateObject(item, updated) : item) }))
   const captureCanvasObject = (element: CanvasElement) => {
@@ -400,7 +404,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review objects={state.objects} onResolve={resolveReviewObject} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
@@ -556,7 +561,7 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ objects, onResolve, onReject, onOpen }: { objects: ThoughtObject[]; onResolve: (object: ThoughtObject) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
@@ -564,8 +569,8 @@ export function Review({ objects, onResolve, onReject, onOpen }: { objects: Thou
   return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
-    <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small>{item.kind === 'commitment' && <small>Commitment setup remains in Review until its continuation is available.</small>}{item.kind === 'reminder' && <small>Reminder setup remains in Review until its continuation is available.</small>}</div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onEdit={() => onOpen(item.id)} />}
+    <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small>{item.kind === 'commitment' && <small>Commitment setup remains in Review until its continuation is available.</small>}</div></div>
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
       {ideas.length ? ideas.map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No resolved ideas yet." />}
