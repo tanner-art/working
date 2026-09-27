@@ -13,7 +13,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     recover_stale_claims, refresh_queue_snapshot,
                     RegistryAttemptLifecycle, run,
                     refresh_capacity_observations, run_repository_validation, select, stage_verified_changes,
-                    usage_policy_enabled)
+                    usage_policy_enabled, review_source_is_green)
 from usage_policy import worker_state
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
@@ -34,6 +34,99 @@ class QueueTests(unittest.TestCase):
         self.assertFalse(usage_policy_enabled({'agents': {'codex-a': {'model': 'm'}}}))
         self.assertTrue(usage_policy_enabled({'usage': {}}))
         self.assertTrue(usage_policy_enabled({'usage_file': 'usage.json'}))
+
+    def test_review_source_accepts_exact_pr_head_with_passing_verify(self):
+        commit = 'a' * 40
+        responses = iter((
+            {'headRefOid': commit, 'state': 'OPEN', 'mergeCommit': None},
+            [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+        ))
+
+        self.assertTrue(review_source_is_green(
+            lambda *_args: json.dumps(next(responses)), 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+        ))
+
+    def test_review_source_accepts_exact_merged_commit_with_matching_tree_and_main_ci(self):
+        commit, head, tree = 'a' * 40, 'b' * 40, 'c' * 40
+        responses = iter((
+            {'headRefOid': head, 'state': 'MERGED', 'mergeCommit': {'oid': commit}},
+            [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+            [{'headSha': commit, 'status': 'completed', 'conclusion': 'success',
+              'workflowName': 'Validate app'}],
+            {'tree': {'sha': tree}}, {'tree': {'sha': tree}},
+        ))
+
+        self.assertTrue(review_source_is_green(
+            lambda *_args: json.dumps(next(responses)), 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+        ))
+
+    def test_review_source_rejects_wrong_merge_sha(self):
+        commit = 'a' * 40
+        responses = iter((
+            {'headRefOid': 'b' * 40, 'state': 'MERGED', 'mergeCommit': {'oid': 'c' * 40}},
+            [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+        ))
+
+        self.assertFalse(review_source_is_green(
+            lambda *_args: json.dumps(next(responses)), 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+        ))
+
+    def test_review_source_rejects_unequal_merged_trees(self):
+        commit, head = 'a' * 40, 'b' * 40
+        responses = iter((
+            {'headRefOid': head, 'state': 'MERGED', 'mergeCommit': {'oid': commit}},
+            [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+            [{'headSha': commit, 'status': 'completed', 'conclusion': 'success',
+              'workflowName': 'Validate app'}],
+            {'tree': {'sha': 'c' * 40}}, {'tree': {'sha': 'd' * 40}},
+        ))
+
+        self.assertFalse(review_source_is_green(
+            lambda *_args: json.dumps(next(responses)), 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+        ))
+
+    def test_review_source_rejects_failed_or_missing_main_ci(self):
+        commit, head = 'a' * 40, 'b' * 40
+        for main_runs in (
+            [{'headSha': commit, 'status': 'completed', 'conclusion': 'failure',
+              'workflowName': 'Validate app'}],
+            [],
+        ):
+            with self.subTest(main_runs=main_runs):
+                responses = iter((
+                    {'headRefOid': head, 'state': 'MERGED', 'mergeCommit': {'oid': commit}},
+                    [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+                    main_runs, {'tree': {'sha': 'c' * 40}}, {'tree': {'sha': 'c' * 40}},
+                ))
+                self.assertFalse(review_source_is_green(
+                    lambda *_args: json.dumps(next(responses)), 'owner/repo',
+                    SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+                ))
+
+    def test_review_source_rejects_open_pr_after_head_advances(self):
+        commit = 'a' * 40
+        responses = iter((
+            {'headRefOid': 'b' * 40, 'state': 'OPEN', 'mergeCommit': None},
+            [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}],
+        ))
+
+        self.assertFalse(review_source_is_green(
+            lambda *_args: json.dumps(next(responses)), 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
+        ))
+
+    def test_review_source_defers_on_github_query_failure(self):
+        def failing_github(*_args):
+            raise RuntimeError('network unavailable')
+
+        self.assertFalse(review_source_is_green(
+            failing_github, 'owner/repo',
+            SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit='a' * 40),
+        ))
 
     def test_agent_environment_is_allowlisted(self):
         with patch('runner.os.getuid', return_value=501), \
