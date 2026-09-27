@@ -190,6 +190,20 @@ class QueueTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     review_command(config)
 
+    def test_codex_review_adapter_normalizes_the_configured_exec_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            packet = pathlib.Path(directory)
+            (packet / 'review-verdict-schema.json').write_text('{}')
+            command = review_command({'provider': 'openai', 'command': [
+                '/opt/homebrew/bin/codex', 'exec', '--ignore-user-config',
+                '--disable', 'multi_agent', '-m', 'gpt-5.6-terra', '-s',
+                'workspace-write', '--json', '-']}, review_packet_path=str(packet))
+        self.assertEqual(command[:7], ['/opt/homebrew/bin/codex', '--ignore-user-config',
+                                       '--disable', 'multi_agent', '-m', 'gpt-5.6-terra', 'exec'])
+        self.assertIn('--sandbox', command)
+        self.assertEqual(command[command.index('--sandbox') + 1], 'read-only')
+        self.assertEqual(command.count('exec'), 1)
+
     def test_review_packet_is_outside_checkout_immutable_and_in_the_prompt(self):
         import pathlib, tempfile
         from scripts.factory_registry.models import ReviewInput

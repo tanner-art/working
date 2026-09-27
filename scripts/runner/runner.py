@@ -794,7 +794,43 @@ or CHANGES_REQUESTED.
 
 
 def review_command(config, *, review_packet_path=None):
-    """Adapt only the supported Claude envelope to a read-only review call."""
+    """Adapt supported providers to a strict read-only Registry review call."""
+    if config.get('provider') == 'openai':
+        source = list(config.get('review_command') or config['command'])
+        if not source or not all(isinstance(item, str) and item for item in source):
+            raise ValueError('Codex review command must be a non-empty string command')
+        if pathlib.Path(source[0]).name != 'codex':
+            raise ValueError('Registry Codex review command must invoke codex')
+        if review_packet_path is None or not isinstance(review_packet_path, str):
+            raise ValueError('Codex review requires an immutable packet schema path')
+        packet = pathlib.Path(review_packet_path)
+        schema = packet / 'review-verdict-schema.json'
+        if not packet.is_absolute() or not schema.is_file():
+            raise ValueError('Codex review packet schema is unavailable')
+        # Normalize a configured implementation command.  Do not inherit any
+        # approval/write/output controls (including shorthand and = forms).
+        value_flags = {'--sandbox', '-s', '--output-schema', '--add-dir'}
+        reject = {'--full-auto', '--approve-for-me',
+                  '--dangerously-bypass-approvals-and-sandbox',
+                  '--dangerously-bypass-hook-trust', '--worktree'}
+        kept, index = [source[0]], 1
+        while index < len(source):
+            item = source[index]
+            if item == 'exec':
+                index += 1; continue
+            if item in reject or any(item.startswith(flag + '=') for flag in reject):
+                raise ValueError(f'unsafe Codex review capability flag: {item}')
+            if item in value_flags:
+                if index + 1 >= len(source):
+                    raise ValueError(f'Codex review flag lacks value: {item}')
+                index += 2; continue
+            if any(item.startswith(flag + '=') for flag in value_flags):
+                index += 1; continue
+            if item == '--json' or item == '-':
+                index += 1; continue
+            kept.append(item); index += 1
+        return kept + ['exec', '--sandbox', 'read-only', '--json',
+                       '--output-schema', str(schema), '-']
     if config.get('provider') != 'anthropic':
         raise ValueError('Registry review requires the supported anthropic Claude adapter')
     command = list(config.get('review_command') or config['command'])
@@ -861,6 +897,7 @@ def materialize_review_packet(state, *, implementation_attempt_id, base_commit,
         'changed-files.txt': ('\n'.join(changed_files) + ('\n' if changed_files else '')).encode('utf-8'),
         'contract.json': (json.dumps(contract, sort_keys=True, indent=2, ensure_ascii=False) + '\n').encode('utf-8'),
         'validation-evidence.json': (json.dumps(validation_evidence, sort_keys=True, indent=2, ensure_ascii=False) + '\n').encode('utf-8'),
+        'review-verdict-schema.json': (json.dumps(REVIEW_VERDICT_SCHEMA, sort_keys=True, indent=2) + '\n').encode('utf-8'),
     }
     file_hashes = {}
     for name, value in contents.items():

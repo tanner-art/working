@@ -56,6 +56,9 @@ _PACKAGE_TRANSITIONS = {
     },
     TransitionAuthority.REVIEW_OUTCOME: {
         (TaskStatus.VERIFY_REVIEW, TaskStatus.DONE),
+        # A changes-requested decision preserves the failed target and opens
+        # only an owner-approved immutable remediation slot.
+        (TaskStatus.VERIFY_REVIEW, TaskStatus.BLOCKED),
     },
     TransitionAuthority.RECOVERY: {
         (TaskStatus.ACTIVE, TaskStatus.BLOCKED),
