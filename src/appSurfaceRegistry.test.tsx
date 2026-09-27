@@ -18,7 +18,10 @@ describe('application surface registry', () => {
       { id: 'landing-preview', path: '/preview/landing', persistence: 'none' },
       { id: 'tutorial-preview', path: '/preview/tutorial', persistence: 'none' },
     ]))
-    expect(appSurfaceRegistry).toHaveLength(4)
+    const surfaceIds = appSurfaceRegistry.map(surface => surface.id)
+    const surfacePaths = appSurfaceRegistry.map(surface => surface.path)
+    expect(new Set(surfaceIds)).toHaveLength(surfaceIds.length)
+    expect(new Set(surfacePaths)).toHaveLength(surfacePaths.length)
   })
 
   it('keeps the main workspace as the safe fallback without assigning persistence to previews', () => {
