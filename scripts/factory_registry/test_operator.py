@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -159,6 +159,97 @@ class OperatorFixture(unittest.TestCase):
             recorded_at=recorded_at,
         ))
         return digest, input_id
+
+    def _review_packet_spec(self, *, review_id="TASK-202", target_id="TASK-201",
+                            attempt_id="implementation-attempt", recorded_at):
+        """Create the immutable packet consumed by the operator CLI, not a mock."""
+        packet = self.root / f"packet-{review_id}"
+        packet.mkdir()
+        contract = {"task": target_id, "paths": ["scripts/factory_registry/operator.py"]}
+        contents = {
+            "base-to-implementation.diff": b"diff --git a/operator.py b/operator.py\n",
+            "changed-files.txt": b"scripts/factory_registry/operator.py\n",
+            "contract.json": json.dumps(contract, sort_keys=True).encode(),
+            "validation-evidence.json": json.dumps({"focused_tests": "passed"}).encode(),
+        }
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+        hashes = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        manifest = {
+            "schema_version": 1, "implementation_attempt_id": attempt_id,
+            "base_commit": "b" * 40, "implementation_commit": COMMIT, "files": hashes,
+        }
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        return {
+            "id": f"review-input:{review_id}:{attempt_id}", "review_package_id": review_id,
+            "target_package_id": target_id, "implementation_attempt_id": attempt_id,
+            "implementation_commit": COMMIT, "base_commit": "b" * 40,
+            "pr_url": "https://example.invalid/pr/1", "contract": contract,
+            "validation_evidence": {
+                "ci": {"state": "SUCCESS", "implementation_commit": COMMIT,
+                       "pr_url": "https://example.invalid/pr/1"},
+                "review_packet": {"path": str(packet),
+                                  "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                                  "files": hashes},
+            },
+            "recorded_at": recorded_at,
+        }
+
+    def _bounded_review_fixture(self, *, publish_input=True):
+        """Set up legacy history plus one completed target and its review evidence."""
+        now = datetime.now(timezone.utc) - timedelta(minutes=5)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        self.registry.register_feature(Feature("LEGACY-HISTORY", "Preserved history", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "LEGACY-PARENT-1", "LEGACY-HISTORY", "Preserved completed parent", "OPERATIONS",
+            Lane.PLATFORM, ("documentation",), 1, ("preserved",), status=TaskStatus.VERIFY_REVIEW,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "LEGACY-PARENT-2", "LEGACY-HISTORY", "Preserved failed-review target", "OPERATIONS",
+            Lane.PLATFORM, ("documentation",), 1, ("preserved",), status=TaskStatus.DONE,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "LEGACY-FAILED-REVIEW", "LEGACY-HISTORY", "Preserved failed review", "ASSURANCE",
+            Lane.ASSURANCE, ("independent-review",), 1, ("preserved",), status=TaskStatus.BLOCKED,
+            kind=PackageKind.REVIEW, dependency_ids=("LEGACY-PARENT-2",),
+        ))
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED", new_mode="LIVE",
+            kill_switch_engaged=False, changed_at=(now + timedelta(seconds=1)).isoformat(),
+            reason="bounded review fixture",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", "codex-a", acquired_at=(now + timedelta(seconds=2)).isoformat(),
+            expires_at=(now + timedelta(minutes=10)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "implementation-attempt", package_id="TASK-201", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=(now + timedelta(seconds=3)).isoformat(),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "implementation-attempt", ended_at=(now + timedelta(seconds=4)).isoformat(),
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW, reason="completed target",
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=(now + timedelta(seconds=5)).isoformat(), reason="fixture drained",
+        )
+        RunnerRegistryControl(self.database).finalize_paused(reason="fixture ownership drained")
+        spec = self._review_packet_spec(recorded_at=(now + timedelta(seconds=6)).isoformat())
+        if publish_input:
+            self.registry.record_operator_review_input(
+                operator_module.parse_review_input_spec(spec),
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+        return now, spec
 
     def _release(self):
         source_root = Path(__file__).resolve().parents[2]
@@ -1687,6 +1778,124 @@ class OperatorFixture(unittest.TestCase):
         self.assertIsNotNone(controller.proposed_worker('TASK-301'))
         historical = next(p for p in self.registry.dispatch_snapshot(observed_at=now).work_packages if p['id'] == 'TASK-999')
         self.assertEqual(historical['status'], 'READY')
+
+    def test_bounded_run_worker_gate_keeps_normal_ready_pair_path(self):
+        now = utc_now()
+        self.sync_workers(now)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=now,
+        )
+        evidence = operator_module.bounded_run_worker_gate(
+            self.registry.dispatch_snapshot(observed_at=now), ["TASK-201", "TASK-202"],
+        )
+        self.assertEqual(evidence["run_package_ids"], ["TASK-201", "TASK-202"])
+        self.assertIn(["TASK-201", "codex-a", "claude"], evidence["independent_pairs"])
+
+    def test_bounded_review_preflight_accepts_immutable_target_scoped_followup(self):
+        now, _spec = self._bounded_review_fixture()
+        observed_at = (now + timedelta(seconds=7)).isoformat()
+        evidence = preflight(
+            self.database, self.config_path, self.release, self.preservation, COMMIT,
+            self.registry.dispatch_control()["revision"], observed_at=observed_at,
+            require_permissions_gate=False, require_workers=True, run_package_ids=["TASK-202"],
+        )
+        self.assertEqual(evidence["worker_gate"]["independent_pairs"], [["TASK-202", "codex-a", "claude"]])
+        followup = parse_followup_review_spec(self.followup_review())
+        followup_gate = followup_review_worker_gate(
+            self.registry.dispatch_snapshot(observed_at=observed_at), followup,
+            implementer_worker_id=self.registry.successful_package_worker("TASK-201"),
+            observed_at=observed_at,
+        )
+        self.assertEqual(followup_gate["independent_pairs"], [["codex-a", "claude"]])
+
+    def test_bounded_review_gate_rejects_each_isolated_target_and_provenance_failure(self):
+        cases = (
+            ("ready-target", "UPDATE work_packages SET status='READY' WHERE id='TASK-201'", "VERIFY_REVIEW parent"),
+            ("active-target", "UPDATE work_packages SET status='ACTIVE' WHERE id='TASK-201'", "VERIFY_REVIEW parent"),
+            ("non-parent-target", "UPDATE work_packages SET kind='REVIEW' WHERE id='TASK-201'", "VERIFY_REVIEW parent"),
+            ("wrong-target", "UPDATE task_dependencies SET dependency_id='LEGACY-PARENT-1' WHERE package_id='TASK-202'", "does not bind its target"),
+            ("missing-input", "DELETE FROM evidence WHERE package_id='TASK-202' AND kind='review-input'", "provenance gate failed: REVIEW_INPUT_REQUIRED"),
+            ("self-review-provenance", "UPDATE attempts SET worker_id='claude' WHERE id='implementation-attempt'", "no independent reviewer"),
+            ("zero-dependencies", "DELETE FROM task_dependencies WHERE package_id='TASK-202'", "exactly one dependency row"),
+        )
+        for index, (name, statement, message) in enumerate(cases):
+            with self.subTest(name=name):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                now, _spec = self._bounded_review_fixture()
+                with self.registry._connection() as connection:
+                    connection.execute(statement)
+                with self.assertRaisesRegex(OperatorError, message):
+                    operator_module.bounded_run_worker_gate(
+                        self.registry.dispatch_snapshot(observed_at=(now + timedelta(seconds=7)).isoformat()),
+                        ["TASK-202"], review_input_lookup=self.registry.review_input,
+                        successful_attempt_worker=self.registry.successful_attempt_worker,
+                    )
+
+    def test_bounded_review_gate_rejects_multiple_dependencies_and_stale_capacity(self):
+        now, _spec = self._bounded_review_fixture()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO task_dependencies(package_id, dependency_id) VALUES ('TASK-202', 'LEGACY-PARENT-1')"
+            )
+        with self.assertRaisesRegex(OperatorError, "exactly one dependency row"):
+            operator_module.bounded_run_worker_gate(
+                self.registry.dispatch_snapshot(observed_at=(now + timedelta(seconds=7)).isoformat()),
+                ["TASK-202"], review_input_lookup=self.registry.review_input,
+                successful_attempt_worker=self.registry.successful_attempt_worker,
+            )
+        self.tearDown()
+        self.setUp()
+        now, _spec = self._bounded_review_fixture()
+        with self.assertRaisesRegex(OperatorError, "global worker/capacity gate failed"):
+            operator_module.bounded_run_worker_gate(
+                self.registry.dispatch_snapshot(observed_at=(now + timedelta(hours=2)).isoformat()),
+                ["TASK-202"], review_input_lookup=self.registry.review_input,
+                successful_attempt_worker=self.registry.successful_attempt_worker,
+            )
+
+    def test_record_review_input_cli_publishes_valid_packet_and_refuses_tampering(self):
+        now, spec = self._bounded_review_fixture(publish_input=False)
+        # The CLI's preflight deliberately rejects default-umask storage.  Make
+        # this disposable fixture match the real private-storage contract for
+        # both the tampered and restored-packet branches; do not bypass it.
+        self.database.parent.chmod(0o700)
+        self.database.chmod(0o600)
+        for path in (Path(f"{self.database}-wal"), Path(f"{self.database}-shm")):
+            if path.exists():
+                path.chmod(0o600)
+        self.config_path.chmod(0o600)
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        for path in sorted((self.release, *self.release.rglob("*")), key=lambda value: len(value.parts), reverse=True):
+            path.chmod(0o500 if path.is_dir() else 0o400)
+        spec_path = self.root / "review-input.json"
+        spec_path.write_text(json.dumps(spec))
+        packet_contract = Path(spec["validation_evidence"]["review_packet"]["path"]) / "contract.json"
+        original_contract = packet_contract.read_bytes()
+        packet_contract.write_text('{"task":"tampered"}')
+        argv = [
+            "record-review-input", "--database", str(self.database), "--config", str(self.config_path),
+            "--release", str(self.release), "--release-commit", COMMIT,
+            "--preservation", str(self.preservation), "--expect-revision",
+            str(self.registry.dispatch_control()["revision"]), "--spec", str(spec_path),
+        ]
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(operator_main(argv), 1)
+        self.assertIn("REVIEW_PACKET_FILE_MISMATCH", errors.getvalue())
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_REQUIRED"):
+            self.registry.review_input("TASK-202")
+        packet_contract.write_bytes(original_contract)
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(operator_main(argv), 0)
+        published = json.loads(output.getvalue())
+        self.assertTrue(published["passed"])
+        self.assertEqual(self.registry.review_input("TASK-202")["target_package_id"], "TASK-201")
 
 
 if __name__ == "__main__":
