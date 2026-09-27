@@ -25,6 +25,9 @@ class TaskReadinessTests(unittest.TestCase):
             "git", "-C", str(self.repo), "-c", "user.name=Test",
             "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
         ], check=True)
+        # Git's default initial branch varies by host configuration; the
+        # unbounded runner's integration base is explicitly named main.
+        subprocess.run(["git", "-C", str(self.repo), "branch", "-M", "main"], check=True)
         self.base = subprocess.check_output(
             ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True,
         ).strip()
