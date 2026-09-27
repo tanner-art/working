@@ -52,6 +52,7 @@ MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
 DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 3
+BUILDER_WIP_LIMIT = 2
 def _json(value: Any) -> str:
     """Canonical JSON for existing Registry records and operation receipts."""
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
@@ -2788,6 +2789,34 @@ class SQLiteRegistry:
                     ).fetchone()[0]
                     if active_in_run >= scope["parent_limit"]:
                         raise RegistryConflict("RUN_PARENT_LIMIT")
+                if package["kind"] == PackageKind.PARENT.value:
+                    # A submitted parent continues to consume its original
+                    # builder's WIP slot while it waits for independent review.
+                    # Attribution is derived from successful attempts, never a
+                    # caller-supplied worker label.
+                    builder_wip = connection.execute(
+                        """SELECT COUNT(*) FROM work_packages AS parent
+                           WHERE parent.kind='PARENT' AND (
+                             (parent.status='ACTIVE' AND EXISTS (
+                               SELECT 1 FROM leases AS active
+                               WHERE active.package_id=parent.id
+                                 AND active.worker_id=?
+                                 AND active.released_at IS NULL
+                                 AND active.expires_at > ?
+                             ))
+                             OR (parent.status='VERIFY_REVIEW' AND (
+                               SELECT attempt.worker_id FROM attempts AS attempt
+                               WHERE attempt.package_id=parent.id
+                                 AND attempt.outcome='SUCCEEDED'
+                                 AND attempt.ended_at IS NOT NULL
+                               ORDER BY attempt.ended_at DESC, attempt.started_at DESC, attempt.id DESC
+                               LIMIT 1
+                             )=?)
+                           )""",
+                        (worker_id, acquired_at, worker_id),
+                    ).fetchone()[0]
+                    if builder_wip >= BUILDER_WIP_LIMIT:
+                        raise RegistryConflict("BUILDER_WIP_LIMIT", worker_id)
                 validate_package_transition(
                     TaskStatus.READY,
                     TaskStatus.ACTIVE,
@@ -4498,6 +4527,20 @@ class SQLiteRegistry:
                 ):
                     item[key.removesuffix("_json")] = json.loads(item.pop(key))
                 packages.append(item)
+            # The scheduler needs durable author provenance for submitted
+            # parents.  Keep it projection-only: attempts remain the source.
+            for item in packages:
+                if item["kind"] != PackageKind.PARENT.value or item["status"] != TaskStatus.VERIFY_REVIEW.value:
+                    continue
+                attempt = connection.execute(
+                    """SELECT worker_id FROM attempts WHERE package_id=?
+                       AND outcome='SUCCEEDED' AND ended_at IS NOT NULL
+                       AND worker_id IS NOT NULL
+                       ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+                    (item["id"],),
+                ).fetchone()
+                if attempt is not None:
+                    item["wip_implementer_worker_id"] = attempt["worker_id"]
             dependencies = tuple(
                 dict(row) for row in connection.execute(
                     "SELECT package_id, dependency_id FROM task_dependencies ORDER BY package_id, dependency_id"

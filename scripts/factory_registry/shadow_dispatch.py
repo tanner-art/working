@@ -57,6 +57,7 @@ class RejectionCode(str, Enum):
     PACKAGE_ALREADY_PROPOSED = "PACKAGE_ALREADY_PROPOSED"
     WORKER_ALREADY_PROPOSED = "WORKER_ALREADY_PROPOSED"
     ACTIVE_PARENT_LIMIT = "ACTIVE_PARENT_LIMIT"
+    BUILDER_WIP_LIMIT = "BUILDER_WIP_LIMIT"
     EXPIRED_LEASE_REQUIRES_RECONCILIATION = "EXPIRED_LEASE_REQUIRES_RECONCILIATION"
     LEASE_ID_DUPLICATE = "LEASE_ID_DUPLICATE"
     LEASE_PACKAGE_DUPLICATE = "LEASE_PACKAGE_DUPLICATE"
@@ -730,6 +731,18 @@ def decide_shadow(
         if package_by_id.get(str(lease.get("package_id")), {}).get("kind", "PARENT")
         == "PARENT"
     )
+    builder_wip = Counter(
+        str(lease.get("worker_id"))
+        for lease in active_leases
+        if package_by_id.get(str(lease.get("package_id")), {}).get("kind", "PARENT") == "PARENT"
+    )
+    builder_wip.update(
+        str(package["wip_implementer_worker_id"])
+        for package in packages
+        if package.get("kind") == "PARENT"
+        and package.get("status") == "VERIFY_REVIEW"
+        and package.get("wip_implementer_worker_id")
+    )
 
     worker_evaluations = tuple(
         EntityEvaluation(
@@ -829,11 +842,15 @@ def decide_shadow(
             if package.get("kind") == "PARENT" and parent_count >= snapshot.active_parent_limit:
                 dynamic.append(_reason(RejectionCode.ACTIVE_PARENT_LIMIT))
                 continue
+            if package.get("kind") == "PARENT" and builder_wip[worker_id] >= 2:
+                dynamic.append(_reason(RejectionCode.BUILDER_WIP_LIMIT))
+                continue
             assignments.append(Assignment(package_id, worker_id))
             assigned_packages.add(package_id)
             assigned_workers.add(worker_id)
             if package.get("kind") == "PARENT":
                 parent_count += 1
+                builder_wip[worker_id] += 1
 
     # Pair records include assignment-time rejection reasons as a separate deterministic pass.
     final_pairs: list[PairEvaluation] = []

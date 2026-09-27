@@ -99,3 +99,55 @@ class BoundedRunTests(unittest.TestCase):
             ),
         )
         self.assertEqual("LIVE", self.registry.dispatch_control()["dispatch_mode"])
+
+    def test_builder_wip_counts_submitted_review_provenance_and_frees_after_review(self) -> None:
+        self.registry.register_worker(Worker(
+            "reviewer", "reviewer", ("code",), (Lane.PLATFORM,), usage_state="GREEN"
+        ))
+        for package_id in ("A-1", "A-2", "A-3", "B-1"):
+            self.registry.register_work_package(WorkPackage(
+                package_id, "F", package_id, "test", Lane.PLATFORM, ("code",), 1,
+                ("works",), status=TaskStatus.READY,
+            ))
+        self.enable(("A-1", "A-2", "A-3", "B-1"), parent_limit=3)
+
+        first = self.registry.acquire_lease(
+            "A-1", "builder-a", acquired_at=self.now.isoformat(),
+            expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-a-1", package_id="A-1", worker_id="builder-a", runner_pid=1,
+            started_at=self.now.isoformat(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "attempt-a-1", ended_at=(self.now + timedelta(seconds=1)).isoformat(),
+            outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW,
+            reason="submitted for independent review",
+        )
+        self.assertTrue(first.id)
+        self.registry.acquire_lease(
+            "A-2", "builder-a", acquired_at=(self.now + timedelta(seconds=2)).isoformat(),
+            expires_at=(self.now + timedelta(minutes=2)).isoformat(),
+        )
+        self.registry.acquire_lease(
+            "B-1", "builder-b", acquired_at=(self.now + timedelta(seconds=2)).isoformat(),
+            expires_at=(self.now + timedelta(minutes=2)).isoformat(),
+        )
+        with self.assertRaisesRegex(RegistryConflict, "BUILDER_WIP_LIMIT"):
+            self.registry.acquire_lease(
+                "A-3", "builder-a", acquired_at=(self.now + timedelta(seconds=3)).isoformat(),
+                expires_at=(self.now + timedelta(minutes=2)).isoformat(),
+            )
+        # Releasing A-2 frees its active slot while A-1 remains durably
+        # attributed to A through its submitted-review attempt.
+        self.registry.release_lease(
+            next(item["id"] for item in self.registry.dispatch_snapshot(observed_at=(self.now + timedelta(seconds=3)).isoformat()).active_leases if item["package_id"] == "A-2"),
+            released_at=(self.now + timedelta(seconds=4)).isoformat(),
+            reason="builder slot released", next_status=TaskStatus.READY,
+        )
+        restarted = SQLiteRegistry(self.registry.database)
+        lease = restarted.acquire_lease(
+            "A-3", "builder-a", acquired_at=(self.now + timedelta(seconds=5)).isoformat(),
+            expires_at=(self.now + timedelta(minutes=2)).isoformat(),
+        )
+        self.assertEqual(lease.package_id, "A-3")
