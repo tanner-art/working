@@ -26,7 +26,8 @@ import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDra
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
-import { appSurfaceDefinitionForPath } from './surfaces'
+import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
+import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -95,7 +96,7 @@ export function App() {
     try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Continue remains available for this visit. */ }
     setLandingDismissed(true)
   }} />
-  return <ThreadlineApp key={generation} account={account} cloud={cloud} onOpenAccount={open}
+  return <ThreadlineApp key={generation} account={account} cloud={cloud} workspaceSurface={workspaceSurfaceModuleForPath(window.location.pathname)} onOpenAccount={open}
     mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
@@ -128,8 +129,9 @@ function TutorialPreview() {
   </div></main>
 }
 
-function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {
+function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge }: {
   account: ReturnType<typeof useAuthState>; cloud?: CloudWorkspace; onOpenAccount: (local?: AccountData) => Promise<void>
+  workspaceSurface: ReturnType<typeof workspaceSurfaceModuleForPath>
   mergePlan?: AccountMergePlan; onPreviewMerge: (local: AccountData, choices: AccountMergeChoices) => Promise<AccountMergePlan>
   onConfirmMerge: (currentLocal: AccountData) => Promise<void>; onCancelMerge: () => void
 }) {
@@ -365,6 +367,7 @@ function ThreadlineApp({ account, cloud, onOpenAccount, mergePlan, onPreviewMerg
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
+  if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
     <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">

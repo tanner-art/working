@@ -6,13 +6,19 @@ import {
   createAppSurfaceRegistry,
   defaultAppSurface,
   surfaceDefinitionForPath,
+  surfaceModulesFromDiscoveredModules,
+  workspaceSurfaceModuleForPath as registeredWorkspaceSurfaceModuleForPath,
   type AppSurface,
   type AppSurfaceDefinition,
+  type RenderedWorkspaceSurfaceModule,
   type SurfaceModule,
   type SurfacePersistence,
 } from '../appSurfaceRegistry'
 
-const discoveredSurfaceModules = import.meta.glob<SurfaceModule>('./*.surface.ts', { eager: true })
+const discoveredSurfaceModules = surfaceModulesFromDiscoveredModules({
+  ...import.meta.glob<SurfaceModule>('./*.surface.ts', { eager: true }),
+  ...import.meta.glob<SurfaceModule>(['./*.tsx', '!./*.test.tsx'], { eager: true }),
+})
 
 export const appSurfaceRegistry = createAppSurfaceRegistry(discoveredSurfaceModules)
 
@@ -24,9 +30,14 @@ export function appSurfaceForPath(pathname: string): AppSurface {
   return appSurfaceDefinitionForPath(pathname).id
 }
 
+export function workspaceSurfaceModuleForPath(pathname: string): RenderedWorkspaceSurfaceModule | undefined {
+  return registeredWorkspaceSurfaceModuleForPath(discoveredSurfaceModules, appSurfaceRegistry, pathname)
+}
+
 export {
   defaultAppSurface,
   type AppSurface,
   type AppSurfaceDefinition,
+  type RenderedWorkspaceSurfaceModule,
   type SurfacePersistence,
 }

@@ -35,9 +35,11 @@ describe('Review resolution', () => {
     expect(result).toEqual({ status: 'recoverable-error', message: 'thought:review still needs action setup.' })
   })
 
-  it.each(['action', 'commitment', 'reminder'] as const)('keeps %s in Review when its registered continuation is unavailable', async kind => {
+  it.each(['action', 'commitment', 'reminder'] as const)('keeps %s in Review when its injected continuation is unavailable', async kind => {
     const object = pending()
-    const result = await resolveReviewCapture(object, kind)
+    const result = await resolveReviewCapture(object, kind, {
+      [kind]: () => ({ status: 'unavailable', message: `${kind} is not ready.` }),
+    })
     expect(result.status).toBe('recoverable-error')
     expect(object.status).toBe('review')
     expect(object.history).toEqual([])

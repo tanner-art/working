@@ -1,3 +1,6 @@
+import type { ComponentType } from 'react'
+import type { AppState } from './domain'
+
 /**
  * Validated composition contract for URL-addressable application surfaces.
  *
@@ -14,7 +17,16 @@ export type AppSurfaceDefinition = Readonly<{
   persistence: SurfacePersistence
 }>
 
+export type WorkspaceSurfaceProps = Readonly<{
+  state: AppState
+  update: (updater: (current: AppState) => AppState) => void
+}>
+
 export type SurfaceModule = Readonly<{ surface: AppSurfaceDefinition }>
+export type RenderedWorkspaceSurfaceModule = Readonly<{
+  surface: AppSurfaceDefinition & Readonly<{ persistence: 'workspace' }>
+  WorkspaceSurface: ComponentType<WorkspaceSurfaceProps>
+}>
 
 const definitionKeys = ['id', 'path', 'persistence'] as const
 const persistenceValues = new Set<SurfacePersistence>(['workspace', 'none', 'factory-projection'])
@@ -48,6 +60,16 @@ function validatedDefinition(value: unknown, modulePath: string): AppSurfaceDefi
   return Object.freeze({ id, path, persistence: persistence as SurfacePersistence })
 }
 
+function isRenderedWorkspaceSurfaceModule(value: unknown): value is RenderedWorkspaceSurfaceModule {
+  return isRecord(value) && typeof value.WorkspaceSurface === 'function'
+    && isRecord(value.surface) && value.surface.persistence === 'workspace'
+}
+
+/** Select TSX surface candidates without treating support components as surfaces. */
+export function surfaceModulesFromDiscoveredModules(modules: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(modules).filter(([, module]) => isRecord(module) && 'surface' in module))
+}
+
 /** Validate one module at authoring time and again when the discovered set is assembled. */
 export function defineAppSurface(definition: AppSurfaceDefinition): AppSurfaceDefinition {
   return validatedDefinition(definition, 'surface module')
@@ -63,10 +85,18 @@ export function createAppSurfaceRegistry(modules: Record<string, unknown>): read
   const paths = new Set<string>()
   for (const modulePath of Object.keys(modules).sort()) {
     const module = modules[modulePath]
-    if (!isRecord(module) || Object.keys(module).length !== 1 || !('surface' in module)) {
+    if (!isRecord(module) || !('surface' in module)) {
       throw new Error(`Malformed surface module ${modulePath}`)
     }
     const definition = validatedDefinition(module.surface, modulePath)
+    if ('WorkspaceSurface' in module && !isRenderedWorkspaceSurfaceModule(module)) {
+      throw new Error(`Malformed workspace surface module ${modulePath}`)
+    }
+    const keys = Object.keys(module).sort()
+    const expectedKeys = isRenderedWorkspaceSurfaceModule(module) ? ['WorkspaceSurface', 'surface'] : ['surface']
+    if (keys.length !== expectedKeys.length || expectedKeys.some(key => !keys.includes(key))) {
+      throw new Error(`Malformed surface module ${modulePath}`)
+    }
     if (ids.has(definition.id)) throw new Error(`Duplicate surface id ${definition.id}`)
     if (paths.has(definition.path)) throw new Error(`Duplicate surface path ${definition.path}`)
     ids.add(definition.id)
@@ -74,6 +104,15 @@ export function createAppSurfaceRegistry(modules: Record<string, unknown>): read
     definitions.push(definition)
   }
   return Object.freeze(definitions)
+}
+
+export function workspaceSurfaceModuleForPath(
+  modules: Record<string, unknown>, registry: readonly AppSurfaceDefinition[], pathname: string,
+): RenderedWorkspaceSurfaceModule | undefined {
+  const definition = surfaceDefinitionForPath(registry, pathname)
+  if (definition.persistence !== 'workspace') return undefined
+  return Object.values(modules).filter(isRenderedWorkspaceSurfaceModule)
+    .find(module => module.surface.path === definition.path)
 }
 
 export function surfaceDefinitionForPath(
