@@ -4,8 +4,9 @@ import { newCanvasElement, toggleCanvasNodeVariant } from './canvasDocument'
 import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_COLORS, CANVAS_SIZE, CONNECTION_COLORS, DEFAULT_CANVAS_COLOR, DEFAULT_CONNECTION_COLOR, DEFAULT_CONTAINER_COLOR, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionMarkerAppearance, connectionEndpoints, didMoveCanvasConnectionHandle, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, updateCanvasNodeAppearance, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
-import { fitCanvasViewport, zoomCanvasViewport, type CanvasPoint } from './canvasViewport'
+import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
+import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke } from './canvasStrokes'
 import { MobileCanvasToolbar } from './surfaces/canvas'
 
@@ -49,13 +50,15 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   }
   const [panPreview, setPanPreview] = useState<{ x: number; y: number } | null>(null)
   const [pinchPreview, setPinchPreview] = useState<CanvasViewport | null>(null)
+  // React state renders the preview; this mutable interaction state lets pointer-up
+  // commit the most recent move even if React has not rendered it yet.
+  const pinchInteraction = useRef(createPinchInteraction())
   const pan = pinchPreview ?? (panPreview ? { ...viewport, ...panPreview } : viewport), scale = pan.scale
   const canvasRef = useRef<HTMLDivElement>(null)
   const [editMode, setEditMode] = useState(false)
   const [tool, setTool] = useState<'select' | 'pen' | 'lasso'>('select')
   const gesture = useRef<GestureState>(idleGestureState())
   const holdTimer = useRef<number | null>(null)
-  const pinchStart = useRef<{ viewport: CanvasViewport; midpoint: CanvasPoint; distance: number } | null>(null)
   const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
   // Undo/redo (and delete) can remove the currently selected or connect-from node out
   // from under this component without it ever unmounting. Clear any reference to an id
@@ -101,11 +104,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     onCommit([...elements, next])
     setSelected(next.id)
   }
-  const midpoint = (a: PointerSample, b: PointerSample) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
-  const distance = (a: PointerSample, b: PointerSample) => Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
   const dismissRefinementPreview = () => setRefinementCandidateId(null)
-  const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
+  const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; clearPinchInteraction(pinchInteraction.current); setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
   const clearInteraction = () => { clearTransientInteraction(); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
   const applyGestureEffect = (effect: GestureEffect) => {
@@ -124,9 +125,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
-    if (effect.type === 'begin-pinch') { pinchStart.current = { viewport, midpoint: midpoint(effect.first, effect.second), distance: distance(effect.first, effect.second) }; return }
-    if (effect.type === 'preview-pinch') { const start = pinchStart.current; if (!start) return; const currentMidpoint = midpoint(effect.first, effect.second), nextScale = start.viewport.scale * distance(effect.first, effect.second) / start.distance; const anchored = zoomCanvasViewport(start.viewport, start.midpoint, nextScale); setPinchPreview({ ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }); return }
-    if (effect.type === 'commit-pinch') { if (pinchPreview) onViewport(pinchPreview); setPinchPreview(null); pinchStart.current = null; return }
+    if (effect.type === 'begin-pinch') { beginPinchInteraction(pinchInteraction.current, viewport, effect.first, effect.second); return }
+    if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second); if (preview) setPinchPreview(preview); return }
+    if (effect.type === 'commit-pinch') { const preview = commitPinchInteraction(pinchInteraction.current); if (preview) onViewport(preview); setPinchPreview(null); return }
     // The reducer has already installed its next state before effects run. In the
     // second-pointer path that state is pinch-zooming, so cleanup must not replace
     // it with idle before begin-pinch and preview-pinch can run.
@@ -160,7 +161,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const target = resize ? { kind: 'resize' as const, id: item!.id } : item ? { kind: 'node' as const, id: item.id } : { kind: 'canvas' as const }
     if (item) setSelected(item.id)
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-    dispatchGesture({ type: 'pointer-down', sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, target })
+    const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+    if (resize) {
+      const result = reduceResizePointerDown(gesture.current, sample, item!.id, editMode)
+      gesture.current = result.state
+      result.effects.forEach(applyGestureEffect)
+    } else dispatchGesture({ type: 'pointer-down', sample, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
   }
@@ -425,7 +431,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </>}
     </div>
     <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size === 1 ? 'One stroke selected · preview refinement or circle another selection' : 'Lasso active · circle one stroke to preview refinement · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
-    <div ref={canvasRef} className="canvas" onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
+    <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
     <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
     <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId); const to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); setSelected(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
