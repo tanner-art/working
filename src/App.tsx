@@ -16,6 +16,7 @@ import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
+import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
 import { useEffect, useRef, useState } from 'react'
@@ -32,9 +33,9 @@ import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
 
-type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'canvas' | 'settings' | 'digest' | 'beta-home'
+type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -326,10 +327,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       setCaptureBusy(false)
     }
   }
-  const resolveReviewObject = (resolved: ThoughtObject) => update(current => ({
-    ...current,
-    objects: current.objects.map(item => item.id === resolved.id ? resolved : item),
-  }))
+  const resolveReviewObject = (resolved: ThoughtObject) => {
+    update(current => ({ ...current, objects: current.objects.map(item => item.id === resolved.id ? resolved : item) }))
+    if (resolved.kind === 'action') navigate('schedule')
+  }
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
   const saveObject = (updated: ThoughtObject) => update(current => ({ ...current, objects: current.objects.map(item => item.id === updated.id ? updateObject(item, updated) : item) }))
   const captureCanvasObject = (element: CanvasElement) => {
@@ -403,6 +404,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
+      {view === 'schedule' && <ScheduleView state={state} update={update} />}
       {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
   </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
