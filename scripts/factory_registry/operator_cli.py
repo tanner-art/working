@@ -30,6 +30,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_canary_spec,
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
+    parse_review_input_spec,
     parse_bounded_run_scope,
     preflight,
     prepare_dry_run,
@@ -173,6 +174,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser("record-review-input", help="Record immutable historical implementation facts for a registered review")
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser("bind-legacy-source", help="CAS-bind an unstarted legacy package to its existing GitHub issue")
+    _context(command)
+    command.add_argument("--package", required=True)
+    command.add_argument("--issue", required=True, type=int)
+    command.add_argument("--queue-contract", required=True, type=pathlib.Path)
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser("enable-live", help="Promote reviewed plists and CAS PAUSED to LIVE")
@@ -391,6 +403,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "revision": revision,
             "worker_gate": worker_gate,
         }
+    if args.command == "record-review-input":
+        review_input = parse_review_input_spec(_load_object(args.spec, "review input spec"))
+        preflight(**_preflight_args(args, observed_at=review_input.recorded_at, require_workers=False))
+        registry = SQLiteRegistry(args.database)
+        revision = registry.record_operator_review_input(
+            review_input, expected_revision=args.expect_revision
+        )
+        return {"kind": "threadline-factory-record-review-input", "passed": True,
+                "review_package_id": review_input.review_package_id, "review_input_id": review_input.id,
+                "revision": revision}
+    if args.command == "bind-legacy-source":
+        observed_at = args.observed_at or utc_now()
+        preflight(**_preflight_args(args, observed_at=observed_at, require_workers=False))
+        contract = _load_object(args.queue_contract, "legacy queue contract")
+        revision = SQLiteRegistry(args.database).bind_legacy_package_source(
+            args.package, github_issue=args.issue, queue_contract=contract,
+            expected_revision=args.expect_revision, recorded_at=observed_at,
+        )
+        return {"kind": "threadline-factory-bind-legacy-source", "passed": True,
+                "package_id": args.package, "github_issue": args.issue,
+                "previous_revision": args.expect_revision, "revision": revision}
     if args.command == "stop":
         return dict(stop(args.database, args.reason, expected_run_id=args.run_id))
     if args.command == "reconcile":
