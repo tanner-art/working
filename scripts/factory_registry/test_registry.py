@@ -310,6 +310,64 @@ class SQLiteRegistryTest(unittest.TestCase):
                         recorded_at="2026-09-27T12:00:00Z",
                     )
 
+    def test_followup_registration_ignores_only_ready_review_with_blocked_parent(self) -> None:
+        self.feature()
+        self.registry.register_work_package(WorkPackage(
+            "TASK173", "FEATURE-1", "target", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("preserved",), status=TaskStatus.VERIFY_REVIEW,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "PRIOR-REVIEW", "FEATURE-1", "prior review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("preserved",), status=TaskStatus.DONE,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK173",),
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK329", "FEATURE-1", "blocked parent", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("preserved",), status=TaskStatus.BLOCKED,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK330", "FEATURE-1", "blocked-parent review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("preserved",), status=TaskStatus.READY,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK329",),
+        ))
+        self.worker("implementer", "registry")
+        self.registry.register_worker(Worker(
+            "reviewer", "reviewer", ("review",), (Lane.ASSURANCE,), usage_state="GREEN",
+        ))
+        with self.registry._connection() as connection:
+            connection.execute(
+                """INSERT INTO review_outcomes
+                   (id, review_package_id, target_package_id,
+                    implementer_worker_id, reviewer_worker_id,
+                    requested_at, decided_at, state, findings_json,
+                    changes_requested_json, approval_evidence_ids_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    "prior-changes", "PRIOR-REVIEW", "TASK173", "implementer", "reviewer",
+                    "2026-09-27T11:00:00.000000Z", "2026-09-27T11:01:00.000000Z",
+                    "CHANGES_REQUESTED", "[]", '["retry"]', "[]",
+                ),
+            )
+        review = WorkPackage(
+            "TASK331", "FEATURE-1", "follow-up review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("independent",), status=TaskStatus.READY,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK173",),
+        )
+
+        self.registry.register_followup_review(
+            review, expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at="2026-09-27T12:00:00Z",
+        )
+
+        snapshot = self.registry.dispatch_snapshot(observed_at="2026-09-27T12:00:01Z")
+        packages = {package["id"]: package for package in snapshot.work_packages}
+        self.assertEqual(packages["TASK330"]["status"], TaskStatus.READY.value)
+        self.assertEqual(packages["TASK331"]["status"], TaskStatus.READY.value)
+        self.assertIn(
+            {"package_id": "TASK331", "dependency_id": "TASK173"},
+            snapshot.dependencies,
+        )
+
     def test_operator_review_packet_requires_exact_hashes_contract_and_green_ci(self) -> None:
         packet = self.root / "packet"
         packet.mkdir()

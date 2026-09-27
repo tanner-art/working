@@ -2288,7 +2288,29 @@ class SQLiteRegistry:
                 ).fetchone():
                     raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
                 unrelated = connection.execute(
-                    "SELECT id FROM work_packages WHERE status IN ('READY', 'ACTIVE') LIMIT 1"
+                    """SELECT package.id
+                       FROM work_packages AS package
+                       WHERE package.status = 'ACTIVE'
+                          OR (
+                              package.status = 'READY'
+                              AND NOT (
+                                  package.kind = 'REVIEW'
+                                  AND (
+                                      SELECT COUNT(*) FROM task_dependencies
+                                      WHERE package_id = package.id
+                                  ) = 1
+                                  AND EXISTS (
+                                      SELECT 1
+                                      FROM task_dependencies AS dependency
+                                      JOIN work_packages AS parent
+                                        ON parent.id = dependency.dependency_id
+                                      WHERE dependency.package_id = package.id
+                                        AND parent.kind = 'PARENT'
+                                        AND parent.status = 'BLOCKED'
+                                  )
+                              )
+                          )
+                       LIMIT 1"""
                 ).fetchone()
                 if unrelated is not None:
                     raise RegistryConflict("CANARY_NOT_EXCLUSIVE", str(unrelated["id"]))
