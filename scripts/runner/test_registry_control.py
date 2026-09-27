@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from registry_control import RunnerRegistryControl, queue_contract_digest
+import runner
 from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry.codex_capacity import CapacityCollectorError
 from scripts.factory_registry.claude_telemetry import claude_provider_signal
@@ -23,6 +24,7 @@ from scripts.factory_registry import (
     Worker,
     WorkPackage,
 )
+from scripts.factory_registry.models import Evidence, ReviewOutcome, ReviewOutcomeState
 
 
 class RunnerRegistryControlTests(unittest.TestCase):
@@ -192,6 +194,106 @@ class RunnerRegistryControlTests(unittest.TestCase):
         control = RunnerRegistryControl(self.database)
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_INPUT_REQUIRED"):
             control.pre_claim("TASK-REVIEW", "worker-b")
+
+    def test_operator_review_only_input_to_bounded_followup_claim_preserves_independence_and_exact_pr(self):
+        """Exercise the real Registry write/claim path with fake PR service results."""
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stamp = lambda value: value.isoformat().replace("+00:00", "Z")
+        contract = {"task": "TASK-FOLLOWUP", "paths": ["docs/review.md"], "depends_on": []}
+        digest = queue_contract_digest(contract)
+        self.registry.register_feature(Feature("LEGACY", "multi-parent legacy", 10, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-TARGET", "LEGACY", "historical implementation", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 10, ("historical success",), status=TaskStatus.READY,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-REVIEW-OLD", "LEGACY", "preserved review", "ASSURANCE", Lane.ASSURANCE,
+            ("review",), 10, ("changes requested retained",), status=TaskStatus.READY,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-TARGET",),
+        ))
+        for worker in (
+            Worker("implementer", "Implementer", ("registry",), (Lane.PLATFORM,), provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["implementer"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
+            Worker("reviewer", "Reviewer", ("review",), (Lane.ASSURANCE,), provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["reviewer"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
+            Worker("orchestra", "Orchestra", (), (), role="ORCHESTRA", provider_diagnostics={"capacity_mode": "percentage", "capacity_scopes": ["orchestra"]}, last_heartbeat_at=stamp(now), usage_state="NORMAL"),
+        ):
+            self.registry.register_worker(worker)
+
+        def capacity(worker_id, percent):
+            self.registry.record_worker_capacity_observations(worker_id, ({
+                "id": f"usage-{worker_id}", "worker_id": worker_id, "observed_at": stamp(now),
+                "reset_at": None, "consumed_percent": percent, "state": "NORMAL",
+                "provider_diagnostics": {"capacity_mode": "percentage", "capacity_scope": worker_id},
+            },), recorded_at=stamp(now))
+        capacity("implementer", 10); capacity("reviewer", 10); capacity("orchestra", 10)
+
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(expected_revision=control["revision"], expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False, changed_at=stamp(now), reason="historical fixture")
+        lease = self.registry.acquire_lease("TASK-TARGET", "implementer", acquired_at=stamp(now), expires_at=stamp(now + timedelta(minutes=5)), expected_dispatch_revision=self.registry.dispatch_control()["revision"])
+        self.registry.begin_attempt_runtime("implementation", package_id="TASK-TARGET", worker_id="implementer", runner_pid=1, started_at=stamp(now + timedelta(seconds=1)), expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.finish_attempt_runtime("implementation", ended_at=stamp(now + timedelta(seconds=2)), outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW, reason="historical success")
+        self.assertIsNotNone(lease.id)
+        review_lease = self.registry.acquire_lease("TASK-REVIEW-OLD", "reviewer", acquired_at=stamp(now + timedelta(seconds=3)), expires_at=stamp(now + timedelta(minutes=5)), expected_dispatch_revision=self.registry.dispatch_control()["revision"])
+        self.registry.begin_attempt_runtime("old-review", package_id="TASK-REVIEW-OLD", worker_id="reviewer", runner_pid=1, started_at=stamp(now + timedelta(seconds=4)), expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.finish_attempt_runtime("old-review", ended_at=stamp(now + timedelta(seconds=5)), outcome="SUCCEEDED", next_status=TaskStatus.VERIFY_REVIEW, reason="preserved changes request")
+        self.assertIsNotNone(review_lease.id)
+        self.registry.engage_dispatch_kill_switch(changed_at=stamp(now + timedelta(seconds=6)), reason="review-only preflight")
+        paused = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(expected_revision=paused["revision"], expected_mode="STOPPING", new_mode="PAUSED", kill_switch_engaged=True, changed_at=stamp(now + timedelta(seconds=7)), reason="ownership drained")
+
+        def review_input(review_id, input_id):
+            packet = pathlib.Path(self.temporary.name) / input_id; packet.mkdir()
+            files = {"base-to-implementation.diff": b"diff", "changed-files.txt": b"docs/review.md\n",
+                     "contract.json": json.dumps(contract, sort_keys=True).encode(), "validation-evidence.json": b"{}"}
+            for name, content in files.items(): (packet / name).write_bytes(content)
+            hashes = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
+            manifest = {"schema_version": 1, "implementation_attempt_id": "implementation", "implementation_commit": "a" * 40,
+                        "base_commit": "b" * 40, "files": hashes}
+            raw = json.dumps(manifest, sort_keys=True).encode(); (packet / "manifest.json").write_bytes(raw)
+            return ReviewInput(input_id, review_id, "TASK-TARGET", "implementation", "a" * 40, "b" * 40,
+                "https://example.test/pull/261", digest, contract,
+                {"ci": {"state": "SUCCESS", "implementation_commit": "a" * 40, "pr_url": "https://example.test/pull/261"},
+                 "review_packet": {"path": str(packet), "manifest_sha256": hashlib.sha256(raw).hexdigest(), "files": hashes}},
+                stamp(now + timedelta(seconds=8)))
+
+        old_input = review_input("TASK-REVIEW-OLD", "old-input")
+        self.registry.record_operator_review_input(old_input, expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.record_review_outcome(ReviewOutcome(
+            id="changes-requested", review_package_id="TASK-REVIEW-OLD", target_package_id="TASK-TARGET",
+            implementer_worker_id="implementer", reviewer_worker_id="reviewer", requested_at=stamp(now + timedelta(seconds=3)),
+            decided_at=stamp(now + timedelta(seconds=9)), state=ReviewOutcomeState.CHANGES_REQUESTED,
+            changes_requested=("Review again against the exact head.",), reviewed_commit="a" * 40,
+            reviewed_base_commit="b" * 40, contract_sha256=digest, review_input_evidence_id="old-input", reviewer_attempt_id="old-review",
+        ), evidence=Evidence("old-decision", "TASK-REVIEW-OLD", "review", None, "Preserved changes request.", stamp(now + timedelta(seconds=5)),
+            {"attempt_id": "old-review", "reviewed_commit": "a" * 40, "reviewed_base_commit": "b" * 40, "contract_sha256": digest, "review_input_evidence_id": "old-input"}), expected_revision=self.registry.dispatch_control()["revision"])
+        followup = WorkPackage("TASK-FOLLOWUP", "LEGACY", "fresh review", "ASSURANCE", Lane.ASSURANCE,
+            ("review",), 10, ("independent review",), status=TaskStatus.READY, kind=PackageKind.REVIEW,
+            dependency_ids=("TASK-TARGET",), provider_diagnostics={"queue_contract_sha256": digest})
+        self.registry.register_followup_review(followup, expected_revision=self.registry.dispatch_control()["revision"], recorded_at=stamp(now + timedelta(seconds=10)))
+        self.registry.record_operator_review_input(review_input("TASK-FOLLOWUP", "followup-input"), expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.register_work_package(WorkPackage(
+            "TASK-DEADLINE", "LEGACY", "deadline probe", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("deadline enforcement",), status=TaskStatus.READY,
+        ))
+
+        live = self.registry.dispatch_control()
+        deadline = now + timedelta(minutes=2)
+        self.registry.set_dispatch_control(expected_revision=live["revision"], expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False, changed_at=stamp(now + timedelta(seconds=11)), reason="bounded followup", bounded_run={"run_id": "review-261", "package_ids": ["TASK-FOLLOWUP", "TASK-DEADLINE"], "deadline": stamp(deadline), "base_ref": "main", "parent_limit": 1})
+        runner_control = RunnerRegistryControl(self.database)
+        with patch("registry_control.utc_now", return_value=stamp(now + timedelta(seconds=12))):
+            with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
+                runner_control.pre_claim("TASK-TARGET", "implementer")
+            with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+                runner_control.pre_claim("TASK-FOLLOWUP", "implementer", task_contract=contract)
+            revision = runner_control.pre_claim("TASK-FOLLOWUP", "reviewer", task_contract=contract)
+            lease_id = runner_control.claim_package("TASK-FOLLOWUP", worker_id="reviewer", expected_revision=revision, lease_seconds=300)
+        self.assertTrue(lease_id)
+        github = lambda *args: json.dumps({"headRefOid": "a" * 40}) if args[:2] == ("pr", "view") else json.dumps([{"name": "verify", "workflow": "Validate app", "state": "SUCCESS"}])
+        self.assertTrue(runner.review_source_is_green(github, "owner/repo", review_input("TASK-FOLLOWUP", "green-check")))
+        self.assertFalse(runner.review_source_is_green(lambda *args: json.dumps({"headRefOid": "c" * 40}) if args[:2] == ("pr", "view") else "[]", "owner/repo", review_input("TASK-FOLLOWUP", "wrong-head")))
+        with patch("registry_control.datetime") as clock:
+            clock.now.return_value = deadline + timedelta(seconds=1)
+            with self.assertRaisesRegex(RegistryConflict, "RUN_DEADLINE_EXPIRED"):
+                runner_control.claim_package("TASK-DEADLINE", worker_id="implementer", expected_revision=self.registry.dispatch_control()["revision"], lease_seconds=30)
 
     def test_claim_package_pins_dispatch_revision(self):
         control = RunnerRegistryControl(self.database)
