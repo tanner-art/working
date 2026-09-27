@@ -49,6 +49,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   }
   const [panPreview, setPanPreview] = useState<{ x: number; y: number } | null>(null)
   const [pinchPreview, setPinchPreview] = useState<CanvasViewport | null>(null)
+  // State drives rendering, while the ref makes a final pointer-up see the most
+  // recent preview even when React has not rendered it yet.
+  const pinchPreviewRef = useRef<CanvasViewport | null>(null)
   const pan = pinchPreview ?? (panPreview ? { ...viewport, ...panPreview } : viewport), scale = pan.scale
   const canvasRef = useRef<HTMLDivElement>(null)
   const [editMode, setEditMode] = useState(false)
@@ -105,7 +108,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const distance = (a: PointerSample, b: PointerSample) => Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
   const dismissRefinementPreview = () => setRefinementCandidateId(null)
-  const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; pinchStart.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
+  const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; pinchStart.current = null; pinchPreviewRef.current = null; setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
   const clearInteraction = () => { clearTransientInteraction(); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
   const applyGestureEffect = (effect: GestureEffect) => {
@@ -124,9 +127,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
-    if (effect.type === 'begin-pinch') { pinchStart.current = { viewport, midpoint: midpoint(effect.first, effect.second), distance: distance(effect.first, effect.second) }; return }
-    if (effect.type === 'preview-pinch') { const start = pinchStart.current; if (!start) return; const currentMidpoint = midpoint(effect.first, effect.second), nextScale = start.viewport.scale * distance(effect.first, effect.second) / start.distance; const anchored = zoomCanvasViewport(start.viewport, start.midpoint, nextScale); setPinchPreview({ ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }); return }
-    if (effect.type === 'commit-pinch') { if (pinchPreview) onViewport(pinchPreview); setPinchPreview(null); pinchStart.current = null; return }
+    if (effect.type === 'begin-pinch') { pinchPreviewRef.current = null; pinchStart.current = { viewport, midpoint: midpoint(effect.first, effect.second), distance: distance(effect.first, effect.second) }; return }
+    if (effect.type === 'preview-pinch') { const start = pinchStart.current; if (!start) return; const currentMidpoint = midpoint(effect.first, effect.second), nextScale = start.viewport.scale * distance(effect.first, effect.second) / start.distance; const anchored = zoomCanvasViewport(start.viewport, start.midpoint, nextScale); const next = { ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }; pinchPreviewRef.current = next; setPinchPreview(next); return }
+    if (effect.type === 'commit-pinch') { if (pinchPreviewRef.current) onViewport(pinchPreviewRef.current); pinchPreviewRef.current = null; setPinchPreview(null); pinchStart.current = null; return }
     // The reducer has already installed its next state before effects run. In the
     // second-pointer path that state is pinch-zooming, so cleanup must not replace
     // it with idle before begin-pinch and preview-pinch can run.
@@ -160,6 +163,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const target = resize ? { kind: 'resize' as const, id: item!.id } : item ? { kind: 'node' as const, id: item.id } : { kind: 'canvas' as const }
     if (item) setSelected(item.id)
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    // The resize control is rendered only for an explicitly opened edit menu.
+    // Mirror that UI state in the reducer before its pointer-down guard runs.
+    if (resize && editMode) dispatchGesture({ type: 'enter-edit-mode' })
     dispatchGesture({ type: 'pointer-down', sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
