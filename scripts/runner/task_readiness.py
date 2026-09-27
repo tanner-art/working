@@ -42,6 +42,15 @@ def _git(repo: pathlib.Path, *args: str) -> bool:
     ).returncode == 0
 
 
+def _git_commit(repo: pathlib.Path, ref: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and _SHA.fullmatch(commit) else None
+
+
 def contract_shape_reasons(contract: Mapping[str, Any]) -> tuple[str, ...]:
     """Pure registration-time checks; Git and Registry facts are checked again at claim."""
     if contract.get("schema_version") != 2:
@@ -107,10 +116,10 @@ def check_packet(
     elif base_commit is not None:
         if not _git(repository, "cat-file", "-e", f"{base_commit}^{{commit}}"):
             reasons.append("BASE_COMMIT_MISSING")
-        elif not _git(repository, "merge-base", "--is-ancestor", base_commit, run_base):
-            # A packet may start from this exact commit or an immutable
-            # descendant, but never from an unrelated planning tree.
-            reasons.append("BASE_NOT_IN_RUN_LINEAGE")
+        elif _git_commit(repository, run_base) != base_commit:
+            # A mutable branch may advance after run activation. The packet
+            # names one exact tree, not merely an ancestor of current main.
+            reasons.append("BASE_REF_CHANGED")
     names = ("planning_paths", "existing_paths", "new_paths", "integration_paths", "test_paths")
     path_lists: dict[str, list[str]] = {}
     required_nonempty = {"planning_paths", "integration_paths", "test_paths"}

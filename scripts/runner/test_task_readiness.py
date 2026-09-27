@@ -72,6 +72,17 @@ class TaskReadinessTests(unittest.TestCase):
                     "test_paths": ["tests/missing.py"]}}
         self.assertIn("EXISTING_PATH_MISSING:tests/missing.py", self.check(contract).reasons)
 
+    def test_base_ref_advancing_after_packet_creation_fails_closed(self):
+        (self.repo / "docs/PLAN.md").write_text("changed")
+        subprocess.run(["git", "-C", str(self.repo), "add", "docs/PLAN.md"], check=True)
+        subprocess.run([
+            "git", "-C", str(self.repo), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "advance",
+        ], check=True)
+        result = check_packet(self.contract, repository=self.repo, run_base="HEAD",
+                              package=self.package, snapshot=self.snapshot, github_issue=101)
+        self.assertIn("BASE_REF_CHANGED", result.reasons)
+
     def test_dependency_and_exclusive_path_guards(self):
         other = {"id": "TASK-2", "status": "ACTIVE",
                  "provider_diagnostics": {"exclusive_paths": ["src/existing.py"]}}
