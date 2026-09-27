@@ -31,6 +31,7 @@ from scripts.factory_registry import (
     validate_control_center_projection,
 )
 from scripts.factory_registry.control_center_projection import ControlCenterProjectionError
+from scripts.factory_registry.control_center_projection import _feature_stage, _union_seconds
 from scripts.factory_registry.control_center_server import (
     SIGNATURE_HEADER,
     create_projection_handler,
@@ -44,6 +45,18 @@ SECRET = "projection-signing-secret-at-least-32-bytes"
 
 
 class ControlCenterProjectionTest(unittest.TestCase):
+    def test_feature_stage_precedence_keeps_active_remediation_visible_and_does_not_infer_integration(self) -> None:
+        parent = {"id": "PARENT", "kind": "PARENT", "status": "ACTIVE"}
+        feature = {"status": "VERIFY_REVIEW"}
+        waiting_review = {"id": "REVIEW", "kind": "REVIEW", "status": "READY"}
+        self.assertEqual(_feature_stage(feature, [parent, waiting_review], [{"packageId": "PARENT", "state": "changes_requested", "requestedAt": "2026-09-27T10:00:00Z", "id": "old"}], {"PARENT": []}), "building")
+        parent["status"] = "DONE"
+        self.assertEqual(_feature_stage({"status": "DONE"}, [parent], [{"packageId": "OTHER", "state": "approved", "requestedAt": "2026-09-27T10:00:00Z", "id": "unrelated"}], {"PARENT": []}), "unknown")
+
+    def test_union_is_wall_clock_while_distinct_attempts_remain_additive(self) -> None:
+        self.assertEqual(_union_seconds([(0, 60), (0, 60)]), 60)
+        self.assertEqual(sum(end - start for start, end in [(0, 60), (0, 60)]), 120)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.database = Path(self.temporary.name) / "registry.sqlite3"

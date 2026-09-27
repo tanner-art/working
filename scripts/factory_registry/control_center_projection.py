@@ -23,6 +23,8 @@ _CAPACITY_STATES = {"normal", "caution", "checkpoint", "hard_stop", "limited", "
 _EVIDENCE_KINDS = {"commit", "check", "test", "review", "artifact", "screenshot"}
 _REVIEW_STATES = {"waiting", "assigned", "changes_requested", "approved"}
 _HEARTBEAT_FRESH_SECONDS = 180
+_FEATURE_STAGES = {"ready", "building", "awaiting_review", "changes_requested", "awaiting_integration", "accepted", "blocked", "unknown"}
+_THROUGHPUT_WINDOW_SECONDS = 24 * 60 * 60
 
 
 class ControlCenterProjectionError(RuntimeError):
@@ -506,6 +508,127 @@ def _event_kind(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _timestamp_seconds(value: Any) -> float | None:
+    normalized = _iso(value)
+    if normalized is None:
+        return None
+    return datetime.fromisoformat(normalized.replace("Z", "+00:00")).timestamp()
+
+
+def _union_seconds(intervals: Sequence[tuple[float, float]]) -> float:
+    """Elapsed coverage; callers deliberately keep additive execution separate."""
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(intervals):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return sum(end - start for start, end in merged)
+
+
+def _throughput(snapshot: ControlCenterReadSnapshot) -> dict[str, Any]:
+    """Account only for authoritative Registry attempt bounds in a recent window.
+
+    Runtime counters are not substituted for bounds: an open/malformed interval is
+    explicitly partial, so dashboards never call missing time idle or zero.
+    """
+    observed = _timestamp_seconds(snapshot.observed_at)
+    if observed is None:
+        raise ControlCenterProjectionError("observation timestamp is invalid")
+    start = observed - _THROUGHPUT_WINDOW_SECONDS
+    package_kind = {str(item.get("id")): str(item.get("kind")) for item in snapshot.work_packages}
+    intervals: list[tuple[float, float]] = []
+    implementation_seconds = review_seconds = 0.0
+    parent_seconds = 0.0
+    partial = 0
+    retries = 0
+    successful_packages: set[str] = set()
+    for attempt in snapshot.attempts:
+        package_id = str(attempt.get("package_id"))
+        if package_kind.get(package_id) == "REVIEW":
+            kind = "review"
+        else:
+            kind = "implementation"
+        attempt_start, attempt_end = _timestamp_seconds(attempt.get("started_at")), _timestamp_seconds(attempt.get("ended_at"))
+        if attempt_start is None or attempt_end is None or attempt_end < attempt_start:
+            partial += 1
+            continue
+        clipped_start, clipped_end = max(start, attempt_start), min(observed, attempt_end)
+        if clipped_end <= clipped_start:
+            continue
+        seconds = clipped_end - clipped_start
+        intervals.append((clipped_start, clipped_end))
+        if kind == "review":
+            review_seconds += seconds
+        else:
+            implementation_seconds += seconds
+            if package_kind.get(package_id) == "PARENT":
+                parent_seconds += seconds
+        if str(attempt.get("outcome")) == "SUCCEEDED" and kind == "implementation":
+            successful_packages.add(package_id)
+    attempts_by_package: dict[str, int] = defaultdict(int)
+    for attempt in snapshot.attempts:
+        attempts_by_package[str(attempt.get("package_id"))] += 1
+    retries = sum(max(0, count - 1) for count in attempts_by_package.values())
+    union = _union_seconds(intervals)
+    review_waits = []
+    for outcome in snapshot.review_outcomes:
+        requested = _timestamp_seconds(outcome.get("requested_at"))
+        decided = _timestamp_seconds(outcome.get("decided_at"))
+        if requested is not None:
+            review_waits.append(max(0.0, min(observed, decided if decided is not None else observed) - max(start, requested)))
+    return {
+        "window": {"startAt": datetime.fromtimestamp(start, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"), "endAt": snapshot.observed_at, "seconds": _THROUGHPUT_WINDOW_SECONDS, "meaning": "Recent 24-hour Registry attempt interval window"},
+        "parentAttemptSeconds": parent_seconds,
+        "implementationAttemptSeconds": implementation_seconds,
+        "reviewAttemptSeconds": review_seconds,
+        "workerAttemptUnionSeconds": union,
+        "noWorkerAttemptSeconds": max(0.0, _THROUGHPUT_WINDOW_SECONDS - union),
+        "partialIntervalCount": partial,
+        "retryCount": retries,
+        "implementedCount": len(successful_packages),
+        "approvedCount": sum(1 for outcome in snapshot.review_outcomes if outcome.get("state") == "APPROVED"),
+        "acceptedCount": 0,
+        "reviewWaitSeconds": sum(review_waits) if review_waits else None,
+        "reviewWaitMeaning": "requested_at to recorded decision or observation time",
+        "coordinatorTurnSeconds": None,
+        "identifiableWaitingSeconds": None,
+        "coordinatorTelemetry": "unknown: no supplied coordinator event log in Registry projection",
+    }
+
+
+def _feature_stage(feature: Mapping[str, Any], packages: Sequence[Mapping[str, Any]], reviews: Sequence[Mapping[str, Any]], attempts: Mapping[str, Sequence[Mapping[str, Any]]]) -> str:
+    """Conservative derived view: status/history remain authoritative and untouched."""
+    parents = [item for item in packages if item.get("kind") == "PARENT"]
+    if not parents:
+        return "unknown"
+    if any(item.get("status") == "BLOCKED" for item in parents):
+        return "blocked"
+    if any(item.get("status") == "ACTIVE" for item in parents):
+        return "building"
+    parent_ids = {str(item.get("id")) for item in parents}
+    verdicts = [item for item in reviews if str(item.get("packageId")) in parent_ids and item.get("state") in {"approved", "changes_requested"}]
+    latest = max(verdicts, key=lambda item: (str(item.get("requestedAt")), str(item.get("id"))), default=None)
+    if latest is not None and latest.get("state") == "changes_requested":
+        # A later remediation is not silently a success; it returns to the review queue.
+        requested = str(latest.get("requestedAt"))
+        later_remediation = any(
+            str(_iso(attempt.get("ended_at")) or "") > requested and attempt.get("outcome") == "SUCCEEDED"
+            for item in parents for attempt in attempts.get(str(item.get("id")), [])
+        )
+        return "awaiting_review" if later_remediation else "changes_requested"
+    if latest is not None and latest.get("state") == "approved":
+        # Approval is not integration. Accepted requires the target itself DONE.
+        return "accepted" if feature.get("status") == "DONE" and all(item.get("status") == "DONE" for item in parents) else "awaiting_integration"
+    if any(item.get("status") == "VERIFY_REVIEW" for item in parents) or any(item.get("kind") == "REVIEW" and item.get("status") in {"READY", "ACTIVE", "VERIFY_REVIEW"} for item in packages):
+        return "awaiting_review"
+    if all(item.get("status") == "READY" for item in parents):
+        return "ready"
+    return "unknown"
+
+
 def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any]:
     """Translate an immutable Registry read into schema-v2 dashboard JSON."""
     feature_ids = {str(feature.get("id", "")) for feature in snapshot.features}
@@ -609,7 +732,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "id": feature_id, "title": str(feature.get("title", "")),
             "description": str(feature.get("description", "")),
             "priority": int(_nonnegative(feature.get("priority"))),
-            "state": feature.get("status"), "packages": feature_packages,
+            "state": feature.get("status"), "stage": "unknown", "packages": feature_packages,
         })
 
     projected_workers = []
@@ -668,6 +791,10 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         package = projected_packages.get(target_id)
         if package is not None:
             package["reviewState"] = review.get("state")
+    for feature, projected_feature in zip(snapshot.features, projected_features):
+        projected_feature["stage"] = _feature_stage(
+            feature, packages_by_feature.get(str(feature.get("id")), []), projected_reviews, attempts,
+        )
     failures = []
     package_state = {str(item.get("id")): item.get("status") for item in snapshot.work_packages}
     for item in snapshot.failures:
@@ -754,6 +881,8 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         or any(item["health"] != "healthy" for item in orchestra)
     )
     factory_health = "constrained" if constrained else "healthy"
+    throughput = _throughput(snapshot)
+    throughput["acceptedCount"] = sum(1 for feature in projected_features if feature["stage"] == "accepted")
     projection = {
         "schemaVersion": SCHEMA_VERSION, "registryRevision": str(snapshot.revision),
         "generatedAt": snapshot.observed_at,
@@ -766,6 +895,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
             "verifyReviewCount": sum(1 for item in snapshot.work_packages if item.get("status") == "VERIFY_REVIEW"),
             "blockedCount": sum(1 for item in snapshot.work_packages if item.get("status") == "BLOCKED"),
             "attentionCount": sum(1 for item in failures if item["requiresHuman"]),
+            "throughput": throughput,
         },
         "reconciliation": reconciliation, "features": projected_features,
         "workers": projected_workers, "reviews": projected_reviews,
@@ -810,6 +940,21 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
             raise ControlCenterProjectionError("factory metrics are invalid")
     if factory.get("orchestraReservePercent") is not None and _finite_number(factory.get("orchestraReservePercent")) is None:
         raise ControlCenterProjectionError("Factory reserve is invalid")
+    throughput = _mapping(factory.get("throughput"))
+    window = _mapping(throughput.get("window"))
+    if (
+        _iso(window.get("startAt")) is None or _iso(window.get("endAt")) is None
+        or _finite_number(window.get("seconds")) is None or not isinstance(window.get("meaning"), str)
+        or any(_finite_number(throughput.get(field)) is None for field in (
+            "parentAttemptSeconds", "implementationAttemptSeconds", "reviewAttemptSeconds",
+            "workerAttemptUnionSeconds", "noWorkerAttemptSeconds", "partialIntervalCount",
+            "retryCount", "implementedCount", "approvedCount", "acceptedCount",
+        ))
+        or (throughput.get("reviewWaitSeconds") is not None and _finite_number(throughput.get("reviewWaitSeconds")) is None)
+        or not all(isinstance(throughput.get(field), str) for field in ("reviewWaitMeaning", "coordinatorTelemetry"))
+        or throughput.get("coordinatorTurnSeconds") is not None or throughput.get("identifiableWaitingSeconds") is not None
+    ):
+        raise ControlCenterProjectionError("throughput metrics are invalid")
     reconciliation = _mapping(value.get("reconciliation"))
     if reconciliation.get("status") not in {"clean", "mismatch", "unknown"}:
         raise ControlCenterProjectionError("reconciliation is invalid")
@@ -831,6 +976,7 @@ def validate_control_center_projection(value: Mapping[str, Any]) -> None:
     for feature in value.get("features", []):
         if (
             not isinstance(feature, Mapping) or feature.get("state") not in _STATES
+            or feature.get("stage") not in _FEATURE_STAGES
             or not all(isinstance(feature.get(field), str) for field in ("id", "title", "description"))
             or _finite_number(feature.get("priority")) is None
             or not isinstance(feature.get("packages"), list)

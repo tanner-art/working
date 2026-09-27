@@ -328,6 +328,9 @@
       ['Ready', projection.factory.readyCount],
       ['Verify / review', projection.factory.verifyReviewCount],
       ['Blocked', projection.factory.blockedCount],
+      ['Implemented (recent)', projection.factory.throughput && projection.factory.throughput.implementedCount],
+      ['Approved / accepted', projection.factory.throughput ? projection.factory.throughput.approvedCount + ' / ' + projection.factory.throughput.acceptedCount : null],
+      ['Retries (recent)', projection.factory.throughput && projection.factory.throughput.retryCount],
       ['Active leases', ownership.active_leases],
       ['Active attempts', ownership.active_attempts],
       ['Active runtimes', ownership.active_runtimes],
@@ -353,7 +356,7 @@
       details.open = !!expandedFeatures[feature.id];
       details.addEventListener('toggle', function () { expandedFeatures[feature.id] = details.open; });
       details.appendChild(el('summary', { text: feature.title + ' — ' + (progress || 'No packages registered') }));
-      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state }));
+      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Derived stage: ' + feature.stage + ' · Recorded feature state: ' + feature.state }));
       feature.packages.forEach(function (pkg) {
         var packageNode = el('div', { class: 'feature-package' }, [
           el('strong', { text: pkg.id + ' — ' + pkg.title }),
@@ -377,6 +380,10 @@
     });
     if (!packages.length) {
       tbody.appendChild(el('tr', {}, [el('td', { colspan: '9' }, [unknown('No packages are registered')])]));
+    }
+    if (projection.factory.throughput) {
+      var t = projection.factory.throughput;
+      note.textContent += ' Throughput window: ' + t.window.meaning + '; implementation ' + t.implementationAttemptSeconds + 's, review ' + t.reviewAttemptSeconds + 's, worker-union ' + t.workerAttemptUnionSeconds + 's, no-worker-attempt ' + t.noWorkerAttemptSeconds + 's. Review wait (' + t.reviewWaitMeaning + '): ' + (t.reviewWaitSeconds == null ? 'Unknown' : t.reviewWaitSeconds + 's') + '. ' + (t.partialIntervalCount ? t.partialIntervalCount + ' partial/open interval(s) are explicitly unknown.' : 'No partial intervals.');
     }
     packages.forEach(function (pkg) {
       var badgeClass = pkg.state === 'ACTIVE' ? 'active' : (pkg.state === 'BLOCKED' ? 'blocked' : 'idle');
