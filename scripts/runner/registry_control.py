@@ -57,12 +57,28 @@ def queue_contract_digest(value) -> str:
 def scope_dispatch_snapshot(snapshot, package_ids, parent_limit):
     """Restrict scheduling, not persisted history or dependency evidence."""
     allowed = set(package_ids)
+    by_id = {str(item.get("id")): item for item in snapshot.work_packages}
+    waiting_review_parents = {
+        str(edge.get("dependency_id"))
+        for edge in getattr(snapshot, "dependencies", ())
+        if edge.get("package_id") in allowed
+        and (review := by_id.get(str(edge.get("package_id")))) is not None
+        and review.get("kind") == "REVIEW"
+        and review.get("status") in ("READY", "ACTIVE", "VERIFY_REVIEW")
+    }
     return replace(snapshot,
         active_parent_limit=min(snapshot.active_parent_limit, parent_limit),
         work_packages=tuple(
-            {**item, "status": "ON_DECK"}
-            if item.get("id") not in allowed and item.get("status") == "READY"
-            else item for item in snapshot.work_packages
+            {
+                **item,
+                **({"status": "ON_DECK"} if item.get("id") not in allowed and item.get("status") == "READY" else {}),
+                **({"wip_implementer_worker_id": None}
+                   if item.get("status") == "VERIFY_REVIEW"
+                   and item.get("kind") == "PARENT"
+                   and (item.get("id") not in allowed
+                        or item.get("id") not in waiting_review_parents) else {}),
+            }
+            for item in snapshot.work_packages
         ))
 
 
@@ -343,8 +359,6 @@ class RunnerRegistryControl:
             (item.package_id, item.worker_id)
             for item in decide_shadow(candidate).pair_evaluations if item.eligible
         }
-        if (package_id, worker_id) not in eligible:
-            raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
         return {
             "revision": int(control["revision"]),
             "lease_id": active[0].get("id"),
@@ -354,7 +368,10 @@ class RunnerRegistryControl:
             "package_status": package.get("status"),
             "bounded_run": scope,
             "deadline": scope.get("deadline") if isinstance(scope, dict) else None,
-            "eligible": True,
+            # reserve_attempt checks this at both the baseline and retry.
+            # Returning the real scheduler result keeps those explicit
+            # fail-closed guards reachable when capacity or paths change.
+            "eligible": (package_id, worker_id) in eligible,
         }
 
     def pre_launch(self) -> int:

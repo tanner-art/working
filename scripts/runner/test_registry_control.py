@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from registry_control import RunnerRegistryControl, queue_contract_digest
+from registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
 import runner
 from runner import RegistryAttemptLifecycle, run
 from scripts.factory_registry.codex_capacity import CapacityCollectorError
@@ -24,7 +24,7 @@ from scripts.factory_registry import (
     Worker,
     WorkPackage,
 )
-from scripts.factory_registry.models import Evidence, ReviewOutcome, ReviewOutcomeState
+from scripts.factory_registry.models import DispatchSnapshot, Evidence, ReviewOutcome, ReviewOutcomeState
 
 
 class RunnerRegistryControlTests(unittest.TestCase):
@@ -124,6 +124,28 @@ class RunnerRegistryControlTests(unittest.TestCase):
         control = RunnerRegistryControl(self.database)
         with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAUSED"):
             control.pre_claim()
+
+    def test_scoped_shadow_wip_excludes_historical_and_finished_reviews(self):
+        snapshot = DispatchSnapshot(
+            revision=1, observed_at=datetime.now(timezone.utc).isoformat(),
+            active_parent_limit=3, orchestra_reserve_percent=20,
+            features=(), work_packages=(
+                {"id": "OLD", "kind": "PARENT", "status": "VERIFY_REVIEW", "wip_implementer_worker_id": "builder"},
+                {"id": "CURRENT", "kind": "PARENT", "status": "VERIFY_REVIEW", "wip_implementer_worker_id": "builder"},
+                {"id": "FINISHED", "kind": "PARENT", "status": "VERIFY_REVIEW", "wip_implementer_worker_id": "builder"},
+                {"id": "REVIEW-CURRENT", "kind": "REVIEW", "status": "READY"},
+                {"id": "REVIEW-FINISHED", "kind": "REVIEW", "status": "DONE"},
+            ), dependencies=(
+                {"package_id": "REVIEW-CURRENT", "dependency_id": "CURRENT"},
+                {"package_id": "REVIEW-FINISHED", "dependency_id": "FINISHED"},
+            ), workers=(), active_leases=(), usage_observations=(),
+        )
+        scoped = scope_dispatch_snapshot(
+            snapshot, ("CURRENT", "FINISHED", "REVIEW-CURRENT", "REVIEW-FINISHED"), 2,
+        )
+        authors = {item["id"]: item.get("wip_implementer_worker_id")
+                   for item in scoped.work_packages if item["kind"] == "PARENT"}
+        self.assertEqual(authors, {"OLD": None, "CURRENT": "builder", "FINISHED": None})
 
     def test_pre_claim_requires_the_exact_registry_assignment_and_revision(self):
         control = RunnerRegistryControl(self.database)
@@ -336,6 +358,23 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 runner_control.pre_claim(
                     "TASK-FOLLOWUP", "reviewer", task_contract=contract, github_issue=351,
                 )
+            # Use the real SQLite snapshot, scheduler, controller and lease
+            # transaction for both independent workers.  The historical
+            # VERIFY_REVIEW parent is outside this run and must not consume
+            # the implementer's WIP or make the review globally preempt it.
+            parent_revision = runner_control.pre_claim(
+                "TASK-DEADLINE", "implementer", task_contract=deadline_contract,
+                github_issue=999,
+            )
+            revision = runner_control.pre_claim(
+                "TASK-FOLLOWUP", "reviewer", task_contract=contract, github_issue=312,
+            )
+            self.assertEqual(parent_revision, revision)
+            parent_lease = runner_control.claim_package(
+                "TASK-DEADLINE", worker_id="implementer",
+                expected_revision=parent_revision, lease_seconds=300,
+            )
+            self.assertTrue(parent_lease)
             revision = runner_control.pre_claim(
                 "TASK-FOLLOWUP", "reviewer", task_contract=contract, github_issue=312,
             )
@@ -411,6 +450,34 @@ class RunnerRegistryControlTests(unittest.TestCase):
             )
         self.assertFalse(self.registry.attempt_exists("attempt-stopped"))
 
+    def test_reservation_does_not_retry_after_real_capacity_loss(self):
+        self.seed_assignment()
+        control = RunnerRegistryControl(self.database)
+        revision = self.registry.dispatch_control()["revision"]
+        lease = next(item for item in self.registry.dispatch_snapshot(
+            observed_at=datetime.now(timezone.utc).isoformat()
+        ).active_leases if item["package_id"] == "TASK-1")
+
+        def lose_capacity(*args, **kwargs):
+            now = datetime.now(timezone.utc).isoformat()
+            self.registry.record_worker_capacity_observations("worker-a", ({
+                "id": "capacity-lost-before-provider", "worker_id": "worker-a",
+                "observed_at": now, "reset_at": None, "consumed_percent": 99,
+                "state": "HARD_STOP", "provider_diagnostics": {
+                    "capacity_mode": "percentage", "capacity_scope": "worker-a",
+                },
+            },), recorded_at=now)
+            raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+
+        with patch.object(control.registry, "begin_attempt_runtime", side_effect=lose_capacity):
+            with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
+                control.reserve_attempt(
+                    "attempt-capacity-lost", package_id="TASK-1",
+                    worker_id="worker-a", expected_revision=revision,
+                    lease_id=lease["id"],
+                )
+        self.assertFalse(self.registry.attempt_exists("attempt-capacity-lost"))
+
     def test_reservation_does_not_retry_when_the_claimed_lease_is_replaced(self):
         self.seed_assignment()
         control = RunnerRegistryControl(self.database)
@@ -461,6 +528,29 @@ class RunnerRegistryControlTests(unittest.TestCase):
                     "attempt-run-rollover", package_id="TASK-1", worker_id="worker-a",
                     expected_revision=10, lease_id="lease-1",
                 )
+
+    def test_real_registry_refuses_run_rollover_with_live_lease(self):
+        """The mocked retry negative is backed by a real no-hot-reload gate."""
+        self.seed_assignment()
+        now = datetime.now(timezone.utc)
+        self.registry.register_work_package(WorkPackage(
+            "TASK-2", "FEATURE", "New-run task", "ORCHESTRATION",
+            Lane.PLATFORM, ("registry",), 10, ("verified",),
+            status=TaskStatus.READY,
+        ))
+        before = self.registry.dispatch_control()
+        with self.assertRaisesRegex(RegistryConflict, "ACTIVE_OWNERSHIP_PRESENT"):
+            self.registry.set_dispatch_control(
+                expected_revision=before["revision"], expected_mode="LIVE",
+                new_mode="LIVE", kill_switch_engaged=False,
+                changed_at=now.isoformat(), reason="unsafe run rollover",
+                bounded_run={
+                    "run_id": "new-run", "package_ids": ["TASK-2"],
+                    "deadline": (now + timedelta(minutes=5)).isoformat(),
+                    "base_ref": "main", "parent_limit": 1,
+                },
+            )
+        self.assertEqual(before, self.registry.dispatch_control())
 
     def test_reservation_requires_eligible_baseline_and_retry(self):
         control = RunnerRegistryControl(self.database)
