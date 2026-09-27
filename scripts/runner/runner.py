@@ -536,7 +536,7 @@ def normalized_contract(issue):
 
 
 def review_source_is_green(github, repository, review_input):
-    """Require the review packet's exact PR head and required checks.
+    """Require the review packet's exact source and required checks.
 
     GitHub supplies this observation only; the immutable review input remains
     Registry-owned and a failed/pending query merely defers assurance.
@@ -544,7 +544,7 @@ def review_source_is_green(github, repository, review_input):
     try:
         source = json.loads(github(
             'pr', 'view', review_input.pr_url, '--repo', repository,
-            '--json', 'headRefOid',
+            '--json', 'headRefOid,state,mergeCommit',
         ))
         checks = json.loads(github(
             'pr', 'checks', review_input.pr_url, '--repo', repository,
@@ -552,14 +552,60 @@ def review_source_is_green(github, repository, review_input):
         ))
     except Exception:
         return False
-    if source.get('headRefOid') != review_input.implementation_commit:
+    if not isinstance(source, dict) or not isinstance(checks, list):
         return False
     verify = [
         item for item in checks if isinstance(item, dict)
         and item.get('name') == 'verify'
         and (item.get('workflow') in (None, '', 'Validate app'))
     ]
-    return bool(verify) and all(item.get('state') in {'SUCCESS', 'PASS'} for item in verify)
+    if not (verify and all(item.get('state') in {'SUCCESS', 'PASS'} for item in verify)):
+        return False
+
+    # Keep the original exact-PR-head proof unchanged.  A merged PR advances
+    # headRefOid, so its separately proved merge path must never weaken this.
+    if source.get('headRefOid') == review_input.implementation_commit:
+        return True
+
+    merge_commit = source.get('mergeCommit')
+    if (source.get('state') != 'MERGED' or not isinstance(merge_commit, dict)
+            or merge_commit.get('oid') != review_input.implementation_commit
+            or not isinstance(source.get('headRefOid'), str)
+            or not re.fullmatch(r'[0-9a-f]{40,64}', source['headRefOid'])):
+        return False
+    try:
+        main_runs = json.loads(github(
+            'run', 'list', '--repo', repository, '--branch', 'main',
+            '--commit', review_input.implementation_commit, '--workflow', 'Validate app',
+            '--json', 'headSha,status,conclusion,workflowName',
+        ))
+        pr_tree = json.loads(github(
+            'api', f'repos/{repository}/git/commits/{source["headRefOid"]}',
+        ))
+        merge_tree = json.loads(github(
+            'api', f'repos/{repository}/git/commits/{review_input.implementation_commit}',
+        ))
+    except Exception:
+        return False
+    if not isinstance(main_runs, list):
+        return False
+    canonical_main_success = any(
+        isinstance(run, dict)
+        and run.get('headSha') == review_input.implementation_commit
+        and run.get('workflowName') == 'Validate app'
+        and run.get('status') == 'completed'
+        and run.get('conclusion') == 'success'
+        for run in main_runs
+    )
+    if not canonical_main_success:
+        return False
+    try:
+        pr_tree_id, merge_tree_id = pr_tree['tree']['sha'], merge_tree['tree']['sha']
+    except (KeyError, TypeError):
+        return False
+    return (isinstance(pr_tree_id, str) and isinstance(merge_tree_id, str)
+            and bool(re.fullmatch(r'[0-9a-f]{40,64}', pr_tree_id))
+            and pr_tree_id == merge_tree_id)
 
 
 def write_collected_usage(path, config, collected):
