@@ -5,6 +5,13 @@ parent WIP limit. The allowlist can contain more independently reviewed pairs
 than can run simultaneously; the Registry remains the authority for leases,
 deadlines, capacity, paths, reviewer independence, and the kill switch.
 
+Waiting-review WIP is scoped to the active bounded run's immutable allowlist:
+only a parent whose paired review remains in that run can consume its author's
+slot. When a run is stopped and a successor is activated, the successor gets a
+new allowlist/lineage; preserved historical `VERIFY_REVIEW` records remain
+visible but do not consume successor capacity. A parent still awaiting review
+must be explicitly included with its review in a restarted run to count.
+
 Each builder has a WIP limit of two parent packages. A parent awaiting its
 independent review remains attributed to the worker on its latest successful
 implementation attempt, so it consumes one of that builder's slots until the

@@ -2767,6 +2767,14 @@ class SQLiteRegistry:
                     ):
                         raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
                     scope = self._assert_scope_membership(connection, package_id, acquired_at)
+                elif connection.execute(
+                    "SELECT 1 FROM registry_metadata WHERE key=?",
+                    (BOUNDED_RUN_METADATA_KEY,),
+                ).fetchone():
+                    # The bounded envelope is authoritative for direct
+                    # Registry callers too; it defines submitted-review WIP
+                    # lineage without rewriting historical work.
+                    scope = self._assert_scope_membership(connection, package_id, acquired_at)
                 package = connection.execute(
                     "SELECT * FROM work_packages WHERE id=?", (package_id,)
                 ).fetchone()
@@ -2794,6 +2802,25 @@ class SQLiteRegistry:
                     # builder's WIP slot while it waits for independent review.
                     # Attribution is derived from successful attempts, never a
                     # caller-supplied worker label.
+                    scope_clause = ""
+                    scope_args: tuple[Any, ...] = ()
+                    waiting_review_clause = ""
+                    waiting_review_args: tuple[Any, ...] = ()
+                    if scope is not None:
+                        placeholders = ",".join("?" for _ in scope["package_ids"])
+                        scope_clause = f" AND parent.id IN ({placeholders})"
+                        scope_args = tuple(scope["package_ids"])
+                        # A submitted parent belongs to this run's WIP only
+                        # when its independent review is also still able to
+                        # progress inside this exact immutable allowlist.
+                        waiting_review_clause = (
+                            " AND EXISTS (SELECT 1 FROM task_dependencies AS review_dependency "
+                            "JOIN work_packages AS review ON review.id=review_dependency.package_id "
+                            "WHERE review_dependency.dependency_id=parent.id "
+                            "AND review.kind='REVIEW' AND review.id IN ("
+                            + placeholders + ") AND review.status IN ('READY','ACTIVE','VERIFY_REVIEW'))"
+                        )
+                        waiting_review_args = tuple(scope["package_ids"])
                     builder_wip = connection.execute(
                         """SELECT COUNT(*) FROM work_packages AS parent
                            WHERE parent.kind='PARENT' AND (
@@ -2811,9 +2838,9 @@ class SQLiteRegistry:
                                  AND attempt.ended_at IS NOT NULL
                                ORDER BY attempt.ended_at DESC, attempt.started_at DESC, attempt.id DESC
                                LIMIT 1
-                             )=?)
-                           )""",
-                        (worker_id, acquired_at, worker_id),
+                             )=?""" + waiting_review_clause + """)
+                           )""" + scope_clause,
+                        (worker_id, acquired_at, worker_id, *waiting_review_args, *scope_args),
                     ).fetchone()[0]
                     if builder_wip >= BUILDER_WIP_LIMIT:
                         raise RegistryConflict("BUILDER_WIP_LIMIT", worker_id)

@@ -15,6 +15,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     refresh_capacity_observations, run_repository_validation, select, stage_verified_changes,
                     usage_policy_enabled, review_source_is_green)
 from usage_policy import worker_state
+from scripts.factory_registry.repository import RegistryConflict
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -812,7 +813,7 @@ class LifecycleTests(unittest.TestCase):
 
     def exercise_poll(
         self, blocked=False, preclaim_error=False, snapshot_failure=False,
-        kind='PARENT',
+        kind='PARENT', registry_claim_error=None,
     ):
         import contextlib, io, json, pathlib, tempfile
         from unittest.mock import patch
@@ -867,9 +868,12 @@ class LifecycleTests(unittest.TestCase):
             registry.claim_package.side_effect = lambda *args, **kwargs: (
                 calls.append(['registry', 'claim']) or 'lease-1'
             )
-            registry.claim_with_retry.side_effect = lambda *args, **kwargs: (
-                calls.append(['registry', 'claim']) or ('lease-1', 1)
-            )
+            def claim_with_retry(*_args, **_kwargs):
+                calls.append(['registry', 'claim'])
+                if registry_claim_error:
+                    raise RegistryConflict(registry_claim_error)
+                return ('lease-1', 1)
+            registry.claim_with_retry.side_effect = claim_with_retry
             registry.pre_launch.side_effect = lambda: (
                 calls.append(['registry', 'pre-launch']) or 2
             )
@@ -994,6 +998,12 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(record['status'], 'agent')
         self.assertEqual(record['paths'], ['other.py'])
         self.assertNotIn(['gh', 'issue', 'edit'], [c[:3] for c in calls])
+
+    def test_builder_wip_refusal_defers_without_crashing_the_poll(self):
+        calls, record = self.exercise_poll(registry_claim_error='BUILDER_WIP_LIMIT')
+        self.assertEqual(record['status'], 'deferred')
+        self.assertEqual(record['registry_defer_code'], 'BUILDER_WIP_LIMIT')
+        self.assertNotIn(['provider', 'started'], calls)
 
     def test_snapshot_write_failure_does_not_prevent_a_claim(self):
         calls, record = self.exercise_poll(snapshot_failure=True)

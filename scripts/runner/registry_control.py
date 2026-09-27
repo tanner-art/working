@@ -270,6 +270,8 @@ class RunnerRegistryControl:
         baseline = self._reservation_facts(
             attempt_id, package_id, worker_id, lease_id
         )
+        if not baseline["eligible"]:
+            raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
         revision = expected_revision
         for retry in range(2):
             try:
@@ -290,6 +292,8 @@ class RunnerRegistryControl:
                 current = self._reservation_facts(
                     attempt_id, package_id, worker_id, baseline["lease_id"]
                 )
+                if not current["eligible"]:
+                    raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
                 if ({key: value for key, value in current.items() if key != "revision"}
                         != {key: value for key, value in baseline.items() if key != "revision"}):
                     raise
@@ -339,12 +343,18 @@ class RunnerRegistryControl:
             (item.package_id, item.worker_id)
             for item in decide_shadow(candidate).pair_evaluations if item.eligible
         }
+        if (package_id, worker_id) not in eligible:
+            raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
         return {
             "revision": int(control["revision"]),
             "lease_id": active[0].get("id"),
+            "lease_expires_at": active[0].get("expires_at"),
+            "package_id": package_id,
+            "worker_id": worker_id,
+            "package_status": package.get("status"),
             "bounded_run": scope,
             "deadline": scope.get("deadline") if isinstance(scope, dict) else None,
-            "eligible": (package_id, worker_id) in eligible,
+            "eligible": True,
         }
 
     def pre_launch(self) -> int:
