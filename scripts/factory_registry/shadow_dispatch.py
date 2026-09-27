@@ -736,13 +736,9 @@ def decide_shadow(
         for lease in active_leases
         if package_by_id.get(str(lease.get("package_id")), {}).get("kind", "PARENT") == "PARENT"
     )
-    builder_wip.update(
-        str(package["wip_implementer_worker_id"])
-        for package in packages
-        if package.get("kind") == "PARENT"
-        and package.get("status") == "VERIFY_REVIEW"
-        and package.get("wip_implementer_worker_id")
-    )
+    # Submitted code is reviewer-owned work, not an active coding attempt.
+    # Keep the builder limit for active leases; do not idle a free builder
+    # solely because independent reviews are still in flight.
 
     worker_evaluations = tuple(
         EntityEvaluation(

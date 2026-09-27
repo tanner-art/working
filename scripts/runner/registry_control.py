@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import signal
 import sys
 import time
@@ -153,10 +154,11 @@ class RunnerRegistryControl:
             actual = queue_contract_digest(task_contract)
             if not isinstance(expected, str) or expected != actual:
                 raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
+        control = self.registry.dispatch_control()
         if (package is not None and github_issue is not None
-                and self.registry.dispatch_control().get("bounded_run")):
-            # In Registry-owned pilot mode, GitHub is a provenance/rendering
-            # source, never the mutable work contract or scheduler.
+                and (control.get("bounded_run") or control.get("continuous_queue"))):
+            # GitHub is a provenance/rendering source, never the mutable work
+            # contract or scheduler, with or without a bounded run.
             if package.get("source_system") != "github_issue" or package.get("source_ref") != str(github_issue):
                 raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
         requires_readiness = (
@@ -212,8 +214,27 @@ class RunnerRegistryControl:
 
     def _run_snapshot(self, observed_at):
         snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
-        scope = self.registry.dispatch_control().get("bounded_run")
-        return scope_dispatch_snapshot(snapshot, scope["package_ids"], scope["parent_limit"]) if scope else snapshot
+        control = self.registry.dispatch_control()
+        scope = control.get("bounded_run")
+        if scope:
+            return scope_dispatch_snapshot(snapshot, scope["package_ids"], scope["parent_limit"])
+        if control.get("continuous_queue"):
+            # A malformed/unbound item cannot be fetched from GitHub. Exclude
+            # only that item from runner proposals so independent ready work
+            # can continue; the Registry record remains visible for repair.
+            return replace(snapshot, work_packages=tuple(
+                package for package in snapshot.work_packages
+                if package.get("status") != "READY" or (
+                    package.get("source_system") == "github_issue"
+                    and isinstance(package.get("source_ref"), str)
+                    and package["source_ref"].isdigit()
+                    and int(package["source_ref"]) > 0
+                    and isinstance(package.get("provider_diagnostics"), dict)
+                    and isinstance(package["provider_diagnostics"].get("queue_contract_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", package["provider_diagnostics"]["queue_contract_sha256"])
+                )
+            ))
+        return snapshot
 
     def bounded_source_issues(self) -> tuple[int, ...]:
         """Return explicitly registered GitHub issue references for this run."""
@@ -231,6 +252,28 @@ class RunnerRegistryControl:
             reference = package.get("source_ref")
             if not isinstance(reference, str) or not reference.isdigit() or int(reference) <= 0:
                 raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+            references.append(int(reference))
+        return tuple(sorted(set(references)))
+
+    def queue_source_issues(self) -> tuple[int, ...]:
+        """Read Registry-owned READY work, without a session allowlist.
+
+        Historical packages and work already awaiting review are not fetched
+        as new claims. The Registry remains the authority for eligibility.
+        """
+        snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
+        references = []
+        for package in snapshot.work_packages:
+            if package.get("status") != "READY":
+                continue
+            if package.get("source_system") != "github_issue":
+                continue
+            reference = package.get("source_ref")
+            if not isinstance(reference, str) or not reference.isdigit() or int(reference) <= 0:
+                continue
+            diagnostics = package.get("provider_diagnostics")
+            if not isinstance(diagnostics, dict) or not isinstance(diagnostics.get("queue_contract_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", diagnostics["queue_contract_sha256"]):
+                continue
             references.append(int(reference))
         return tuple(sorted(set(references)))
 

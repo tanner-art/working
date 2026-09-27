@@ -196,6 +196,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--bounded-run", type=pathlib.Path,
                          help="reviewed JSON run envelope; omission preserves legacy canary mode")
 
+    command = subparsers.add_parser(
+        "enable-continuous", help="Activate the persistent Registry queue without a run allowlist"
+    )
+    _context(command)
+    command.add_argument("--mode", choices=("serial", "lanes"), default="lanes")
+    command.add_argument("--dashboard-port", type=int, default=8787)
+
     command = subparsers.add_parser("stop", help="Engage the Registry kill switch (or no-op for a superseded run timer)")
     command.add_argument("--database", required=True, type=pathlib.Path)
     command.add_argument("--reason", required=True)
@@ -373,6 +380,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.release_commit, args.expect_revision, args.canary_feature,
             mode=args.mode, dashboard_port=args.dashboard_port,
             bounded_run=bounded_run,
+        ))
+    if args.command == "enable-continuous":
+        return dict(enable_live(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision, None,
+            mode=args.mode, dashboard_port=args.dashboard_port,
+            continuous=True,
         ))
     if args.command == "register-followup-review":
         observed_at = args.observed_at or utc_now()

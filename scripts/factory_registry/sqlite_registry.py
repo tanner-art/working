@@ -51,6 +51,7 @@ CURRENT_SCHEMA_VERSION = 5
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
+CONTINUOUS_QUEUE_METADATA_KEY = "continuous_queue_enabled"
 DEFAULT_BOUNDED_RUN_PARENT_LIMIT = 3
 BUILDER_WIP_LIMIT = 2
 def _json(value: Any) -> str:
@@ -539,6 +540,10 @@ class SQLiteRegistry:
                 "SELECT value FROM registry_metadata WHERE key=?",
                 (BOUNDED_RUN_METADATA_KEY,),
             ).fetchone()
+            continuous_row = connection.execute(
+                "SELECT value FROM registry_metadata WHERE key=?",
+                (CONTINUOUS_QUEUE_METADATA_KEY,),
+            ).fetchone()
             parent_limit_row = connection.execute(
                 "SELECT value FROM registry_metadata WHERE key='active_parent_limit'"
             ).fetchone()
@@ -560,6 +565,10 @@ class SQLiteRegistry:
         }
         if scope is not None:
             result["bounded_run"] = scope
+        if continuous_row is not None:
+            if continuous_row["value"] != "1" or scope is not None:
+                raise RegistryConflict("INVALID_CONTINUOUS_QUEUE_MODE")
+            result["continuous_queue"] = True
         return result
 
     def require_live_dispatch(self, *, expected_revision: int | None = None) -> int:
@@ -607,6 +616,7 @@ class SQLiteRegistry:
         reason: str,
         operation_id: str | None = None,
         bounded_run: Mapping[str, Any] | None = None,
+        continuous_queue: bool = False,
     ) -> int:
         """Atomically compare-and-swap the persistent dispatch gate."""
         if new_mode not in {"PAUSED", "LIVE", "STOPPING", "RECOVERY_REQUIRED"}:
@@ -615,6 +625,8 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_DISPATCH_CONTROL")
         if new_mode != "LIVE" and not kill_switch_engaged:
             raise RegistryConflict("INVALID_DISPATCH_CONTROL")
+        if continuous_queue and (new_mode != "LIVE" or bounded_run is not None):
+            raise RegistryConflict("INVALID_CONTINUOUS_QUEUE_MODE")
         changed_at = _normalize_timestamp(changed_at)
         request = {
             "expected_revision": expected_revision,
@@ -628,6 +640,8 @@ class SQLiteRegistry:
         # safely replay an old operator action.
         if bounded_run is not None:
             request["bounded_run"] = dict(bounded_run)
+        if continuous_queue:
+            request["continuous_queue"] = True
         with self._connection() as connection:
             self._require_control_schema(connection)
             connection.execute("BEGIN IMMEDIATE")
@@ -709,6 +723,17 @@ class SQLiteRegistry:
                             "INSERT INTO registry_metadata(key, value) VALUES (?, ?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                             (BOUNDED_RUN_METADATA_KEY, _json(scope)),
+                        )
+                    if continuous_queue:
+                        connection.execute(
+                            "INSERT INTO registry_metadata(key, value) VALUES (?, '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (CONTINUOUS_QUEUE_METADATA_KEY,),
+                        )
+                    else:
+                        connection.execute(
+                            "DELETE FROM registry_metadata WHERE key=?",
+                            (CONTINUOUS_QUEUE_METADATA_KEY,),
                         )
                 elif new_mode == "PAUSED":
                     connection.execute(
@@ -2768,8 +2793,8 @@ class SQLiteRegistry:
                         raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
                     scope = self._assert_scope_membership(connection, package_id, acquired_at)
                 elif connection.execute(
-                    "SELECT 1 FROM registry_metadata WHERE key=?",
-                    (BOUNDED_RUN_METADATA_KEY,),
+                    "SELECT 1 FROM registry_metadata WHERE key IN (?, ?) LIMIT 1",
+                    (BOUNDED_RUN_METADATA_KEY, CONTINUOUS_QUEUE_METADATA_KEY),
                 ).fetchone():
                     control = connection.execute(
                         "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
@@ -2795,6 +2820,20 @@ class SQLiteRegistry:
                     raise RegistryConflict("ORCHESTRA_CANNOT_CLAIM")
                 if package["status"] != TaskStatus.READY.value:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
+                if connection.execute(
+                    "SELECT 1 FROM registry_metadata WHERE key=? AND value='1'",
+                    (CONTINUOUS_QUEUE_METADATA_KEY,),
+                ).fetchone():
+                    source_ref = package["source_ref"]
+                    if (package["source_system"] != "github_issue"
+                            or not isinstance(source_ref, str)
+                            or not re.fullmatch(r"[1-9]\d*", source_ref)):
+                        raise RegistryConflict("GITHUB_SOURCE_MISMATCH", package_id)
+                    diagnostics = json.loads(package["provider_diagnostics_json"])
+                    if not re.fullmatch(
+                        r"[0-9a-f]{64}", str(diagnostics.get("queue_contract_sha256", ""))
+                    ):
+                        raise RegistryConflict("QUEUE_CONTRACT_MISMATCH", package_id)
                 if scope is not None and package["kind"] == PackageKind.PARENT.value:
                     placeholders = ",".join("?" for _ in scope["package_ids"])
                     active_in_run = connection.execute(
@@ -2804,49 +2843,20 @@ class SQLiteRegistry:
                     if active_in_run >= scope["parent_limit"]:
                         raise RegistryConflict("RUN_PARENT_LIMIT")
                 if package["kind"] == PackageKind.PARENT.value:
-                    # A submitted parent continues to consume its original
-                    # builder's WIP slot while it waits for independent review.
-                    # Attribution is derived from successful attempts, never a
-                    # caller-supplied worker label.
-                    scope_clause = ""
-                    scope_args: tuple[Any, ...] = ()
-                    waiting_review_clause = ""
-                    waiting_review_args: tuple[Any, ...] = ()
-                    if scope is not None:
-                        placeholders = ",".join("?" for _ in scope["package_ids"])
-                        scope_clause = f" AND parent.id IN ({placeholders})"
-                        scope_args = tuple(scope["package_ids"])
-                        # A submitted parent belongs to this run's WIP only
-                        # when its independent review is also still able to
-                        # progress inside this exact immutable allowlist.
-                        waiting_review_clause = (
-                            " AND EXISTS (SELECT 1 FROM task_dependencies AS review_dependency "
-                            "JOIN work_packages AS review ON review.id=review_dependency.package_id "
-                            "WHERE review_dependency.dependency_id=parent.id "
-                            "AND review.kind='REVIEW' AND review.id IN ("
-                            + placeholders + ") AND review.status IN ('READY','ACTIVE','VERIFY_REVIEW'))"
-                        )
-                        waiting_review_args = tuple(scope["package_ids"])
+                    # Reviewer-owned waiting work is not active coding. Keep
+                    # this guard on active builder leases; the unique worker
+                    # lease index also prevents simultaneous coding claims.
                     builder_wip = connection.execute(
                         """SELECT COUNT(*) FROM work_packages AS parent
-                           WHERE parent.kind='PARENT' AND (
-                             (parent.status='ACTIVE' AND EXISTS (
+                           WHERE parent.kind='PARENT' AND
+                             parent.status='ACTIVE' AND EXISTS (
                                SELECT 1 FROM leases AS active
                                WHERE active.package_id=parent.id
                                  AND active.worker_id=?
                                  AND active.released_at IS NULL
                                  AND active.expires_at > ?
-                             ))
-                             OR (parent.status='VERIFY_REVIEW' AND (
-                               SELECT attempt.worker_id FROM attempts AS attempt
-                               WHERE attempt.package_id=parent.id
-                                 AND attempt.outcome='SUCCEEDED'
-                                 AND attempt.ended_at IS NOT NULL
-                               ORDER BY attempt.ended_at DESC, attempt.started_at DESC, attempt.id DESC
-                               LIMIT 1
-                             )=?""" + waiting_review_clause + """)
-                           )""" + scope_clause,
-                        (worker_id, acquired_at, worker_id, *waiting_review_args, *scope_args),
+                             )""",
+                        (worker_id, acquired_at),
                     ).fetchone()[0]
                     if builder_wip >= BUILDER_WIP_LIMIT:
                         raise RegistryConflict("BUILDER_WIP_LIMIT", worker_id)

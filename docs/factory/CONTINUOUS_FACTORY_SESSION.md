@@ -1,32 +1,30 @@
-# Continuous Factory session
+# Continuous Factory queue
 
-An approved bounded session has an immutable allowlist and a distinct active
-parent WIP limit. The allowlist can contain more independently reviewed pairs
-than can run simultaneously; the Registry remains the authority for leases,
-deadlines, capacity, paths, reviewer independence, and the kill switch.
+The Registry is the persistent work queue. The opt-in `enable-continuous`
+operator starts a LIVE dispatch generation without an immutable package
+allowlist or a queue-item deadline. A READY package with a valid GitHub source
+binding can be proposed when its dependencies, worker capability, capacity,
+path ownership, and review-independence gates pass. Unbound READY records stay
+visible in the Registry but are not runner proposals or direct lease targets.
+Individual leases and provider attempts still have timeouts. The kill switch
+and lifecycle operators retain authority over every claim.
 
-Waiting-review WIP is scoped to the active bounded run's immutable allowlist:
-only a parent whose paired review remains in that run can consume its author's
-slot. When a run is stopped and a successor is activated, the successor gets a
-new allowlist/lineage; preserved historical `VERIFY_REVIEW` records remain
-visible but do not consume successor capacity. A parent still awaiting review
-must be explicitly included with its review in a restarted run to count.
+Bounded runs remain available for canaries. Their allowlist, deadline, and
+parent limit continue to apply only when that mode is selected. Switching
+modes requires the normal drained, PAUSED lifecycle and an immutable installed
+release; active attempts are never hot-reloaded.
 
-Each builder has a WIP limit of two parent packages. A parent awaiting its
-independent review remains attributed to the worker on its latest successful
-implementation attempt, so it consumes one of that builder's slots until the
-review completes. This does not consume another builder's capacity or replace
-the global active-parent limit.
+One worker may hold only one active lease. A submitted parent in
+`VERIFY_REVIEW` is reviewer-owned waiting work and does not consume the
+builder's active coding slot. Active parent leases still count toward the
+builder WIP guard and the global active-parent limit. Review-ready work is
+ordered before new coding at an idle boundary; running attempts are never
+preempted. A review request for changes is not, by itself, authority to
+requeue a parent or create a correction package. The evidence-linked
+correction transition remains a separate control-plane change.
 
-At an idle boundary, a READY independent review is ordered before an eligible
-parent. Waiting and BLOCKED packages remain in their recorded state: they are
-not promoted to make a session appear runnable. Activation may retain a
-dependency-waiting pair only when a capable implementer and an independent
-capable reviewer are registered for that exact pair.
-
-Between lease claim and provider launch, the runner may revalidate once after a
-revision race only if dispatch is still LIVE, the run deadline remains valid,
-the same lease ID and bounded-run ID/scope/deadline remain active, the package
-remains ACTIVE, capacity/path eligibility remains valid, and no attempt exists.
-A stop, kill switch, deadline, lease ownership change, run rollover, altered
-scope, lost eligibility, or existing attempt fails closed.
+Between lease claim and provider launch, the runner may revalidate once
+after a revision race only while dispatch remains LIVE, the same lease is
+active, the package and worker remain eligible, capacity/path checks pass,
+and no attempt exists. In bounded mode the original run identity, scope, and
+deadline must also remain unchanged. Any failed condition closes the claim.

@@ -1129,18 +1129,23 @@ def main():
     def g(*a,cwd=repo): return monitored_run([git,*a],cwd=cwd,env=env)
     # Dry-run performs only read-only GitHub/Git calls: no directories, labels, or fetch.
     github('api','repos/'+c['github'],'--jq','.full_name')
-    control_scope = (
-        registry_control.registry.dispatch_control().get('bounded_run')
-        if registry_control is not None else None
+    registry_dispatch = (
+        registry_control.registry.dispatch_control()
+        if registry_control is not None else {}
     )
-    bounded_registry_mode = isinstance(control_scope, dict)
-    if bounded_registry_mode and not c.get('capacity_collectors'):
-        raise ValueError('bounded Registry mode requires configured capacity_collectors')
+    control_scope = registry_dispatch.get('bounded_run')
+    registry_queue_mode = (isinstance(control_scope, dict)
+                           or registry_dispatch.get('continuous_queue') is True)
+    if registry_queue_mode and not c.get('capacity_collectors'):
+        raise ValueError('Registry queue mode requires configured capacity_collectors')
     issue_list = ['issue','list','--repo',c['github'],'--state','open','--limit','100',
                   '--json','number,title,body,labels,author']
-    if bounded_registry_mode:
+    if registry_queue_mode:
         issues = []
-        for source_issue in registry_control.bounded_source_issues():
+        source_issues = (registry_control.bounded_source_issues()
+                         if isinstance(control_scope, dict)
+                         else registry_control.queue_source_issues())
+        for source_issue in source_issues:
             issue = json.loads(github(
                 'issue', 'view', str(source_issue), '--repo', c['github'],
                 '--json', 'number,title,body,labels,author,state',
@@ -1170,7 +1175,7 @@ def main():
                 usage_error = 'usage policy unavailable or invalid'
         for issue in issues:
             try:
-                if bounded_registry_mode:
+                if registry_queue_mode:
                     if issue['author']['login'] not in c['allowed_authors']:
                         raise ValueError('Queue issue requires an allowed author')
                     body = normalized_contract(issue)
@@ -1261,7 +1266,7 @@ def main():
         registry_lifecycle = None
         runtime_monitor = None
         try:
-            if bounded_registry_mode:
+            if registry_queue_mode:
                 if issue['author']['login'] not in c['allowed_authors']:
                     raise ValueError('Queue issue requires an allowed author')
                 body = normalized_contract(issue)
@@ -1286,7 +1291,7 @@ def main():
             registry_review = (
                 registry_control is not None and body.get('kind') == 'REVIEW'
             )
-            blocked = [] if (registry_review or bounded_registry_mode) else [
+            blocked = [] if (registry_review or registry_queue_mode) else [
                 dep for dep in body.get('depends_on', [])
                 if json.loads(github(
                     'issue', 'view', str(dep), '--repo', c['github'],
@@ -1326,12 +1331,12 @@ def main():
             try:
                 review_input = (
                     registry_control.review_input(body['task'])
-                    if registry_review and bounded_registry_mode else None
+                    if registry_review and registry_queue_mode else None
                 )
-                if registry_review and bounded_registry_mode:
+                if registry_review and registry_queue_mode:
                     if not isinstance(review_input, ReviewInput):
                         raise RegistryConflict('REVIEW_INPUT_REQUIRED')
-                    if bounded_registry_mode and not review_source_is_green(github, c['github'], review_input):
+                    if registry_queue_mode and not review_source_is_green(github, c['github'], review_input):
                         print(json.dumps({'issue': n, 'status': 'defer',
                                           'reason': 'REVIEW_SOURCE_OR_CI_NOT_GREEN'}))
                         continue
