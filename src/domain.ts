@@ -54,6 +54,10 @@ export interface HistoryEvent {
   at: string
   event: string
   confirmation?: ConfirmationGesture
+  /** Dedicated confirmation that creates a non-executable Action staging record. */
+  actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
+  /** A separately authored CalendarEvent request for an already staged Action. */
+  actionSchedule?: { eventId: string; startsAt: string; temporalContext: string }
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
   reviewRevision?: { from: string; to: string }
   sourceCorrection?: { correctionId: string; from: string; to: string }
@@ -163,6 +167,17 @@ export interface SemanticObject {
   metadata: ObjectMetadata
   reminders: ReminderInstruction[]
 }
+export type ActionPriority = 1 | 2 | 3 | 4 | 5
+/** Staging is durable but intentionally distinct from execution eligibility. */
+export interface StagedAction {
+  id: string
+  objectId: string
+  captureId: string
+  priority: ActionPriority
+  status: 'staged' | 'scheduled' | 'reversed'
+  stagedAt: string
+  schedule?: { eventId: string; startsAt: string; temporalContext: string }
+}
 export interface Commitment extends SemanticObject { kind: 'commitment' }
 export interface CalendarEvent {
   id: string
@@ -187,6 +202,8 @@ export interface PersistedState {
   sourceCorrections?: SourceCorrection[]
   interpretations: Interpretation[]
   semanticObjects: SemanticObject[]
+  /** Action-specific durable staging projection, derived from immutable history. */
+  stagedActions?: StagedAction[]
   calendarEvents: CalendarEvent[]
   relationships: SemanticRelationship[]
   /** Active UI identities include unresolved proposals without semantic objects. */
