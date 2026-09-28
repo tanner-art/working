@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -2414,6 +2415,55 @@ def parse_followup_review_spec(value: Mapping[str, Any]) -> WorkPackage:
     return review
 
 
+def parse_review_correction_slots_spec(
+    value: Mapping[str, Any],
+) -> tuple[str, Mapping[str, Any], tuple[tuple[WorkPackage, WorkPackage, Mapping[str, Any], Mapping[str, Any]], ...]]:
+    """Parse inert, source-bound correction pairs; no verdict is inferred."""
+    if _sensitive_paths(value):
+        raise OperatorError("correction slot spec contains secret-shaped fields")
+    target_id = value.get("target_package_id")
+    original = value.get("original_contract")
+    raw_slots = value.get("slots")
+    if (not isinstance(target_id, str) or not re.fullmatch(r"TASK-\d+", target_id)
+            or not isinstance(original, Mapping) or not isinstance(raw_slots, list)
+            or not 1 <= len(raw_slots) <= 2):
+        raise OperatorError("correction slot spec is invalid")
+    slots = []
+    for slot in raw_slots:
+        if not isinstance(slot, Mapping):
+            raise OperatorError("correction slot is invalid")
+        raw_implementation, raw_review = slot.get("implementation"), slot.get("review")
+        if not isinstance(raw_implementation, Mapping) or not isinstance(raw_review, Mapping):
+            raise OperatorError("correction slot requires implementation and review")
+        implementation_contract = raw_implementation.get("queue_contract")
+        review_contract = raw_review.get("queue_contract")
+        if not isinstance(implementation_contract, Mapping) or not isinstance(review_contract, Mapping):
+            raise OperatorError("correction slot contracts are required")
+        implementation = replace(_package(raw_implementation, queue_contract=implementation_contract), status=TaskStatus.ON_DECK)
+        review = replace(_package(raw_review, queue_contract=review_contract), status=TaskStatus.ON_DECK)
+        source_ref = implementation.provider_diagnostics.get("github_source_ref")
+        if not isinstance(source_ref, str) or not re.fullmatch(r"[1-9]\d*", source_ref):
+            raise OperatorError("correction implementation source is invalid")
+        for package, contract in ((implementation, implementation_contract), (review, review_contract)):
+            declared = {
+                "task": package.id, "lane": package.lane.value,
+                "kind": package.kind.value,
+                "capacity_size": package.capacity_size.value,
+                "capacity_risk": package.capacity_risk.value,
+            }
+            if any(contract.get(key) != expected for key, expected in declared.items() if key in contract):
+                raise OperatorError("correction package/contract mismatch")
+            if contract_shape_reasons(contract):
+                raise OperatorError("correction readiness contract is incomplete")
+        if (not re.fullmatch(r"TASK-\d+", implementation.id)
+                or not re.fullmatch(r"TASK-\d+", review.id)
+                or implementation_contract.get("depends_on") != []
+                or review_contract.get("depends_on") != [int(source_ref)]):
+            raise OperatorError("correction slot source/dependency is invalid")
+        slots.append((implementation, review, dict(implementation_contract), dict(review_contract)))
+    return target_id, dict(original), tuple(slots)
+
+
 def parse_review_input_spec(value: Mapping[str, Any]) -> ReviewInput:
     """Parse supplied historical review facts; this never records an approval."""
     if _sensitive_paths(value):
@@ -2713,7 +2763,7 @@ def enable_live(
     preservation_path: Path,
     expected_commit: str,
     expected_revision: int,
-    canary_feature_id: str,
+    canary_feature_id: str | None,
     *,
     mode: str = "lanes",
     dashboard_port: int = 8787,
@@ -2721,7 +2771,12 @@ def enable_live(
     run=None,
     uid: int | None = None,
     bounded_run: Mapping[str, Any] | None = None,
+    continuous: bool = False,
 ) -> Mapping[str, Any]:
+    if continuous and (canary_feature_id is not None or bounded_run is not None):
+        raise OperatorError("continuous queue cannot use a canary or bounded-run scope")
+    if not continuous and canary_feature_id is None:
+        raise OperatorError("bounded activation requires a canary feature")
     run_package_ids = tuple(bounded_run["package_ids"]) if bounded_run is not None else None
     evidence = preflight(
         database, config_path, release, preservation_path, expected_commit,
@@ -2760,9 +2815,12 @@ def enable_live(
             new_mode="LIVE",
             kill_switch_engaged=False,
             changed_at=utc_now(),
-            reason=f"owner-approved bounded canary {canary_feature_id}",
-            operation_id=f"enable-live:{canary_feature_id}:{expected_revision}",
+            reason=("owner-approved continuous queue" if continuous
+                    else f"owner-approved bounded canary {canary_feature_id}"),
+            operation_id=(f"enable-continuous:{expected_revision}" if continuous
+                          else f"enable-live:{canary_feature_id}:{expected_revision}"),
             bounded_run=bounded_run,
+            continuous_queue=continuous,
         )
     except Exception:
         # A stale revision after service promotion is handled as an emergency
@@ -2784,6 +2842,7 @@ def enable_live(
         "previous_revision": expected_revision,
         "revision": revision,
         "canary_feature_id": canary_feature_id,
+        "continuous": continuous,
         "services": sorted(label for label, _ in live_plan),
         "worker_gate": evidence["worker_gate"],
         "bounded_run": dict(bounded_run) if bounded_run is not None else None,

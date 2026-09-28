@@ -30,6 +30,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_canary_spec,
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
+    parse_review_correction_slots_spec,
     parse_review_input_spec,
     parse_bounded_run_scope,
     preflight,
@@ -176,6 +177,14 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--spec", required=True, type=pathlib.Path)
     command.add_argument("--observed-at")
 
+    command = subparsers.add_parser(
+        "register-review-corrections",
+        help="Pre-authorize up to two same-scope rejected-review correction pairs",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
     command = subparsers.add_parser("record-review-input", help="Record immutable historical implementation facts for a registered review")
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
@@ -195,6 +204,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--dashboard-port", type=int, default=8787)
     command.add_argument("--bounded-run", type=pathlib.Path,
                          help="reviewed JSON run envelope; omission preserves legacy canary mode")
+
+    command = subparsers.add_parser(
+        "enable-continuous", help="Activate the persistent Registry queue without a run allowlist"
+    )
+    _context(command)
+    command.add_argument("--mode", choices=("serial", "lanes"), default="lanes")
+    command.add_argument("--dashboard-port", type=int, default=8787)
 
     command = subparsers.add_parser("stop", help="Engage the Registry kill switch (or no-op for a superseded run timer)")
     command.add_argument("--database", required=True, type=pathlib.Path)
@@ -374,6 +390,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             mode=args.mode, dashboard_port=args.dashboard_port,
             bounded_run=bounded_run,
         ))
+    if args.command == "enable-continuous":
+        return dict(enable_live(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision, None,
+            mode=args.mode, dashboard_port=args.dashboard_port,
+            continuous=True,
+        ))
     if args.command == "register-followup-review":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
@@ -402,6 +425,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "previous_revision": args.expect_revision,
             "revision": revision,
             "worker_gate": worker_gate,
+        }
+    if args.command == "register-review-corrections":
+        observed_at = args.observed_at or utc_now()
+        preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
+        target_id, original_contract, slots = parse_review_correction_slots_spec(
+            _load_object(args.spec, "review correction slot spec")
+        )
+        registry = SQLiteRegistry(args.database)
+        revision = registry.register_review_correction_slots(
+            target_id, original_contract, slots,
+            expected_revision=args.expect_revision, recorded_at=observed_at,
+        )
+        return {
+            "kind": "threadline-factory-register-review-corrections",
+            "passed": True,
+            "target_package_id": target_id,
+            "correction_package_ids": [item[0].id for item in slots],
+            "review_package_ids": [item[1].id for item in slots],
+            "previous_revision": args.expect_revision,
+            "revision": revision,
         }
     if args.command == "record-review-input":
         review_input = parse_review_input_spec(_load_object(args.spec, "review input spec"))

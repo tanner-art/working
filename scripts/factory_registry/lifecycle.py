@@ -19,6 +19,7 @@ class TransitionAuthority(str, Enum):
     LEASE_RELEASE = "LEASE_RELEASE"
     ATTEMPT_FINISH = "ATTEMPT_FINISH"
     REVIEW_OUTCOME = "REVIEW_OUTCOME"
+    REVIEW_CORRECTION = "REVIEW_CORRECTION"
     RECOVERY = "RECOVERY"
 
 
@@ -56,6 +57,10 @@ _PACKAGE_TRANSITIONS = {
     },
     TransitionAuthority.REVIEW_OUTCOME: {
         (TaskStatus.VERIFY_REVIEW, TaskStatus.DONE),
+    },
+    TransitionAuthority.REVIEW_CORRECTION: {
+        (TaskStatus.VERIFY_REVIEW, TaskStatus.BLOCKED),
+        (TaskStatus.ON_DECK, TaskStatus.READY),
     },
     TransitionAuthority.RECOVERY: {
         (TaskStatus.ACTIVE, TaskStatus.BLOCKED),

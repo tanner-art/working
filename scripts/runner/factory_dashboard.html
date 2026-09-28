@@ -160,7 +160,7 @@
   <section id="section-registry-queue">
     <h2>Features &amp; progress</h2>
     <div id="feature-groups"></div>
-    <p class="note">Grouped by registered feature identity. Expand a feature to see its implementation, reviews, and attempt history. DONE is a Registry state, not proof of merge or deployment.</p>
+    <p class="note">One item per feature. Expand it for drafts and review history. A successful review is not a verified merge, Preview, or Production deployment.</p>
     <details><summary>All Registry work packages (technical detail)</summary>
     <div class="table-wrap">
       <table id="registry-packages-table">
@@ -299,6 +299,38 @@
     return packages;
   }
 
+  function featureProgress(feature, reviews) {
+    var parents = feature.packages.filter(function (pkg) { return pkg.kind === 'PARENT'; });
+    var parentIds = parents.map(function (pkg) { return pkg.id; });
+    var drafts = parents.reduce(function (total, pkg) {
+      return total + pkg.attempts.filter(function (attempt) { return attempt.outcome === 'succeeded'; }).length;
+    }, 0);
+    var currentDraft = Math.max(1, drafts);
+    var verdicts = (reviews || []).filter(function (review) {
+      return parentIds.indexOf(review.packageId) !== -1 &&
+        (review.state === 'approved' || review.state === 'changes_requested');
+    }).sort(function (a, b) {
+      return String(b.decidedAt || b.requestedAt).localeCompare(String(a.decidedAt || a.requestedAt));
+    });
+    var latest = verdicts[0];
+    var reviewActive = feature.packages.some(function (pkg) {
+      return pkg.kind === 'REVIEW' && pkg.state === 'ACTIVE';
+    });
+    if (parents.some(function (pkg) { return pkg.state === 'ACTIVE'; }))
+      return 'Draft ' + (drafts + 1) + ' in progress';
+    if (reviewActive) return 'In review ' + currentDraft;
+    if (parents.some(function (pkg) {
+      return pkg.state === 'BLOCKED' &&
+        !String(pkg.blockReason || '').startsWith('SUPERSEDED_BY_CORRECTION:');
+    })) return 'Blocked';
+    if (latest && latest.state === 'changes_requested') return 'Changes requested';
+    if (parents.some(function (pkg) { return pkg.state === 'VERIFY_REVIEW'; }))
+      return 'For review ' + currentDraft;
+    if (latest && latest.state === 'approved' && feature.state === 'DONE')
+      return 'Review successful';
+    return 'Queued';
+  }
+
   function renderRegistry(registry) {
     var kpis = document.getElementById('registry-kpis');
     var note = document.getElementById('registry-note');
@@ -352,8 +384,9 @@
       var details = el('details', { 'data-feature-id': feature.id });
       details.open = !!expandedFeatures[feature.id];
       details.addEventListener('toggle', function () { expandedFeatures[feature.id] = details.open; });
-      details.appendChild(el('summary', { text: feature.title + ' — ' + (progress || 'No packages registered') }));
-      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state }));
+      details.appendChild(el('summary', { text: feature.title + ' — ' + featureProgress(feature, projection.reviews) }));
+      details.appendChild(el('div', { class: 'note', text: feature.id + ' · ' + (progress || 'No packages registered') }));
+      details.appendChild(el('div', { class: 'note', text: 'Merge and deployment: unverified unless separately proven by their source systems.' }));
       feature.packages.forEach(function (pkg) {
         var packageNode = el('div', { class: 'feature-package' }, [
           el('strong', { text: pkg.id + ' — ' + pkg.title }),
@@ -373,6 +406,20 @@
         packageNode.appendChild(attempts);
         details.appendChild(packageNode);
       });
+      var featureReviews = (projection.reviews || []).filter(function (review) {
+        return feature.packages.some(function (pkg) { return pkg.id === review.packageId; });
+      });
+      if (featureReviews.length) {
+        var reviewHistory = el('details', {}, [el('summary', { text: 'Review history (' + featureReviews.length + ')' })]);
+        featureReviews.forEach(function (review) {
+          reviewHistory.appendChild(el('div', { class: 'note', text:
+            review.state.replace('_', ' ') + ' · ' + (review.assignedReviewerId || 'Unassigned') +
+            ' · ' + (review.decidedAt || review.requestedAt || 'Time unknown') +
+            (review.changesRequested && review.changesRequested.length ?
+              ' · ' + review.changesRequested.join('; ') : '') }));
+        });
+        details.appendChild(reviewHistory);
+      }
       groups.appendChild(details);
     });
     if (!packages.length) {

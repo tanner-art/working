@@ -29,9 +29,14 @@ class BoundedRunTests(unittest.TestCase):
                 worker_id, worker_id, ("code",), (Lane.PLATFORM,), usage_state="GREEN"
             ))
         for package_id in ("TASK-1", "TASK-2", "TASK-3"):
+            contract = {"task": package_id}
+            digest = hashlib.sha256(json.dumps(
+                contract, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
             self.registry.register_work_package(WorkPackage(
                 package_id, "F", package_id, "test", Lane.PLATFORM, ("code",), 1,
                 ("works",), status=TaskStatus.READY,
+                provider_diagnostics={"queue_contract_sha256": digest},
             ))
 
     def tearDown(self) -> None:
@@ -62,6 +67,42 @@ class BoundedRunTests(unittest.TestCase):
                 "TASK-3", "builder-c", acquired_at=self.now.isoformat(),
                 expires_at=(self.now + timedelta(minutes=1)).isoformat(),
                 expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+
+    def test_continuous_queue_claims_ready_work_without_a_session_allowlist(self) -> None:
+        for source in (1, 2):
+            package_id = f"TASK-{source}"
+            self.registry.bind_legacy_package_source(
+                package_id, github_issue=source, queue_contract={"task": package_id},
+                expected_revision=self.registry.dispatch_control()["revision"],
+                recorded_at=self.now.isoformat(),
+            )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=self.now.isoformat(), reason="continuous queue test",
+            continuous_queue=True,
+        )
+        self.assertTrue(self.registry.dispatch_control()["continuous_queue"])
+        with self.assertRaisesRegex(RegistryConflict, "GITHUB_SOURCE_MISMATCH"):
+            self.registry.acquire_lease(
+                "TASK-3", "builder-c", acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+            )
+        for package_id, worker_id in (("TASK-1", "builder-a"), ("TASK-2", "builder-b")):
+            self.registry.acquire_lease(
+                package_id, worker_id, acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=self.now.isoformat(), reason="stop continuous queue"
+        )
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_NOT_AUTHORIZED"):
+            self.registry.acquire_lease(
+                "TASK-3", "builder-c", acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
             )
 
     def test_long_allowlist_is_bounded_by_wip_not_registered_queue_size(self) -> None:
@@ -117,7 +158,7 @@ class BoundedRunTests(unittest.TestCase):
         )
         self.assertEqual("LIVE", self.registry.dispatch_control()["dispatch_mode"])
 
-    def test_builder_wip_counts_only_current_lineage_and_frees_after_real_review(self) -> None:
+    def test_submitted_review_does_not_idle_builder_and_active_lease_still_blocks(self) -> None:
         self.registry.register_worker(Worker(
             "reviewer", "reviewer", ("review",), (Lane.ASSURANCE,), usage_state="GREEN"
         ))
@@ -184,7 +225,9 @@ class BoundedRunTests(unittest.TestCase):
             "B-1", "builder-b", acquired_at=(self.now + timedelta(seconds=2)).isoformat(),
             expires_at=(self.now + timedelta(minutes=2)).isoformat(),
         )
-        with self.assertRaisesRegex(RegistryConflict, "BUILDER_WIP_LIMIT"):
+        # A-1 waiting for review did not prevent the A-2 claim. The second
+        # simultaneous coding claim is refused by the sole-worker lease.
+        with self.assertRaisesRegex(RegistryConflict, "WORKER_NOT_IDLE"):
             self.registry.acquire_lease(
                 "A-3", "builder-a", acquired_at=(self.now + timedelta(seconds=3)).isoformat(),
                 expires_at=(self.now + timedelta(minutes=2)).isoformat(),

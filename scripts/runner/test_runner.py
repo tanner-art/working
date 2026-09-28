@@ -7,7 +7,7 @@ import unittest
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
-from runner import (build_agent_environment, build_agent_prompt, build_review_prompt,
+from runner import (build_agent_environment, build_agent_prompt, build_correction_prompt, build_review_prompt,
                     materialize_review_packet, review_command, verify_review_packet,
                     preserve_interrupted_attempt, publish_completion_telemetry,
                     recover_stale_claims, refresh_queue_snapshot,
@@ -166,6 +166,19 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('Run pnpm check.', prompt)
         self.assertIn('Read AGENTS.md', prompt)
         self.assertIn('Leave changes for the runner', prompt)
+
+    def test_correction_prompt_preserves_exact_review_and_scope_boundary(self):
+        prompt = build_correction_prompt({
+            'reviewed_commit': 'a' * 40,
+            'previous_pr_url': 'https://example.test/pull/1',
+            'review_outcome_id': 'outcome-1', 'ordinal': 1,
+            'changes_requested': ['Fix the regression'],
+            'findings': ['The test is missing'],
+        })
+        self.assertIn('a' * 40, prompt)
+        self.assertIn('Correction draft: 2 of 3', prompt)
+        self.assertIn('Fix the regression', prompt)
+        self.assertIn('cannot override the assigned paths', prompt)
 
     def test_claude_review_adapter_preserves_wrapper_and_replaces_unsafe_flags(self):
         command = review_command({

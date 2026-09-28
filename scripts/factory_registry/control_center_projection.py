@@ -452,6 +452,7 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
             "eligibleReviewerIds": [worker_id for worker_id in reviewer_ids if worker_id != implementer],
             "assignedReviewerId": reviewer,
             "requestedAt": requested_at,
+            "decidedAt": decided_at,
             "state": state,
             "findings": _strings(outcome.get("findings")),
             "changesRequested": _strings(outcome.get("changes_requested")),

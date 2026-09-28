@@ -125,6 +125,40 @@ class RunnerRegistryControlTests(unittest.TestCase):
         with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAUSED"):
             control.pre_claim()
 
+    def test_continuous_queue_keeps_unbound_work_visible_but_out_of_runner_proposals(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self.registry.register_feature(Feature("F", "Feature", 1, TaskStatus.READY))
+        contract = {"task": "BOUND"}
+        self.registry.register_work_package(WorkPackage(
+            "BOUND", "F", "Bound", "test", Lane.PLATFORM, ("code",), 1,
+            ("works",), status=TaskStatus.READY,
+            provider_diagnostics={"queue_contract_sha256": queue_contract_digest(contract)},
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "UNBOUND", "F", "Unbound", "test", Lane.PLATFORM, ("code",), 2,
+            ("works",), status=TaskStatus.READY,
+        ))
+        self.registry.bind_legacy_package_source(
+            "BOUND", github_issue=42, queue_contract=contract,
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=now,
+        )
+        current = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=current["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False, changed_at=now,
+            reason="test continuous queue", continuous_queue=True,
+        )
+        control = RunnerRegistryControl(self.database)
+        self.assertEqual(control.queue_source_issues(), (42,))
+        self.assertEqual(
+            {item["id"] for item in control._run_snapshot(now).work_packages},
+            {"BOUND"},
+        )
+        self.assertEqual(
+            {item["id"] for item in self.registry.dispatch_snapshot(observed_at=now).work_packages},
+            {"BOUND", "UNBOUND"},
+        )
+
     def test_scoped_shadow_wip_excludes_historical_and_finished_reviews(self):
         snapshot = DispatchSnapshot(
             revision=1, observed_at=datetime.now(timezone.utc).isoformat(),
