@@ -45,7 +45,7 @@ python3 -m scripts.factory_registry.control_center_server \
   --database /absolute/path/to/factory-registry.sqlite3
 ```
 
-The Vercel Control Center requires an HTTPS projection URL. This loopback service is therefore not directly reachable from Vercel and is not a hosted relay. Selecting, provisioning, securing, and operating a relay or hosting location remains an owner decision. No relay, tunnel, cloud storage, deployment, or production secret is created by this package.
+This loopback service is for local diagnostics and is not part of the phone dashboard path. The hosted dashboard uses the separate three-hour outbound snapshot publisher described in [HOSTED_SNAPSHOT_MIRROR.md](HOSTED_SNAPSHOT_MIRROR.md); it does not expose this local listener or require a tunnel.
 
 ## Verification
 

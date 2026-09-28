@@ -22,6 +22,12 @@ describe('Factory Control Center components', () => {
     expect(markup).toContain('>Refresh</button>')
   })
 
+  it('labels an old published copy as stale rather than live', () => {
+    const markup = renderToStaticMarkup(<DashboardView view="overview" snapshot={factoryControlFixture} refreshing={false} onRefresh={() => undefined} />)
+    expect(markup).toContain('Snapshot is older than the three-hour update window')
+    expect(markup).toContain('Captured')
+  })
+
   it.each([
     ['overview', ['Registry revision registry-preserved-soak-001', 'Needs attention', 'Heartbeat evidence is stale', 'Service state is unknown', 'Authentication state is unknown']],
     ['queue', ['SOAK-001', 'Registry read-only reconciliation canary', 'VERIFY / REVIEW', 'REVIEW_FAILURE']],
