@@ -352,8 +352,8 @@
       var details = el('details', { 'data-feature-id': feature.id });
       details.open = !!expandedFeatures[feature.id];
       details.addEventListener('toggle', function () { expandedFeatures[feature.id] = details.open; });
-      details.appendChild(el('summary', { text: feature.title + ' — ' + (progress || 'No packages registered') }));
-      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state }));
+      details.appendChild(el('summary', { text: feature.title + ' — ' + featureStage(feature, projection) + ' · ' + (progress || 'No packages registered') }));
+      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state + '. Stage is derived from this Registry revision, not an authoritative status write.' }));
       feature.packages.forEach(function (pkg) {
         var packageNode = el('div', { class: 'feature-package' }, [
           el('strong', { text: pkg.id + ' — ' + pkg.title }),
@@ -394,6 +394,21 @@
         el('td', { text: String(pkg.attemptNumber) })
       ]));
     });
+  }
+
+  function featureStage(feature, projection) {
+    var packages = feature.packages || [];
+    var ids = {}; packages.forEach(function (item) { ids[item.id] = true; });
+    var reviews = (projection.reviews || []).filter(function (review) { return ids[review.packageId]; });
+    if (packages.some(function (item) { return item.reviewState === 'changes_requested'; }) || reviews.some(function (item) { return item.state === 'changes_requested'; })) return 'Changes requested';
+    if (packages.some(function (item) { return item.state === 'BLOCKED'; })) return 'Blocked';
+    var approved = packages.some(function (item) { return item.reviewState === 'approved'; }) || reviews.some(function (item) { return item.state === 'approved' && item.approvalEvidence && item.approvalEvidence.length; });
+    if (feature.state === 'DONE') return approved ? 'Accepted' : 'Awaiting integration';
+    if (approved) return 'Awaiting integration';
+    if (packages.some(function (item) { return item.state === 'VERIFY_REVIEW'; }) || reviews.some(function (item) { return item.state === 'waiting' || item.state === 'assigned'; })) return 'Awaiting review';
+    if (packages.some(function (item) { return item.state === 'ACTIVE'; })) return 'Building';
+    if (packages.some(function (item) { return item.state === 'READY'; })) return 'Ready';
+    return 'Unknown';
   }
 
   function registryWorkers(registry) {
