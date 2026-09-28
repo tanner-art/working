@@ -1,6 +1,6 @@
 import { validTemporalHistory } from './temporalConfirmation'
 import { isGroupingReviewState } from './groupingProposal'
-import type { ActionPriority, AppState, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
+import type { ActionPriority, AppState, CommitmentScheduleAudit, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
 import { bankFromLegacy, isCanvasBank } from './canvasBank'
 import { isAppState } from './store'
@@ -93,6 +93,17 @@ function stagedAction(item: ThoughtObject, captureId: string): StagedAction | un
     status: reversed ? 'reversed' : schedule ? 'scheduled' : 'staged', stagedAt: stage.at, ...(schedule ? { schedule: copy(schedule) } : {}) }
 }
 
+/** Commitment time is only a proposal until this separate scheduling audit exists. */
+function commitmentSchedule(item: ThoughtObject): CommitmentScheduleAudit | undefined {
+  if (item.kind !== 'commitment') return undefined
+  const schedules = item.history.filter(entry => entry.commitmentSchedule !== undefined)
+  if (schedules.length > 1) fail()
+  const schedule = schedules[0]?.commitmentSchedule
+  if (!schedule) return undefined
+  if (!schedule.eventId || !Number.isFinite(Date.parse(schedule.startsAt)) || !schedule.temporalContext.trim() || schedule.source !== 'commitment-calendar-scheduling') fail()
+  return schedule
+}
+
 function latest(model: PersistedState, id: string): Interpretation {
   return model.interpretations.filter(item => item.legacy.id === id).at(-1) ?? fail()
 }
@@ -110,6 +121,7 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
   const version = (previous?.version ?? 0) + 1
   const consequential = item.kind === 'action' || item.kind === 'commitment'
   const actionStage = stagedAction(item, `capture:${item.id}`)
+  const commitmentEvent = commitmentSchedule(item)
   // Text alone never authorizes a gesture. Compatibility requires a structured
   // confirmation from schema-v2 validation or an already validated save baseline.
   const additions = previous ? item.history.slice(previous.legacy.history.length) : []
@@ -172,6 +184,10 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
       model.calendarEvents.push({ id: actionStage.schedule.eventId, title: interpretation.summary, startsAt: actionStage.schedule.startsAt,
         temporalContext: actionStage.schedule.temporalContext, objectIds: [item.id], captureIds: interpretation.captureIds, status: 'scheduled' })
     }
+  }
+  if (commitmentEvent && !model.calendarEvents.some(event => event.id === commitmentEvent.eventId)) {
+    model.calendarEvents.push({ id: commitmentEvent.eventId, title: interpretation.summary, startsAt: commitmentEvent.startsAt,
+      temporalContext: commitmentEvent.temporalContext, objectIds: [item.id], captureIds: interpretation.captureIds, status: 'scheduled' })
   }
   // Unresolved reminders and unconfirmed consequential meaning remain interpretations.
   if (item.kind !== 'reminder' && (!consequential || confirmation || (actionStage && actionStage.status !== 'reversed'))) {
