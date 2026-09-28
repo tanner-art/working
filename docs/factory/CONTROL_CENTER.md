@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`/dashboard` is the authenticated, read-only human view of Factory state. The Registry remains authoritative for features, packages, workers, leases, attempts, evidence, capacity, failures, and events. The browser and Vercel endpoint do not store or mutate Factory state.
+`/dashboard` is the authenticated, read-only human view of Factory state. The Registry remains authoritative for features, packages, workers, leases, attempts, evidence, capacity, failures, and events. The website keeps one replaceable, signed projection for phone access; it never owns Factory scheduling state.
 
 The Control Center provides seven views: Overview, Queue, Workers, Reviews, Capacity, History / provenance, and Failures / attention. Queue is organized by Feature and expands into Work Packages. History provides an expandable Registry-backed path from Feature to package, attempt, branch, commit, pull request, and evidence. The UI renders `VERIFY_REVIEW` as **VERIFY / REVIEW**.
 
@@ -11,38 +11,40 @@ The Control Center provides seven views: Overview, Queue, Workers, Reviews, Capa
 1. The browser restores the existing Threadline Supabase session.
 2. `GET /api/factory-control` verifies the bearer token against the existing Supabase Auth user endpoint.
 3. The endpoint requires the verified Supabase user ID to appear in a server-only owner allowlist.
-4. The endpoint fetches one current snapshot from the configured HTTPS Registry projection transport using a server-only bearer token.
-5. The transport signs the exact UTF-8 response body with HMAC-SHA-256. The endpoint verifies the detached signature before parsing JSON.
+4. The endpoint reads the latest Mac-published snapshot from one private Supabase row using a server-only service-role key.
+5. The Mac signs the exact gzip-compressed request bytes with HMAC-SHA-256. The endpoint verifies the detached signature before parsing JSON.
 6. The runtime contract reconstructs only supported fields. Unknown fields are dropped and missing, malformed, or unsupported values fail closed.
 7. The endpoint adds verification metadata and returns the sanitized snapshot with private, no-store caching headers.
 
-There is no dashboard database, browser fallback, GitHub-label fallback, or write endpoint.
+The browser has no write endpoint or direct access to the snapshot table. The Mac-only publisher may replace that one row. There is no tunnel, browser fallback, or GitHub-label fallback.
 
-## Hosted projection transport limitation
+## Three-hour snapshot mirror
 
-Vercel cannot read the Mac-hosted SQLite Registry or its local files. A separately operated, read-only HTTPS projection transport must call the backend-neutral Registry read contract and serialize schema version `2`. This package deliberately does not expose SQLite, copy its database into Vercel, or introduce a second state store.
+Vercel cannot read the Mac-hosted SQLite Registry or its local files. A Mac launch agent publishes one sanitized schema-version-2 Registry projection every three hours to `POST /api/factory-control`. The endpoint accepts only the publisher token and a valid HMAC signature, then replaces one private Supabase row. `GET /api/factory-control` serves only that last published row to the allowed signed-in owner. The page loads once when opened and only refreshes when its Refresh button is pressed. A stale timestamp is visible when the Mac has not published within 3½ hours. The website does not command or poll the Mac.
 
-Until the owner allowlist is configured, authenticated requests return `503 authorization_unconfigured`. Until the projection transport is running and its server variables are configured, they return `503 projection_unconfigured`. These are the expected safe states.
+The endpoint explicitly uses the Vercel Node.js runtime. A 1 MiB compressed snapshot expands to up to 1,398,104 base64 bytes in the private Supabase REST response; choosing Node keeps this server-only transfer out of the Edge runtime body budget. This is not an authorization change.
+
+Until the owner allowlist is configured, authenticated requests return `503 authorization_unconfigured`. Until the mirror table and server variables are configured, they return `503 projection_unconfigured`. These are the expected safe states.
 
 Required server-only Vercel variables:
 
 - `FACTORY_CONTROL_ALLOWED_USER_IDS`: comma-separated Supabase Auth user IDs authorized to read Factory operations. Empty or missing fails closed.
-- `FACTORY_CONTROL_PROJECTION_URL`: absolute HTTPS URL for the read-only snapshot. Credentials in the URL and URL fragments are rejected.
-- `FACTORY_CONTROL_PROJECTION_TOKEN`: bearer token sent only from the Vercel function to the projection transport.
+- `FACTORY_CONTROL_SUPABASE_SERVICE_ROLE_KEY`: server-only key used solely by this endpoint to read and replace the private snapshot row. Never use a `VITE_` prefix.
+- `FACTORY_CONTROL_PUBLISH_TOKEN`: bearer token shared only by the Mac publisher and server endpoint.
 - `FACTORY_CONTROL_PROJECTION_SIGNING_SECRET`: shared HMAC secret of at least 32 characters. Rotate it with the transport token and never use a `VITE_` prefix.
 
 The existing `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` server variables, or their existing Vite-compatible fallbacks, remain required for session verification. The browser still needs the existing `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` values to restore its account session.
 
-## Transport response contract
+## Publisher contract
 
-The projection transport responds to authenticated `GET` with:
+The Mac publisher sends an authenticated `POST` with:
 
-- `Content-Type: application/json`;
+- `Content-Type: application/gzip`;
 - `X-Threadline-Factory-Signature: sha256=<64 lowercase hexadecimal characters>`;
-- no more than 1 MiB of UTF-8 JSON; and
+- no more than 1 MiB compressed (which becomes at most 1,398,104 base64 bytes in SQL) and 16 MiB expanded; and
 - a schema-version-2 Registry projection matching `src/factoryControl.ts`.
 
-The signature is the lowercase hexadecimal HMAC-SHA-256 of the exact response-body bytes using `FACTORY_CONTROL_PROJECTION_SIGNING_SECRET`. Whitespace changes after signing invalidate the response.
+The signature is the lowercase hexadecimal HMAC-SHA-256 of the exact compressed request-body bytes using `FACTORY_CONTROL_PROJECTION_SIGNING_SECRET`. Byte changes after signing invalidate the request or the stored copy. The server validates the expanded projection and returns gzip-compressed JSON; the browser cannot publish.
 
 The projection must be generated through Registry methods or a Registry API service. It includes one Registry revision so features, packages, workers, leases, attempts, evidence, usage, failures, and events describe one coherent read. Provider/model values are diagnostic. Capacity values declare whether they are provider reported, Factory measured, inferred, or unknown.
 
@@ -66,6 +68,6 @@ The Overview attention count is derived from the exact current set rendered by F
 
 Schema limitation: Control Center schema version 2 still permits sparse compatible snapshots, and package rows do not carry a failure occurrence time. The dashboard truthfully marks unavailable facts as not recorded and uses package-level state, failure code, block reason, implementer attempt, and typed review evidence only for conservative fallback visibility. `REVIEW_STATE_UNRECORDED` means only that review evidence and structured outcome state disagree; it is not an inferred approval or rejection. Registry schema version 4 supplies authoritative final review outcomes for current producers.
 
-These local checks do not prove the hosted Registry projection path. A hosted test with a real allowed Supabase account, configured signed schema-version-2 projection transport, and live Registry revision is still required before this dashboard satisfies the restart gate. That test must confirm all seven views, drill-through provenance, and Claude ledger rows against one current Registry revision and capture browser evidence after authentication.
+These local checks do not prove the hosted snapshot path. A hosted test with a real allowed Supabase account, signed Mac publication, and live Registry revision is still required before this dashboard satisfies the restart gate. That test must confirm all seven views, drill-through provenance, and Claude ledger rows against one published Registry revision and capture browser evidence after authentication.
 
-This delivery does not create the Registry projection service, configure hosted secrets, deploy the dashboard, or grant Factory write authority. Those are separate reviewed operations.
+This delivery does not configure hosted secrets, deploy the dashboard, apply the SQL, install the publisher, or grant Factory write authority. Those are separate reviewed operations and require a fresh independent security review before production activation.

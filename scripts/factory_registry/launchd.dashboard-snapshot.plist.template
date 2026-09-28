@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.threadline.factory.dashboard-snapshot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string><string>-m</string>
+    <string>scripts.factory_registry.publish_control_snapshot</string>
+    <string>--database</string><string>__REGISTRY_PATH__</string>
+    <string>--endpoint</string><string>__ENDPOINT__</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO_ROOT__</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>10800</integer>
+</dict>
+</plist>
