@@ -566,7 +566,7 @@ class RunnerRegistryControl:
 
     def implementation_review_inputs(self, *, target_package_id: str, implementation_attempt_id: str, implementation_commit: str, base_commit: str, pr_url: str, contract: dict, validation_evidence: dict, recorded_at: str) -> tuple[ReviewInput, ...]:
         snapshot = self.registry.dispatch_snapshot(observed_at=utc_now())
-        review_ids = [package["id"] for package in snapshot.work_packages if package.get("kind") == "REVIEW" and target_package_id in {dependency["dependency_id"] for dependency in snapshot.dependencies if dependency["package_id"] == package.get("id")}]
+        review_ids = [package["id"] for package in snapshot.work_packages if package.get("kind") == "REVIEW" and package.get("status") == TaskStatus.READY.value and target_package_id in {dependency["dependency_id"] for dependency in snapshot.dependencies if dependency["package_id"] == package.get("id")}]
         digest = queue_contract_digest(contract)
         return tuple(
             ReviewInput(id=f"review-input:{review_id}:{implementation_attempt_id}", review_package_id=review_id, target_package_id=target_package_id, implementation_attempt_id=implementation_attempt_id, implementation_commit=implementation_commit, base_commit=base_commit, pr_url=pr_url, contract_sha256=digest, contract=contract, validation_evidence=validation_evidence, recorded_at=recorded_at)

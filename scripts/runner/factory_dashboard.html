@@ -319,11 +319,14 @@
     if (parents.some(function (pkg) { return pkg.state === 'ACTIVE'; }))
       return 'Draft ' + (drafts + 1) + ' in progress';
     if (reviewActive) return 'In review ' + currentDraft;
-    if (parents.some(function (pkg) { return pkg.state === 'BLOCKED'; })) return 'Blocked';
+    if (parents.some(function (pkg) {
+      return pkg.state === 'BLOCKED' &&
+        !String(pkg.blockReason || '').startsWith('SUPERSEDED_BY_CORRECTION:');
+    })) return 'Blocked';
     if (latest && latest.state === 'changes_requested') return 'Changes requested';
     if (parents.some(function (pkg) { return pkg.state === 'VERIFY_REVIEW'; }))
       return 'For review ' + currentDraft;
-    if (latest && latest.state === 'approved' && parents.every(function (pkg) { return pkg.state === 'DONE'; }))
+    if (latest && latest.state === 'approved' && feature.state === 'DONE')
       return 'Review successful';
     return 'Queued';
   }

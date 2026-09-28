@@ -54,6 +54,8 @@ class RejectionCode(str, Enum):
     PROVIDER_LIMIT_SIGNAL = "PROVIDER_LIMIT_SIGNAL"
     LANE_NOT_APPROVED = "LANE_NOT_APPROVED"
     CAPABILITY_MISMATCH = "CAPABILITY_MISMATCH"
+    CORRECTION_AUTHOR_MISMATCH = "CORRECTION_AUTHOR_MISMATCH"
+    CORRECTION_FEATURE_COMPLETE = "CORRECTION_FEATURE_COMPLETE"
     PACKAGE_ALREADY_PROPOSED = "PACKAGE_ALREADY_PROPOSED"
     WORKER_ALREADY_PROPOSED = "WORKER_ALREADY_PROPOSED"
     ACTIVE_PARENT_LIMIT = "ACTIVE_PARENT_LIMIT"
@@ -543,7 +545,7 @@ def _package_reasons(
         ) or (
             package.get("kind") != "REVIEW"
             and dependency.get("status") != "DONE"
-        ):
+        ) or dependency.get("review_changes_pending") is True:
             reasons.append(
                 _reason(
                     RejectionCode.DEPENDENCY_BLOCKED,
@@ -575,6 +577,14 @@ def _pair_reasons(
     missing = sorted(required - capabilities)
     if missing:
         reasons.append(_reason(RejectionCode.CAPABILITY_MISMATCH, ",".join(missing)))
+    correction_author = package.get("correction_author_worker_id")
+    if package.get("kind") == "PARENT" and correction_author is not None and correction_author != worker.get("id"):
+        reasons.append(_reason(RejectionCode.CORRECTION_AUTHOR_MISMATCH, str(correction_author)))
+    if package.get("kind") == "PARENT" and correction_author is not None and any(
+        feature.get("id") == package.get("feature_id") and feature.get("status") == "DONE"
+        for feature in snapshot.features
+    ):
+        reasons.append(_reason(RejectionCode.CORRECTION_FEATURE_COMPLETE))
     if not reasons:
         reasons.extend(_capacity_package_reasons(snapshot, package, worker, policy))
     return tuple(sorted(set(reasons)))
@@ -810,6 +820,8 @@ def decide_shadow(
             0 if package_by_id[value.package_id].get("capacity_risk") == "EMERGENCY_RECOVERY" else 1,
             0 if package_by_id[value.package_id].get("kind") == "REVIEW"
             and package_by_id[value.package_id].get("status") == "READY" else 1,
+            0 if package_by_id[value.package_id].get("kind") == "PARENT"
+            and package_by_id[value.package_id].get("correction_author_worker_id") else 1,
             -int(package_by_id[value.package_id].get("priority", 0)),
             value.capability_surplus,
             _package_order_key(package_by_id[value.package_id])[1],

@@ -20,8 +20,12 @@ builder's active coding slot. Active parent leases still count toward the
 builder WIP guard and the global active-parent limit. Review-ready work is
 ordered before new coding at an idle boundary; running attempts are never
 preempted. A review request for changes is not, by itself, authority to
-requeue a parent or create a correction package. The evidence-linked
-correction transition remains a separate control-plane change.
+create work. In the opt-in correction loop, one or two same-scope correction
+and review pairs must already have been registered while PAUSED and drained.
+Only an exact structured rejection releases its linked next pair, to the
+original author at their next idle boundary. The old verdict and draft remain
+in history; a third rejected draft blocks for owner decision. Without those
+pre-authorized slots, legacy review behavior is unchanged.
 
 Between lease claim and provider launch, the runner may revalidate once
 after a revision race only while dispatch remains LIVE, the same lease is
