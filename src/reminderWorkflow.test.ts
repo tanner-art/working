@@ -17,13 +17,23 @@ describe('Reminder workflow', () => {
     expect(due).toMatchObject([{ due: true, fallback: 'in-app-only', target: { id: 'idea:target' }, instruction: { mode: 'specific', deliveryState: 'active' } }])
   })
 
+  it('allows the actual Review choice to classify a non-Reminder proposal before setup', () => {
+    const initial = legacyUiProjection(migrateLegacyState({ objects: [target(), { ...reminder(), kind: 'idea', interpretation: { ...reminder().interpretation, suggestedKind: 'idea' } }], canvas: [] }))
+    const resolved = resolveReminderInState(initial, 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' })
+    expect(resolved.model?.reminderInstructions).toHaveLength(1)
+    expect(resolved.objects.find(item => item.id === 'capture:reminder')).toMatchObject({ kind: 'reminder', status: 'confirmed' })
+  })
+
   it('keeps Daily log active across reload, then retains handled and dismissed evidence while removing active rows', () => {
     let resolved = resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    expect(dailyLogReminderProjection(legacyUiProjection(resolved.model!).model!)).toHaveLength(1)
     const id = resolved.model!.reminderInstructions![0].id
     resolved = setReminderDeliveryState(resolved, id, 'handled', '2026-09-27T08:03:00.000Z')
     expect(dailyLogReminderProjection(resolved.model!)).toEqual([])
     expect(resolved.model!.reminderInstructions?.[0]).toMatchObject({ deliveryState: 'handled', handledAt: '2026-09-27T08:03:00.000Z' })
+    expect(resolved.objects.find(item => item.id === 'capture:reminder')?.history.at(-1)?.reminderInstruction).toMatchObject({ action: 'handled' })
     const dismissed = setReminderDeliveryState(resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }), id, 'dismissed', '2026-09-27T08:04:00.000Z')
+    expect(dailyLogReminderProjection(dismissed.model!)).toEqual([])
     expect(dismissed.model!.reminderInstructions?.[0]).toMatchObject({ deliveryState: 'dismissed', dismissedAt: '2026-09-27T08:04:00.000Z' })
   })
 
