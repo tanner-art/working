@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS registry_metadata (
 );
 
 INSERT OR IGNORE INTO registry_metadata(key, value) VALUES
-    ('schema_version', '5'),
+    ('schema_version', '6'),
     ('control_schema_version', '1'),
     ('revision', '0'),
     ('active_parent_limit', '3'),
@@ -331,6 +331,34 @@ CREATE TRIGGER IF NOT EXISTS control_operation_receipts_are_append_only_delete
 BEFORE DELETE ON control_operation_receipts
 BEGIN
     SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+END;
+
+CREATE TABLE IF NOT EXISTS historical_package_reconciliations (
+    id TEXT PRIMARY KEY,
+    package_id TEXT NOT NULL UNIQUE REFERENCES work_packages(id),
+    disposition TEXT NOT NULL CHECK(disposition IN (
+        'INTEGRATED_ELSEWHERE', 'SUPERSEDED'
+    )),
+    historical_commit TEXT NOT NULL,
+    integration_commit TEXT NOT NULL,
+    repository_head TEXT NOT NULL,
+    evidence_uri TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    CHECK(length(historical_commit) IN (40, 64)),
+    CHECK(length(integration_commit) IN (40, 64)),
+    CHECK(length(repository_head) IN (40, 64))
+);
+
+CREATE TRIGGER IF NOT EXISTS historical_package_reconciliations_are_append_only_update
+BEFORE UPDATE ON historical_package_reconciliations
+BEGIN
+    SELECT RAISE(ABORT, 'HISTORICAL_PACKAGE_RECONCILIATIONS_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS historical_package_reconciliations_are_append_only_delete
+BEFORE DELETE ON historical_package_reconciliations
+BEGIN
+    SELECT RAISE(ABORT, 'HISTORICAL_PACKAGE_RECONCILIATIONS_APPEND_ONLY');
 END;
 
 CREATE TRIGGER IF NOT EXISTS task_events_are_append_only_update
