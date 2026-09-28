@@ -19,6 +19,8 @@ describe('Factory Control Center snapshot contract', () => {
     expect(() => parseFactoryControlSnapshot(withoutReviews)).toThrow('snapshot.reviews')
     const { usageInvocations: _usage, ...withoutUsage } = factoryControlFixture
     expect(() => parseFactoryControlSnapshot(withoutUsage)).toThrow('snapshot.usageInvocations')
+    expect(() => parseFactoryControlSnapshot({ ...factoryControlFixture, features: [{ ...factoryControlFixture.features[0], stage: 'merged' }] })).toThrow('unsupported')
+    expect(() => parseFactoryControlSnapshot({ ...factoryControlFixture, factory: { ...factoryControlFixture.factory, throughput: { ...factoryControlFixture.factory.throughput, acceptedCount: 'zero' } } })).toThrow('acceptedCount')
   })
 
   it('fails closed when same-revision counts or queue relationships do not reconcile', () => {

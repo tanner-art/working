@@ -328,6 +328,9 @@
       ['Ready', projection.factory.readyCount],
       ['Verify / review', projection.factory.verifyReviewCount],
       ['Blocked', projection.factory.blockedCount],
+      ['Implemented (24h)', projection.factory.throughput.implementedCount],
+      ['Approved (24h)', projection.factory.throughput.approvedCount],
+      ['Accepted (24h)', projection.factory.throughput.acceptedCount == null ? 'Unknown' : projection.factory.throughput.acceptedCount],
       ['Active leases', ownership.active_leases],
       ['Active attempts', ownership.active_attempts],
       ['Active runtimes', ownership.active_runtimes],
@@ -352,8 +355,8 @@
       var details = el('details', { 'data-feature-id': feature.id });
       details.open = !!expandedFeatures[feature.id];
       details.addEventListener('toggle', function () { expandedFeatures[feature.id] = details.open; });
-      details.appendChild(el('summary', { text: feature.title + ' — ' + (progress || 'No packages registered') }));
-      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Recorded feature state: ' + feature.state }));
+      details.appendChild(el('summary', { text: feature.title + ' — ' + feature.stage + ' · ' + (progress || 'No packages registered') }));
+      details.appendChild(el('div', { class: 'note', text: feature.id + ' · Stage evidence: ' + feature.stageReason }));
       feature.packages.forEach(function (pkg) {
         var packageNode = el('div', { class: 'feature-package' }, [
           el('strong', { text: pkg.id + ' — ' + pkg.title }),
@@ -375,6 +378,8 @@
       });
       groups.appendChild(details);
     });
+    var throughput = projection.factory.throughput;
+    note.appendChild(el('div', { class: 'note', text: throughput.window.meaning + ' · review wait: ' + (throughput.reviewWaitSeconds == null ? 'Unknown' : Math.round(throughput.reviewWaitSeconds) + 's') + ' · retries: ' + throughput.retryCount + ' · no-worker coverage: ' + (throughput.noWorkerAttemptSeconds == null ? 'Partial / unknown' : Math.round(throughput.noWorkerAttemptSeconds) + 's') + ' · ' + throughput.acceptedCountReason }));
     if (!packages.length) {
       tbody.appendChild(el('tr', {}, [el('td', { colspan: '9' }, [unknown('No packages are registered')])]));
     }
