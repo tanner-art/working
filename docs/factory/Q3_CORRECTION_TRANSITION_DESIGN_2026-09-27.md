@@ -2,6 +2,12 @@
 
 The first proposed code change was rejected because it would have granted every review outcome broad authority to change any ON_DECK package to READY. No such lifecycle change was committed. Q3 remains unimplemented and no live Registry state was touched.
 
+The names `NEEDS_SCOPE` and `EXHAUSTED`, original-author-only correction
+assignment, and a two-attempt remediation budget below are conditional design
+terms, not current Registry statuses, runner behavior, or approved TASK-353
+behavior. Neither TASK-353 (`f36b7ced604dfe87635cf4789184d89a69894a60`) nor
+the later PR #352 repairs implemented a correction transition.
+
 A narrower design requires a dedicated, opt-in correction transition whose guard proves all of the following within one Registry writer transaction:
 
 1. An exact structured `CHANGES_REQUESTED` review outcome has passed the existing implementer, reviewer, commit, base, contract and evidence checks. Its idempotency receipt is new, not a replay with a different request.
