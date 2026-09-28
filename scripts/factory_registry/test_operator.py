@@ -38,6 +38,7 @@ from scripts.factory_registry.operator import (
     harden_paths,
     migrate_registry_v3_to_v4,
     migrate_registry_v4_to_v5,
+    migrate_registry_v5_to_v6,
     parse_canary_spec,
     parse_followup_review_spec,
     preflight,
@@ -682,6 +683,13 @@ class OperatorFixture(unittest.TestCase):
                 "DROP TRIGGER control_operation_receipts_are_append_only_delete"
             )
             connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE historical_package_reconciliations")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_update")
             connection.execute("DROP TRIGGER review_outcomes_are_append_only_delete")
             connection.execute("DROP TABLE review_outcomes")
@@ -700,6 +708,13 @@ class OperatorFixture(unittest.TestCase):
                 "DROP TRIGGER control_operation_receipts_are_append_only_delete"
             )
             connection.execute("DROP TABLE control_operation_receipts")
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE historical_package_reconciliations")
             connection.execute(
                 "UPDATE registry_metadata SET value='4' WHERE key='schema_version'"
             )
@@ -735,6 +750,22 @@ class OperatorFixture(unittest.TestCase):
                 ).fetchone()[0],
                 "History",
             )
+
+    def test_reviewed_registry_v6_migration_creates_empty_reconciliation_store(self):
+        revision = self._downgrade_fixture_to_v4()
+        migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        result = migrate_registry_v5_to_v6(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["source_schema"], 5)
+        self.assertEqual(result["schema_version"], 6)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM historical_package_reconciliations"
+            ).fetchone()[0], 0)
 
     def test_reviewed_registry_v5_migration_can_restore_exact_v4_backup(self):
         self.registry.register_feature(

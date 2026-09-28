@@ -77,8 +77,52 @@ class SQLiteRegistryTest(unittest.TestCase):
             ).fetchall())
         self.assertEqual(
             versions,
-            {"schema_version": "5", "control_schema_version": "1"},
+            {"schema_version": "6", "control_schema_version": "1"},
         )
+
+    def test_historical_reconciliation_retires_queue_without_rewriting_review_history(self) -> None:
+        self.feature()
+        self.package("STALE")
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW", "FEATURE-1", "historical review", "ASSURANCE", Lane.PLATFORM,
+            ("review",), 1, ("preserved",), status=TaskStatus.DONE,
+            kind=PackageKind.REVIEW, dependency_ids=("STALE",),
+        ))
+        self.worker("implementer", "registry")
+        self.worker("reviewer", "review")
+        with self.registry._connection() as connection:
+            connection.execute(
+                """INSERT INTO review_outcomes
+                   (id, review_package_id, target_package_id, implementer_worker_id,
+                    reviewer_worker_id, requested_at, decided_at, state, findings_json,
+                    changes_requested_json, approval_evidence_ids_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("changes", "REVIEW", "STALE", "implementer", "reviewer",
+                 "2026-09-28T10:00:00Z", "2026-09-28T10:01:00Z", "CHANGES_REQUESTED",
+                 "[]", '["fix"]', "[]"),
+            )
+        revision = self.registry.dispatch_control()["revision"]
+        result = self.registry.reconcile_historical_package(
+            reconciliation_id="reconcile-stale", package_id="STALE",
+            disposition="INTEGRATED_ELSEWHERE", historical_commit="a" * 40,
+            integration_commit="b" * 40, repository_head="c" * 40,
+            evidence_uri="https://example.test/commit/c", expected_revision=revision,
+            recorded_at="2026-09-28T11:00:00Z",
+        )
+        self.assertEqual(result, revision + 1)
+        snapshot = self.registry.control_center_snapshot(observed_at="2026-09-28T11:01:00Z")
+        package = next(item for item in snapshot.work_packages if item["id"] == "STALE")
+        self.assertEqual(package["status"], "DONE")
+        self.assertEqual(snapshot.review_outcomes[0]["state"], "CHANGES_REQUESTED")
+        event = next(item for item in snapshot.events if item["event_type"] == "HISTORICAL_PACKAGE_RECONCILED")
+        self.assertFalse(event["detail"]["review_passed"])
+        with self.assertRaisesRegex(RegistryConflict, "ALREADY_RECORDED"):
+            self.registry.reconcile_historical_package(
+                reconciliation_id="another", package_id="STALE", disposition="SUPERSEDED",
+                historical_commit="a" * 40, integration_commit="b" * 40,
+                repository_head="c" * 40, evidence_uri="https://example.test/commit/c",
+                expected_revision=result, recorded_at="2026-09-28T11:02:00Z",
+            )
 
     def test_legacy_source_binding_is_contract_pinned_and_idempotent(self) -> None:
         self.feature()
@@ -437,7 +481,7 @@ class SQLiteRegistryTest(unittest.TestCase):
             package_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(work_packages)")
             }
-        self.assertEqual(metadata["schema_version"], "5")
+        self.assertEqual(metadata["schema_version"], "6")
         self.assertEqual(metadata["legacy_marker"], "preserved")
         self.assertEqual(usage_tables, 2)
         self.assertTrue({"capacity_size", "capacity_risk"}.issubset(package_columns))

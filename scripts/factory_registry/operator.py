@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -100,6 +101,29 @@ V4_TO_V5_STATEMENTS = (
     """CREATE TRIGGER control_operation_receipts_are_append_only_delete
        BEFORE DELETE ON control_operation_receipts BEGIN
            SELECT RAISE(ABORT, 'CONTROL_OPERATION_RECEIPTS_APPEND_ONLY');
+       END""",
+)
+V5_TO_V6_STATEMENTS = (
+    """CREATE TABLE historical_package_reconciliations (
+        id TEXT PRIMARY KEY,
+        package_id TEXT NOT NULL UNIQUE REFERENCES work_packages(id),
+        disposition TEXT NOT NULL CHECK(disposition IN ('INTEGRATED_ELSEWHERE', 'SUPERSEDED')),
+        historical_commit TEXT NOT NULL,
+        integration_commit TEXT NOT NULL,
+        repository_head TEXT NOT NULL,
+        evidence_uri TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        CHECK(length(historical_commit) IN (40, 64)),
+        CHECK(length(integration_commit) IN (40, 64)),
+        CHECK(length(repository_head) IN (40, 64))
+    )""",
+    """CREATE TRIGGER historical_package_reconciliations_are_append_only_update
+       BEFORE UPDATE ON historical_package_reconciliations BEGIN
+           SELECT RAISE(ABORT, 'HISTORICAL_PACKAGE_RECONCILIATIONS_APPEND_ONLY');
+       END""",
+    """CREATE TRIGGER historical_package_reconciliations_are_append_only_delete
+       BEFORE DELETE ON historical_package_reconciliations BEGIN
+           SELECT RAISE(ABORT, 'HISTORICAL_PACKAGE_RECONCILIATIONS_APPEND_ONLY');
        END""",
 )
 HEARTBEAT_FRESH_SECONDS = 180
@@ -660,6 +684,7 @@ def _status_without_control_metadata(
             "workers": count("workers"),
             "evidence": count("evidence"),
             "review_outcomes": count("review_outcomes") or 0,
+            "historical_reconciliations": count("historical_package_reconciliations") or 0,
             "preservation_imports": count("preservation_imports"),
             "active_leases": count("leases", "WHERE released_at IS NULL"),
             "active_attempts": count("attempts", "WHERE ended_at IS NULL"),
@@ -691,6 +716,12 @@ def status(database: Path, *, observed_at: str | None = None) -> Mapping[str, An
     runtimes = registry.active_attempt_runtimes()
     unbound = registry.active_unbound_leases()
     orphans = registry.runtime_orphans(observed_at=observed_at)
+    reconciliations = 0
+    if int(checks["schema_version"]) >= 6:
+        with sqlite3.connect(database) as connection:
+            reconciliations = int(connection.execute(
+                "SELECT count(*) FROM historical_package_reconciliations"
+            ).fetchone()[0])
     return {
         "kind": "threadline-factory-operator-status",
         "observed_at": observed_at,
@@ -703,6 +734,7 @@ def status(database: Path, *, observed_at: str | None = None) -> Mapping[str, An
             "workers": len(snapshot.workers),
             "evidence": len(snapshot.evidence),
             "review_outcomes": len(snapshot.review_outcomes),
+            "historical_reconciliations": reconciliations,
             "preservation_imports": len(snapshot.preservation_imports),
             "active_leases": len(active_leases),
             "active_attempts": len(active_attempts),
@@ -1008,9 +1040,10 @@ def migrate_registry_v3_to_v4(
             ).fetchone()
             if control is None or control[0] != "PAUSED" or control[1] != 1:
                 raise OperatorError("Registry control changed before migration")
-            if any(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                   for table in ("leases", "attempts", "attempt_runtime_ownership")):
-                raise OperatorError("Registry ownership appeared before migration")
+            if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                    or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                    or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                raise OperatorError("Registry active ownership appeared before migration")
             for statement in V3_TO_V4_STATEMENTS:
                 connection.execute(statement)
             connection.execute(
@@ -1226,6 +1259,92 @@ def migrate_registry_v4_to_v5(
         "preservation_after": preservation_after,
         "operation_receipts": 0,
     }
+
+
+def migrate_registry_v5_to_v6(
+    database: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+    *,
+    backup_path: Path | None = None,
+    observed_at: str | None = None,
+) -> Mapping[str, Any]:
+    """Add append-only historical reconciliation receipts under operator control."""
+    observed_at = observed_at or utc_now()
+    verify_release(release, expected_commit)
+    if _release_permission_failures(release):
+        raise OperatorError("private/immutable release gate failed")
+    if (_path_mode(database.parent) != 0o700 or _path_mode(database) != 0o600
+            or database.is_symlink() or database.stat().st_uid != os.getuid()):
+        raise OperatorError("Registry migration requires an owner-controlled 0600 database")
+    _require_installed_preservation(database, preservation_path)
+    current = status(database, observed_at=observed_at)
+    _require_migration_state(current, expected_schema=5, expected_revision=expected_revision)
+    ownership_before = _total_ownership_counts(database)
+    if any(current["counts"][key] for key in (
+        "active_leases", "active_attempts", "active_runtimes",
+    )):
+        raise OperatorError("Registry migration requires drained ownership")
+    preservation = verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at), preservation_path,
+    )
+    control_before = dict(current["control"])
+    backup_path = backup_path or database.parent / "evidence" / (
+        f"registry-v5-revision-{expected_revision}-{time.time_ns()}.sqlite3"
+    )
+    backup = _create_verified_registry_backup(
+        database, backup_path, preservation_path, expected_revision=expected_revision,
+        observed_at=observed_at, expected_schema=5, require_empty_history=False,
+    )
+    with sqlite3.connect(database, timeout=10, isolation_level=None) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            metadata = dict(connection.execute("SELECT key, value FROM registry_metadata"))
+            control = connection.execute(
+                "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+            ).fetchone()
+            if (metadata.get("schema_version") != "5" or metadata.get("revision") != str(expected_revision)
+                    or control is None or control[0] != "PAUSED" or control[1] != 1):
+                raise OperatorError("Registry changed before migration")
+            if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                    or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                    or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                raise OperatorError("Registry active ownership appeared before migration")
+            for statement in V5_TO_V6_STATEMENTS:
+                connection.execute(statement)
+            connection.execute("UPDATE registry_metadata SET value='6' WHERE key='schema_version' AND value='5'")
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise OperatorError("Registry schema version compare-and-swap failed")
+            if tuple(connection.execute("PRAGMA foreign_key_check")):
+                raise OperatorError("Registry migration introduced foreign-key violations")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    try:
+        final = status(database, observed_at=observed_at)
+        _require_migration_state(final, expected_schema=6, expected_revision=expected_revision)
+        if final["control"] != control_before:
+            raise OperatorError("Registry migration changed dispatch control")
+        if _total_ownership_counts(database) != ownership_before:
+            raise OperatorError("Registry migration changed ownership history")
+        with sqlite3.connect(database) as connection:
+            count = connection.execute("SELECT count(*) FROM historical_package_reconciliations").fetchone()[0]
+        if count != 0:
+            raise OperatorError("Registry migration did not create an empty reconciliation store")
+        preservation_after = verify_preservation(
+            SQLiteRegistry(database).control_center_snapshot(observed_at=observed_at), preservation_path,
+        )
+    except Exception as error:
+        _restore_database_from_backup(database, backup_path, backup["sha256"])
+        raise OperatorError(f"v6 migration verification failed; verified v5 backup restored; original={type(error).__name__}: {error}") from error
+    return {"kind": "threadline-factory-registry-migration", "passed": True,
+            "source_schema": 5, "schema_version": 6, "control": final["control"],
+            "backup": backup, "preservation_before": preservation,
+            "preservation_after": preservation_after, "historical_reconciliations": 0}
 
 
 def restore_registry_v3_backup(
@@ -2452,6 +2571,81 @@ def parse_bounded_pilot_spec(
             if not isinstance(source_ref, str) or not source_ref.isdigit() or int(source_ref) <= 0:
                 raise OperatorError("bounded pilot package requires explicit GitHub source_ref")
     return parsed
+
+
+def parse_historical_reconciliation_spec(value: Mapping[str, Any]) -> Mapping[str, str]:
+    """Validate evidence that retires stale work without fabricating approval."""
+    if _sensitive_paths(value):
+        raise OperatorError("historical reconciliation spec contains secret-shaped fields")
+    required = {"id", "package_id", "disposition", "repository", "historical_commit",
+                "integration_commit", "evidence_uri", "recorded_at"}
+    if set(value) != required:
+        raise OperatorError("historical reconciliation spec is invalid")
+    if not all(isinstance(value[key], str) and value[key] for key in required):
+        raise OperatorError("historical reconciliation spec is invalid")
+    result = {key: value[key] for key in required}
+    if (not all(result[key] for key in required)
+            or result["disposition"] not in {"INTEGRATED_ELSEWHERE", "SUPERSEDED"}
+            or not Path(result["repository"]).is_absolute()
+            or not re.fullmatch(r"[0-9a-f]{40,64}", result["historical_commit"])
+            or not re.fullmatch(r"[0-9a-f]{40,64}", result["integration_commit"])):
+        raise OperatorError("historical reconciliation provenance is invalid")
+    _parse_time(result["recorded_at"], "historical reconciliation recorded_at")
+    return result
+
+
+def _git_exact_commit(repository: Path, commit: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--verify", f"{commit}^{{commit}}"],
+            check=True, capture_output=True, text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OperatorError(f"cannot resolve reconciliation commit {commit}") from error
+    resolved = completed.stdout.strip()
+    if resolved != commit:
+        raise OperatorError("reconciliation commits must be exact object IDs")
+    return resolved
+
+
+def reconcile_historical_package(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    value = parse_historical_reconciliation_spec(spec)
+    repository = Path(value["repository"])
+    if not repository.is_dir() or repository.is_symlink():
+        raise OperatorError("historical reconciliation repository must be a real directory")
+    historical = _git_exact_commit(repository, value["historical_commit"])
+    integration = _git_exact_commit(repository, value["integration_commit"])
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        for ancestor, descendant in ((historical, integration), (integration, head)):
+            result = subprocess.run(
+                ["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant],
+                check=False, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise OperatorError("historical reconciliation ancestry evidence failed")
+    except OSError as error:
+        raise OperatorError("cannot inspect reconciliation ancestry") from error
+    preflight(
+        database, config_path, release, preservation_path, expected_commit, expected_revision,
+        observed_at=value["recorded_at"], require_workers=False,
+    )
+    revision = SQLiteRegistry(database).reconcile_historical_package(
+        reconciliation_id=value["id"], package_id=value["package_id"],
+        disposition=value["disposition"], historical_commit=historical,
+        integration_commit=integration, repository_head=head, evidence_uri=value["evidence_uri"],
+        expected_revision=expected_revision, recorded_at=value["recorded_at"],
+    )
+    return {"kind": "threadline-factory-historical-package-reconciliation", "passed": True,
+            "reconciliation_id": value["id"], "package_id": value["package_id"],
+            "disposition": value["disposition"], "review_passed": False,
+            "previous_revision": expected_revision, "revision": revision}
 
 
 def parse_review_outcome_spec(
