@@ -5,6 +5,22 @@ parent WIP limit. The allowlist can contain more independently reviewed pairs
 than can run simultaneously; the Registry remains the authority for leases,
 deadlines, capacity, paths, reviewer independence, and the kill switch.
 
+## TASK-353 parity record
+
+The approved TASK-353 implementation (`f36b7ced604dfe87635cf4789184d89a69894a60`)
+remains present on the pinned current main: a nonempty approved backlog may
+contain more pairs than its configured parent limit, while the Registry rejects
+the next parent lease once that limit is occupied. Current focused coverage
+exercises both three active parents at a limit of three and the original
+two-active/third-refused case at a limit of two.
+
+This is bounded-run behavior only. It does not create remediation work after a
+`CHANGES_REQUESTED` verdict. In particular, `NEEDS_SCOPE`, `EXHAUSTED`,
+original-author-only correction assignment, and a two-attempt remediation
+budget are not live Registry or runner behavior. The rejected Q3 proposal is
+retained as historical safety design in
+[`Q3_CORRECTION_TRANSITION_DESIGN_2026-09-27.md`](Q3_CORRECTION_TRANSITION_DESIGN_2026-09-27.md).
+
 Waiting-review WIP is scoped to the active bounded run's immutable allowlist:
 only a parent whose paired review remains in that run can consume its author's
 slot. When a run is stopped and a successor is activated, the successor gets a

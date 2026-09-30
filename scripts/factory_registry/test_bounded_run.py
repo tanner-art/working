@@ -79,6 +79,22 @@ class BoundedRunTests(unittest.TestCase):
             3,
         )
 
+    def test_long_allowlist_retains_its_separate_parent_concurrency_limit(self) -> None:
+        """TASK-353 parity: an approved backlog is not itself a WIP grant."""
+        self.enable(("TASK-1", "TASK-2", "TASK-3"), parent_limit=2)
+        for package_id, worker_id in (("TASK-1", "builder-a"), ("TASK-2", "builder-b")):
+            self.registry.acquire_lease(
+                package_id, worker_id, acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+        with self.assertRaisesRegex(RegistryConflict, "RUN_PARENT_LIMIT"):
+            self.registry.acquire_lease(
+                "TASK-3", "builder-c", acquired_at=self.now.isoformat(),
+                expires_at=(self.now + timedelta(minutes=1)).isoformat(),
+                expected_dispatch_revision=self.registry.dispatch_control()["revision"],
+            )
+
     def test_direct_lease_cannot_claim_retained_scope_after_kill(self) -> None:
         self.enable()
         self.registry.engage_dispatch_kill_switch(
