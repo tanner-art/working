@@ -96,9 +96,15 @@ python3 -m scripts.factory_registry.operator_cli reconcile-historical-package \
 The spec contains exactly `id`, `package_id`, `disposition`
 (`INTEGRATED_ELSEWHERE` or `SUPERSEDED`), `repository`, `historical_commit`,
 `integration_commit`, `evidence_uri`, and `recorded_at`. Both commits must be
-full object IDs. The command resolves them exactly and requires the historical
-commit to be an ancestor of the integration commit, and that integration commit
-to be an ancestor of the repository's current `HEAD`.
+full object IDs. For `INTEGRATED_ELSEWHERE`, the historical commit must be an
+ancestor of the integration commit. For `SUPERSEDED`, the historical source and
+replacement commits must differ, the source must not be an ancestor of the
+replacement, and `evidence_uri` must be a permalink to an independent review
+comment identifying the package, both exact commits, and why the replacement
+satisfies the acceptance criteria. In either case the integration or replacement
+commit must be an ancestor of the repository's current `HEAD`. The operator
+checks exact Git identities and ancestry; the coordinator must inspect the
+review comment before applying a `SUPERSEDED` record.
 
 The Registry writes an append-only reconciliation record and event, removes the
 package from the active queue by transitioning it to `DONE`, and explicitly
