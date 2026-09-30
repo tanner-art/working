@@ -737,6 +737,22 @@ class OperatorFixture(unittest.TestCase):
         git("commit", "--quiet", "-m", "integration")
         return repository, historical, git("rev-parse", "HEAD")
 
+    def _superseded_repository(self) -> tuple[Path, str, str]:
+        repository, base, replacement = self._historical_repository()
+        def git(*arguments: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(repository), *arguments], check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+        git("checkout", "--quiet", "-b", "stale-source", base)
+        marker = repository / "history.txt"
+        marker.write_text("historical\nstale source\n")
+        git("add", "history.txt")
+        git("commit", "--quiet", "-m", "stale source")
+        stale = git("rev-parse", "HEAD")
+        git("checkout", "--quiet", "--detach", replacement)
+        return repository, stale, replacement
+
     def test_reviewed_registry_v6_migration_creates_empty_reconciliation_store(self):
         revision = self._downgrade_fixture_to_v4()
         migrate_registry_v4_to_v5(self.database, self.release, self.preservation, COMMIT, revision)
@@ -786,6 +802,48 @@ class OperatorFixture(unittest.TestCase):
         with self.assertRaisesRegex(OperatorError, "cannot resolve reconciliation commit"):
             reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
                                          spec(repository=str(not_a_git_repository)))
+
+    def test_superseded_reconciliation_requires_divergent_source_merged_replacement_and_review_permalink(self):
+        repository, stale, replacement = self._superseded_repository()
+        review = "https://github.com/example/project/issues/42#issuecomment-123"
+        def spec(**changes):
+            value = {"id": "superseded-reconcile", "package_id": "STALE",
+                     "disposition": "SUPERSEDED", "repository": str(repository),
+                     "historical_commit": stale, "integration_commit": replacement,
+                     "evidence_uri": review, "recorded_at": "2026-09-28T11:00:00Z"}
+            value.update(changes)
+            return value
+        with mock.patch.object(operator_module, "preflight") as preflight_gate, mock.patch.object(
+            SQLiteRegistry, "reconcile_historical_package", return_value=9
+        ) as reconcile_write:
+            result = reconcile_historical_package(
+                self.database, self.config_path, self.release, self.preservation, COMMIT, 8, spec()
+            )
+        self.assertTrue(result["passed"])
+        self.assertFalse(result["review_passed"])
+        preflight_gate.assert_called_once()
+        self.assertEqual(reconcile_write.call_args.kwargs["historical_commit"], stale)
+        self.assertEqual(reconcile_write.call_args.kwargs["integration_commit"], replacement)
+        for invalid in ("https://example.test/review", "https://github.com/example/project/pull/42",
+                        "https://github.com/example/project/issues/42#issuecomment-not-a-number"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(OperatorError, "independent review comment"):
+                parse_historical_reconciliation_spec(spec(evidence_uri=invalid))
+        with self.assertRaisesRegex(OperatorError, "source and replacement must differ"):
+            reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                                         spec(historical_commit=replacement))
+        with self.assertRaisesRegex(OperatorError, "cannot resolve reconciliation commit"):
+            reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                                         spec(historical_commit="f" * 40))
+        with self.assertRaisesRegex(OperatorError, "source is already integrated"):
+            parent = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", f"{replacement}^"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                                         spec(historical_commit=parent))
+        with self.assertRaisesRegex(OperatorError, "ancestry evidence failed"):
+            reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                                         spec(integration_commit=stale, historical_commit=replacement))
 
     def test_reconcile_historical_package_cli_records_append_only_reconciliation(self):
         repository, historical, head = self._historical_repository()

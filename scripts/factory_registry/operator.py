@@ -2581,6 +2581,12 @@ def parse_historical_reconciliation_spec(value: Mapping[str, Any]) -> Mapping[st
             or not re.fullmatch(r"[0-9a-f]{40,64}", result["historical_commit"])
             or not re.fullmatch(r"[0-9a-f]{40,64}", result["integration_commit"])):
         raise OperatorError("historical reconciliation provenance is invalid")
+    if (result["disposition"] == "SUPERSEDED"
+            and not re.fullmatch(
+                r"https://github\.com/[^/]+/[^/]+/(?:issues|pull)/[0-9]+#issuecomment-[0-9]+",
+                result["evidence_uri"],
+            )):
+        raise OperatorError("supersession requires an independent review comment permalink")
     _parse_time(result["recorded_at"], "historical reconciliation recorded_at")
     return result
 
@@ -2614,13 +2620,25 @@ def reconcile_historical_package(
             ["git", "-C", str(repository), "rev-parse", "HEAD"],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
-        for ancestor, descendant in ((historical, integration), (integration, head)):
+        ancestry = ((integration, head),)
+        if value["disposition"] == "INTEGRATED_ELSEWHERE":
+            ancestry = ((historical, integration), *ancestry)
+        elif historical == integration:
+            raise OperatorError("superseded source and replacement must differ")
+        for ancestor, descendant in ancestry:
             result = subprocess.run(
                 ["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant],
                 check=False, capture_output=True, text=True,
             )
             if result.returncode != 0:
                 raise OperatorError("historical reconciliation ancestry evidence failed")
+        if value["disposition"] == "SUPERSEDED":
+            integrated = subprocess.run(
+                ["git", "-C", str(repository), "merge-base", "--is-ancestor", historical, integration],
+                check=False, capture_output=True, text=True,
+            )
+            if integrated.returncode == 0:
+                raise OperatorError("superseded source is already integrated")
     except (OSError, subprocess.CalledProcessError) as error:
         raise OperatorError("cannot inspect reconciliation ancestry") from error
     preflight(database, config_path, release, preservation_path, expected_commit, expected_revision,
