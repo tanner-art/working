@@ -38,11 +38,14 @@ from scripts.factory_registry.operator import (
     harden_paths,
     migrate_registry_v3_to_v4,
     migrate_registry_v4_to_v5,
+    migrate_registry_v5_to_v6,
     parse_canary_spec,
+    parse_historical_reconciliation_spec,
     parse_followup_review_spec,
     preflight,
     prepare_dry_run,
     record_review_decision,
+    reconcile_historical_package,
     restore_registry_v3_backup,
     restore_registry_v4_backup,
     status,
@@ -676,6 +679,13 @@ class OperatorFixture(unittest.TestCase):
     def _downgrade_fixture_to_v3(self) -> int:
         with sqlite3.connect(self.database) as connection:
             connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE historical_package_reconciliations")
+            connection.execute(
                 "DROP TRIGGER control_operation_receipts_are_append_only_update"
             )
             connection.execute(
@@ -694,6 +704,13 @@ class OperatorFixture(unittest.TestCase):
     def _downgrade_fixture_to_v4(self) -> int:
         with sqlite3.connect(self.database) as connection:
             connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_update"
+            )
+            connection.execute(
+                "DROP TRIGGER historical_package_reconciliations_are_append_only_delete"
+            )
+            connection.execute("DROP TABLE historical_package_reconciliations")
+            connection.execute(
                 "DROP TRIGGER control_operation_receipts_are_append_only_update"
             )
             connection.execute(
@@ -705,6 +722,124 @@ class OperatorFixture(unittest.TestCase):
             )
         harden_paths(self.database, self.config_path, self.release)
         return self.registry.dispatch_control()["revision"]
+
+    def test_reviewed_registry_v6_migration_creates_empty_reconciliation_store(self):
+        revision = self._downgrade_fixture_to_v4()
+        migrate_registry_v4_to_v5(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        result = migrate_registry_v5_to_v6(
+            self.database, self.release, self.preservation, COMMIT, revision
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["source_schema"], 5)
+        self.assertEqual(result["schema_version"], 6)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM historical_package_reconciliations"
+            ).fetchone()[0], 0)
+
+    def test_historical_reconciliation_operator_validates_exact_git_ancestry_and_repository_paths(self):
+        repository = Path(__file__).resolve().parents[2]
+        head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        historical = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD~1"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        def spec(**changes):
+            value = {
+                "id": "historical-reconcile", "package_id": "STALE",
+                "disposition": "INTEGRATED_ELSEWHERE", "repository": str(repository),
+                "historical_commit": historical, "integration_commit": head,
+                "evidence_uri": "https://example.test/evidence", "recorded_at": "2026-09-28T11:00:00Z",
+            }
+            value.update(changes)
+            return value
+
+        self.assertEqual(parse_historical_reconciliation_spec(spec())["historical_commit"], historical)
+        with mock.patch.object(operator_module, "preflight") as preflight_gate, mock.patch.object(
+            SQLiteRegistry, "reconcile_historical_package", return_value=9
+        ) as reconcile_write:
+            result = reconcile_historical_package(
+                self.database, self.config_path, self.release, self.preservation, COMMIT, 8, spec()
+            )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["revision"], 9)
+        preflight_gate.assert_called_once()
+        self.assertEqual(reconcile_write.call_args.kwargs["repository_head"], head)
+
+        source_commit = "da72e831d0972318532a7d6df4b10b666b9af2ce"
+        with self.assertRaisesRegex(OperatorError, "ancestry evidence failed"):
+            reconcile_historical_package(
+                self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                spec(integration_commit=source_commit),
+            )
+        with self.assertRaisesRegex(OperatorError, "provenance is invalid"):
+            parse_historical_reconciliation_spec(spec(historical_commit=historical[:12]))
+        missing = self.root / "missing-repository"
+        file_path = self.root / "not-a-repository"
+        file_path.write_text("not a directory")
+        link = self.root / "repository-link"
+        link.symlink_to(repository, target_is_directory=True)
+        for path in (missing, file_path, link):
+            with self.subTest(path=path), self.assertRaisesRegex(OperatorError, "real directory"):
+                reconcile_historical_package(
+                    self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                    spec(repository=str(path)),
+                )
+        not_a_git_repository = self.root / "not-a-git-repository"
+        not_a_git_repository.mkdir()
+        with self.assertRaisesRegex(OperatorError, "cannot resolve reconciliation commit"):
+            reconcile_historical_package(
+                self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                spec(repository=str(not_a_git_repository)),
+            )
+
+    def test_reconcile_historical_package_cli_records_append_only_reconciliation(self):
+        repository = Path(__file__).resolve().parents[2]
+        head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        historical = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD~1"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.registry.register_feature(Feature("HISTORY", "History", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "STALE", "HISTORY", "stale historical package", "OPERATIONS", Lane.PLATFORM,
+            ("registry",), 1, ("preserved",), status=TaskStatus.BLOCKED,
+        ))
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        harden_paths(self.database, self.config_path, self.release)
+        spec_path = self.root / "historical-reconciliation.json"
+        spec_path.write_text(json.dumps({
+            "id": "historical-cli", "package_id": "STALE", "disposition": "INTEGRATED_ELSEWHERE",
+            "repository": str(repository), "historical_commit": historical, "integration_commit": head,
+            "evidence_uri": "https://example.test/evidence", "recorded_at": "2026-09-28T11:00:00Z",
+        }))
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(operator_main([
+                "reconcile-historical-package", "--database", str(self.database),
+                "--config", str(self.config_path), "--release", str(self.release),
+                "--release-commit", COMMIT, "--preservation", str(self.preservation),
+                "--expect-revision", str(self.registry.dispatch_control()["revision"]),
+                "--spec", str(spec_path),
+            ]), 0, errors.getvalue())
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["passed"])
+        self.assertFalse(result["review_passed"])
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT disposition FROM historical_package_reconciliations WHERE id='historical-cli'"
+            ).fetchone()[0], "INTEGRATED_ELSEWHERE")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "APPEND_ONLY"):
+                connection.execute("DELETE FROM historical_package_reconciliations WHERE id='historical-cli'")
 
     def test_reviewed_registry_v5_migration_preserves_v4_history(self):
         self.registry.register_feature(
