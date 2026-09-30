@@ -831,6 +831,9 @@ class OperatorFixture(unittest.TestCase):
         with self.assertRaisesRegex(OperatorError, "source and replacement must differ"):
             reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
                                          spec(historical_commit=replacement))
+        with self.assertRaisesRegex(OperatorError, "cannot resolve reconciliation commit"):
+            reconcile_historical_package(self.database, self.config_path, self.release, self.preservation, COMMIT, 8,
+                                         spec(historical_commit="f" * 40))
         with self.assertRaisesRegex(OperatorError, "source is already integrated"):
             parent = subprocess.run(
                 ["git", "-C", str(repository), "rev-parse", f"{replacement}^"],
