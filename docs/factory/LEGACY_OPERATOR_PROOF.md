@@ -1,7 +1,13 @@
-# Legacy operator bounded-review proof
+# Current-main bounded-review operator proof
 
-TASK-317 adds the following new `OperatorFixture` methods in
-`scripts/factory_registry/test_operator.py`:
+TASK-383 consolidates the complementary approved test evidence from TASK-317
+(`e206d1d1459c6b90f42e94e7a2cfa98039462101`, PR #318) and TASK-319
+(`564499059eb067854fadf3ee4502733e5d65e4ea`, PR #319) into the current-main
+test package. Production ancestry is shared; this package adds no production
+behavior and does not rewrite preserved historical state.
+
+The operator portion is represented by these current-main `OperatorFixture`
+methods in `scripts/factory_registry/test_operator.py`:
 
 - `test_bounded_run_worker_gate_keeps_normal_ready_pair_path` — normal READY
   implementation/review pair remains eligible.
@@ -34,7 +40,23 @@ present, and config. The release remains private and immutable. Thus the test
 reaches its intended tamper assertion under Linux-default `umask 022` without
 weakening any production permission validation.
 
-Validation executed on 2026-09-27:
+The complementary Registry and runner coverage is listed in
+[`LEGACY_RUNNER_PROOF.md`](LEGACY_RUNNER_PROOF.md). Together, these focused
+tests are the TASK-383 current-main package.
+
+Focused current-main validation executed on 2026-09-28:
+
+```text
+PYTHONPYCACHEPREFIX=/private/tmp/task383-operator-pyc python3 -m unittest -v \
+  scripts.factory_registry.test_operator.OperatorFixture.test_bounded_run_worker_gate_keeps_normal_ready_pair_path \
+  scripts.factory_registry.test_operator.OperatorFixture.test_bounded_review_preflight_accepts_immutable_target_scoped_followup \
+  scripts.factory_registry.test_operator.OperatorFixture.test_bounded_review_gate_rejects_each_isolated_target_and_provenance_failure \
+  scripts.factory_registry.test_operator.OperatorFixture.test_bounded_review_gate_rejects_multiple_dependencies_and_stale_capacity \
+  scripts.factory_registry.test_operator.OperatorFixture.test_record_review_input_cli_publishes_valid_packet_and_refuses_tampering
+# Ran 5 tests: OK
+```
+
+Historical validation executed on 2026-09-27:
 
 ```text
 umask 022 && PYTHONPYCACHEPREFIX=/private/tmp/task321-umask022-pyc python3 -m unittest -v scripts.factory_registry.test_operator.OperatorFixture.test_record_review_input_cli_publishes_valid_packet_and_refuses_tampering
