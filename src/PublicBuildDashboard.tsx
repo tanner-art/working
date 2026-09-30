@@ -45,8 +45,6 @@ function useFactorySnapshot(account: AuthState) {
   useEffect(() => {
     if (account.status !== 'signed-in') { setLoad({ status: 'idle' }); return }
     void refresh()
-    const interval = window.setInterval(() => { void refresh() }, 60_000)
-    return () => window.clearInterval(interval)
   }, [account.status, account.status === 'signed-in' ? account.session.user.id : '', refresh])
   return { load, refresh }
 }
@@ -64,7 +62,7 @@ export function BuildDashboard() {
       <div className="factory-sidebar-foot"><span className="readonly-pill">Read-only</span><a href="/">Return to Threadline</a></div>
     </aside>
     <section className="factory-workspace">
-      <header className="factory-topbar"><div><p className="factory-eyebrow">Live Factory visibility</p><h1>{views.find(item => item.id === target.view)?.label}</h1></div><div className="factory-account"><span>{account.state.session.user.email ?? 'Authenticated owner'}</span><button type="button" className="factory-button secondary" onClick={() => void auth.act('logout')}>Sign out</button></div></header>
+      <header className="factory-topbar"><div><p className="factory-eyebrow">Latest published Factory snapshot</p><h1>{views.find(item => item.id === target.view)?.label}</h1></div><div className="factory-account"><span>{account.state.session.user.email ?? 'Authenticated owner'}</span><button type="button" className="factory-button secondary" onClick={() => void auth.act('logout')}>Sign out</button></div></header>
       {projection.load.status === 'loading' && <LoadingPanel />}
       {projection.load.status === 'idle' && <LoadingPanel />}
       {projection.load.status === 'error' && <ErrorPanel message={projection.load.message} onRetry={() => void projection.refresh()} />}
@@ -90,8 +88,10 @@ function FactorySignIn({ state, onRetry }: { state: AuthState; onRetry: () => vo
 }
 
 export function DashboardView({ view, queueState, snapshot, refreshing, onRefresh, onNavigate }: { view: View; queueState?: FactoryState; snapshot: FactoryControlSnapshot; refreshing: boolean; onRefresh: () => void; onNavigate?: (target: DashboardTarget) => void }) {
+  const ageMs = Date.now() - new Date(snapshot.generatedAt).getTime()
+  const stale = !Number.isFinite(ageMs) || ageMs > 3.5 * 60 * 60 * 1000
   return <>
-    <div className="factory-snapshot-bar"><div><StatusDot state={snapshot.factory.health} /><strong>Registry revision {snapshot.registryRevision}</strong><span>Generated {formatRelativeTime(snapshot.generatedAt)}</span><span>Signature verified {formatRelativeTime(snapshot.verification.verifiedAt)}</span></div><button type="button" className="factory-button secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button></div>
+    <div className="factory-snapshot-bar"><div><StatusDot state={stale ? 'constrained' : snapshot.factory.health} /><strong>Registry revision {snapshot.registryRevision}</strong><span>Captured {formatRelativeTime(snapshot.generatedAt)}</span><span>{stale ? 'Snapshot is older than the three-hour update window' : 'Latest published snapshot'}</span></div><button type="button" className="factory-button secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button></div>
     {view === 'overview' && <Overview snapshot={snapshot} onNavigate={onNavigate} />}
     {view === 'queue' && <Queue snapshot={snapshot} initialState={queueState} />}
     {view === 'workers' && <Workers snapshot={snapshot} />}
