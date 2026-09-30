@@ -1,5 +1,5 @@
-import { authenticateInterpretCaller } from './interpretAuth'
-import { parseFactoryProjection, type FactoryControlSnapshot } from '../src/factoryControl'
+import { authenticateInterpretCaller } from './interpretAuth.js'
+import { parseFactoryProjection, type FactoryControlSnapshot } from '../src/factoryControl.js'
 
 // Node.js is deliberate: its private Supabase read can carry the base64 form
 // (up to 1,398,104 bytes) of the 1 MiB gzip snapshot without Edge body limits.

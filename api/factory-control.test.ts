@@ -53,6 +53,27 @@ describe('Factory Control Center API', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([{ body: `${accepted}A`, signature: await signature(maximum, process.env.FACTORY_CONTROL_PROJECTION_SIGNING_SECRET!) }]), { status: 200 })))
     expect(await (await handler(request())).json()).toMatchObject({ error: 'projection_invalid' })
   })
+  it('rejects a signed snapshot that expands beyond the 16 MiB limit', async () => {
+    const compressed = await gzip(JSON.stringify({ junk: 'x'.repeat(16 * 1_048_576) }))
+    expect(compressed.byteLength).toBeLessThan(1_048_576)
+    const signed = await signature(compressed, process.env.FACTORY_CONTROL_PROJECTION_SIGNING_SECRET!)
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ body: encoded(compressed), signature: signed }]), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const read = await handler(request())
+    expect(read.status).toBe(503)
+    expect(await read.json()).toMatchObject({ error: 'projection_invalid' })
+
+    fetchMock.mockClear()
+    const publish = await handler(new Request('https://threadline.test/api/factory-control', {
+      method: 'POST',
+      headers: { authorization: 'Bearer publisher-token', 'content-type': 'application/gzip', 'x-threadline-factory-signature': signed },
+      body: requestBody(compressed),
+    }))
+    expect(publish.status).toBe(400)
+    expect(await publish.json()).toMatchObject({ error: 'projection_invalid' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
   it('accepts only a signed publisher and stores one snapshot', async () => {
     const { verification: _verification, ...projection } = factoryControlFixture; const bytes = await gzip(JSON.stringify(projection)); const signed = await signature(bytes, process.env.FACTORY_CONTROL_PROJECTION_SIGNING_SECRET!); const fetchMock = vi.fn(async () => new Response(null, { status: 201 })); vi.stubGlobal('fetch', fetchMock)
     const publish = (token: string, value: string) => handler(new Request('https://threadline.test/api/factory-control', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/gzip', 'x-threadline-factory-signature': value }, body: requestBody(bytes) }))
