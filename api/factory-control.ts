@@ -1,5 +1,5 @@
-import { authenticateInterpretCaller } from './interpretAuth'
-import { parseFactoryProjection, type FactoryControlSnapshot } from '../src/factoryControl'
+import { authenticateInterpretCaller } from './interpretAuth.js'
+import { parseFactoryProjection, type FactoryControlSnapshot } from '../src/factoryControl.js'
 
 // Node.js is deliberate: its private Supabase read can carry the base64 form
 // (up to 1,398,104 bytes) of the 1 MiB gzip snapshot without Edge body limits.
@@ -130,7 +130,7 @@ async function publishProjection(request: Request, mirror: MirrorConfig): Promis
   return response(200, { registryRevision: projection.registryRevision, generatedAt: projection.generatedAt })
 }
 
-export default async function handler(request: Request): Promise<Response> {
+export async function handler(request: Request): Promise<Response> {
   if (request.method !== 'GET' && request.method !== 'POST') return response(405, { error: 'method_not_allowed' })
   const mirror = readMirrorConfig(process.env)
   if (request.method === 'POST') {
@@ -152,3 +152,6 @@ export default async function handler(request: Request): Promise<Response> {
     return response(503, { error: code, message: 'The verified Factory snapshot is unavailable.' })
   }
 }
+
+// Vercel's fetch export passes a Web Request; a default function receives a Node request.
+export default { fetch: handler }
