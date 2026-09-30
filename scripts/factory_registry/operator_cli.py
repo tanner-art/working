@@ -27,6 +27,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     followup_review_worker_gate,
     migrate_registry_v3_to_v4,
     migrate_registry_v4_to_v5,
+    migrate_registry_v5_to_v6,
     parse_canary_spec,
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
@@ -36,6 +37,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     prepare_dry_run,
     record_review_decision,
     reconcile,
+    reconcile_historical_package,
     return_paused,
     restore_registry_v3_backup,
     restore_registry_v4_backup,
@@ -83,6 +85,18 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser(
+        "migrate-registry-v6",
+        help="Atomically migrate a quiescent PAUSED Registry from v5 to v6",
+    )
+    command.add_argument("--database", required=True, type=pathlib.Path)
+    command.add_argument("--release", required=True, type=pathlib.Path)
+    command.add_argument("--release-commit", required=True)
+    command.add_argument("--preservation", required=True, type=pathlib.Path)
+    command.add_argument("--expect-revision", required=True, type=int)
+    command.add_argument("--backup", type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
         "restore-registry-v4", help="Restore the verified v4 backup before v5 receipts exist"
     )
     command.add_argument("--database", required=True, type=pathlib.Path)
@@ -93,6 +107,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--preservation", required=True, type=pathlib.Path)
     command.add_argument("--expect-revision", required=True, type=int)
     command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "reconcile-historical-package",
+        help="Retire an integrated or superseded historical package with exact Git ancestry evidence",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
 
     command = subparsers.add_parser(
         "migrate-registry-v5",
@@ -256,6 +277,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.expect_revision,
             backup_path=args.backup,
             observed_at=args.observed_at,
+        ))
+    if args.command == "migrate-registry-v6":
+        return dict(migrate_registry_v5_to_v6(
+            args.database, args.release, args.preservation, args.release_commit,
+            args.expect_revision, backup_path=args.backup, observed_at=args.observed_at,
         ))
     if args.command == "restore-registry-v3":
         return dict(restore_registry_v3_backup(
@@ -424,6 +450,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"kind": "threadline-factory-bind-legacy-source", "passed": True,
                 "package_id": args.package, "github_issue": args.issue,
                 "previous_revision": args.expect_revision, "revision": revision}
+    if args.command == "reconcile-historical-package":
+        return dict(reconcile_historical_package(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "historical reconciliation spec"),
+        ))
     if args.command == "stop":
         return dict(stop(args.database, args.reason, expected_run_id=args.run_id))
     if args.command == "reconcile":

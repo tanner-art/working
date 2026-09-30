@@ -79,6 +79,32 @@ No prior failed head is accepted by this reconciliation: historical
 `CHANGES_REQUESTED` remains append-only. The integrated repair is subject to
 independent whole-diff review.
 
+## Retire a package integrated elsewhere or superseded
+
+Do not edit a production SQLite file or revise old review evidence to clear a
+stale package. Once exact integration evidence is available, use the reviewed
+operator command against a paused, drained Registry:
+
+```sh
+python3 -m scripts.factory_registry.operator_cli reconcile-historical-package \
+  --database /absolute/factory.sqlite3 --config /absolute/config.json \
+  --release /absolute/release --release-commit <release-sha> \
+  --preservation /absolute/preservation.json --expect-revision <revision> \
+  --spec /absolute/reconciliation.json
+```
+
+The spec contains exactly `id`, `package_id`, `disposition`
+(`INTEGRATED_ELSEWHERE` or `SUPERSEDED`), `repository`, `historical_commit`,
+`integration_commit`, `evidence_uri`, and `recorded_at`. Both commits must be
+full object IDs. The command resolves them exactly and requires the historical
+commit to be an ancestor of the integration commit, and that integration commit
+to be an ancestor of the repository's current `HEAD`.
+
+The Registry writes an append-only reconciliation record and event, removes the
+package from the active queue by transitioning it to `DONE`, and explicitly
+records `review_passed: false`. It does not modify attempts, review inputs,
+evidence, or existing `CHANGES_REQUESTED` outcomes.
+
 Validation executed on 2026-09-27:
 
 ```text
