@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { authenticateInterpretCaller } from './interpretAuth'
-import handler, { readAllowedUserIds, readMirrorConfig } from './factory-control'
+import route, { handler, readAllowedUserIds, readMirrorConfig } from './factory-control'
 import { factoryControlFixture } from '../src/factoryControl.fixture'
 
 vi.mock('./interpretAuth', () => ({ authenticateInterpretCaller: vi.fn() }))
@@ -31,6 +31,9 @@ beforeEach(() => {
 afterEach(() => { delete process.env.SUPABASE_URL; delete process.env.FACTORY_CONTROL_SUPABASE_SERVICE_ROLE_KEY; delete process.env.FACTORY_CONTROL_PUBLISH_TOKEN; delete process.env.FACTORY_CONTROL_PROJECTION_SIGNING_SECRET; delete process.env.FACTORY_CONTROL_ALLOWED_USER_IDS; vi.unstubAllGlobals() })
 
 describe('Factory Control Center API', () => {
+  it('exports the Web Request entry point expected by Vercel', () => {
+    expect(route.fetch).toBe(handler)
+  })
   it('authenticates before reading the hosted snapshot', async () => {
     authenticateMock.mockResolvedValue({ ok: false, status: 401, error: 'unauthorized', message: 'Sign in.' }); const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
     expect((await handler(request())).status).toBe(401); expect(fetchMock).not.toHaveBeenCalled()
