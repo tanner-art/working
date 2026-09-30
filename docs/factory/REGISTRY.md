@@ -132,6 +132,19 @@ mutation. Reusing that ID for a different semantic request fails closed with
 attempt, lease, and Registry revision identities rather than process-local
 randomness.
 
+Registry schema version 6 adds append-only historical-package reconciliation.
+It is the only supported path for removing a stale historical package from the
+active queue because its work was integrated elsewhere or superseded. The
+reviewed operator must verify exact Git object IDs and both ancestry links
+(`historical_commit` ancestor of `integration_commit`, then that commit
+ancestor of the inspected repository `HEAD`) before the Registry accepts the
+write. The operation is revision-checked and allowed only while dispatch is
+`PAUSED`, the kill switch is engaged, and ownership is drained. It records the
+disposition and evidence URI, changes the package to `DONE`, and emits an
+explicit reconciliation event with `review_passed: false`. It never changes
+attempts, evidence, or append-only review outcomes; in particular, an existing
+`CHANGES_REQUESTED` remains a historical verdict rather than becoming approval.
+
 Invocation consumption is stored separately in the append-only usage ledger.
 Each provider/worker/account/invocation tuple is counted once, while a linked
 append-only source table retains CLI JSON, stream JSON, and transcript

@@ -47,7 +47,7 @@ from .lifecycle import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 MINIMUM_MIGRATABLE_SCHEMA_VERSION = 1
 CONTROL_SCHEMA_VERSION = 1
 BOUNDED_RUN_METADATA_KEY = "bounded_run_scope"
@@ -328,6 +328,8 @@ class SQLiteRegistry:
             raise RegistryConflict("REGISTRY_V3_OPERATOR_MIGRATION_REQUIRED")
         if existing_version == 4:
             raise RegistryConflict("REGISTRY_V4_OPERATOR_MIGRATION_REQUIRED")
+        if existing_version == 5:
+            raise RegistryConflict("REGISTRY_V5_OPERATOR_MIGRATION_REQUIRED")
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
@@ -2633,6 +2635,72 @@ class SQLiteRegistry:
                 return revision
             except Exception:
                 connection.rollback(); raise
+
+    def reconcile_historical_package(
+        self, *, reconciliation_id: str, package_id: str, disposition: str,
+        historical_commit: str, integration_commit: str, repository_head: str,
+        evidence_uri: str, expected_revision: int, recorded_at: str,
+    ) -> int:
+        """Retire an historical package without rewriting its review history."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        commits = (historical_commit, integration_commit, repository_head)
+        if (not reconciliation_id or disposition not in {"INTEGRATED_ELSEWHERE", "SUPERSEDED"}
+                or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40,64}", value) for value in commits)
+                or not isinstance(evidence_uri, str) or not evidence_uri):
+            raise RegistryConflict("INVALID_HISTORICAL_RECONCILIATION")
+        request = {"id": reconciliation_id, "package_id": package_id,
+                   "disposition": disposition, "historical_commit": historical_commit,
+                   "integration_commit": integration_commit, "repository_head": repository_head,
+                   "evidence_uri": evidence_uri}
+        operation_id = f"historical-reconciliation:{reconciliation_id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_PACKAGE_RECONCILIATION", request=request)
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("HISTORICAL_RECONCILIATION_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                package = connection.execute("SELECT status FROM work_packages WHERE id=?", (package_id,)).fetchone()
+                if package is None:
+                    raise RegistryNotFound(f"work package {package_id}")
+                existing = connection.execute(
+                    "SELECT id FROM historical_package_reconciliations WHERE package_id=?", (package_id,)
+                ).fetchone()
+                if existing is not None:
+                    raise RegistryConflict("HISTORICAL_RECONCILIATION_ALREADY_RECORDED", str(existing["id"]))
+                if package["status"] not in {"ON_DECK", "READY", "VERIFY_REVIEW", "BLOCKED"}:
+                    raise RegistryConflict("HISTORICAL_RECONCILIATION_STATUS_INVALID", package["status"])
+                connection.execute(
+                    """INSERT INTO historical_package_reconciliations
+                       (id, package_id, disposition, historical_commit, integration_commit,
+                        repository_head, evidence_uri, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (reconciliation_id, package_id, disposition, historical_commit,
+                     integration_commit, repository_head, evidence_uri, recorded_at),
+                )
+                connection.execute("UPDATE work_packages SET status='DONE', updated_at=? WHERE id=?", (recorded_at, package_id))
+                self._insert_event(connection, "HISTORICAL_PACKAGE_RECONCILED", recorded_at, package_id,
+                    None, None, {**request, "previous_status": package["status"], "review_passed": False})
+                revision = self._bump_revision(connection)
+                self._record_operation(connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_PACKAGE_RECONCILIATION", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at)
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
 
     def review_input(self, review_package_id: str) -> Mapping[str, Any]:
         """Return the single immutable input assigned to a review package."""
