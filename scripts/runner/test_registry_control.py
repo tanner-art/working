@@ -163,10 +163,14 @@ class RunnerRegistryControlTests(unittest.TestCase):
         with patch(
             "registry_control.decide_shadow",
             return_value=SimpleNamespace(
-                proposed_assignments=(), pair_evaluations=()
+                proposed_assignments=(), pair_evaluations=(SimpleNamespace(
+                    package_id="TASK-1", worker_id="worker-a",
+                    reasons=(SimpleNamespace(code="FEATURE_NOT_READY",
+                                             detail="FEATURE-1:ON_DECK"),),
+                ),)
             ),
         ):
-            with self.assertRaisesRegex(RegistryConflict, "PAIR_NOT_FOUND"):
+            with self.assertRaisesRegex(RegistryConflict, "FEATURE-1:ON_DECK"):
                 control.pre_claim("TASK-1", "worker-a")
 
     def test_pre_claim_pins_the_normalized_queue_contract(self):
@@ -198,6 +202,29 @@ class RunnerRegistryControlTests(unittest.TestCase):
             changed = dict(body, instructions="Different work")
             with self.assertRaisesRegex(RegistryConflict, "QUEUE_CONTRACT_MISMATCH"):
                 control.pre_claim("TASK-1", "worker-a", task_contract=changed)
+
+    def test_pre_claim_reports_v2_missing_proof_as_package_deferral(self):
+        from task_readiness import Readiness
+
+        body = {"schema_version": 2, "task": "TASK-1"}
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        control.registry.dispatch_control.return_value = {}
+        control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+            revision=17, work_packages=({
+                "id": "TASK-1", "provider_diagnostics": {
+                    "readiness_schema_version": 2,
+                    "queue_contract_sha256": queue_contract_digest(body),
+                },
+            },),
+        )
+        with patch("registry_control.check_packet", return_value=Readiness(
+            "BLOCKED", ("REGISTRATION_PROOF_MISSING",)
+        )), patch.object(control, "integration_base", return_value="main"):
+            with self.assertRaisesRegex(
+                RegistryConflict, "DISPATCH_PAIR_INELIGIBLE.*REGISTRATION_PROOF_MISSING"
+            ):
+                control.pre_claim("TASK-1", "worker-a", task_contract=body)
 
     def test_review_preclaim_excludes_the_actual_implementer(self):
         control = RunnerRegistryControl(self.database)

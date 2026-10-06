@@ -45,6 +45,7 @@ from .lifecycle import (
     validate_dispatch_transition,
     validate_package_transition,
 )
+from scripts.runner.task_readiness import ready_contract_reasons
 
 
 CURRENT_SCHEMA_VERSION = 6
@@ -1752,6 +1753,9 @@ class SQLiteRegistry:
                 ).fetchone()
                 if lease is None or lease["released_at"] is not None:
                     raise RegistryConflict("LEASE_NOT_ACTIVE")
+                if next_status == TaskStatus.READY:
+                    feature_id = self._require_ready_row_contract(connection, row["package_id"])
+                    self._promote_feature_for_ready_package(connection, feature_id, ended_at)
                 connection.execute(
                     """UPDATE attempt_runtime_ownership
                        SET released_at=?, release_reason=?, updated_at=?
@@ -1944,35 +1948,30 @@ class SQLiteRegistry:
 
     @staticmethod
     def _require_ready_package_contract(package: WorkPackage) -> None:
-        if not (package.provider_diagnostics.get("readiness_schema_version") == 2):
-            return
-        digest = package.provider_diagnostics.get("queue_contract_sha256")
-        proof = package.provider_diagnostics.get("readiness_proof")
-        acceptance_digest = hashlib.sha256(json.dumps(
-            package.acceptance_criteria, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")).hexdigest()
-        if (package.lane is None
-                or not package.acceptance_criteria
-                or any(not isinstance(item, str) or not item.strip()
-                       for item in package.acceptance_criteria)
-                or not isinstance(digest, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or not isinstance(proof, Mapping)
-                or proof.get("queue_contract_sha256") != digest
-                or proof.get("acceptance_sha256") != acceptance_digest
-                or not isinstance(proof.get("base_commit"), str)
-                or not re.fullmatch(r"[0-9a-f]{40}", proof["base_commit"])
-                or not isinstance(proof.get("target_ref"), str)
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", proof["target_ref"])
-                or ".." in proof["target_ref"]
-                or proof["target_ref"].endswith("/")
-                or not isinstance(proof.get("planning_sha256"), Mapping)
-                or not proof["planning_sha256"]
-                or any(not isinstance(path, str) or not path
-                       or not isinstance(value, str)
-                       or not re.fullmatch(r"[0-9a-f]{64}", value)
-                       for path, value in proof["planning_sha256"].items())):
-            raise RegistryConflict("READY_CONTRACT_INCOMPLETE", package.id)
+        reasons = ready_contract_reasons({
+            "lane": package.lane.value if package.lane else None,
+            "acceptance_criteria": package.acceptance_criteria,
+            "provider_diagnostics": package.provider_diagnostics,
+        })
+        if reasons:
+            raise RegistryConflict("READY_CONTRACT_INCOMPLETE", f"{package.id}:{','.join(reasons)}")
+
+    @staticmethod
+    def _require_ready_row_contract(connection: sqlite3.Connection, package_id: str) -> str:
+        row = connection.execute(
+            "SELECT feature_id, lane, acceptance_criteria_json, provider_diagnostics_json "
+            "FROM work_packages WHERE id=?", (package_id,),
+        ).fetchone()
+        if row is None:
+            raise RegistryNotFound(f"work package {package_id}")
+        reasons = ready_contract_reasons({
+            "lane": row["lane"],
+            "acceptance_criteria": json.loads(row["acceptance_criteria_json"]),
+            "provider_diagnostics": json.loads(row["provider_diagnostics_json"]),
+        })
+        if reasons:
+            raise RegistryConflict("READY_CONTRACT_INCOMPLETE", f"{package_id}:{','.join(reasons)}")
+        return str(row["feature_id"])
 
     @staticmethod
     def _promote_feature_for_ready_package(
@@ -2635,6 +2634,8 @@ class SQLiteRegistry:
                     or attempt["outcome"] not in {"FAILED", "BLOCKED"}
                 ):
                     raise RegistryConflict("TERMINAL_FAILED_ATTEMPT_REQUIRED")
+                feature_id = self._require_ready_row_contract(connection, package_id)
+                self._promote_feature_for_ready_package(connection, feature_id, changed_at)
                 connection.execute(
                     """UPDATE work_packages
                        SET status='READY', ready_at=?, failure_code=NULL,
@@ -2907,6 +2908,10 @@ class SQLiteRegistry:
                     raise RegistryConflict("HISTORICAL_RECONCILIATION_ALREADY_RECORDED")
                 if connection.execute("SELECT 1 FROM workers WHERE id=?", (external["implementer_worker_id"],)).fetchone() is None:
                     raise RegistryConflict("IMPLEMENTER_WORKER_UNKNOWN")
+                feature_id = self._require_ready_row_contract(
+                    connection, review_input.review_package_id
+                )
+                self._promote_feature_for_ready_package(connection, feature_id, recorded_at)
                 connection.execute(
                     "INSERT INTO historical_package_reconciliations "
                     "(id, package_id, disposition, historical_commit, integration_commit, repository_head, evidence_uri, recorded_at) "
@@ -3113,8 +3118,6 @@ class SQLiteRegistry:
                ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
             (target["id"],),
         ).fetchall()
-        if not attempts or not attempts[0]["worker_id"]:
-            reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
         inputs = connection.execute(
             """SELECT id, uri, recorded_at, metadata_json FROM evidence
                WHERE package_id=? AND kind='review-input' ORDER BY recorded_at, id""",
@@ -3126,6 +3129,9 @@ class SQLiteRegistry:
             row = inputs[0]
             try:
                 metadata = json.loads(row["metadata_json"])
+                if not isinstance(metadata, Mapping):
+                    raise ValueError("review input metadata is not an object")
+                external = metadata.get("external_integration")
                 review_input = ReviewInput(
                     id=row["id"], review_package_id=review_package_id,
                     target_package_id=metadata["target_package_id"],
@@ -3136,15 +3142,42 @@ class SQLiteRegistry:
                     contract=metadata["contract"],
                     validation_evidence=metadata["validation_evidence"],
                     recorded_at=row["recorded_at"],
+                    external_integration=external,
                 )
                 _review_input_evidence(review_input)
                 _verify_operator_review_packet(review_input)
-                if (review_input.target_package_id != target["id"]
-                        or not attempts
-                        or review_input.implementation_attempt_id != attempts[0]["id"]):
+                if review_input.target_package_id != target["id"]:
                     reasons.append("REVIEW_INPUT_ATTEMPT_MISMATCH")
+                elif external is None:
+                    if not attempts or not attempts[0]["worker_id"]:
+                        reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
+                    elif review_input.implementation_attempt_id != attempts[0]["id"]:
+                        reasons.append("REVIEW_INPUT_ATTEMPT_MISMATCH")
+                else:
+                    historical = connection.execute(
+                        "SELECT disposition, historical_commit, integration_commit, "
+                        "repository_head, evidence_uri FROM historical_package_reconciliations "
+                        "WHERE id=? AND package_id=?",
+                        (external["id"], target["id"]),
+                    ).fetchone()
+                    failed = connection.execute(
+                        "SELECT worker_id, outcome, ended_at FROM attempts WHERE package_id=? "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1", (target["id"],),
+                    ).fetchone()
+                    if (attempts or historical is None or historical["disposition"] != "INTEGRATED_ELSEWHERE"
+                            or historical["historical_commit"] != review_input.implementation_commit
+                            or historical["integration_commit"] != external.get("integration_commit")
+                            or historical["repository_head"] != external.get("repository_head")
+                            or historical["evidence_uri"] != review_input.pr_url
+                            or review_input.implementation_attempt_id != f"external-integration:{external['id']}"
+                            or failed is None or failed["outcome"] not in {"FAILED", "BLOCKED"}
+                            or failed["ended_at"] is None
+                            or failed["worker_id"] != external.get("implementer_worker_id")):
+                        reasons.append("REVIEW_EXTERNAL_INTEGRATION_LINEAGE_INVALID")
             except (KeyError, TypeError, ValueError, RegistryConflict) as error:
                 reasons.append(f"REVIEW_INPUT_INVALID:{getattr(error, 'code', type(error).__name__)}")
+        if len(inputs) != 1 and (not attempts or not attempts[0]["worker_id"]):
+            reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
         return tuple(sorted(set(reasons)))
 
     @staticmethod
@@ -3618,6 +3651,9 @@ class SQLiteRegistry:
                     next_status,
                     authority=TransitionAuthority.LEASE_RELEASE,
                 )
+                if next_status == TaskStatus.READY:
+                    feature_id = self._require_ready_row_contract(connection, row["package_id"])
+                    self._promote_feature_for_ready_package(connection, feature_id, released_at)
                 transitioned = connection.execute(
                     """UPDATE work_packages
                        SET status=?, ready_at=CASE WHEN ?='READY' THEN ? ELSE ready_at END,
@@ -3702,6 +3738,9 @@ class SQLiteRegistry:
                     new_status,
                     authority=TransitionAuthority.DIRECT,
                 )
+                if new_status == TaskStatus.READY:
+                    feature_id = self._require_ready_row_contract(connection, package_id)
+                    self._promote_feature_for_ready_package(connection, feature_id, changed_at)
                 updated = connection.execute(
                     """UPDATE work_packages
                        SET status=?, ready_at=CASE WHEN ?='READY' THEN ? ELSE ready_at END,

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .models import ControlCenterReadSnapshot
 from .repository import Registry
+from scripts.runner.task_readiness import ready_contract_reasons
 
 
 SCHEMA_VERSION = 2
@@ -560,6 +561,7 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         for package in packages_by_feature.get(feature_id, []):
             package_id = str(package.get("id", ""))
             readiness_reasons = list(package.get("review_readiness_reasons") or ())
+            readiness_reasons.extend(ready_contract_reasons(package))
             if (package.get("status") == "READY"
                     and _mapping(package.get("provider_diagnostics")).get("readiness_schema_version") == 2
                     and feature.get("status") not in {"READY", "ACTIVE", "VERIFY_REVIEW"}):
