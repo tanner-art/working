@@ -698,20 +698,56 @@ class SQLiteRegistry:
                                 if len(target) != 1 or target[0]["status"] != "VERIFY_REVIEW":
                                     raise RegistryConflict("BOUNDED_REVIEW_TARGET_INVALID", row["id"])
                                 packet = connection.execute(
-                                    "SELECT metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
+                                    "SELECT uri, metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
                                     (row["id"],),
                                 ).fetchall()
                                 if len(packet) != 1:
                                     raise RegistryConflict("REVIEW_INPUT_REQUIRED", row["id"])
                                 metadata = json.loads(packet[0]["metadata_json"])
-                                attempt = connection.execute(
-                                    "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
-                                    (metadata.get("implementation_attempt_id"),),
-                                ).fetchone()
-                                if (metadata.get("target_package_id") != target[0]["id"]
-                                        or attempt is None or attempt["package_id"] != target[0]["id"]
-                                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                                if metadata.get("target_package_id") != target[0]["id"]:
                                     raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED", row["id"])
+                                external = metadata.get("external_integration")
+                                if external is None:
+                                    attempt = connection.execute(
+                                        "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
+                                        (metadata.get("implementation_attempt_id"),),
+                                    ).fetchone()
+                                    if (attempt is None or attempt["package_id"] != target[0]["id"]
+                                            or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                                        raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED", row["id"])
+                                else:
+                                    if (not isinstance(external, Mapping)
+                                            or any(not isinstance(external.get(key), str) or not external[key]
+                                                   for key in ("id", "integration_commit", "repository_head",
+                                                               "implementer_worker_id"))):
+                                        raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
+                                    historical = connection.execute(
+                                        "SELECT * FROM historical_package_reconciliations WHERE id=? AND package_id=?",
+                                        (external.get("id"), target[0]["id"]),
+                                    ).fetchone()
+                                    worker_id = external["implementer_worker_id"]
+                                    failed = connection.execute(
+                                        "SELECT worker_id, outcome, ended_at FROM attempts WHERE package_id=? "
+                                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                                        (target[0]["id"],),
+                                    ).fetchone()
+                                    succeeded = connection.execute(
+                                        "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
+                                        (target[0]["id"],),
+                                    ).fetchone()
+                                    worker = connection.execute(
+                                        "SELECT 1 FROM workers WHERE id=?", (worker_id,),
+                                    ).fetchone()
+                                    if (historical is None or historical["disposition"] != "INTEGRATED_ELSEWHERE"
+                                            or historical["historical_commit"] != metadata.get("implementation_commit")
+                                            or historical["integration_commit"] != external.get("integration_commit")
+                                            or historical["repository_head"] != external.get("repository_head")
+                                            or historical["evidence_uri"] != packet[0]["uri"]
+                                            or metadata.get("implementation_attempt_id") != f"external-integration:{historical['id']}"
+                                            or worker is None or failed is None or failed["worker_id"] != worker_id
+                                            or failed["outcome"] not in {"FAILED", "BLOCKED"}
+                                            or failed["ended_at"] is None or succeeded is not None):
+                                        raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
                     active = connection.execute(
                         "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
                     ).fetchone()

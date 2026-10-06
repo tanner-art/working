@@ -199,6 +199,67 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
         self.assertEqual(after.revision, revision)
         self.assertEqual(after.attempts[0]["outcome"], "FAILED")
 
+    def test_bounded_external_review_activation_preserves_unrelated_ready_work(self):
+        review_input = self.review_input()
+        self.registry.record_external_integration_review_input(
+            review_input, expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.register_feature(Feature("OTHER", "Other work", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-999", "OTHER", "Unrelated", "CONTROL_PLANE", Lane.PLATFORM,
+            ("implementation",), 1, ("preserve",), status=TaskStatus.READY,
+        ))
+        scope = {"run_id": "cp02-review-only", "package_ids": ["TASK-232"],
+                 "deadline": self.stamp(3600), "base_ref": "main", "parent_limit": 1}
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_CONTROL_COMPARE_AND_SWAP_FAILED"):
+            self.registry.set_dispatch_control(
+                expected_revision=revision - 1, expected_mode="PAUSED", new_mode="LIVE",
+                kill_switch_engaged=False, changed_at=self.stamp(8), reason="stale review run",
+                bounded_run=scope,
+            )
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=revision, expected_mode="PAUSED", new_mode="LIVE",
+            kill_switch_engaged=False, changed_at=self.stamp(8), reason="bounded review run",
+            bounded_run=scope,
+        )
+        self.assertEqual(self.registry.dispatch_control()["bounded_run"]["package_ids"], ["TASK-232"])
+        with self.assertRaisesRegex(RegistryConflict, "RUN_PACKAGE_NOT_ALLOWLISTED"):
+            self.registry.acquire_lease("TASK-999", "codex-a", acquired_at=self.stamp(9),
+                                        expires_at=self.stamp(120), expected_dispatch_revision=live_revision)
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.acquire_lease("TASK-232", "codex-a", acquired_at=self.stamp(9),
+                                        expires_at=self.stamp(120), expected_dispatch_revision=live_revision)
+        self.registry.acquire_lease("TASK-232", "claude", acquired_at=self.stamp(9),
+                                    expires_at=self.stamp(120), expected_dispatch_revision=live_revision)
+        snapshot = self.registry.control_center_snapshot(observed_at=self.stamp(10))
+        self.assertEqual({item["id"]: item["status"] for item in snapshot.work_packages}["TASK-999"], "READY")
+        self.assertEqual(snapshot.attempts[0]["outcome"], "FAILED")
+
+    def test_bounded_external_review_activation_rejects_tampered_history(self):
+        review_input = self.review_input()
+        self.registry.record_external_integration_review_input(
+            review_input, expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        scope = {"run_id": "cp02-tamper", "package_ids": ["TASK-232"],
+                 "deadline": self.stamp(3600), "base_ref": "main", "parent_limit": 1}
+        revision = self.registry.dispatch_control()["revision"]
+        with self.registry._connection() as connection:
+            # Simulate corrupted persisted provenance; normal writes are append-only.
+            connection.execute("DROP TRIGGER historical_package_reconciliations_are_append_only_update")
+            connection.execute(
+                "UPDATE historical_package_reconciliations SET historical_commit=? WHERE id=?",
+                ("f" * 40, "bridge-1"),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "EXTERNAL_INTEGRATION_PROVENANCE_INVALID"):
+            self.registry.set_dispatch_control(
+                expected_revision=revision, expected_mode="PAUSED", new_mode="LIVE",
+                kill_switch_engaged=False, changed_at=self.stamp(8), reason="tampered review run",
+                bounded_run=scope,
+            )
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+
     def test_operator_checks_actual_git_ancestry_pr_and_merge_ci(self):
         repo = self.root / "repo"
         repo.mkdir()
