@@ -66,6 +66,21 @@ def _review_contract_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _require_unique_external_implementer(
+    connection: sqlite3.Connection, package_id: str, worker_id: str, code: str,
+) -> sqlite3.Row:
+    """A failed Factory history can identify one external author only if unique."""
+    attempts = connection.execute(
+        "SELECT id, worker_id, outcome, ended_at FROM attempts WHERE package_id=?", (package_id,),
+    ).fetchall()
+    if (not isinstance(worker_id, str) or not worker_id or len(attempts) != 1
+            or attempts[0]["worker_id"] != worker_id
+            or attempts[0]["outcome"] not in {"FAILED", "BLOCKED"}
+            or attempts[0]["ended_at"] is None):
+        raise RegistryConflict(code, package_id)
+    return attempts[0]
+
+
 def _review_input_evidence(review_input: ReviewInput) -> Evidence:
     if (
         not all(
@@ -698,20 +713,49 @@ class SQLiteRegistry:
                                 if len(target) != 1 or target[0]["status"] != "VERIFY_REVIEW":
                                     raise RegistryConflict("BOUNDED_REVIEW_TARGET_INVALID", row["id"])
                                 packet = connection.execute(
-                                    "SELECT metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
+                                    "SELECT uri, metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
                                     (row["id"],),
                                 ).fetchall()
                                 if len(packet) != 1:
                                     raise RegistryConflict("REVIEW_INPUT_REQUIRED", row["id"])
                                 metadata = json.loads(packet[0]["metadata_json"])
-                                attempt = connection.execute(
-                                    "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
-                                    (metadata.get("implementation_attempt_id"),),
-                                ).fetchone()
-                                if (metadata.get("target_package_id") != target[0]["id"]
-                                        or attempt is None or attempt["package_id"] != target[0]["id"]
-                                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                                if metadata.get("target_package_id") != target[0]["id"]:
                                     raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED", row["id"])
+                                external = metadata.get("external_integration")
+                                if external is None:
+                                    attempt = connection.execute(
+                                        "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
+                                        (metadata.get("implementation_attempt_id"),),
+                                    ).fetchone()
+                                    if (attempt is None or attempt["package_id"] != target[0]["id"]
+                                            or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                                        raise RegistryConflict("REVIEW_INPUT_SUCCESSFUL_ATTEMPT_REQUIRED", row["id"])
+                                else:
+                                    if (not isinstance(external, Mapping)
+                                            or any(not isinstance(external.get(key), str) or not external[key]
+                                                   for key in ("id", "integration_commit", "repository_head",
+                                                               "implementer_worker_id"))):
+                                        raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
+                                    historical = connection.execute(
+                                        "SELECT * FROM historical_package_reconciliations WHERE id=? AND package_id=?",
+                                        (external.get("id"), target[0]["id"]),
+                                    ).fetchone()
+                                    worker_id = external["implementer_worker_id"]
+                                    worker = connection.execute(
+                                        "SELECT 1 FROM workers WHERE id=?", (worker_id,),
+                                    ).fetchone()
+                                    if (historical is None or historical["disposition"] != "INTEGRATED_ELSEWHERE"
+                                            or historical["historical_commit"] != metadata.get("implementation_commit")
+                                            or historical["integration_commit"] != external.get("integration_commit")
+                                            or historical["repository_head"] != external.get("repository_head")
+                                            or historical["evidence_uri"] != packet[0]["uri"]
+                                            or metadata.get("implementation_attempt_id") != f"external-integration:{historical['id']}"
+                                            or worker is None):
+                                        raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
+                                    _require_unique_external_implementer(
+                                        connection, target[0]["id"], worker_id,
+                                        "EXTERNAL_INTEGRATION_PROVENANCE_INVALID",
+                                    )
                     active = connection.execute(
                         "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
                     ).fetchone()
@@ -2590,13 +2634,17 @@ class SQLiteRegistry:
             worker = connection.execute(
                 "SELECT 1 FROM workers WHERE id=?", (external.get("implementer_worker_id"),)
             ).fetchone()
-        if (row is None or worker is None or row["disposition"] != "INTEGRATED_ELSEWHERE"
-                or row["historical_commit"] != review_input.get("implementation_commit")
-                or row["integration_commit"] != external.get("integration_commit")
-                or row["repository_head"] != external.get("repository_head")
-                or row["evidence_uri"] != review_input.get("pr_url")
-                or review_input.get("implementation_attempt_id") != f"external-integration:{row['id']}"):
-            raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID")
+            if (row is None or worker is None or row["disposition"] != "INTEGRATED_ELSEWHERE"
+                    or row["historical_commit"] != review_input.get("implementation_commit")
+                    or row["integration_commit"] != external.get("integration_commit")
+                    or row["repository_head"] != external.get("repository_head")
+                    or row["evidence_uri"] != review_input.get("pr_url")
+                    or review_input.get("implementation_attempt_id") != f"external-integration:{row['id']}"):
+                raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID")
+            _require_unique_external_implementer(
+                connection, str(review_input.get("target_package_id")),
+                external.get("implementer_worker_id"), "EXTERNAL_INTEGRATION_PROVENANCE_INVALID",
+            )
         return external
 
     def successful_package_worker(self, package_id: str) -> str:
@@ -2776,20 +2824,15 @@ class SQLiteRegistry:
                 digest = json.loads(target["provider_diagnostics_json"]).get("queue_contract_sha256")
                 if digest != review_input.contract_sha256:
                     raise RegistryConflict("QUEUE_CONTRACT_MISMATCH")
-                failed = connection.execute(
-                    "SELECT id, outcome, ended_at, worker_id FROM attempts WHERE package_id=? "
-                    "ORDER BY started_at DESC, id DESC LIMIT 1",
-                    (review_input.target_package_id,),
-                ).fetchone()
-                if (failed is None or failed["outcome"] not in {"FAILED", "BLOCKED"}
-                        or failed["ended_at"] is None
-                        or failed["worker_id"] != external["implementer_worker_id"]):
-                    raise RegistryConflict("HISTORICAL_FAILED_ATTEMPT_REQUIRED")
                 if connection.execute(
                     "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
                     (review_input.target_package_id,),
                 ).fetchone():
                     raise RegistryConflict("EXTERNAL_INTEGRATION_ATTEMPT_CONFLICT")
+                failed = _require_unique_external_implementer(
+                    connection, review_input.target_package_id,
+                    external["implementer_worker_id"], "HISTORICAL_FAILED_ATTEMPT_REQUIRED",
+                )
                 if connection.execute("SELECT 1 FROM attempts WHERE package_id=? LIMIT 1", (review_input.review_package_id,)).fetchone():
                     raise RegistryConflict("REVIEW_ALREADY_ATTEMPTED")
                 if connection.execute("SELECT 1 FROM evidence WHERE package_id=? AND kind='review-input' LIMIT 1", (review_input.review_package_id,)).fetchone():
@@ -3233,15 +3276,13 @@ class SQLiteRegistry:
                            ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
                         (targets[0]["dependency_id"],),
                     ).fetchone()
-                    if implementation is None:
-                        input_rows = connection.execute(
-                            "SELECT uri, metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
-                            (package_id,),
-                        ).fetchall()
-                        if len(input_rows) != 1:
-                            raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
-                        external_input = json.loads(input_rows[0]["metadata_json"])
-                        external = external_input.get("external_integration")
+                    input_rows = connection.execute(
+                        "SELECT uri, metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
+                        (package_id,),
+                    ).fetchall()
+                    external_input = json.loads(input_rows[0]["metadata_json"]) if len(input_rows) == 1 else None
+                    external = external_input.get("external_integration") if isinstance(external_input, Mapping) else None
+                    if external is not None:
                         historical = connection.execute(
                             "SELECT * FROM historical_package_reconciliations WHERE id=? AND package_id=?",
                             (external.get("id"), targets[0]["dependency_id"]),
@@ -3254,6 +3295,12 @@ class SQLiteRegistry:
                                 or external_input.get("implementation_attempt_id") != f"external-integration:{historical['id']}"):
                             raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
                         implementer_worker = external.get("implementer_worker_id")
+                        _require_unique_external_implementer(
+                            connection, targets[0]["dependency_id"], implementer_worker,
+                            "REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED",
+                        )
+                    elif implementation is None:
+                        raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
                     else:
                         implementer_worker = implementation["worker_id"]
                     if implementer_worker == worker_id:
@@ -3798,7 +3845,7 @@ class SQLiteRegistry:
                 if dependency is None:
                     raise RegistryConflict("REVIEW_TARGET_MISMATCH")
                 input_evidence = connection.execute(
-                    "SELECT package_id, uri, metadata_json FROM evidence WHERE id=? AND kind='review-input'",
+                    "SELECT package_id, uri, recorded_at, metadata_json FROM evidence WHERE id=? AND kind='review-input'",
                     (outcome.review_input_evidence_id,),
                 ).fetchone()
                 if input_evidence is None or input_evidence["package_id"] != outcome.review_package_id:
@@ -3832,6 +3879,12 @@ class SQLiteRegistry:
                         raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID")
                     if successful_implementation_attempts:
                         raise RegistryConflict("EXTERNAL_INTEGRATION_ATTEMPT_CONFLICT")
+                    _require_unique_external_implementer(
+                        connection, outcome.target_package_id, external.get("implementer_worker_id"),
+                        "EXTERNAL_INTEGRATION_PROVENANCE_INVALID",
+                    )
+                    if requested_at != input_evidence["recorded_at"]:
+                        raise RegistryConflict("REVIEW_REQUEST_TIME_MISMATCH")
                     actual_implementation = {"id": review_input["implementation_attempt_id"],
                                              "worker_id": external.get("implementer_worker_id")}
                 else:
