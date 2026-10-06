@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
@@ -50,6 +51,9 @@ from scripts.factory_registry.operator import (
     restore_registry_v4_backup,
     status,
     store_preservation_evidence,
+    update_allowed_authors,
+    recover_allowed_authors_pending,
+    parse_allowed_authors_update_spec,
     utc_now,
     validate_telemetry_payload,
     verify_preservation,
@@ -1877,6 +1881,222 @@ class OperatorFixture(unittest.TestCase):
             if "runner" in label:
                 self.assertIn("--dry-run", data["ProgramArguments"])
         self.assertTrue(any(call[1] == "bootstrap" for call in calls))
+
+    def test_prepare_dry_run_rejects_stale_config_at_shared_lock_boundary(self):
+        self.config_path.write_text(json.dumps(self.config(strict=False)))
+        control = self.registry.dispatch_control()
+        revision = self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False, changed_at=utc_now(),
+            reason="fixture starts live",
+        )
+
+        def race_prepared_commit(_plan, **kwargs):
+            changed = json.loads(self.config_path.read_text())
+            changed["allowed_authors"] = ["concurrent-writer"]
+            self.config_path.write_text(json.dumps(changed))
+            self.config_path.chmod(0o600)
+            kwargs["after_reconcile"]()
+
+        with mock.patch.object(operator_module.install_launchd, "pause_to_dry_run", side_effect=race_prepared_commit):
+            with self.assertRaisesRegex(OperatorError, "changed during dry-run preparation"):
+                prepare_dry_run(
+                    self.database, self.config_path, self.release, self.preservation,
+                    COMMIT, revision, self.migration(), home=self.root / "home", uid=501,
+                )
+
+    def _allowlist_ready(self):
+        config = self.config(strict=True)
+        config["github"] = "tanner-art/working"
+        config["allowed_authors"] = ["tanner-art"]
+        self.config_path.write_text(json.dumps(config))
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        harden_paths(self.database, self.config_path, self.release)
+        return config
+
+    def _allowlist_spec(self, config, *, operation_id="allowlist-395"):
+        return {
+            "operation_id": operation_id,
+            "repository": "tanner-art/working",
+            "expected_config_sha256": hashlib.sha256(
+                self.config_path.read_bytes()).hexdigest(),
+            "expected_allowed_authors": config["allowed_authors"],
+            "allowed_authors": ["tanner-art", "Danner-tev"],
+        }
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_is_paused_cas_receipted_and_idempotent(self, run):
+        config = self._allowlist_ready()
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        spec = self._allowlist_spec(config)
+        revision = self.registry.dispatch_control()["revision"]
+        evidence = update_allowed_authors(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, revision, spec,
+        )
+        self.assertFalse(evidence["idempotent_replay"])
+        self.assertEqual(evidence["allowed_authors"], ["tanner-art", "Danner-tev"])
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision + 1)
+        self.assertEqual(stat.S_IMODE(self.config_path.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], evidence["allowed_authors"])
+        replay = update_allowed_authors(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, revision, spec,
+        )
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(replay["revision"], evidence["revision"])
+        self.assertEqual(run.call_count, 1)
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_rejects_stale_revision_permission_loss_and_unexpected_config(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"read","user":{"login":"Danner-tev"}}', ""
+        )
+        with self.assertRaisesRegex(OperatorError, "lacks required write"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT,
+                                   self.registry.dispatch_control()["revision"], spec)
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], ["tanner-art"])
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        with self.assertRaisesRegex(OperatorError, "Registry revision mismatch"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT, 99, spec)
+        changed = json.loads(self.config_path.read_text())
+        changed["allowed_authors"] = ["someone-else"]
+        self.config_path.write_text(json.dumps(changed))
+        self.config_path.chmod(0o600)
+        with self.assertRaisesRegex(OperatorError, "compare-and-swap"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT,
+                                   self.registry.dispatch_control()["revision"], spec)
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_rolls_back_config_when_receipt_fails(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        before = self.config_path.read_bytes()
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        # The operator creates its own Registry adapter, so fail its write boundary.
+        with mock.patch.object(operator_module.SQLiteRegistry, "record_paused_config_operation", side_effect=RuntimeError("receipt fail")):
+            with self.assertRaisesRegex(RuntimeError, "receipt fail"):
+                update_allowed_authors(self.database, self.config_path, self.release,
+                                       self.preservation, COMMIT,
+                                       self.registry.dispatch_control()["revision"], spec)
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertFalse(operator_module._allowed_authors_pending_path(self.config_path).exists())
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_concurrent_updates_share_persistent_lock_and_reject_stale_cas(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        results, failures = [], []
+
+        def invoke():
+            try:
+                results.append(update_allowed_authors(
+                    self.database, self.config_path, self.release, self.preservation,
+                    COMMIT, revision, spec,
+                ))
+            except Exception as error:  # The second caller must fail closed.
+                failures.append(error)
+
+        first, second = threading.Thread(target=invoke), threading.Thread(target=invoke)
+        first.start()
+        second.start()
+        first.join(5)
+        second.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], OperatorError)
+        self.assertRegex(str(failures[0]), "(compare-and-swap|revision mismatch)")
+        self.assertTrue(operator_module._allowed_authors_lock_path(self.config_path).is_file())
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], spec["allowed_authors"])
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_interrupt_after_config_write_requires_and_supports_recovery(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        with mock.patch.object(operator_module.SQLiteRegistry, "record_paused_config_operation",
+                               side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                update_allowed_authors(self.database, self.config_path, self.release,
+                                       self.preservation, COMMIT, revision, spec)
+        self.assertTrue(operator_module._allowed_authors_pending_path(self.config_path).is_file())
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], spec["allowed_authors"])
+        with self.assertRaisesRegex(OperatorError, "pending recovery"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation, COMMIT, revision,
+            )
+        with self.assertRaisesRegex(OperatorError, "pending recovery"):
+            enable_live(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, revision, "not-reached",
+            )
+        with self.assertRaisesRegex(OperatorError, "pending recovery"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT, revision, spec)
+        recovered = recover_allowed_authors_pending(
+            self.database, self.config_path, self.release, self.preservation, COMMIT, revision,
+        )
+        self.assertTrue(recovered["recovered"])
+        self.assertFalse(operator_module._allowed_authors_pending_path(self.config_path).exists())
+        self.assertIsNotNone(self.registry.control_operation_replay(
+            operation_id=spec["operation_id"], operation_kind="UPDATE_ALLOWED_AUTHORS", request=spec,
+        ))
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_receipt_failure_clears_journal_only_after_source_is_restored(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        before = self.config_path.read_bytes()
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        with mock.patch.object(operator_module.SQLiteRegistry, "record_paused_config_operation",
+                               side_effect=RuntimeError("receipt fail")):
+            with mock.patch.object(operator_module, "_atomic_replace_config_bytes") as restore:
+                with self.assertRaisesRegex(OperatorError, "rollback requires recovery"):
+                    update_allowed_authors(
+                        self.database, self.config_path, self.release, self.preservation,
+                        COMMIT, self.registry.dispatch_control()["revision"], spec,
+                    )
+        restore.assert_called_once()
+        self.assertNotEqual(self.config_path.read_bytes(), before)
+        self.assertTrue(operator_module._allowed_authors_pending_path(self.config_path).is_file())
+
+    def test_allowed_authors_update_spec_rejects_wrong_repository_and_invalid_logins(self):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        spec["repository"] = "tanner-art/not-working"
+        with self.assertRaisesRegex(OperatorError, "repository"):
+            parse_allowed_authors_update_spec(spec)
+        spec = self._allowlist_spec(config)
+        spec["allowed_authors"] = ["tanner-art", "Danner-tev", "danner-tev"]
+        with self.assertRaisesRegex(OperatorError, "duplicate"):
+            parse_allowed_authors_update_spec(spec)
+        spec = self._allowlist_spec(config)
+        spec["allowed_authors"] = ["tanner-art", ""]
+        with self.assertRaisesRegex(OperatorError, "invalid"):
+            parse_allowed_authors_update_spec(spec)
 
     def test_enable_live_promotes_loaded_dry_run_then_cas_enables_canary(self):
         self.config_path.write_text(json.dumps(self.config(strict=False)))

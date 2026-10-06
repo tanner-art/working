@@ -22,6 +22,12 @@ class QueueTests(unittest.TestCase):
     def test_valid(self): self.assertEqual(select(self.issue(),['owner'])[0],'codex-a')
     def test_untrusted_author(self):
         with self.assertRaises(ValueError): select(self.issue(),['someone'])
+    def test_labels_do_not_authorize_an_unlisted_author(self):
+        issue = self.issue()
+        issue['author']['login'] = 'Danner-tev'
+        issue['labels'].append({'name': 'runner:ready'})
+        with self.assertRaises(ValueError):
+            select(issue, ['tanner-art'])
     def test_traversal(self):
         with self.assertRaises(ValueError): select(self.issue('{"task":"TASK-015","paths":["../secret"],"instructions":"x"}'),['owner'])
     def test_two_agents(self):
