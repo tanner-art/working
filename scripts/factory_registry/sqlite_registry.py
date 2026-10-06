@@ -2983,6 +2983,62 @@ class SQLiteRegistry:
         return value
 
     @staticmethod
+    def _review_readiness_reasons(
+        connection: sqlite3.Connection, review_package_id: str
+    ) -> tuple[str, ...]:
+        """Derive review readiness from current Registry facts and immutable input."""
+        reasons: list[str] = []
+        targets = connection.execute(
+            """SELECT target.id, target.status FROM task_dependencies AS dependency
+               JOIN work_packages AS target ON target.id=dependency.dependency_id
+               WHERE dependency.package_id=?""", (review_package_id,),
+        ).fetchall()
+        if len(targets) != 1:
+            return ("REVIEW_TARGET_MISMATCH",)
+        target = targets[0]
+        if target["status"] != TaskStatus.VERIFY_REVIEW.value:
+            reasons.append(f"REVIEW_TARGET_NOT_VERIFY_REVIEW:{target['id']}:{target['status']}")
+        attempts = connection.execute(
+            """SELECT id, worker_id FROM attempts WHERE package_id=?
+               AND outcome='SUCCEEDED' AND ended_at IS NOT NULL
+               ORDER BY ended_at DESC, started_at DESC, id DESC LIMIT 1""",
+            (target["id"],),
+        ).fetchall()
+        if not attempts or not attempts[0]["worker_id"]:
+            reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
+        inputs = connection.execute(
+            """SELECT id, uri, recorded_at, metadata_json FROM evidence
+               WHERE package_id=? AND kind='review-input' ORDER BY recorded_at, id""",
+            (review_package_id,),
+        ).fetchall()
+        if len(inputs) != 1:
+            reasons.append(f"REVIEW_INPUT_COUNT_INVALID:{len(inputs)}")
+        else:
+            row = inputs[0]
+            try:
+                metadata = json.loads(row["metadata_json"])
+                review_input = ReviewInput(
+                    id=row["id"], review_package_id=review_package_id,
+                    target_package_id=metadata["target_package_id"],
+                    implementation_attempt_id=metadata["implementation_attempt_id"],
+                    implementation_commit=metadata["implementation_commit"],
+                    base_commit=metadata["base_commit"], pr_url=row["uri"],
+                    contract_sha256=metadata["contract_sha256"],
+                    contract=metadata["contract"],
+                    validation_evidence=metadata["validation_evidence"],
+                    recorded_at=row["recorded_at"],
+                )
+                _review_input_evidence(review_input)
+                _verify_operator_review_packet(review_input)
+                if (review_input.target_package_id != target["id"]
+                        or not attempts
+                        or review_input.implementation_attempt_id != attempts[0]["id"]):
+                    reasons.append("REVIEW_INPUT_ATTEMPT_MISMATCH")
+            except (KeyError, TypeError, ValueError, RegistryConflict) as error:
+                reasons.append(f"REVIEW_INPUT_INVALID:{getattr(error, 'code', type(error).__name__)}")
+        return tuple(sorted(set(reasons)))
+
+    @staticmethod
     def _expire_leases(connection: sqlite3.Connection, now: str) -> int:
         expired = connection.execute(
             "SELECT id, package_id, worker_id FROM leases "
@@ -3131,6 +3187,12 @@ class SQLiteRegistry:
                     raise RegistryConflict("ORCHESTRA_CANNOT_CLAIM")
                 if package["status"] != TaskStatus.READY.value:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
+                diagnostics = json.loads(package["provider_diagnostics_json"])
+                if (package["kind"] == PackageKind.REVIEW.value
+                        and diagnostics.get("readiness_schema_version") == 2):
+                    readiness_reasons = self._review_readiness_reasons(connection, package_id)
+                    if readiness_reasons:
+                        raise RegistryConflict("REVIEW_NOT_READY", ",".join(readiness_reasons))
                 if scope is not None and package["kind"] == PackageKind.PARENT.value:
                     placeholders = ",".join("?" for _ in scope["package_ids"])
                     active_in_run = connection.execute(
@@ -4937,6 +4999,11 @@ class SQLiteRegistry:
                     "provider_diagnostics_json", "usage_consumption_json",
                 ):
                     item[key.removesuffix("_json")] = json.loads(item.pop(key))
+                if (item["kind"] == PackageKind.REVIEW.value
+                        and item["provider_diagnostics"].get("readiness_schema_version") == 2):
+                    item["review_readiness_reasons"] = self._review_readiness_reasons(
+                        connection, item["id"]
+                    )
                 packages.append(item)
             # The scheduler needs durable author provenance for submitted
             # parents.  Keep it projection-only: attempts remain the source.

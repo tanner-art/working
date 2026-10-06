@@ -32,6 +32,8 @@ class RejectionCode(str, Enum):
     PACKAGE_NOT_YET_READY = "PACKAGE_NOT_YET_READY"
     DEPENDENCY_BLOCKED = "DEPENDENCY_BLOCKED"
     DEPENDENCY_MISSING = "DEPENDENCY_MISSING"
+    REVIEW_PREREQUISITE_MISSING = "REVIEW_PREREQUISITE_MISSING"
+    REVIEW_INDEPENDENCE_REQUIRED = "REVIEW_INDEPENDENCE_REQUIRED"
     PACKAGE_HAS_ACTIVE_LEASE = "PACKAGE_HAS_ACTIVE_LEASE"
     NO_ELIGIBLE_WORKER = "NO_ELIGIBLE_WORKER"
     WORKER_ROLE_INELIGIBLE = "WORKER_ROLE_INELIGIBLE"
@@ -550,6 +552,8 @@ def _package_reasons(
                     f"{dependency_id}:{dependency.get('status')}",
                 )
             )
+    for prerequisite in package.get("review_readiness_reasons", ()):
+        reasons.append(_reason(RejectionCode.REVIEW_PREREQUISITE_MISSING, str(prerequisite)))
     return tuple(sorted(set(reasons)))
 
 
@@ -575,6 +579,14 @@ def _pair_reasons(
     missing = sorted(required - capabilities)
     if missing:
         reasons.append(_reason(RejectionCode.CAPABILITY_MISMATCH, ",".join(missing)))
+    if (package.get("kind") == "REVIEW"
+            and (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2):
+        target_ids = [str(edge.get("dependency_id")) for edge in snapshot.dependencies
+                      if edge.get("package_id") == package.get("id")]
+        target = next((item for item in snapshot.work_packages
+                       if item.get("id") == target_ids[0]), None) if len(target_ids) == 1 else None
+        if target is not None and target.get("wip_implementer_worker_id") == worker.get("id"):
+            reasons.append(_reason(RejectionCode.REVIEW_INDEPENDENCE_REQUIRED, str(worker.get("id"))))
     if not reasons:
         reasons.extend(_capacity_package_reasons(snapshot, package, worker, policy))
     return tuple(sorted(set(reasons)))
