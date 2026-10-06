@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -2080,6 +2082,7 @@ def bounded_run_worker_gate(
     snapshot: DispatchSnapshot, package_ids: Sequence[str], *,
     review_input_lookup: Callable[[str], Mapping[str, Any]] | None = None,
     successful_attempt_worker: Callable[[str, str], str] | None = None,
+    review_implementer_worker: Callable[[str], str] | None = None,
 ) -> Mapping[str, Any]:
     """Evaluate only the reviewed pilot allowlist, not historical READY work."""
     allowed = set(package_ids)
@@ -2109,7 +2112,7 @@ def bounded_run_worker_gate(
     if not review_only and {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
         raise OperatorError("bounded run review dependencies do not exactly match implementations")
     if review_only:
-        if review_input_lookup is None or successful_attempt_worker is None:
+        if review_input_lookup is None or (successful_attempt_worker is None and review_implementer_worker is None):
             raise OperatorError("bounded review provenance lookup is required")
         targets = {str(item.get("id")): item for item in packages}
         review_implementers: dict[str, str] = {}
@@ -2123,7 +2126,11 @@ def bounded_run_worker_gate(
                 attempt_id = review_input.get("implementation_attempt_id")
                 if review_input.get("target_package_id") != target_id or not isinstance(attempt_id, str) or not attempt_id:
                     raise OperatorError("bounded review input does not bind its target")
-                review_implementers[str(review["id"])] = successful_attempt_worker(target_id, attempt_id)
+                review_implementers[str(review["id"])] = (
+                    review_implementer_worker(str(review["id"]))
+                    if review_implementer_worker is not None else
+                    successful_attempt_worker(target_id, attempt_id)
+                )
             except RegistryError as error:
                 raise OperatorError("bounded review provenance gate failed: " + str(error)) from error
     candidate = DispatchSnapshot(
@@ -2269,6 +2276,7 @@ def preflight(
             dispatch, run_package_ids,
             review_input_lookup=registry.review_input,
             successful_attempt_worker=registry.successful_attempt_worker,
+            review_implementer_worker=registry.review_implementer_worker,
         )
         if require_workers and run_package_ids is not None else
         _worker_gate(dispatch, canary_feature_id=canary_feature_id,
@@ -2555,6 +2563,111 @@ def parse_review_input_spec(value: Mapping[str, Any]) -> ReviewInput:
         base_commit=str(value["base_commit"]), pr_url=str(value["pr_url"]), contract_sha256=queue_contract_digest(contract),
         contract=contract, validation_evidence=dict(value["validation_evidence"]), recorded_at=str(value["recorded_at"]),
     )
+
+
+def _github_public_json(url: str) -> Mapping[str, Any]:
+    """Read one exact GitHub API resource; never follow a supplied API URL."""
+    request = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json", "User-Agent": "threadline-factory-operator",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.load(response)
+    except (OSError, ValueError) as error:
+        raise OperatorError("GitHub provenance is unavailable") from error
+    if not isinstance(result, Mapping):
+        raise OperatorError("GitHub provenance is invalid")
+    return result
+
+
+def parse_external_integration_review_spec(value: Mapping[str, Any]) -> tuple[Path, ReviewInput]:
+    if _sensitive_paths(value) or set(value) != {"repository", "review_input", "external_integration"}:
+        raise OperatorError("external integration review spec is invalid")
+    repository = Path(value["repository"])
+    raw_input, external = value["review_input"], value["external_integration"]
+    if (not repository.is_absolute() or not repository.is_dir() or repository.is_symlink()
+            or not isinstance(raw_input, Mapping) or not isinstance(external, Mapping)
+            or set(external) != {"id", "historical_commit", "integration_commit", "repository_head", "implementer_worker_id"}):
+        raise OperatorError("external integration review spec is invalid")
+    review_input = parse_review_input_spec(raw_input)
+    if (review_input.implementation_attempt_id != f"external-integration:{external['id']}"
+            or review_input.implementation_commit != external["historical_commit"]
+            or not all(isinstance(external[key], str) and re.fullmatch(r"[0-9a-f]{40}", external[key])
+                       for key in ("historical_commit", "integration_commit", "repository_head"))
+            or not isinstance(external["implementer_worker_id"], str)
+            or not external["implementer_worker_id"]):
+        raise OperatorError("external integration identity is invalid")
+    return repository, replace(review_input, external_integration=dict(external))
+
+
+def record_external_integration_review_input(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Authorize an exact externally merged implementation for Registry review."""
+    repository, review_input = parse_external_integration_review_spec(spec)
+    external = review_input.external_integration
+    assert external is not None
+    historical = _git_exact_commit(repository, review_input.implementation_commit)
+    integration = _git_exact_commit(repository, external["integration_commit"])
+    head = _git_exact_commit(repository, external["repository_head"])
+    try:
+        checked_head = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        base = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", f"{historical}^"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        ancestry = ((historical, integration), (integration, head))
+        if (checked_head != head or base != review_input.base_commit
+                or any(subprocess.run(
+                    ["git", "-C", str(repository), "merge-base", "--is-ancestor", ancestor, descendant],
+                    check=False, capture_output=True,
+                ).returncode != 0 for ancestor, descendant in ancestry)):
+            raise OperatorError("external integration Git ancestry failed")
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OperatorError("external integration Git ancestry unavailable") from error
+    match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/([1-9]\d*)", review_input.pr_url)
+    if match is None:
+        raise OperatorError("external integration PR URL is invalid")
+    owner, repo, number = match.groups()
+    api = f"https://api.github.com/repos/{owner}/{repo}"
+    pull = _github_public_json(f"{api}/pulls/{number}")
+    if (pull.get("merged") is not True or pull.get("merge_commit_sha") != integration
+            or pull.get("html_url") != review_input.pr_url):
+        raise OperatorError("external integration PR does not bind the merge commit")
+    ci = review_input.validation_evidence.get("ci")
+    if not isinstance(ci, Mapping):
+        raise OperatorError("external integration CI evidence is missing")
+    run_url = ci.get("run_url")
+    run_match = re.fullmatch(
+        rf"https://github\.com/{re.escape(owner)}/{re.escape(repo)}/actions/runs/([1-9]\d*)",
+        run_url if isinstance(run_url, str) else "",
+    )
+    if run_match is None:
+        raise OperatorError("external integration CI run URL is invalid")
+    run = _github_public_json(f"{api}/actions/runs/{run_match.group(1)}")
+    if (run.get("head_sha") != integration or run.get("name") != "Validate app"
+            or run.get("head_branch") != "main" or run.get("status") != "completed"
+            or run.get("conclusion") != "success" or run.get("html_url") != run_url
+            or ci.get("state") != "SUCCESS" or ci.get("validated_commit") != integration
+            or ci.get("contains_implementation_commit") != historical
+            or ci.get("pr_url") != review_input.pr_url):
+        raise OperatorError("external integration CI does not validate the containing merge")
+    preflight(database, config_path, release, preservation_path, expected_commit,
+              expected_revision, observed_at=review_input.recorded_at,
+              require_workers=False)
+    revision = SQLiteRegistry(database).record_external_integration_review_input(
+        review_input, expected_revision=expected_revision,
+    )
+    return {"kind": "threadline-factory-record-external-integration-review-input",
+            "passed": True, "target_package_id": review_input.target_package_id,
+            "review_package_id": review_input.review_package_id,
+            "review_input_id": review_input.id, "historical_failed_attempt_preserved": True,
+            "review_passed": False, "previous_revision": expected_revision,
+            "revision": revision}
 
 
 def parse_bounded_pilot_spec(

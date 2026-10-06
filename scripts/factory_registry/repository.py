@@ -130,6 +130,10 @@ class Registry(Protocol):
 
     def review_implementer_worker(self, review_package_id: str) -> str: ...
 
+    def record_external_integration_review_input(
+        self, review_input: ReviewInput, *, expected_revision: int,
+    ) -> int: ...
+
     def successful_package_worker(self, package_id: str) -> str: ...
 
     def acquire_lease(
