@@ -116,6 +116,48 @@ describe('Factory Control Center components', () => {
     for (const detail of ['Classification', 'Affected worker', 'Affected package', 'Owner action required', 'Recommended next action', 'Triggering event', 'Relevant evidence']) expect(failureMarkup).toContain(detail)
   })
 
+  it('bounds Overview capacity to current distinct scopes without hiding unknown capacity or stale worker evidence', () => {
+    const snapshot = structuredClone(factoryControlFixture)
+    const agentA = snapshot.workers.find(worker => worker.id === 'agent-a')
+    const agentB = snapshot.workers.find(worker => worker.id === 'agent-b')
+    if (!agentA) throw new Error('Agent A fixture worker is missing')
+    if (!agentB) throw new Error('Agent B fixture worker is missing')
+    agentB.heartbeatAt = '2026-09-24T18:25:00Z'
+    agentA.capacityState = 'unknown'
+    snapshot.capacity = Array.from({ length: 250 }, (_, index) => ({
+      ...structuredClone(factoryControlFixture.capacity[0]),
+      id: `agent-a-history-${index}`,
+      workerId: 'agent-a',
+      label: `Historical scope ${index}`,
+      observedAt: `2026-09-24T${String(14 + Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}:00Z`,
+      usedPercent: index % 100,
+    }))
+    snapshot.capacity.push({
+      ...structuredClone(factoryControlFixture.capacity[0]),
+      id: 'agent-a-current-unknown',
+      workerId: 'agent-a',
+      label: 'Current provider window',
+      observedAt: '2026-09-24T18:30:00Z',
+      source: 'unknown',
+      state: 'unknown',
+      usedPercent: null,
+    })
+
+    const overviewMarkup = renderToStaticMarkup(<DashboardView view="overview" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(overviewMarkup).toContain('Recent capacity scopes (3 of 251)')
+    expect(overviewMarkup).toContain('Current provider window: Capacity value unknown · unknown')
+    expect(overviewMarkup).toContain('Historical scope 249')
+    expect(overviewMarkup).not.toContain('Historical scope 0')
+    expect(overviewMarkup.match(/Capacity value unknown/g)).toHaveLength(2)
+    expect(overviewMarkup).toContain('HEARTBEAT_STALE')
+    expect(overviewMarkup).toContain('CAPACITY_UNKNOWN')
+    expect(overviewMarkup).toContain('<span class="factory-chip constrained">constrained</span>')
+
+    const capacityMarkup = renderToStaticMarkup(<DashboardView view="capacity" snapshot={snapshot} refreshing={false} onRefresh={() => undefined} />)
+    expect(capacityMarkup).toContain('Historical scope 0')
+    expect(capacityMarkup).toContain('Historical scope 249')
+  })
+
   it('renders unsafe evidence and pull-request URLs as text instead of links', () => {
     const snapshot = structuredClone(factoryControlFixture)
     snapshot.features[0].packages[0].pullRequestUrl = 'javascript:alert(1)'

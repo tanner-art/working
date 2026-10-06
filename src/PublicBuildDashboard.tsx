@@ -13,6 +13,8 @@ const views: Array<{ id: View; label: string }> = [
   { id: 'failures', label: 'Failures / attention' },
 ]
 
+const OVERVIEW_CAPACITY_SCOPE_LIMIT = 3
+
 function useFactoryAuth() {
   const [state, setState] = useState<AuthState>(auth.getState)
   const [attempt, setAttempt] = useState(0)
@@ -123,13 +125,25 @@ function Overview({ snapshot, onNavigate }: { snapshot: FactoryControlSnapshot; 
 
 function WorkerSummary({ worker, item, scopes, generatedAt }: { worker: FactoryWorker; item?: FactoryPackage; scopes: FactoryCapacityScope[]; generatedAt: string }) {
   const health = effectiveWorkerHealth(worker, generatedAt)
+  const recentScopes = recentDistinctCapacityScopes(scopes)
+  const displayHealth = health.state === 'healthy' && worker.capacityState === 'unknown'
+    ? { state: 'constrained' as const, reason: 'Capacity evidence is unknown.' }
+    : health
   const constraints = workerConstraintDetails(worker, generatedAt, scopes)
-  return <details className="factory-card worker-summary factory-inspection" open={health.state !== 'healthy'}><summary className="factory-card-heading"><div className="factory-avatar" aria-hidden="true">{worker.displayName.slice(0, 2).toUpperCase()}</div><div><h3>{worker.displayName}</h3><p>{worker.role === 'ORCHESTRA' ? 'Coordinator' : worker.provider && worker.model ? `${worker.provider} · ${worker.model}` : worker.role}</p></div><StatusChip label={health.state} tone={health.state} /></summary>
+  return <details className="factory-card worker-summary factory-inspection" open={displayHealth.state !== 'healthy'}><summary className="factory-card-heading"><div className="factory-avatar" aria-hidden="true">{worker.displayName.slice(0, 2).toUpperCase()}</div><div><h3>{worker.displayName}</h3><p>{worker.role === 'ORCHESTRA' ? 'Coordinator' : worker.provider && worker.model ? `${worker.provider} · ${worker.model}` : worker.role}</p></div><StatusChip label={displayHealth.state} tone={displayHealth.state} /></summary>
     <p className="factory-assignment"><strong>{item?.title ?? 'No current assignment'}</strong><span>{item ? `${item.id} · ${item.lane ?? 'Lane unassigned'}` : 'Available work is shown in Queue'}</span></p>
     <dl className="factory-definition"><div><dt>Task elapsed</dt><dd>{item ? formatDuration(item.elapsedRuntimeSeconds) : '—'}</dd></div><div><dt>Heartbeat</dt><dd>{formatRelativeTime(worker.heartbeatAt, new Date(generatedAt))}</dd></div><div><dt>Attempt</dt><dd>{worker.currentAttempt ?? '—'}</dd></div><div><dt>Capacity</dt><dd>{worker.capacityState.replace('_', ' ')}</dd></div></dl>
-    <p className="factory-scope-line">{health.reason}</p>{scopes.length > 0 && <p className="factory-scope-line">{scopes.map(capacitySummary).join(' · ')}</p>}
+    <p className="factory-scope-line">{displayHealth.reason}</p>{scopes.length > 0 && <p className="factory-scope-line">Recent capacity scopes ({recentScopes.length} of {new Set(scopes.map(scope => scope.label)).size}): {recentScopes.map(scope => `${scope.label}: ${capacitySummary(scope)} · ${scope.state.replace('_', ' ')}`).join(' · ')}</p>}
     {constraints.length > 0 && <div className="factory-constraint-list">{constraints.map(detail => <div key={detail.code}><strong>{detail.code}</strong><span>{detail.reason}</span><span>Next action: {detail.nextAction}</span></div>)}</div>}
   </details>
+}
+
+function recentDistinctCapacityScopes(scopes: FactoryCapacityScope[]): FactoryCapacityScope[] {
+  const latestByLabel = new Map<string, FactoryCapacityScope>()
+  for (const scope of [...scopes].sort((left, right) => (right.observedAt ?? '').localeCompare(left.observedAt ?? '') || right.id.localeCompare(left.id))) {
+    if (!latestByLabel.has(scope.label)) latestByLabel.set(scope.label, scope)
+  }
+  return [...latestByLabel.values()].slice(0, OVERVIEW_CAPACITY_SCOPE_LIMIT)
 }
 
 function Queue({ snapshot, initialState }: { snapshot: FactoryControlSnapshot; initialState?: FactoryState }) {
