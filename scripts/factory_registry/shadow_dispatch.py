@@ -27,6 +27,7 @@ class ShadowDispatchError(ValueError):
 
 class RejectionCode(str, Enum):
     PACKAGE_NOT_READY = "PACKAGE_NOT_READY"
+    FEATURE_NOT_READY = "FEATURE_NOT_READY"
     PACKAGE_LANE_UNASSIGNED = "PACKAGE_LANE_UNASSIGNED"
     PACKAGE_READY_TIME_INVALID = "PACKAGE_READY_TIME_INVALID"
     PACKAGE_NOT_YET_READY = "PACKAGE_NOT_YET_READY"
@@ -510,6 +511,7 @@ def _worker_reasons(
 def _package_reasons(
     package: Mapping[str, Any],
     package_by_id: Mapping[str, Mapping[str, Any]],
+    feature_by_id: Mapping[str, Mapping[str, Any]],
     dependencies: Mapping[str, tuple[str, ...]],
     actively_leased_packages: set[str],
     observed_at: datetime,
@@ -517,6 +519,13 @@ def _package_reasons(
     reasons: list[Reason] = []
     if package.get("status") != "READY":
         reasons.append(_reason(RejectionCode.PACKAGE_NOT_READY, str(package.get("status"))))
+    if (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2:
+        feature = feature_by_id.get(str(package.get("feature_id")))
+        if feature is None or feature.get("status") not in {"READY", "ACTIVE", "VERIFY_REVIEW"}:
+            reasons.append(_reason(
+                RejectionCode.FEATURE_NOT_READY,
+                f"{package.get('feature_id')}:{feature.get('status') if feature else 'MISSING'}",
+            ))
     if not package.get("lane"):
         reasons.append(_reason(RejectionCode.PACKAGE_LANE_UNASSIGNED))
     package_id = str(package.get("id"))
@@ -682,6 +691,7 @@ def decide_shadow(
     workers = tuple(sorted(snapshot.workers, key=lambda value: str(value.get("id"))))
     packages = tuple(sorted(snapshot.work_packages, key=lambda value: str(value.get("id"))))
     package_by_id = {str(value.get("id")): value for value in packages}
+    feature_by_id = {str(value.get("id")): value for value in snapshot.features}
     worker_by_id = {str(value.get("id")): value for value in workers}
     dependencies: dict[str, list[str]] = {}
     for dependency in snapshot.dependencies:
@@ -776,6 +786,7 @@ def decide_shadow(
                 reasons := _package_reasons(
                     package,
                     package_by_id,
+                    feature_by_id,
                     normalized_dependencies,
                     actively_leased_packages,
                     observed_at,

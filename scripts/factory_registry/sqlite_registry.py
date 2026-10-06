@@ -1881,6 +1881,11 @@ class SQLiteRegistry:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if package.status == TaskStatus.READY:
+                    self._require_ready_package_contract(package)
+                    self._promote_feature_for_ready_package(
+                        connection, package.feature_id, now
+                    )
                 self._insert_package(connection, package, now)
                 for dependency_id in package.dependency_ids:
                     connection.execute(
@@ -1894,6 +1899,58 @@ class SQLiteRegistry:
                 raise
 
     @staticmethod
+    def _require_ready_package_contract(package: WorkPackage) -> None:
+        if not (package.provider_diagnostics.get("readiness_schema_version") == 2):
+            return
+        digest = package.provider_diagnostics.get("queue_contract_sha256")
+        proof = package.provider_diagnostics.get("readiness_proof")
+        acceptance_digest = hashlib.sha256(json.dumps(
+            package.acceptance_criteria, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
+        if (package.lane is None
+                or not package.acceptance_criteria
+                or any(not isinstance(item, str) or not item.strip()
+                       for item in package.acceptance_criteria)
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not isinstance(proof, Mapping)
+                or proof.get("queue_contract_sha256") != digest
+                or proof.get("acceptance_sha256") != acceptance_digest
+                or not isinstance(proof.get("base_commit"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", proof["base_commit"])
+                or not isinstance(proof.get("target_ref"), str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", proof["target_ref"])
+                or ".." in proof["target_ref"]
+                or proof["target_ref"].endswith("/")
+                or not isinstance(proof.get("planning_sha256"), Mapping)
+                or not proof["planning_sha256"]
+                or any(not isinstance(path, str) or not path
+                       or not isinstance(value, str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for path, value in proof["planning_sha256"].items())):
+            raise RegistryConflict("READY_CONTRACT_INCOMPLETE", package.id)
+
+    @staticmethod
+    def _promote_feature_for_ready_package(
+        connection: sqlite3.Connection, feature_id: str, now: str
+    ) -> None:
+        feature = connection.execute(
+            "SELECT status FROM features WHERE id=?", (feature_id,)
+        ).fetchone()
+        if feature is None:
+            raise RegistryNotFound(f"feature {feature_id}")
+        if feature["status"] == TaskStatus.ON_DECK.value:
+            connection.execute(
+                "UPDATE features SET status='READY', updated_at=? WHERE id=?",
+                (now, feature_id),
+            )
+        elif feature["status"] not in {
+            TaskStatus.READY.value, TaskStatus.ACTIVE.value,
+            TaskStatus.VERIFY_REVIEW.value,
+        }:
+            raise RegistryConflict("FEATURE_CANNOT_CONTAIN_READY_PACKAGE", feature["status"])
+
+    @staticmethod
     def _insert_package(
         connection: sqlite3.Connection,
         package: WorkPackage,
@@ -1904,6 +1961,8 @@ class SQLiteRegistry:
     ) -> None:
         if package.status == TaskStatus.ACTIVE:
             raise RegistryConflict("ACTIVE_REQUIRES_LEASE")
+        if package.status == TaskStatus.READY:
+            SQLiteRegistry._require_ready_package_contract(package)
         started_at = _normalize_timestamp(package.started_at) if package.started_at else None
         heartbeat_at = (
             _normalize_timestamp(package.last_heartbeat_at)
@@ -2208,6 +2267,8 @@ class SQLiteRegistry:
             raise RegistryConflict("INVALID_CANARY_KINDS")
         if implementation.status != TaskStatus.READY or review.status != TaskStatus.READY:
             raise RegistryConflict("CANARY_PACKAGES_MUST_BE_READY")
+        if feature.status not in {TaskStatus.ON_DECK, TaskStatus.READY}:
+            raise RegistryConflict("CANARY_FEATURE_CANNOT_BE_READY")
         if review.lane != Lane.ASSURANCE:
             raise RegistryConflict("CANARY_REVIEW_REQUIRES_ASSURANCE")
         if tuple(review.dependency_ids) != (implementation.id,):
@@ -2248,7 +2309,7 @@ class SQLiteRegistry:
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         feature.id, feature.title, feature.description, feature.priority,
-                        feature.status.value, recorded_at, recorded_at,
+                        TaskStatus.READY.value, recorded_at, recorded_at,
                     ),
                 )
                 self._insert_package(
@@ -2304,6 +2365,7 @@ class SQLiteRegistry:
             if (implementation.feature_id != feature.id or review.feature_id != feature.id
                     or implementation.kind != PackageKind.PARENT or review.kind != PackageKind.REVIEW
                     or implementation.status != TaskStatus.READY or review.status != TaskStatus.READY
+                    or feature.status not in {TaskStatus.ON_DECK, TaskStatus.READY}
                     or review.lane != Lane.ASSURANCE or tuple(review.dependency_ids) != (implementation.id,)
                     or not {item.lower() for item in review.required_capabilities} & {"review", "independent-review"}):
                 raise RegistryConflict("INVALID_BOUNDED_PILOT_PAIR")
@@ -2328,7 +2390,7 @@ class SQLiteRegistry:
                 for feature, implementation, review in pairs:
                     connection.execute(
                         "INSERT INTO features (id,title,description,priority,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                        (feature.id, feature.title, feature.description, feature.priority, feature.status.value, recorded_at, recorded_at),
+                        (feature.id, feature.title, feature.description, feature.priority, TaskStatus.READY.value, recorded_at, recorded_at),
                     )
                     for package in (implementation, review):
                         source_ref = package.provider_diagnostics.get("github_source_ref")
@@ -2448,6 +2510,10 @@ class SQLiteRegistry:
                 ).fetchone()
                 if prior is None:
                     raise RegistryConflict("CHANGES_REQUESTED_REVIEW_REQUIRED")
+                self._require_ready_package_contract(review)
+                self._promote_feature_for_ready_package(
+                    connection, review.feature_id, recorded_at
+                )
                 self._insert_package(
                     connection, review, recorded_at,
                     source_system="github_issue", source_ref=source_ref,
@@ -3188,6 +3254,18 @@ class SQLiteRegistry:
                 if package["status"] != TaskStatus.READY.value:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
                 diagnostics = json.loads(package["provider_diagnostics_json"])
+                if diagnostics.get("readiness_schema_version") == 2:
+                    feature = connection.execute(
+                        "SELECT status FROM features WHERE id=?", (package["feature_id"],)
+                    ).fetchone()
+                    if feature is None or feature["status"] not in {
+                        TaskStatus.READY.value, TaskStatus.ACTIVE.value,
+                        TaskStatus.VERIFY_REVIEW.value,
+                    }:
+                        raise RegistryConflict(
+                            "FEATURE_NOT_READY",
+                            f"{package['feature_id']}:{feature['status'] if feature else 'MISSING'}",
+                        )
                 if (package["kind"] == PackageKind.REVIEW.value
                         and diagnostics.get("readiness_schema_version") == 2):
                     readiness_reasons = self._review_readiness_reasons(connection, package_id)
@@ -5113,6 +5191,24 @@ class SQLiteRegistry:
                 )
                 if "usage_ledger_sources" in tables else ()
             )
+            control_packages = decoded_rows(
+                "SELECT * FROM work_packages "
+                "ORDER BY priority DESC, COALESCE(ready_at, created_at), id",
+                (
+                    "required_capabilities_json", "acceptance_criteria_json",
+                    "provider_diagnostics_json", "usage_consumption_json",
+                ),
+            )
+            control_packages = tuple(
+                {**item, "review_readiness_reasons": self._review_readiness_reasons(
+                    connection, item["id"]
+                )}
+                if (item["kind"] == PackageKind.REVIEW.value
+                    and item["status"] == TaskStatus.READY.value
+                    and item["provider_diagnostics"].get("readiness_schema_version") == 2)
+                else item
+                for item in control_packages
+            )
             snapshot = ControlCenterReadSnapshot(
                 revision=int(metadata["revision"]),
                 observed_at=observed_at,
@@ -5121,16 +5217,7 @@ class SQLiteRegistry:
                 features=decoded_rows(
                     "SELECT * FROM features ORDER BY priority DESC, created_at, id"
                 ),
-                work_packages=decoded_rows(
-                    "SELECT * FROM work_packages "
-                    "ORDER BY priority DESC, COALESCE(ready_at, created_at), id",
-                    (
-                        "required_capabilities_json",
-                        "acceptance_criteria_json",
-                        "provider_diagnostics_json",
-                        "usage_consumption_json",
-                    ),
-                ),
+                work_packages=control_packages,
                 dependencies=decoded_rows(
                     "SELECT package_id, dependency_id FROM task_dependencies "
                     "ORDER BY package_id, dependency_id"

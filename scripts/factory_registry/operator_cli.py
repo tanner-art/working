@@ -35,6 +35,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_review_input_spec,
     parse_bounded_run_scope,
     preflight,
+    prepare_ready_package,
     prepare_dry_run,
     record_review_decision,
     recover_allowed_authors_pending,
@@ -376,8 +377,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "register-canary":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
-        feature, implementation, review = parse_canary_spec(
-            _load_object(args.spec, "canary spec")
+        spec = _load_object(args.spec, "canary spec")
+        feature, implementation, review = parse_canary_spec(spec)
+        repository = pathlib.Path(_load_object(args.config, "runner config")["repo"])
+        implementation = prepare_ready_package(
+            implementation, spec["implementation"]["queue_contract"],
+            repository=repository, target_ref="main",
+        )
+        review = prepare_ready_package(
+            review, spec["review"]["queue_contract"],
+            repository=repository, target_ref="main",
         )
         registry = SQLiteRegistry(args.database)
         worker_gate = canary_worker_gate(
@@ -406,7 +415,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "register-bounded-pilot":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
-        pairs = parse_bounded_pilot_spec(_load_object(args.spec, "bounded pilot spec"))
+        spec = _load_object(args.spec, "bounded pilot spec")
+        pairs = parse_bounded_pilot_spec(spec)
+        repository = pathlib.Path(_load_object(args.config, "runner config")["repo"])
+        pairs = tuple((
+            feature,
+            prepare_ready_package(
+                implementation, raw["implementation"]["queue_contract"],
+                repository=repository, target_ref="main",
+            ),
+            prepare_ready_package(
+                review, raw["review"]["queue_contract"],
+                repository=repository, target_ref="main",
+            ),
+        ) for (feature, implementation, review), raw in zip(pairs, spec["pairs"]))
         registry = SQLiteRegistry(args.database)
         # Registration is still PAUSED; evaluate the candidate packages before
         # writing so the next activation has a real independent pair path.
@@ -437,8 +459,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "register-followup-review":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
-        review = parse_followup_review_spec(
-            _load_object(args.spec, "follow-up review spec")
+        spec = _load_object(args.spec, "follow-up review spec")
+        review = parse_followup_review_spec(spec)
+        repository = pathlib.Path(_load_object(args.config, "runner config")["repo"])
+        review = prepare_ready_package(
+            review, spec["review"]["queue_contract"],
+            repository=repository, target_ref="main",
         )
         registry = SQLiteRegistry(args.database)
         worker_gate = followup_review_worker_gate(
