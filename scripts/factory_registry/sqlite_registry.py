@@ -3686,6 +3686,7 @@ class SQLiteRegistry:
         evidence: Evidence | None = None,
         expected_revision: int | None = None,
         operation_id: str | None = None,
+        review_attempt_id: str | None = None,
     ) -> int:
         """Append one explicit, independently authored review decision."""
         requested_at = _normalize_timestamp(outcome.requested_at)
@@ -3740,6 +3741,12 @@ class SQLiteRegistry:
             },
             "expected_revision": expected_revision,
         }
+        if review_attempt_id is not None:
+            validate_attempt_completion("SUCCEEDED", TaskStatus.VERIFY_REVIEW)
+            if (review_attempt_id != outcome.reviewer_attempt_id or evidence is None
+                    or evidence.metadata.get("attempt_id") != review_attempt_id):
+                raise RegistryConflict("REVIEWER_ATTEMPT_MISMATCH")
+            request["review_attempt_id"] = review_attempt_id
         operation_id = operation_id or f"review-outcome:{outcome.id}"
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -3755,6 +3762,66 @@ class SQLiteRegistry:
                     return int(replay["revision"])
                 if expected_revision is not None:
                     self._require_revision(connection, expected_revision)
+                if review_attempt_id is not None:
+                    attempt = connection.execute(
+                        """SELECT attempt.package_id, attempt.worker_id, attempt.lease_id,
+                                  attempt.started_at, attempt.ended_at,
+                                  runtime.released_at AS runtime_released_at,
+                                  lease.released_at AS lease_released_at
+                           FROM attempts AS attempt
+                           JOIN attempt_runtime_ownership AS runtime ON runtime.attempt_id=attempt.id
+                           JOIN leases AS lease ON lease.id=attempt.lease_id
+                           WHERE attempt.id=?""",
+                        (review_attempt_id,),
+                    ).fetchone()
+                    if (attempt is None or attempt["package_id"] != outcome.review_package_id
+                            or attempt["worker_id"] != outcome.reviewer_worker_id
+                            or attempt["ended_at"] is not None
+                            or attempt["runtime_released_at"] is not None
+                            or attempt["lease_released_at"] is not None):
+                        raise RegistryConflict("REVIEWER_ATTEMPT_NOT_ACTIVE")
+                    if decided_at < attempt["started_at"]:
+                        raise RegistryConflict("INVALID_ATTEMPT_CHRONOLOGY")
+                    elapsed = (
+                        datetime.fromisoformat(decided_at.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(attempt["started_at"].replace("Z", "+00:00"))
+                    ).total_seconds()
+                    updated = connection.execute(
+                        """UPDATE work_packages SET status='VERIFY_REVIEW', updated_at=?,
+                                  failure_detail=NULL,
+                                  runtime_seconds=runtime_seconds+?
+                           WHERE id=? AND status='ACTIVE' AND kind='REVIEW'""",
+                        (decided_at, elapsed, outcome.review_package_id),
+                    ).rowcount
+                    if updated != 1:
+                        raise RegistryConflict("PACKAGE_NOT_ACTIVE")
+                    connection.execute(
+                        """UPDATE attempts SET ended_at=?, outcome='SUCCEEDED', failure_detail=NULL,
+                                  runtime_seconds=runtime_seconds+? WHERE id=?""",
+                        (decided_at, elapsed, review_attempt_id),
+                    )
+                    connection.execute(
+                        """UPDATE attempt_runtime_ownership SET released_at=?,
+                                  release_reason='review outcome recorded', updated_at=?
+                           WHERE attempt_id=?""",
+                        (decided_at, decided_at, review_attempt_id),
+                    )
+                    connection.execute(
+                        """UPDATE leases SET released_at=?, release_reason='review outcome recorded'
+                           WHERE id=?""",
+                        (decided_at, attempt["lease_id"]),
+                    )
+                    connection.execute(
+                        "UPDATE workers SET availability='IDLE', updated_at=? WHERE id=?",
+                        (decided_at, outcome.reviewer_worker_id),
+                    )
+                    self._insert_event(
+                        connection, "ATTEMPT_FINISHED", decided_at,
+                        outcome.review_package_id, outcome.reviewer_worker_id,
+                        review_attempt_id,
+                        {"outcome": "SUCCEEDED", "next_status": "VERIFY_REVIEW",
+                         "reason": "review outcome recorded"},
+                    )
                 if evidence is not None:
                     connection.execute(
                         """INSERT INTO evidence

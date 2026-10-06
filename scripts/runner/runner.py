@@ -50,6 +50,16 @@ class RegistryAttemptLifecycle:
     def fail(self, detail):
         return self._finish(self.control.fail, detail)
 
+    def succeed_review(self, outcome, evidence):
+        if self.finish_attempted:
+            return False
+        # The Registry method commits the attempt and verdict together. On a
+        # rejected transaction the attempt remains active for the failure path.
+        self.control.succeed_review(self.attempt_id, outcome, evidence)
+        self.finish_attempted = True
+        self.finish_completed = True
+        return True
+
     def _finish(self, callback, *args, **kwargs):
         if self.finish_attempted:
             return False
@@ -1606,13 +1616,14 @@ def main():
                         validation_evidence=validation_evidence,
                         recorded_at=completed_at,
                     )
-                registry_lifecycle.succeed(
-                    review_inputs=implementation_review_inputs, ended_at=completed_at
-                )
                 if registry_review:
-                    decided_at = datetime.now(timezone.utc).isoformat()
+                    decided_at = completed_at
                     evidence = Evidence(id=f'review-verdict:{attempt}', package_id=body['task'], kind='review', uri=data['pr'], summary='Structured independent review verdict.', recorded_at=decided_at, metadata={'attempt_id': attempt, 'reviewed_commit': verdict.reviewed_commit, 'reviewed_base_commit': verdict.reviewed_base_commit, 'contract_sha256': verdict.contract_sha256, 'review_input_evidence_id': review_input.id})
-                    registry_control.record_review_outcome(ReviewOutcome(id=f'review-outcome:{attempt}', review_package_id=body['task'], target_package_id=review_input.target_package_id, implementer_worker_id=registry_control.registry.review_implementer_worker(body['task']), reviewer_worker_id=lane, requested_at=review_input.recorded_at, decided_at=decided_at, state=verdict.state, findings=verdict.findings, changes_requested=verdict.changes_requested, approval_evidence_ids=(evidence.id,) if verdict.state.value == 'APPROVED' else (), reviewed_commit=verdict.reviewed_commit, reviewed_base_commit=verdict.reviewed_base_commit, contract_sha256=verdict.contract_sha256, review_input_evidence_id=review_input.id, reviewer_attempt_id=attempt), evidence, expected_revision=registry_control.registry.dispatch_control()['revision'])
+                    registry_lifecycle.succeed_review(ReviewOutcome(id=f'review-outcome:{attempt}', review_package_id=body['task'], target_package_id=review_input.target_package_id, implementer_worker_id=registry_control.registry.review_implementer_worker(body['task']), reviewer_worker_id=lane, requested_at=review_input.recorded_at, decided_at=decided_at, state=verdict.state, findings=verdict.findings, changes_requested=verdict.changes_requested, approval_evidence_ids=(evidence.id,) if verdict.state.value == 'APPROVED' else (), reviewed_commit=verdict.reviewed_commit, reviewed_base_commit=verdict.reviewed_base_commit, contract_sha256=verdict.contract_sha256, review_input_evidence_id=review_input.id, reviewer_attempt_id=attempt), evidence)
+                else:
+                    registry_lifecycle.succeed(
+                        review_inputs=implementation_review_inputs, ended_at=completed_at
+                    )
                 data['registry_runtime_finished'] = True
                 runtime_monitor = None
             save_record(record, data, 'review')

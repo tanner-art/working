@@ -250,6 +250,7 @@ class Registry(Protocol):
         evidence: Evidence | None = None,
         expected_revision: int | None = None,
         operation_id: str | None = None,
+        review_attempt_id: str | None = None,
     ) -> int: ...
 
     def record_review_input(self, review_input: ReviewInput, *, operation_id: str | None = None) -> None: ...
