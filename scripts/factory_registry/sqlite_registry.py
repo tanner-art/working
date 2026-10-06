@@ -812,11 +812,29 @@ class SQLiteRegistry:
                 control = connection.execute(
                     "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
                 ).fetchone()
-                active = any(connection.execute(query).fetchone() is not None for query in (
+                # Keep this set aligned with operator.preflight's five ownership
+                # counts.  The broad unreleased checks intentionally make any
+                # derived unbound/orphan case fail closed too.
+                ownership_queries = (
                     "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1",
                     "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1",
                     "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1",
-                ))
+                    """SELECT 1 FROM leases AS lease WHERE lease.released_at IS NULL
+                         AND NOT EXISTS (SELECT 1 FROM attempts AS attempt
+                           JOIN attempt_runtime_ownership AS runtime ON runtime.attempt_id=attempt.id
+                           WHERE attempt.lease_id=lease.id AND runtime.released_at IS NULL) LIMIT 1""",
+                    """SELECT 1 FROM attempt_runtime_ownership AS runtime
+                         JOIN attempts AS attempt ON attempt.id=runtime.attempt_id
+                         LEFT JOIN leases AS lease ON lease.id=attempt.lease_id
+                         LEFT JOIN workers AS worker ON worker.id=attempt.worker_id
+                         WHERE runtime.released_at IS NULL AND (attempt.ended_at IS NOT NULL
+                           OR lease.id IS NULL OR lease.released_at IS NOT NULL
+                           OR lease.expires_at <= ? OR worker.availability IN ('OFFLINE','CONSTRAINED')) LIMIT 1""",
+                )
+                active = any(
+                    connection.execute(query, (recorded_at,) if "?" in query else ()).fetchone()
+                    is not None for query in ownership_queries
+                )
                 if (control is None or control["dispatch_mode"] != "PAUSED"
                         or not control["kill_switch_engaged"] or active):
                     raise RegistryConflict("PAUSED_CONFIG_OPERATION_NOT_QUIESCENT")

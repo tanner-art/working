@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from contextlib import contextmanager
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
@@ -2214,7 +2215,15 @@ def preflight(
     require_kill_switch: bool = True,
     canary_feature_id: str | None = None,
     run_package_ids: Sequence[str] | None = None,
+    allow_allowed_authors_pending_recovery: bool = False,
 ) -> Mapping[str, Any]:
+    # A config replacement can survive an interrupted allowlist operation before
+    # its Registry receipt does.  Nothing may pass a normal operational gate
+    # while that durable ambiguity exists.  Recovery is the sole caller allowed
+    # to inspect the same gate before resolving the journal.
+    if (not allow_allowed_authors_pending_recovery
+            and _read_allowed_authors_pending(config_path) is not None):
+        raise OperatorError("allowed-authors pending recovery is required")
     observed_at = observed_at or utc_now()
     current = status(database, observed_at=observed_at)
     database_checks = current["database_checks"]
@@ -2828,6 +2837,76 @@ def _atomic_replace_config_bytes(config_path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _allowed_authors_lock_path(config_path: Path) -> Path:
+    return config_path.with_name(config_path.name + ".allowed-authors.lock")
+
+
+def _allowed_authors_pending_path(config_path: Path) -> Path:
+    return config_path.with_name(config_path.name + ".allowed-authors.pending.json")
+
+
+@contextmanager
+def _locked_config_mutation(config_path: Path):
+    """Serialize every known writer of the runner config on one persistent inode."""
+    lock_path = _allowed_authors_lock_path(config_path)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "r+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            yield
+    finally:
+        # Do not unlink: waiters and later writers must lock this same inode.
+        pass
+
+
+def _write_allowed_authors_pending(config_path: Path, value: Mapping[str, Any]) -> None:
+    pending = _allowed_authors_pending_path(config_path)
+    if pending.exists():
+        raise OperatorError("allowed-authors pending recovery is required")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=pending.name + ".", dir=pending.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write((json.dumps(value, sort_keys=True) + "\n").encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(pending)
+        directory_fd = os.open(pending.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_allowed_authors_pending(config_path: Path) -> Mapping[str, Any] | None:
+    pending = _allowed_authors_pending_path(config_path)
+    if not pending.exists():
+        return None
+    if pending.is_symlink() or not pending.is_file() or stat.S_IMODE(pending.stat().st_mode) != 0o600:
+        raise OperatorError("allowed-authors pending journal is not an owner-only regular file")
+    try:
+        value = json.loads(pending.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise OperatorError("allowed-authors pending journal is invalid") from error
+    if not isinstance(value, Mapping):
+        raise OperatorError("allowed-authors pending journal is invalid")
+    return value
+
+
+def _clear_allowed_authors_pending(config_path: Path) -> None:
+    pending = _allowed_authors_pending_path(config_path)
+    pending.unlink(missing_ok=True)
+    directory_fd = os.open(pending.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _validate_author_logins(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise OperatorError(f"{field} must be a non-empty list of GitHub logins")
@@ -2910,6 +2989,56 @@ def _fresh_collaborator_permission(
     return {"login": observed_login, "permission": permission, "observed_at": utc_now()}
 
 
+def recover_allowed_authors_pending(
+    database: Path,
+    config_path: Path,
+    release: Path,
+    preservation_path: Path,
+    expected_commit: str,
+    expected_revision: int,
+) -> Mapping[str, Any]:
+    """Finish an auditable interrupted update, or remove a journal before its write.
+
+    This intentionally does not promise an atomic file/database transaction.  The
+    journal is fsynced before the config replacement; recovery only receipts the
+    exact journaled target, and otherwise refuses to guess.
+    """
+    with _locked_config_mutation(config_path):
+        pending = _read_allowed_authors_pending(config_path)
+        if pending is None:
+            raise OperatorError("no allowed-authors pending recovery exists")
+        try:
+            request = parse_allowed_authors_update_spec(pending["request"])
+            result = pending["result"]
+            source_sha256 = pending["source_sha256"]
+            target_sha256 = pending["target_sha256"]
+        except (KeyError, TypeError) as error:
+            raise OperatorError("allowed-authors pending journal is invalid") from error
+        if not isinstance(result, Mapping) or not isinstance(source_sha256, str) or not isinstance(target_sha256, str):
+            raise OperatorError("allowed-authors pending journal is invalid")
+        preflight(
+            database, config_path, release, preservation_path, expected_commit, expected_revision,
+            allowed_modes=("PAUSED",), require_workers=False,
+            allow_allowed_authors_pending_recovery=True,
+        )
+        current_sha256 = _sha256_file(config_path)
+        if current_sha256 == source_sha256:
+            _clear_allowed_authors_pending(config_path)
+            return {"kind": "threadline-factory-recover-allowed-authors", "passed": True,
+                    "recovered": False, "reason": "config-write-not-observed"}
+        if current_sha256 != target_sha256:
+            raise OperatorError("pending recovery config does not match journaled source or target")
+        registry = SQLiteRegistry(database)
+        receipt = registry.record_paused_config_operation(
+            operation_id=request["operation_id"], operation_kind="UPDATE_ALLOWED_AUTHORS",
+            request=request, result=result, expected_revision=expected_revision,
+            recorded_at=utc_now(),
+        )
+        _clear_allowed_authors_pending(config_path)
+        return {"kind": "threadline-factory-recover-allowed-authors", "passed": True,
+                "recovered": True, **receipt}
+
+
 def update_allowed_authors(
     database: Path,
     config_path: Path,
@@ -2940,58 +3069,68 @@ def update_allowed_authors(
         database, config_path, release, preservation_path, expected_commit, expected_revision,
         allowed_modes=("PAUSED",), require_workers=False,
     )
-    lock_path = config_path.with_name(config_path.name + ".allowed-authors.lock")
-    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        os.fchmod(lock_descriptor, 0o600)
-        with os.fdopen(lock_descriptor, "r+") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            _config_is_owner_only(config_path)
-            source_bytes = config_path.read_bytes()
-            if hashlib.sha256(source_bytes).hexdigest() != request["expected_config_sha256"]:
-                raise OperatorError("runner config compare-and-swap failed")
-            config = _load_object(config_path, "runner config")
-            if config.get("github") != request["repository"]:
-                raise OperatorError("runner config repository does not match allowed-authors request")
-            current_authors = _validate_author_logins(config.get("allowed_authors"), "config allowed_authors")
-            if list(current_authors) != request["expected_allowed_authors"]:
-                raise OperatorError("runner config allowed_authors compare-and-swap failed")
-            additions = [login for login in request["allowed_authors"]
-                         if login.casefold() not in {old.casefold() for old in current_authors}]
-            permissions = [_fresh_collaborator_permission(config, request["repository"], login)
-                           for login in additions]
-            target = dict(config)
-            target["allowed_authors"] = list(request["allowed_authors"])
-            state = target.get("state")
-            if not isinstance(state, str) or not Path(state).is_absolute():
-                raise OperatorError("runner config state must be an absolute path")
-            backup = _atomic_write_config(config_path, target, Path(state))
-            result = {
+    with _locked_config_mutation(config_path):
+        if _read_allowed_authors_pending(config_path) is not None:
+            raise OperatorError("allowed-authors pending recovery is required")
+        _config_is_owner_only(config_path)
+        source_bytes = config_path.read_bytes()
+        if hashlib.sha256(source_bytes).hexdigest() != request["expected_config_sha256"]:
+            raise OperatorError("runner config compare-and-swap failed")
+        config = _load_object(config_path, "runner config")
+        if config.get("github") != request["repository"]:
+            raise OperatorError("runner config repository does not match allowed-authors request")
+        current_authors = _validate_author_logins(config.get("allowed_authors"), "config allowed_authors")
+        if list(current_authors) != request["expected_allowed_authors"]:
+            raise OperatorError("runner config allowed_authors compare-and-swap failed")
+        additions = [login for login in request["allowed_authors"]
+                     if login.casefold() not in {old.casefold() for old in current_authors}]
+        permissions = [_fresh_collaborator_permission(config, request["repository"], login)
+                       for login in additions]
+        target = dict(config)
+        target["allowed_authors"] = list(request["allowed_authors"])
+        state = target.get("state")
+        if not isinstance(state, str) or not Path(state).is_absolute():
+            raise OperatorError("runner config state must be an absolute path")
+        target_bytes = (json.dumps(target, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        pending = {
+            "request": request,
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "target_sha256": hashlib.sha256(target_bytes).hexdigest(),
+            "result": {
                 "repository": request["repository"],
                 "previous_allowed_authors": list(current_authors),
                 "allowed_authors": list(request["allowed_authors"]),
-                "config_sha256": _sha256_file(config_path),
-                "config_backup": str(backup),
+                "config_sha256": hashlib.sha256(target_bytes).hexdigest(),
                 "permission_evidence": permissions,
-            }
-            try:
-                receipt = registry.record_paused_config_operation(
-                    operation_id=request["operation_id"], operation_kind=operation_kind,
-                    request=request, result=result, expected_revision=expected_revision,
-                    recorded_at=utc_now(),
-                )
-            except Exception:
-                _atomic_replace_config_bytes(config_path, backup.read_bytes())
-                raise
-            _config_is_owner_only(config_path)
-            return {"kind": "threadline-factory-update-allowed-authors", "passed": True,
-                    "idempotent_replay": False, **receipt}
-    finally:
-        # The lock itself holds no sensitive config and is never a trust input.
+            },
+        }
+        _write_allowed_authors_pending(config_path, pending)
+        backup = _atomic_write_config(config_path, target, Path(state))
+        result = {**pending["result"], "config_backup": str(backup)}
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            receipt = registry.record_paused_config_operation(
+                operation_id=request["operation_id"], operation_kind=operation_kind,
+                request=request, result=result, expected_revision=expected_revision,
+                recorded_at=utc_now(),
+            )
+        except Exception:
+            try:
+                _atomic_replace_config_bytes(config_path, backup.read_bytes())
+                if config_path.read_bytes() != source_bytes:
+                    raise OperatorError("allowed-authors rollback did not restore source bytes")
+            except Exception as rollback_error:
+                # Leave the journal in place unless the exact pre-update bytes
+                # are durably back.  Recovery can then make the ambiguity
+                # explicit instead of allowing activation with an unknown file.
+                raise OperatorError(
+                    "allowed-authors receipt failed and rollback requires recovery"
+                ) from rollback_error
+            _clear_allowed_authors_pending(config_path)
+            raise
+        _clear_allowed_authors_pending(config_path)
+        _config_is_owner_only(config_path)
+        return {"kind": "threadline-factory-update-allowed-authors", "passed": True,
+                "idempotent_replay": False, **receipt}
 
 
 def _validate_plan(plan: Sequence[tuple[str, Mapping[str, Any]]], release: Path, *, live: bool) -> None:
@@ -3061,6 +3200,7 @@ def prepare_dry_run(
         and not initial_control["kill_switch_engaged"]
     ):
         raise OperatorError("PAUSED dry-run preparation requires the kill switch")
+    source_bytes = config_path.read_bytes()
     source_config = _load_object(config_path, "runner config")
     migrated = migrate_config(source_config, database, release, migration)
     root = release / "scripts" / "runner"
@@ -3072,10 +3212,15 @@ def prepare_dry_run(
     backup_holder: dict[str, Path] = {}
 
     def commit_prepared_configuration() -> None:
-        backup_holder["config"] = _atomic_write_config(config_path, migrated, state)
-        install_launchd.prepare_private_storage(config_path, migrated, plan)
-        harden_paths(database, config_path, release)
-        verify_release(release, expected_commit)
+        with _locked_config_mutation(config_path):
+            if _read_allowed_authors_pending(config_path) is not None:
+                raise OperatorError("allowed-authors pending recovery is required")
+            if _sha256_file(config_path) != hashlib.sha256(source_bytes).hexdigest():
+                raise OperatorError("runner config changed during dry-run preparation")
+            backup_holder["config"] = _atomic_write_config(config_path, migrated, state)
+            install_launchd.prepare_private_storage(config_path, migrated, plan)
+            harden_paths(database, config_path, release)
+            verify_release(release, expected_commit)
 
     control = RunnerRegistryControl(database)
     kwargs = {}

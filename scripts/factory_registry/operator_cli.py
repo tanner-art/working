@@ -36,6 +36,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     preflight,
     prepare_dry_run,
     record_review_decision,
+    recover_allowed_authors_pending,
     reconcile,
     reconcile_historical_package,
     return_paused,
@@ -173,6 +174,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser(
+        "recover-allowed-authors",
+        help="Finish or clear the durable pending journal from an interrupted allowlist update",
+    )
+    _context(command)
 
     command = subparsers.add_parser(
         "prepare-dry-run", help="Kill first, reconcile, migrate config, and load dry-run services"
@@ -326,6 +333,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.database, args.config, args.release, args.preservation,
             args.release_commit, args.expect_revision,
             _load_object(args.spec, "allowed-authors update spec"),
+        ))
+    if args.command == "recover-allowed-authors":
+        return dict(recover_allowed_authors_pending(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
         ))
     if args.command == "prepare-dry-run":
         migration = _load_object(args.migration, "config migration")
