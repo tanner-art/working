@@ -278,6 +278,47 @@ class SQLiteRegistryTest(unittest.TestCase):
                 self.assertEqual(
                     fixture.registry._review_readiness_reasons(connection, "TASK-232"), ()
                 )
+
+            class OverriddenCursor:
+                def __init__(self, cursor, replacement):
+                    self.cursor, self.replacement = cursor, replacement
+
+                def fetchall(self):
+                    return self.replacement if isinstance(self.replacement, list) else self.cursor.fetchall()
+
+                def fetchone(self):
+                    return self.replacement if isinstance(self.replacement, dict) else self.cursor.fetchone()
+
+            class ReadOnlyLineageView:
+                def __init__(self, connection, field, value):
+                    self.connection, self.field, self.value = connection, field, value
+
+                def execute(self, query, params=()):
+                    cursor = self.connection.execute(query, params)
+                    if self.field == "successful_attempt" and "AND outcome='SUCCEEDED'" in query:
+                        return OverriddenCursor(cursor, [{"id": "unexpected-success", "worker_id": "codex-a"}])
+                    if self.field in {"integration_commit", "repository_head", "evidence_uri"} and (
+                        "FROM historical_package_reconciliations" in query
+                    ):
+                        row = dict(cursor.fetchone())
+                        return OverriddenCursor(cursor, {**row, self.field: self.value})
+                    if self.field == "worker_id" and "ORDER BY started_at DESC, id DESC LIMIT 1" in query:
+                        row = dict(cursor.fetchone())
+                        return OverriddenCursor(cursor, {**row, "worker_id": self.value})
+                    return cursor
+
+            for field, value in (
+                ("successful_attempt", None),
+                ("integration_commit", "f" * 40),
+                ("repository_head", "f" * 40),
+                ("evidence_uri", "https://example.test/wrong"),
+                ("worker_id", "wrong-worker"),
+            ):
+                with self.subTest(field=field), fixture.registry._connection() as connection:
+                    reasons = fixture.registry._review_readiness_reasons(
+                        ReadOnlyLineageView(connection, field, value), "TASK-232"
+                    )
+                    self.assertIn("REVIEW_EXTERNAL_INTEGRATION_LINEAGE_INVALID", reasons)
             (Path(review_input.validation_evidence["review_packet"]["path"]) /
              "contract.json").write_text("tampered")
             with fixture.registry._connection() as connection:

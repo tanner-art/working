@@ -246,14 +246,22 @@ class RunnerRegistryControl:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("registry lease duration must be a positive integer")
         acquired = datetime.now(timezone.utc)
-        lease = self.registry.acquire_lease(
-            package_id,
-            worker_id,
-            acquired_at=acquired.isoformat(),
-            expires_at=(acquired + timedelta(seconds=lease_seconds)).isoformat(),
-            expected_dispatch_revision=expected_revision,
-            operation_id=f"claim:{package_id}:{worker_id}:{expected_revision}",
-        )
+        try:
+            lease = self.registry.acquire_lease(
+                package_id,
+                worker_id,
+                acquired_at=acquired.isoformat(),
+                expires_at=(acquired + timedelta(seconds=lease_seconds)).isoformat(),
+                expected_dispatch_revision=expected_revision,
+                operation_id=f"claim:{package_id}:{worker_id}:{expected_revision}",
+            )
+        except RegistryConflict as error:
+            if error.code in {"FEATURE_NOT_READY", "REVIEW_NOT_READY", "READY_CONTRACT_INCOMPLETE"}:
+                raise RegistryConflict(
+                    "DISPATCH_PAIR_INELIGIBLE",
+                    f"{error.code}:{error.detail}" if error.detail else error.code,
+                ) from error
+            raise
         return lease.id
 
     def claim_with_retry(

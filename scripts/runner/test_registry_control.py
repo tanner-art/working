@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import json
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -225,6 +226,77 @@ class RunnerRegistryControlTests(unittest.TestCase):
                 RegistryConflict, "DISPATCH_PAIR_INELIGIBLE.*REGISTRATION_PROOF_MISSING"
             ):
                 control.pre_claim("TASK-1", "worker-a", task_contract=body)
+
+    def test_claim_defers_packet_loss_after_preclaim_without_failing_registry_package(self):
+        from scripts.factory_registry.test_external_integration_review import ExternalIntegrationReviewTests
+
+        fixture = ExternalIntegrationReviewTests()
+        original = SQLiteRegistry.register_work_package
+
+        def register_v2_review(registry, package):
+            if package.id == "TASK-232":
+                digest = package.provider_diagnostics["queue_contract_sha256"]
+                package = replace(package, provider_diagnostics={
+                    **package.provider_diagnostics,
+                    "readiness_schema_version": 2,
+                    "readiness_proof": {
+                        "base_commit": "b" * 40, "target_ref": "main",
+                        "queue_contract_sha256": digest,
+                        "acceptance_sha256": hashlib.sha256(b'["strict verdict"]').hexdigest(),
+                        "planning_sha256": {"docs/PLAN.md": "d" * 64},
+                    },
+                })
+            return original(registry, package)
+
+        with patch.object(SQLiteRegistry, "register_work_package", register_v2_review):
+            fixture.setUp()
+        try:
+            review_input = fixture.review_input()
+            fixture.registry.record_external_integration_review_input(
+                review_input, expected_revision=fixture.registry.dispatch_control()["revision"],
+            )
+            fixture.registry.set_dispatch_control(
+                expected_revision=fixture.registry.dispatch_control()["revision"],
+                expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False,
+                changed_at=fixture.stamp(8), reason="packet race fixture",
+            )
+            control = RunnerRegistryControl(fixture.root / "registry.sqlite3")
+            revision = fixture.registry.dispatch_control()["revision"]
+            packet_file = pathlib.Path(review_input.validation_evidence["review_packet"]["path"]) / "contract.json"
+
+            def preclaim_then_remove_packet(*_args, **_kwargs):
+                packet_file.write_text("tampered after preclaim")
+                return revision
+
+            with patch.object(control, "pre_claim", side_effect=preclaim_then_remove_packet):
+                with self.assertRaises(RegistryConflict) as raised:
+                    control.claim_with_retry(
+                        "TASK-232", worker_id="claude", task_contract=fixture.review_contract,
+                        lease_seconds=60,
+                    )
+            self.assertEqual(raised.exception.code, "DISPATCH_PAIR_INELIGIBLE")
+            self.assertIn("REVIEW_NOT_READY", raised.exception.detail)
+            self.assertIn("REVIEW_PACKET_FILE_MISMATCH", raised.exception.detail)
+            snapshot = fixture.registry.dispatch_snapshot(observed_at=fixture.stamp(9))
+            self.assertEqual(next(item["status"] for item in snapshot.work_packages
+                                  if item["id"] == "TASK-232"), "READY")
+            self.assertFalse(snapshot.active_leases)
+        finally:
+            fixture.temporary.cleanup()
+
+    def test_claim_converts_late_feature_and_proof_loss_to_pair_deferral(self):
+        control = RunnerRegistryControl(self.database)
+        control.registry = Mock()
+        for code in ("FEATURE_NOT_READY", "READY_CONTRACT_INCOMPLETE"):
+            with self.subTest(code=code):
+                control.registry.acquire_lease.side_effect = RegistryConflict(code, "lost gate")
+                with self.assertRaises(RegistryConflict) as raised:
+                    control.claim_package(
+                        "TASK-1", worker_id="worker-a", expected_revision=17,
+                        lease_seconds=60,
+                    )
+                self.assertEqual(raised.exception.code, "DISPATCH_PAIR_INELIGIBLE")
+                self.assertIn(f"{code}:lost gate", raised.exception.detail)
 
     def test_review_preclaim_excludes_the_actual_implementer(self):
         control = RunnerRegistryControl(self.database)

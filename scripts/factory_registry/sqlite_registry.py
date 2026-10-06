@@ -3288,6 +3288,7 @@ class SQLiteRegistry:
                     raise RegistryConflict("PACKAGE_NOT_READY", package["status"])
                 diagnostics = json.loads(package["provider_diagnostics_json"])
                 if diagnostics.get("readiness_schema_version") == 2:
+                    self._require_ready_row_contract(connection, package_id)
                     feature = connection.execute(
                         "SELECT status FROM features WHERE id=?", (package["feature_id"],)
                     ).fetchone()
