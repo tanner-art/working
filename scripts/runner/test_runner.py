@@ -5,9 +5,12 @@ import pathlib
 import tempfile
 import unittest
 import json
+import hashlib
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from runner import (build_agent_environment, build_agent_prompt, build_review_prompt,
+                    verified_readiness_handoff,
                     materialize_review_packet, review_command, verify_review_packet,
                     preserve_interrupted_attempt, publish_completion_telemetry,
                     recover_stale_claims, refresh_queue_snapshot,
@@ -16,6 +19,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     usage_policy_enabled, review_source_is_green)
 from usage_policy import worker_state
 from scripts.factory_registry.repository import RegistryConflict
+from registry_control import queue_contract_digest
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -195,6 +199,56 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('Run pnpm check.', prompt)
         self.assertIn('Read AGENTS.md', prompt)
         self.assertIn('Leave changes for the runner', prompt)
+
+    def test_v2_handoff_uses_committed_registry_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = pathlib.Path(directory)
+            subprocess.run(['git', '-C', directory, 'init', '-q'], check=True)
+            (repo / 'plan.md').write_text('plan evidence\n')
+            subprocess.run(['git', '-C', directory, 'add', 'plan.md'], check=True)
+            subprocess.run(['git', '-C', directory, '-c', 'user.name=Test',
+                            '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], check=True)
+            base = subprocess.check_output(['git', '-C', directory, 'rev-parse', 'HEAD'], text=True).strip()
+            body = {'schema_version': 2, 'task': 'TASK-398', 'paths': ['plan.md'],
+                    'instructions': 'Follow the proof', 'readiness': {
+                        'base_commit': base, 'planning_paths': ['plan.md']}}
+            criteria = ['One verified handoff']
+            digest = queue_contract_digest(body)
+            proof = {'base_commit': base, 'target_ref': 'HEAD',
+                     'queue_contract_sha256': digest,
+                     'acceptance_sha256': hashlib.sha256(
+                         json.dumps(criteria, separators=(',', ':'),
+                                    ensure_ascii=False).encode()).hexdigest(),
+                     'planning_sha256': {'plan.md': hashlib.sha256(b'plan evidence\n').hexdigest()}}
+            package = {'id': 'TASK-398', 'acceptance_criteria': criteria,
+                       'provider_diagnostics': {'queue_contract_sha256': digest,
+                                                'readiness_proof': proof}}
+            control = Mock(repository=repo)
+            control.integration_base.return_value = 'HEAD'
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                revision=17, work_packages=(package,))
+            handoff, revision = verified_readiness_handoff(control, body, base)
+            prompt = build_agent_prompt(398, body, readiness_handoff=handoff)
+            self.assertEqual(revision, 17)
+            for value in (base, 'HEAD', digest, proof['planning_sha256']['plan.md'],
+                          'One verified handoff', 'Registry revision: 17'):
+                self.assertIn(value, prompt)
+            for changed in (
+                {'readiness_proof': None},
+                {'acceptance_criteria': ['Different criterion']},
+                {'readiness_proof': {**proof, 'planning_sha256': {'plan.md': '0' * 64}}},
+                {'readiness_proof': {**proof, 'base_commit': '0' * 40}},
+            ):
+                with self.subTest(changed=changed):
+                    mutated = {**package, 'provider_diagnostics': dict(package['provider_diagnostics'])}
+                    if 'readiness_proof' in changed:
+                        mutated['provider_diagnostics']['readiness_proof'] = changed['readiness_proof']
+                    else:
+                        mutated.update(changed)
+                    control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                        revision=18, work_packages=(mutated,))
+                    with self.assertRaises(RegistryConflict):
+                        verified_readiness_handoff(control, body, base)
 
     def test_claude_review_adapter_preserves_wrapper_and_replaces_unsafe_flags(self):
         command = review_command({
@@ -842,7 +896,8 @@ class LifecycleTests(unittest.TestCase):
 
     def exercise_poll(
         self, blocked=False, preclaim_error=False, snapshot_failure=False,
-        kind='PARENT', registry_claim_error=None,
+        kind='PARENT', registry_claim_error=None, readiness_failure=False,
+        readiness_revision_drift=False,
     ):
         import contextlib, io, json, pathlib, tempfile
         from unittest.mock import patch
@@ -863,6 +918,8 @@ class LifecycleTests(unittest.TestCase):
                 'depends_on': [2] if blocked else [], 'kind': kind,
                 'lane': 'ASSURANCE' if kind == 'REVIEW' else 'FEATURE',
             }
+            if readiness_failure or readiness_revision_drift:
+                body.update(schema_version=2, readiness={'base_commit': 'base-sha'})
             issue = {'number': 1, 'title': 'test', 'author': {'login': 'owner'},
                      'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}], 'body': json.dumps(body)}
             calls = []; branch = None; validated = False
@@ -915,13 +972,33 @@ class LifecycleTests(unittest.TestCase):
             registry.record_process.side_effect = lambda *args, **kwargs: calls.append(
                 ['registry', 'bind']
             )
-            with patch.object(runner, 'run', side_effect=fake_run), snapshot, \
+            proof_gate = (
+                patch.object(runner, 'verified_readiness_handoff',
+                             side_effect=RegistryConflict('REGISTRATION_PROOF_CHANGED'))
+                if readiness_failure else
+                patch.object(runner, 'verified_readiness_handoff', return_value=('verified', 1))
+                if readiness_revision_drift else contextlib.nullcontext()
+            )
+            with patch.object(runner, 'run', side_effect=fake_run), snapshot, proof_gate, \
                  patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
                  patch.object(runner.os, 'getpgid', return_value=901), \
                  patch('sys.argv', ['runner', '--config', str(configfile)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 runner.main()
             record = root/'state'/'issue-1.json'
             return calls, json.loads(record.read_text()) if record.exists() else None
+
+    def test_v2_stale_proof_prevents_provider_launch(self):
+        calls, record = self.exercise_poll(readiness_failure=True)
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('REGISTRATION_PROOF_CHANGED', record['error'])
+        self.assertNotIn(['provider', 'started'], calls)
+        self.assertNotIn(['git', 'push'], [item[:2] for item in calls])
+
+    def test_v2_registry_revision_drift_prevents_provider_launch(self):
+        calls, record = self.exercise_poll(readiness_revision_drift=True)
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('REGISTRATION_PROOF_CHANGED', record['error'])
+        self.assertNotIn(['provider', 'started'], calls)
 
     def test_validation_cannot_stage_out_of_scope_change(self):
         calls, record = self.exercise_poll()

@@ -791,7 +791,79 @@ def run_repository_validation(state, pnpm, worktree, env, log, run_command=None)
                            timeout=600, log=log)
 
 
-def build_agent_prompt(issue_number, body, *, worker=None, slot=1):
+def verified_readiness_handoff(registry_control, body, base):
+    """Read the committed v2 proof and bind its contents to one Registry revision."""
+    if body.get('schema_version') != 2:
+        return '', None
+    if registry_control is None:
+        raise RegistryConflict('REGISTRATION_PROOF_MISSING', body['task'])
+    from registry_control import queue_contract_digest, utc_now
+
+    snapshot = registry_control.registry.dispatch_snapshot(observed_at=utc_now())
+    package = next((item for item in snapshot.work_packages
+                    if item.get('id') == body['task']), None)
+    if package is None:
+        raise RegistryConflict('REGISTRATION_PROOF_MISSING', body['task'])
+    diagnostics = package.get('provider_diagnostics') or {}
+    proof = diagnostics.get('readiness_proof')
+    readiness = body.get('readiness')
+    criteria = package.get('acceptance_criteria')
+    if (not isinstance(proof, dict) or not isinstance(readiness, dict)
+            or not isinstance(criteria, list) or not criteria
+            or any(not isinstance(item, str) or not item.strip() for item in criteria)):
+        raise RegistryConflict('REGISTRATION_PROOF_MISSING', body['task'])
+    contract_hash = queue_contract_digest(body)
+    criteria_hash = hashlib.sha256(json.dumps(
+        criteria, separators=(',', ':'), ensure_ascii=False,
+    ).encode('utf-8')).hexdigest()
+    target_ref = registry_control.integration_base()
+    if (proof.get('queue_contract_sha256') != contract_hash
+            or diagnostics.get('queue_contract_sha256') != contract_hash
+            or proof.get('acceptance_sha256') != criteria_hash
+            or proof.get('base_commit') != base
+            or readiness.get('base_commit') != base
+            or proof.get('target_ref') != target_ref):
+        raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+    planning = readiness.get('planning_paths')
+    hashes = proof.get('planning_sha256')
+    if (not isinstance(planning, list) or not planning
+            or any(not isinstance(path, str) or not path for path in planning)
+            or not isinstance(hashes, dict) or set(hashes) != set(planning)):
+        raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+    repository = registry_control.repository
+    if repository is None:
+        raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+    resolved = subprocess.run(
+        ['git', '-C', str(repository), 'rev-parse', '--verify', f'{target_ref}^{{commit}}'],
+        capture_output=True, text=True, check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != base:
+        raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+    for path in planning:
+        if (path.startswith('/') or '\\' in path or '..' in path.split('/')
+                or not re.fullmatch(r'[0-9a-f]{64}', str(hashes[path]))):
+            raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+        blob = subprocess.run(
+            ['git', '-C', str(repository), 'show', f'{base}:{path}'],
+            capture_output=True, check=False,
+        )
+        if blob.returncode != 0 or hashlib.sha256(blob.stdout).hexdigest() != hashes[path]:
+            raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
+    handoff = '\n'.join((
+        'Verified Registry readiness proof (do not alter this contract):',
+        f'Registry revision: {snapshot.revision}',
+        f'Exact base commit: {base}',
+        f'Target ref: {target_ref}',
+        f'Queue contract SHA-256: {contract_hash}',
+        'Acceptance criteria:',
+        *(f'- {item}' for item in criteria),
+        'Planning file SHA-256:',
+        *(f'- {path}: {hashes[path]}' for path in sorted(hashes)),
+    ))
+    return handoff, snapshot.revision
+
+
+def build_agent_prompt(issue_number, body, *, worker=None, slot=1, readiness_handoff=''):
     """Build runner-owned instructions while reserving full validation."""
     return f'''Execute {body['task']} for GitHub issue #{issue_number} in this assigned worktree.
 Read AGENTS.md, TASKS.md and all canonical docs before editing. Follow task scope.
@@ -803,6 +875,7 @@ Leave changes for the runner and report validation and limitations.
 This process is provider child lane {worker or 'serial'} (slot {slot}). Do not launch detached/background agents or processes. The factory owns fan-out, worktree isolation, usage limits, and lifecycle tracking.
 Assigned instructions:
 {body['instructions']}
+{readiness_handoff}
 '''
 
 
@@ -1480,12 +1553,17 @@ def main():
                 monitored_run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]
             agentenv=build_agent_environment(env, config.get('env', {}), c['path'])
+            readiness_handoff, readiness_revision = (
+                verified_readiness_handoff(registry_control, body, base)
+                if review_input is None else ('', None)
+            )
             prompt = (
                 build_review_prompt(
                     review_input, reviewer_worker_id=lane,
                     review_attempt_id=attempt, provider=config.get('provider', 'anthropic'),
                 ) if review_input is not None else
-                build_agent_prompt(n, body, worker=lane, slot=args.slot)
+                build_agent_prompt(n, body, worker=lane, slot=args.slot,
+                                   readiness_handoff=readiness_handoff)
             )
             data['agent_process_group_state'] = 'unknown'
             save_record(record, data, 'agent')
@@ -1516,7 +1594,9 @@ def main():
                 data['agent_process_group_state'] = 'recorded'
                 save_record(record, data)
             if registry_control is not None:
-                registry_control.pre_launch()
+                launch_revision = registry_control.pre_launch()
+                if readiness_revision is not None and launch_revision != readiness_revision:
+                    raise RegistryConflict('REGISTRATION_PROOF_CHANGED', body['task'])
             provider_result = monitored_run(
                 (review_command(
                     config,
