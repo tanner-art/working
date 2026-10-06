@@ -68,6 +68,109 @@ class SQLiteRegistryTest(unittest.TestCase):
             )
         )
 
+    def test_v2_review_ready_is_derived_from_immutable_registry_input(self) -> None:
+        self.feature()
+        self.registry.register_work_package(WorkPackage(
+            "TARGET", "FEATURE-1", "target", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 100, ("implemented",), status=TaskStatus.READY,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 100, ("reviewed",),
+            status=TaskStatus.READY, kind=PackageKind.REVIEW,
+            dependency_ids=("TARGET",),
+            provider_diagnostics={"readiness_schema_version": 2},
+        ))
+        self.registry.register_worker(Worker(
+            "reviewer", "Reviewer", ("independent-review",), (Lane.ASSURANCE,),
+        ))
+        self.worker("implementer", "registry")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-10-05T09:59:00Z", reason="disposable review fixture",
+        )
+        self.registry.acquire_lease(
+            "TARGET", "implementer", acquired_at="2026-10-05T10:00:00Z",
+            expires_at="2026-10-05T11:00:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1", package_id="TARGET", worker_id="implementer",
+            runner_pid=1, started_at="2026-10-05T10:00:01Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "attempt-1", ended_at="2026-10-05T10:10:00Z", outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW, reason="fixture implementation",
+        )
+        projected = next(item for item in self.registry.dispatch_snapshot(
+            observed_at="2026-10-05T12:00:00Z"
+        ).work_packages if item["id"] == "REVIEW")
+        self.assertIn("REVIEW_INPUT_COUNT_INVALID:0", projected["review_readiness_reasons"])
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_NOT_READY"):
+            self.registry.acquire_lease(
+                "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:00Z",
+                expires_at="2026-10-05T13:00:00Z",
+            )
+        packet = self.root / "review-packet"
+        packet.mkdir()
+        contract = {"task": "TARGET", "instructions": "review exact implementation"}
+        contents = {
+            "base-to-implementation.diff": b"diff",
+            "changed-files.txt": b"file\n",
+            "contract.json": (json.dumps(contract, sort_keys=True) + "\n").encode(),
+            "validation-evidence.json": b"{}",
+        }
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+        files = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        manifest = {
+            "schema_version": 1, "implementation_attempt_id": "attempt-1",
+            "implementation_commit": "a" * 40, "base_commit": "b" * 40,
+            "files": files,
+        }
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        self.registry.record_review_input(ReviewInput(
+            id="review-input-1", review_package_id="REVIEW", target_package_id="TARGET",
+            implementation_attempt_id="attempt-1", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1",
+            contract_sha256=hashlib.sha256(json.dumps(
+                contract, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest(),
+            contract=contract,
+            validation_evidence={
+                "ci": {"state": "SUCCESS", "implementation_commit": "a" * 40,
+                       "pr_url": "https://example.test/pr/1"},
+                "review_packet": {"path": str(packet),
+                                  "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                                  "files": files},
+            },
+            recorded_at="2026-10-05T10:11:00Z",
+        ))
+
+        def reasons():
+            return next(item for item in self.registry.dispatch_snapshot(
+                observed_at="2026-10-05T12:00:00Z"
+            ).work_packages if item["id"] == "REVIEW")["review_readiness_reasons"]
+
+        self.assertEqual(reasons(), ())
+        (packet / "contract.json").write_text("tampered")
+        self.assertIn("REVIEW_INPUT_INVALID:REVIEW_PACKET_FILE_MISMATCH", reasons())
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_NOT_READY"):
+            self.registry.acquire_lease(
+                "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:01Z",
+                expires_at="2026-10-05T13:00:01Z",
+            )
+        (packet / "contract.json").write_bytes(contents["contract.json"])
+        self.assertEqual(reasons(), ())
+        lease = self.registry.acquire_lease(
+            "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:02Z",
+            expires_at="2026-10-05T13:00:02Z",
+        )
+        self.assertEqual(lease.package_id, "REVIEW")
+
     def test_uses_wal_and_expected_schema_version(self) -> None:
         self.assertEqual(self.registry.journal_mode(), "wal")
         with sqlite3.connect(self.database) as connection:
