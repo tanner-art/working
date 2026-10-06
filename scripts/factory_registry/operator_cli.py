@@ -44,6 +44,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     status,
     stop,
     store_preservation_evidence,
+    update_allowed_authors,
     utc_now,
     validate_telemetry_payload,
     _load_object,
@@ -165,6 +166,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
     command.add_argument("--require-workers", action="store_true")
     command.add_argument("--canary-feature")
+
+    command = subparsers.add_parser(
+        "update-allowed-authors",
+        help="CAS a reviewed GitHub-author allowlist expansion while PAUSED",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
 
     command = subparsers.add_parser(
         "prepare-dry-run", help="Kill first, reconcile, migrate config, and load dry-run services"
@@ -312,6 +320,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 require_workers=args.require_workers or bool(args.canary_feature),
                 canary_feature_id=args.canary_feature,
             )
+        ))
+    if args.command == "update-allowed-authors":
+        return dict(update_allowed_authors(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "allowed-authors update spec"),
         ))
     if args.command == "prepare-dry-run":
         migration = _load_object(args.migration, "config migration")

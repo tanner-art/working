@@ -772,6 +772,71 @@ class SQLiteRegistry:
                 )
                 raise
 
+    def control_operation_replay(
+        self, *, operation_id: str, operation_kind: str, request: Mapping[str, Any]
+    ) -> Mapping[str, Any] | None:
+        """Return a prior matching durable operator result, if one exists."""
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            return self._operation_replay(
+                connection, operation_id=operation_id,
+                operation_kind=operation_kind, request=request,
+            )
+
+    def record_paused_config_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_kind: str,
+        request: Mapping[str, Any],
+        result: Mapping[str, Any],
+        expected_revision: int,
+        recorded_at: str,
+    ) -> Mapping[str, Any]:
+        """Receipt a config mutation only while dispatch is quiescent and CAS-pinned."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        if not operation_id or not operation_kind:
+            raise RegistryConflict("INVALID_OPERATION_ID")
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind=operation_kind, request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return replay
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                active = any(connection.execute(query).fetchone() is not None for query in (
+                    "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1",
+                    "SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1",
+                    "SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1",
+                ))
+                if (control is None or control["dispatch_mode"] != "PAUSED"
+                        or not control["kill_switch_engaged"] or active):
+                    raise RegistryConflict("PAUSED_CONFIG_OPERATION_NOT_QUIESCENT")
+                persisted = dict(result)
+                persisted["revision"] = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id, operation_kind=operation_kind,
+                    request=request, result=persisted, recorded_at=recorded_at,
+                )
+                self._insert_event(
+                    connection, "PAUSED_CONFIG_OPERATION_RECORDED", recorded_at,
+                    None, None, None,
+                    {"operation_id": operation_id, "operation_kind": operation_kind},
+                )
+                connection.commit()
+                return persisted
+            except Exception:
+                connection.rollback()
+                raise
+
     def engage_dispatch_kill_switch(
         self, *, changed_at: str, reason: str, expected_run_id: str | None = None
     ) -> int:

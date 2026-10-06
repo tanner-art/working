@@ -50,6 +50,8 @@ from scripts.factory_registry.operator import (
     restore_registry_v4_backup,
     status,
     store_preservation_evidence,
+    update_allowed_authors,
+    parse_allowed_authors_update_spec,
     utc_now,
     validate_telemetry_payload,
     verify_preservation,
@@ -1877,6 +1879,109 @@ class OperatorFixture(unittest.TestCase):
             if "runner" in label:
                 self.assertIn("--dry-run", data["ProgramArguments"])
         self.assertTrue(any(call[1] == "bootstrap" for call in calls))
+
+    def _allowlist_ready(self):
+        config = self.config(strict=True)
+        config["github"] = "tanner-art/working"
+        config["allowed_authors"] = ["tanner-art"]
+        self.config_path.write_text(json.dumps(config))
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        harden_paths(self.database, self.config_path, self.release)
+        return config
+
+    def _allowlist_spec(self, config, *, operation_id="allowlist-395"):
+        return {
+            "operation_id": operation_id,
+            "repository": "tanner-art/working",
+            "expected_config_sha256": hashlib.sha256(
+                self.config_path.read_bytes()).hexdigest(),
+            "expected_allowed_authors": config["allowed_authors"],
+            "allowed_authors": ["tanner-art", "Danner-tev"],
+        }
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_is_paused_cas_receipted_and_idempotent(self, run):
+        config = self._allowlist_ready()
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        spec = self._allowlist_spec(config)
+        revision = self.registry.dispatch_control()["revision"]
+        evidence = update_allowed_authors(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, revision, spec,
+        )
+        self.assertFalse(evidence["idempotent_replay"])
+        self.assertEqual(evidence["allowed_authors"], ["tanner-art", "Danner-tev"])
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision + 1)
+        self.assertEqual(stat.S_IMODE(self.config_path.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], evidence["allowed_authors"])
+        replay = update_allowed_authors(
+            self.database, self.config_path, self.release, self.preservation,
+            COMMIT, revision, spec,
+        )
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(replay["revision"], evidence["revision"])
+        self.assertEqual(run.call_count, 1)
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_rejects_stale_revision_permission_loss_and_unexpected_config(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"read","user":{"login":"Danner-tev"}}', ""
+        )
+        with self.assertRaisesRegex(OperatorError, "lacks required write"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT,
+                                   self.registry.dispatch_control()["revision"], spec)
+        self.assertEqual(json.loads(self.config_path.read_text())["allowed_authors"], ["tanner-art"])
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        with self.assertRaisesRegex(OperatorError, "Registry revision mismatch"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT, 99, spec)
+        changed = json.loads(self.config_path.read_text())
+        changed["allowed_authors"] = ["someone-else"]
+        self.config_path.write_text(json.dumps(changed))
+        self.config_path.chmod(0o600)
+        with self.assertRaisesRegex(OperatorError, "compare-and-swap"):
+            update_allowed_authors(self.database, self.config_path, self.release,
+                                   self.preservation, COMMIT,
+                                   self.registry.dispatch_control()["revision"], spec)
+
+    @mock.patch("scripts.factory_registry.operator.subprocess.run")
+    def test_allowed_authors_update_rolls_back_config_when_receipt_fails(self, run):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        before = self.config_path.read_bytes()
+        run.return_value = subprocess.CompletedProcess(
+            [], 0, '{"permission":"write","user":{"login":"Danner-tev"}}', ""
+        )
+        # The operator creates its own Registry adapter, so fail its write boundary.
+        with mock.patch.object(operator_module.SQLiteRegistry, "record_paused_config_operation", side_effect=RuntimeError("receipt fail")):
+            with self.assertRaisesRegex(RuntimeError, "receipt fail"):
+                update_allowed_authors(self.database, self.config_path, self.release,
+                                       self.preservation, COMMIT,
+                                       self.registry.dispatch_control()["revision"], spec)
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_allowed_authors_update_spec_rejects_wrong_repository_and_invalid_logins(self):
+        config = self._allowlist_ready()
+        spec = self._allowlist_spec(config)
+        spec["repository"] = "tanner-art/not-working"
+        with self.assertRaisesRegex(OperatorError, "repository"):
+            parse_allowed_authors_update_spec(spec)
+        spec = self._allowlist_spec(config)
+        spec["allowed_authors"] = ["tanner-art", "Danner-tev", "danner-tev"]
+        with self.assertRaisesRegex(OperatorError, "duplicate"):
+            parse_allowed_authors_update_spec(spec)
+        spec = self._allowlist_spec(config)
+        spec["allowed_authors"] = ["tanner-art", ""]
+        with self.assertRaisesRegex(OperatorError, "invalid"):
+            parse_allowed_authors_update_spec(spec)
 
     def test_enable_live_promotes_loaded_dry_run_then_cas_enables_canary(self):
         self.config_path.write_text(json.dumps(self.config(strict=False)))

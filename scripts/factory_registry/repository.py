@@ -63,6 +63,17 @@ class Registry(Protocol):
         operation_id: str | None = None,
     ) -> int: ...
 
+    def record_paused_config_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_kind: str,
+        request: Mapping[str, Any],
+        result: Mapping[str, Any],
+        expected_revision: int,
+        recorded_at: str,
+    ) -> Mapping[str, Any]: ...
+
     def register_feature(self, feature: Feature) -> None: ...
 
     def register_work_package(self, package: WorkPackage) -> None: ...

@@ -210,6 +210,46 @@ failure leaves the Registry STOPPING and the prior definitions unloaded. A
 bootstrap failure leaves PAUSED dry-run definitions installed and never
 restores a live definition.
 
+## PAUSED-only GitHub author allowlist expansion
+
+`prepare-dry-run` deliberately cannot change `allowed_authors`. To propose an
+author expansion for the exact `tanner-art/working` repository, create a
+reviewed JSON request containing the current config SHA-256 and exact current
+author list. It must be a strict addition: empty, malformed, and duplicate
+logins (including case-only duplicates) are rejected.
+
+```json
+{
+  "operation_id": "allowlist-395",
+  "repository": "tanner-art/working",
+  "expected_config_sha256": "CURRENT_CONFIG_SHA256",
+  "expected_allowed_authors": ["tanner-art"],
+  "allowed_authors": ["tanner-art", "Danner-tev"]
+}
+```
+
+With dispatch PAUSED, kill-engaged, and ownership empty, run:
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli update-allowed-authors \
+  --database "$DATABASE" \
+  --config "$CONFIG" \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION \
+  --spec /absolute/path/to/reviewed-allowlist-update.json
+```
+
+The command requires the owner-only `0600` config, exact old config digest and
+list, and a fresh GitHub collaborator-permission query for every newly added
+login (write, maintain, or admin). It atomically backs up and writes the
+config, records an append-only Registry receipt under the same expected
+revision, and restores the old config if receipt recording fails. Reusing the
+same operation ID returns only its matching receipt after confirming the
+already-written config; reusing it with a different request is rejected.
+GitHub labels are not authorization evidence and are never consulted.
+
 ## Sync active worker telemetry
 
 Imported `legacy-worker:*` rows remain immutable preservation records. Each
