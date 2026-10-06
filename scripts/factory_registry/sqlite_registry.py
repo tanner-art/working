@@ -66,6 +66,21 @@ def _review_contract_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _require_unique_external_implementer(
+    connection: sqlite3.Connection, package_id: str, worker_id: str, code: str,
+) -> sqlite3.Row:
+    """A failed Factory history can identify one external author only if unique."""
+    attempts = connection.execute(
+        "SELECT id, worker_id, outcome, ended_at FROM attempts WHERE package_id=?", (package_id,),
+    ).fetchall()
+    if (not isinstance(worker_id, str) or not worker_id or len(attempts) != 1
+            or attempts[0]["worker_id"] != worker_id
+            or attempts[0]["outcome"] not in {"FAILED", "BLOCKED"}
+            or attempts[0]["ended_at"] is None):
+        raise RegistryConflict(code, package_id)
+    return attempts[0]
+
+
 def _review_input_evidence(review_input: ReviewInput) -> Evidence:
     if (
         not all(
@@ -726,12 +741,6 @@ class SQLiteRegistry:
                                         (external.get("id"), target[0]["id"]),
                                     ).fetchone()
                                     worker_id = external["implementer_worker_id"]
-                                    attempts = connection.execute(
-                                        "SELECT worker_id, outcome, ended_at FROM attempts WHERE package_id=? "
-                                        "ORDER BY started_at DESC, id DESC",
-                                        (target[0]["id"],),
-                                    ).fetchall()
-                                    failed = attempts[0] if len(attempts) == 1 else None
                                     worker = connection.execute(
                                         "SELECT 1 FROM workers WHERE id=?", (worker_id,),
                                     ).fetchone()
@@ -741,10 +750,12 @@ class SQLiteRegistry:
                                             or historical["repository_head"] != external.get("repository_head")
                                             or historical["evidence_uri"] != packet[0]["uri"]
                                             or metadata.get("implementation_attempt_id") != f"external-integration:{historical['id']}"
-                                            or worker is None or failed is None or failed["worker_id"] != worker_id
-                                            or failed["outcome"] not in {"FAILED", "BLOCKED"}
-                                            or failed["ended_at"] is None):
+                                            or worker is None):
                                         raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
+                                    _require_unique_external_implementer(
+                                        connection, target[0]["id"], worker_id,
+                                        "EXTERNAL_INTEGRATION_PROVENANCE_INVALID",
+                                    )
                     active = connection.execute(
                         "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"
                     ).fetchone()
@@ -2623,13 +2634,17 @@ class SQLiteRegistry:
             worker = connection.execute(
                 "SELECT 1 FROM workers WHERE id=?", (external.get("implementer_worker_id"),)
             ).fetchone()
-        if (row is None or worker is None or row["disposition"] != "INTEGRATED_ELSEWHERE"
-                or row["historical_commit"] != review_input.get("implementation_commit")
-                or row["integration_commit"] != external.get("integration_commit")
-                or row["repository_head"] != external.get("repository_head")
-                or row["evidence_uri"] != review_input.get("pr_url")
-                or review_input.get("implementation_attempt_id") != f"external-integration:{row['id']}"):
-            raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID")
+            if (row is None or worker is None or row["disposition"] != "INTEGRATED_ELSEWHERE"
+                    or row["historical_commit"] != review_input.get("implementation_commit")
+                    or row["integration_commit"] != external.get("integration_commit")
+                    or row["repository_head"] != external.get("repository_head")
+                    or row["evidence_uri"] != review_input.get("pr_url")
+                    or review_input.get("implementation_attempt_id") != f"external-integration:{row['id']}"):
+                raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID")
+            _require_unique_external_implementer(
+                connection, str(review_input.get("target_package_id")),
+                external.get("implementer_worker_id"), "EXTERNAL_INTEGRATION_PROVENANCE_INVALID",
+            )
         return external
 
     def successful_package_worker(self, package_id: str) -> str:
@@ -2809,20 +2824,15 @@ class SQLiteRegistry:
                 digest = json.loads(target["provider_diagnostics_json"]).get("queue_contract_sha256")
                 if digest != review_input.contract_sha256:
                     raise RegistryConflict("QUEUE_CONTRACT_MISMATCH")
-                failed = connection.execute(
-                    "SELECT id, outcome, ended_at, worker_id FROM attempts WHERE package_id=? "
-                    "ORDER BY started_at DESC, id DESC LIMIT 1",
-                    (review_input.target_package_id,),
-                ).fetchone()
-                if (failed is None or failed["outcome"] not in {"FAILED", "BLOCKED"}
-                        or failed["ended_at"] is None
-                        or failed["worker_id"] != external["implementer_worker_id"]):
-                    raise RegistryConflict("HISTORICAL_FAILED_ATTEMPT_REQUIRED")
                 if connection.execute(
                     "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
                     (review_input.target_package_id,),
                 ).fetchone():
                     raise RegistryConflict("EXTERNAL_INTEGRATION_ATTEMPT_CONFLICT")
+                failed = _require_unique_external_implementer(
+                    connection, review_input.target_package_id,
+                    external["implementer_worker_id"], "HISTORICAL_FAILED_ATTEMPT_REQUIRED",
+                )
                 if connection.execute("SELECT 1 FROM attempts WHERE package_id=? LIMIT 1", (review_input.review_package_id,)).fetchone():
                     raise RegistryConflict("REVIEW_ALREADY_ATTEMPTED")
                 if connection.execute("SELECT 1 FROM evidence WHERE package_id=? AND kind='review-input' LIMIT 1", (review_input.review_package_id,)).fetchone():
@@ -3287,6 +3297,10 @@ class SQLiteRegistry:
                                 or external_input.get("implementation_attempt_id") != f"external-integration:{historical['id']}"):
                             raise RegistryConflict("REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED")
                         implementer_worker = external.get("implementer_worker_id")
+                        _require_unique_external_implementer(
+                            connection, targets[0]["dependency_id"], implementer_worker,
+                            "REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED",
+                        )
                     else:
                         implementer_worker = implementation["worker_id"]
                     if implementer_worker == worker_id:

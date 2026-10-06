@@ -84,6 +84,15 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
     def stamp(self, seconds):
         return (self.now + timedelta(seconds=seconds)).isoformat()
 
+    def add_older_failed_author(self):
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO attempts (id, package_id, worker_id, started_at, ended_at, outcome, "
+                "provider_diagnostics_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("older-failed-attempt", "TASK-231", "claude", self.stamp(0),
+                 self.stamp(1), "FAILED", "{}"),
+            )
+
     def review_input(self):
         packet = self.root / "packet"
         packet.mkdir()
@@ -267,13 +276,7 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
         )
         # The older attempt is by a different worker, so the latest failed
         # attempt still matches the bridge but does not prove unique authorship.
-        with self.registry._connection() as connection:
-            connection.execute(
-                "INSERT INTO attempts (id, package_id, worker_id, started_at, ended_at, outcome, "
-                "provider_diagnostics_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("older-failed-attempt", "TASK-231", "claude", self.stamp(0),
-                 self.stamp(1), "FAILED", "{}"),
-            )
+        self.add_older_failed_author()
         revision = self.registry.dispatch_control()["revision"]
         scope = {"run_id": "cp02-multiple-authors", "package_ids": ["TASK-232"],
                  "deadline": self.stamp(3600), "base_ref": "main", "parent_limit": 1}
@@ -284,6 +287,43 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
                 bounded_run=scope,
             )
         self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
+
+    def test_bridge_refuses_multiple_failed_authors_before_recording(self):
+        self.add_older_failed_author()
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "HISTORICAL_FAILED_ATTEMPT_REQUIRED"):
+            self.registry.record_external_integration_review_input(
+                self.review_input(), expected_revision=revision,
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision + 1)
+        self.assertEqual({item["id"]: item["status"] for item in
+                          self.registry.control_center_snapshot(observed_at=self.stamp(6)).work_packages}["TASK-232"],
+                         "ON_DECK")
+
+    def test_mixed_scope_cannot_lease_review_after_ambiguous_history(self):
+        self.registry.record_external_integration_review_input(
+            self.review_input(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.add_older_failed_author()
+        self.registry.register_feature(Feature("OTHER", "Other work", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-999", "OTHER", "Unrelated", "CONTROL_PLANE", Lane.PLATFORM,
+            ("implementation",), 1, ("preserve",), status=TaskStatus.READY,
+        ))
+        scope = {"run_id": "cp02-mixed", "package_ids": ["TASK-232", "TASK-999"],
+                 "deadline": self.stamp(3600), "base_ref": "main", "parent_limit": 1}
+        live_revision = self.registry.set_dispatch_control(
+            expected_revision=self.registry.dispatch_control()["revision"],
+            expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=self.stamp(8), reason="mixed review run", bounded_run=scope,
+        )
+        with self.assertRaisesRegex(RegistryConflict, "EXTERNAL_INTEGRATION_PROVENANCE_INVALID"):
+            self.registry.review_implementer_worker("TASK-232")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED"):
+            self.registry.acquire_lease(
+                "TASK-232", "claude", acquired_at=self.stamp(9),
+                expires_at=self.stamp(120), expected_dispatch_revision=live_revision,
+            )
 
     def test_operator_checks_actual_git_ancestry_pr_and_merge_ci(self):
         repo = self.root / "repo"
