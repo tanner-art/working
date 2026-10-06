@@ -726,15 +726,12 @@ class SQLiteRegistry:
                                         (external.get("id"), target[0]["id"]),
                                     ).fetchone()
                                     worker_id = external["implementer_worker_id"]
-                                    failed = connection.execute(
+                                    attempts = connection.execute(
                                         "SELECT worker_id, outcome, ended_at FROM attempts WHERE package_id=? "
-                                        "ORDER BY started_at DESC, id DESC LIMIT 1",
+                                        "ORDER BY started_at DESC, id DESC",
                                         (target[0]["id"],),
-                                    ).fetchone()
-                                    succeeded = connection.execute(
-                                        "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
-                                        (target[0]["id"],),
-                                    ).fetchone()
+                                    ).fetchall()
+                                    failed = attempts[0] if len(attempts) == 1 else None
                                     worker = connection.execute(
                                         "SELECT 1 FROM workers WHERE id=?", (worker_id,),
                                     ).fetchone()
@@ -746,7 +743,7 @@ class SQLiteRegistry:
                                             or metadata.get("implementation_attempt_id") != f"external-integration:{historical['id']}"
                                             or worker is None or failed is None or failed["worker_id"] != worker_id
                                             or failed["outcome"] not in {"FAILED", "BLOCKED"}
-                                            or failed["ended_at"] is None or succeeded is not None):
+                                            or failed["ended_at"] is None):
                                         raise RegistryConflict("EXTERNAL_INTEGRATION_PROVENANCE_INVALID", row["id"])
                     active = connection.execute(
                         "SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1"

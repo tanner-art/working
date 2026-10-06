@@ -260,6 +260,31 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
         self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
         self.assertEqual(self.registry.dispatch_control()["revision"], revision)
 
+    def test_bounded_external_review_activation_rejects_multiple_failed_authors(self):
+        review_input = self.review_input()
+        self.registry.record_external_integration_review_input(
+            review_input, expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        # The older attempt is by a different worker, so the latest failed
+        # attempt still matches the bridge but does not prove unique authorship.
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO attempts (id, package_id, worker_id, started_at, ended_at, outcome, "
+                "provider_diagnostics_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("older-failed-attempt", "TASK-231", "claude", self.stamp(0),
+                 self.stamp(1), "FAILED", "{}"),
+            )
+        revision = self.registry.dispatch_control()["revision"]
+        scope = {"run_id": "cp02-multiple-authors", "package_ids": ["TASK-232"],
+                 "deadline": self.stamp(3600), "base_ref": "main", "parent_limit": 1}
+        with self.assertRaisesRegex(RegistryConflict, "EXTERNAL_INTEGRATION_PROVENANCE_INVALID"):
+            self.registry.set_dispatch_control(
+                expected_revision=revision, expected_mode="PAUSED", new_mode="LIVE",
+                kill_switch_engaged=False, changed_at=self.stamp(8), reason="ambiguous authorship",
+                bounded_run=scope,
+            )
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
+
     def test_operator_checks_actual_git_ancestry_pr_and_merge_ci(self):
         repo = self.root / "repo"
         repo.mkdir()
