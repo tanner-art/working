@@ -130,6 +130,46 @@ def registration_proof(
     }
 
 
+def ready_contract_reasons(package: Mapping[str, Any]) -> tuple[str, ...]:
+    """Check the stored v2 proof without needing Git or a mutable issue body."""
+    diagnostics = package.get("provider_diagnostics") or {}
+    if not isinstance(diagnostics, Mapping):
+        return ("REGISTRATION_DIAGNOSTICS_INVALID",)
+    if diagnostics.get("readiness_schema_version") != 2:
+        return ()
+    criteria = package.get("acceptance_criteria") or ()
+    proof = diagnostics.get("readiness_proof")
+    digest = diagnostics.get("queue_contract_sha256")
+    reasons = []
+    if not package.get("lane"):
+        reasons.append("PACKAGE_LANE_UNASSIGNED")
+    if (not isinstance(criteria, (list, tuple)) or not criteria
+            or any(not isinstance(item, str) or not item.strip() for item in criteria)):
+        reasons.append("ACCEPTANCE_CRITERIA_MISSING")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        reasons.append("QUEUE_CONTRACT_HASH_MISSING")
+    if not isinstance(proof, Mapping):
+        return tuple(sorted(set((*reasons, "REGISTRATION_PROOF_MISSING"))))
+    acceptance_digest = hashlib.sha256(json.dumps(
+        criteria, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest() if isinstance(criteria, (list, tuple)) else None
+    if proof.get("queue_contract_sha256") != digest or proof.get("acceptance_sha256") != acceptance_digest:
+        reasons.append("REGISTRATION_PROOF_HASH_MISMATCH")
+    if not isinstance(proof.get("base_commit"), str) or not _SHA.fullmatch(proof["base_commit"]):
+        reasons.append("REGISTRATION_BASE_COMMIT_INVALID")
+    target_ref = proof.get("target_ref")
+    if (not isinstance(target_ref, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", target_ref)
+            or ".." in target_ref or target_ref.endswith("/")):
+        reasons.append("REGISTRATION_TARGET_REF_INVALID")
+    planning = proof.get("planning_sha256")
+    if (not isinstance(planning, Mapping) or not planning
+            or any(not _safe_path(path) or not isinstance(value, str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", value)
+                   for path, value in planning.items())):
+        reasons.append("REGISTRATION_PLANNING_HASH_INVALID")
+    return tuple(sorted(set(reasons)))
+
+
 def contract_shape_reasons(contract: Mapping[str, Any]) -> tuple[str, ...]:
     """Pure registration-time checks; Git and Registry facts are checked again at claim."""
     if contract.get("schema_version") != 2:

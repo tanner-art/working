@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .models import DispatchSnapshot
+from scripts.runner.task_readiness import ready_contract_reasons
 
 
 class ShadowDispatchError(ValueError):
@@ -35,6 +36,7 @@ class RejectionCode(str, Enum):
     DEPENDENCY_MISSING = "DEPENDENCY_MISSING"
     REVIEW_PREREQUISITE_MISSING = "REVIEW_PREREQUISITE_MISSING"
     REVIEW_INDEPENDENCE_REQUIRED = "REVIEW_INDEPENDENCE_REQUIRED"
+    READY_CONTRACT_INVALID = "READY_CONTRACT_INVALID"
     PACKAGE_HAS_ACTIVE_LEASE = "PACKAGE_HAS_ACTIVE_LEASE"
     NO_ELIGIBLE_WORKER = "NO_ELIGIBLE_WORKER"
     WORKER_ROLE_INELIGIBLE = "WORKER_ROLE_INELIGIBLE"
@@ -520,6 +522,8 @@ def _package_reasons(
     if package.get("status") != "READY":
         reasons.append(_reason(RejectionCode.PACKAGE_NOT_READY, str(package.get("status"))))
     if (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2:
+        for prerequisite in ready_contract_reasons(package):
+            reasons.append(_reason(RejectionCode.READY_CONTRACT_INVALID, prerequisite))
         feature = feature_by_id.get(str(package.get("feature_id")))
         if feature is None or feature.get("status") not in {"READY", "ACTIVE", "VERIFY_REVIEW"}:
             reasons.append(_reason(

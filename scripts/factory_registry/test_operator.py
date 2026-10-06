@@ -1869,6 +1869,18 @@ class OperatorFixture(unittest.TestCase):
                 "TASK-201", expected_revision=revision - 1,
                 changed_at=utc_now(), reason="stale retry",
             )
+        with mock.patch("scripts.factory_registry.sqlite_registry.ready_contract_reasons",
+                        return_value=("REGISTRATION_PROOF_MISSING",)):
+            with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+                self.registry.requeue_failed_package(
+                    "TASK-201", expected_revision=revision,
+                    changed_at=utc_now(), reason="proof lost",
+                )
+        self.assertEqual(
+            next(item["status"] for item in self.registry.control_center_snapshot(
+                observed_at=utc_now()
+            ).work_packages if item["id"] == "TASK-201"), "BLOCKED",
+        )
         self.registry.requeue_failed_package(
             "TASK-201", expected_revision=revision,
             changed_at=utc_now(), reason="reviewed retry",

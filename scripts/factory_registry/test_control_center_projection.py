@@ -31,6 +31,7 @@ from scripts.factory_registry import (
     validate_control_center_projection,
 )
 from scripts.factory_registry.control_center_projection import ControlCenterProjectionError
+from scripts.factory_registry.control_center_projection import project_control_center
 from scripts.factory_registry.control_center_server import (
     SIGNATURE_HEADER,
     create_projection_handler,
@@ -259,6 +260,19 @@ class ControlCenterProjectionTest(unittest.TestCase):
                 table: connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
                 for table in tables
             }
+
+    def test_projection_names_missing_v2_registration_proof(self) -> None:
+        snapshot = self.registry.control_center_snapshot(observed_at=NOW)
+        packages = tuple(
+            {**item, "provider_diagnostics": {**item["provider_diagnostics"],
+                                               "readiness_schema_version": 2}}
+            if item["id"] == "PACKAGE-1" else item
+            for item in snapshot.work_packages
+        )
+        projection = project_control_center(replace(snapshot, work_packages=packages))
+        card = next(item for item in projection["features"][0]["packages"]
+                    if item["id"] == "PACKAGE-1")
+        self.assertIn("REGISTRATION_PROOF_MISSING", card["blockReason"])
 
     def test_projection_matches_schema_v2_and_preserves_registry_provenance(self) -> None:
         projection = build_control_center_projection(self.registry, observed_at=NOW)

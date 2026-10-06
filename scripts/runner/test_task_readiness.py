@@ -219,7 +219,7 @@ class TaskReadinessTests(unittest.TestCase):
         controller = RunnerRegistryControl(database, self.repo)
         with self.assertRaisesRegex(RegistryConflict, "V2_CONTRACT_REQUIRED"):
             controller.pre_claim("TASK-1", "worker-a", github_issue=101)
-        with self.assertRaisesRegex(RegistryConflict, "TASK_NOT_READY"):
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
             controller.pre_claim("TASK-1", "worker-a", task_contract=self.contract, github_issue=102)
         with self.assertRaisesRegex(RegistryConflict, "EXISTING_PATH_MISSING:docs/MISSING.md"):
             controller.pre_claim("TASK-2", "worker-a", task_contract=incomplete, github_issue=102)

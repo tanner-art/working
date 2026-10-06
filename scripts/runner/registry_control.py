@@ -165,16 +165,16 @@ class RunnerRegistryControl:
         )
         if requires_readiness:
             if package is None:
-                raise RegistryConflict("TASK_NOT_READY", "PACKAGE_MISSING")
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", "PACKAGE_MISSING")
             if not isinstance(task_contract, dict) or task_contract.get("schema_version") != 2:
-                raise RegistryConflict("TASK_NOT_READY", "V2_CONTRACT_REQUIRED")
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", "V2_CONTRACT_REQUIRED")
             readiness = check_packet(
                 task_contract, repository=self.repository,
                 run_base=self.integration_base(), package=package,
                 snapshot=snapshot, github_issue=github_issue,
             )
             if readiness.state != "READY":
-                raise RegistryConflict("TASK_NOT_READY", ",".join(readiness.reasons))
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", ",".join(readiness.reasons))
         if package is not None and package.get("kind") == "REVIEW":
             self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
@@ -197,7 +197,8 @@ class RunnerRegistryControl:
                 None,
             )
             reasons = (
-                ",".join(reason.code for reason in matching.reasons)
+                ",".join(f"{reason.code}:{reason.detail}" if reason.detail else reason.code
+                         for reason in matching.reasons)
                 if matching is not None else "PAIR_NOT_FOUND"
             )
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
