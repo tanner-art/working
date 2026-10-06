@@ -375,6 +375,60 @@ this reviewed operator after its Registry gates pass.
 
 ## Stop, reconcile, retry, and return PAUSED
 
+### Review an implementation integrated outside its failed Factory attempt
+
+`record-external-integration-review-input` is a narrow recovery path for a
+blocked parent whose exact code commit was subsequently merged outside the
+Factory attempt. It does not change the failed attempt to successful or record
+an approval. It atomically stores an append-only integration reconciliation and
+the review input, then moves the parent to `VERIFY_REVIEW` and its existing
+unstarted review package to `READY`.
+
+First bind the review package to its existing GitHub issue while it is still
+`ON_DECK`, using `bind-legacy-source` with that issue's exact normalized queue
+contract. For the CP-02 pair, this is TASK-232 / issue #232. The bridge rejects
+an unbound review source, stale Registry revision, any active ownership, a
+nonterminal or successful parent attempt, an altered parent contract digest,
+and a review that has already started. Prepare a read-only packet containing
+`base-to-implementation.diff`, `changed-files.txt`, `contract.json`,
+`validation-evidence.json`, and a hash manifest bound to the synthetic
+`external-integration:<id>` provenance ID. The packet contract must be the
+exact normalized implementation issue contract.
+
+The spec has three objects: absolute `repository` path, `review_input` with
+the normal input fields (except its digest, which the parser calculates), and
+`external_integration` with `id`, `historical_commit`, `integration_commit`,
+`repository_head`, and `implementer_worker_id`. The review input's
+`implementation_attempt_id` is `external-integration:<id>` and its
+`validation_evidence.ci` names `state=SUCCESS`, `validated_commit` (the
+containing merge), `contains_implementation_commit` (the exact source commit),
+`pr_url`, and the exact successful GitHub Actions `run_url`. The review packet
+is included under `validation_evidence.review_packet` with absolute `path`,
+`manifest_sha256`, and the four file hashes. The operator verifies the local
+commit ancestry and base, the merged PR and its merge SHA through GitHub, and
+the completed successful Actions run on that containing merge. It never
+represents that run as CI on the earlier source commit.
+
+```sh
+"$PYTHON" -m scripts.factory_registry.operator_cli record-external-integration-review-input \
+  --database "$DATABASE" \
+  --config "$CONFIG" \
+  --release "$RELEASE" \
+  --release-commit "$COMMIT" \
+  --preservation "$PRESERVATION" \
+  --expect-revision REVISION \
+  --spec /absolute/path/to/external-integration-review.json
+```
+
+For CP-02 the source commit is
+`08126fc6d965ce40b271cba4d648c8bdab7ef5e8`, its base is
+`c8977d53e4b75c1f02f90b1a829209b13082312b`, merged PR #352's merge is
+`1f7148ead382a2c67e7da671931973327facb0e4`, and the containing merge's
+successful CI run is `36340797730`. Recheck `repository_head` and Registry
+revision immediately before the command. A separate independent TASK-232
+reviewer attempt and structured Registry outcome are still required before
+CP-02 is complete.
+
 Emergency stop has no revision precondition so a stale operator can always
 close dispatch first:
 

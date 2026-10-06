@@ -69,6 +69,29 @@ class QueueTests(unittest.TestCase):
             SimpleNamespace(pr_url='https://example.test/pr/292', implementation_commit=commit),
         ))
 
+    def test_external_integration_review_requires_containing_merge_ci(self):
+        commit, merge = 'a' * 40, 'c' * 40
+        run_url = 'https://github.com/owner/repo/actions/runs/123'
+        review_input = SimpleNamespace(
+            pr_url='https://github.com/owner/repo/pull/352', implementation_commit=commit,
+            external_integration={'historical_commit': commit, 'integration_commit': merge},
+            validation_evidence={'ci': {'state': 'SUCCESS', 'validated_commit': merge,
+                                        'contains_implementation_commit': commit,
+                                        'pr_url': 'https://github.com/owner/repo/pull/352',
+                                        'run_url': run_url}},
+        )
+        source = {'headRefOid': 'b' * 40, 'state': 'MERGED', 'mergeCommit': {'oid': merge}}
+        checks = [{'name': 'verify', 'state': 'SUCCESS', 'workflow': 'Validate app'}]
+        good_run = {'headSha': merge, 'status': 'completed', 'conclusion': 'success',
+                    'workflowName': 'Validate app', 'url': run_url}
+        for run, expected in ((good_run, True), ({**good_run, 'headSha': 'd' * 40}, False),
+                              ({**good_run, 'conclusion': 'failure'}, False)):
+            with self.subTest(run=run):
+                responses = iter((source, checks, run))
+                self.assertEqual(review_source_is_green(
+                    lambda *_args: json.dumps(next(responses)), 'owner/repo', review_input,
+                ), expected)
+
     def test_review_source_rejects_wrong_merge_sha(self):
         commit = 'a' * 40
         responses = iter((

@@ -1,0 +1,253 @@
+"""End-to-end Registry proof for review of an externally integrated commit."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from scripts.factory_registry.models import (
+    Evidence, Feature, Lane, PackageKind, ReviewInput, ReviewOutcome,
+    ReviewOutcomeState, TaskStatus, Worker, WorkPackage,
+)
+from scripts.factory_registry.repository import RegistryConflict
+from scripts.factory_registry.operator import OperatorError, record_external_integration_review_input
+from scripts.factory_registry.sqlite_registry import SQLiteRegistry, _review_contract_sha256
+from scripts.runner.registry_control import RunnerRegistryControl
+
+
+class ExternalIntegrationReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.registry = SQLiteRegistry(self.root / "registry.sqlite3")
+        self.registry.initialize()
+        self.now = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=10)
+        self.contract = {"task": "TASK-231", "paths": ["scripts/factory_registry/sqlite_registry.py"],
+                         "instructions": "Prove CP-02 review integrity.", "depends_on": []}
+        self.review_contract = {"task": "TASK-232", "paths": ["docs/factory/CP_02_FINAL_PROOF_REVIEW.md"],
+                                "instructions": "Independently review CP-02.", "depends_on": [231]}
+        self.commit, self.base, self.merge, self.head = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+        self.pr = "https://github.com/tanner-art/working/pull/352"
+        self.registry.register_feature(Feature("CP-02", "CP-02", 10, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-231", "CP-02", "Implementation", "CONTROL_PLANE", Lane.PLATFORM,
+            ("implementation",), 10, ("proof",), status=TaskStatus.READY,
+            provider_diagnostics={"queue_contract_sha256": _review_contract_sha256(self.contract)},
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-232", "CP-02", "Independent review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 9, ("strict verdict",), status=TaskStatus.ON_DECK,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-231",),
+            provider_diagnostics={"queue_contract_sha256": _review_contract_sha256(self.review_contract)},
+        ))
+        self.registry.bind_legacy_package_source(
+            "TASK-232", github_issue=232, queue_contract=self.review_contract,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=self.stamp(0),
+        )
+        for worker, capabilities, lanes in (
+            ("codex-a", ("implementation", "independent-review"),
+             (Lane.PLATFORM, Lane.ASSURANCE)),
+            ("claude", ("independent-review",), (Lane.ASSURANCE,)),
+        ):
+            self.registry.register_worker(Worker(worker, worker, capabilities, lanes,
+                                                 last_heartbeat_at=self.stamp(0), usage_state="NORMAL"))
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED", new_mode="LIVE",
+            kill_switch_engaged=False, changed_at=self.stamp(1), reason="fixture failed attempt",
+        )
+        self.registry.acquire_lease("TASK-231", "codex-a", acquired_at=self.stamp(2),
+                                    expires_at=self.stamp(120))
+        self.registry.begin_attempt_runtime(
+            "old-failed-attempt", package_id="TASK-231", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=self.stamp(3),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "old-failed-attempt", ended_at=self.stamp(4), outcome="FAILED",
+            next_status=TaskStatus.BLOCKED, reason="original runner failed",
+            failure_detail="blank line at EOF",
+        )
+        self.registry.engage_dispatch_kill_switch(changed_at=self.stamp(5), reason="fixture drained")
+        RunnerRegistryControl(self.root / "registry.sqlite3").finalize_paused(reason="fixture drained")
+
+    def stamp(self, seconds):
+        return (self.now + timedelta(seconds=seconds)).isoformat()
+
+    def review_input(self):
+        packet = self.root / "packet"
+        packet.mkdir()
+        contents = {
+            "base-to-implementation.diff": b"diff --git a/x b/x\n",
+            "changed-files.txt": b"scripts/factory_registry/sqlite_registry.py\n",
+            "contract.json": json.dumps(self.contract, sort_keys=True).encode(),
+            "validation-evidence.json": b'{"containing_merge_ci":"success"}',
+        }
+        files = {}
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+            files[name] = hashlib.sha256(content).hexdigest()
+        manifest = {"schema_version": 1, "implementation_attempt_id": "external-integration:bridge-1",
+                    "implementation_commit": self.commit, "base_commit": self.base, "files": files}
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        return ReviewInput(
+            id="external-review-input", review_package_id="TASK-232", target_package_id="TASK-231",
+            implementation_attempt_id="external-integration:bridge-1",
+            implementation_commit=self.commit, base_commit=self.base, pr_url=self.pr,
+            contract_sha256=_review_contract_sha256(self.contract), contract=self.contract,
+            validation_evidence={
+                "ci": {"state": "SUCCESS", "validated_commit": self.merge,
+                       "contains_implementation_commit": self.commit, "pr_url": self.pr,
+                       "run_url": "https://github.com/tanner-art/working/actions/runs/123"},
+                "review_packet": {"path": str(packet),
+                                  "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                                  "files": files},
+            }, recorded_at=self.stamp(6),
+            external_integration={"id": "bridge-1", "historical_commit": self.commit,
+                                  "integration_commit": self.merge, "repository_head": self.head,
+                                  "implementer_worker_id": "codex-a"},
+        )
+
+    def test_bridge_preserves_failure_and_requires_independent_structured_outcome(self):
+        review_input = self.review_input()
+        before = self.registry.control_center_snapshot(observed_at=self.stamp(6))
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "REGISTRY_REVISION_CHANGED"):
+            self.registry.record_external_integration_review_input(review_input, expected_revision=revision - 1)
+        revision = self.registry.dispatch_control()["revision"]
+        accepted_revision = self.registry.record_external_integration_review_input(
+            review_input, expected_revision=revision,
+        )
+        self.assertEqual(self.registry.record_external_integration_review_input(
+            review_input, expected_revision=revision,
+        ), accepted_revision)
+        self.assertEqual(self.registry.dispatch_control()["revision"], accepted_revision)
+        after = self.registry.control_center_snapshot(observed_at=self.stamp(7))
+        self.assertEqual(before.attempts, after.attempts)
+        self.assertEqual(after.attempts[-1]["outcome"], "FAILED")
+        self.assertEqual(self.registry.review_implementer_worker("TASK-232"), "codex-a")
+        statuses = {item["id"]: item["status"] for item in after.work_packages}
+        self.assertEqual((statuses["TASK-231"], statuses["TASK-232"]), ("VERIFY_REVIEW", "READY"))
+        self.assertEqual(len([item for item in after.evidence if item["package_id"] == "TASK-232"]), 1)
+        self.assertFalse([item for item in after.review_outcomes if item["target_package_id"] == "TASK-231"])
+        self.registry.set_dispatch_control(
+            expected_revision=self.registry.dispatch_control()["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False, changed_at=self.stamp(8), reason="review fixture",
+        )
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.acquire_lease("TASK-232", "codex-a", acquired_at=self.stamp(9),
+                                        expires_at=self.stamp(120))
+        self.registry.acquire_lease("TASK-232", "claude", acquired_at=self.stamp(9),
+                                    expires_at=self.stamp(120))
+        self.registry.begin_attempt_runtime(
+            "review-attempt", package_id="TASK-232", worker_id="claude", runner_pid=os.getpid(),
+            started_at=self.stamp(10), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "review-attempt", ended_at=self.stamp(11), outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW, reason="review finished",
+        )
+        outcome = ReviewOutcome(
+            id="external-verdict", review_package_id="TASK-232", target_package_id="TASK-231",
+            implementer_worker_id="codex-a", reviewer_worker_id="claude",
+            requested_at=review_input.recorded_at, decided_at=self.stamp(12),
+            state=ReviewOutcomeState.APPROVED, findings=("Exact CP-02 proof accepted.",),
+            approval_evidence_ids=("external-verdict-evidence",), reviewed_commit=self.commit,
+            reviewed_base_commit=self.base, contract_sha256=review_input.contract_sha256,
+            review_input_evidence_id=review_input.id, reviewer_attempt_id="review-attempt",
+        )
+        evidence = Evidence("external-verdict-evidence", "TASK-232", "review", self.pr,
+                            "Structured independent review", self.stamp(11),
+                            {"attempt_id": "review-attempt", "reviewed_commit": self.commit,
+                             "reviewed_base_commit": self.base,
+                             "contract_sha256": review_input.contract_sha256,
+                             "review_input_evidence_id": review_input.id})
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
+            self.registry.record_review_outcome(replace(outcome, implementer_worker_id="claude"),
+                                                evidence=evidence, expected_revision=self.registry.dispatch_control()["revision"])
+        self.registry.record_review_outcome(outcome, evidence=evidence,
+                                            expected_revision=self.registry.dispatch_control()["revision"])
+        final = self.registry.control_center_snapshot(observed_at=self.stamp(13))
+        self.assertEqual({item["id"]: item["status"] for item in final.work_packages}["TASK-231"], "DONE")
+        self.assertEqual(final.attempts[0]["outcome"], "FAILED")
+        self.assertEqual(final.review_outcomes[-1]["state"], "APPROVED")
+
+    def test_bridge_rejects_mismatched_contract_and_packet_without_mutation(self):
+        review_input = self.review_input()
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_PACKET_CONTRACT_MISMATCH"):
+            changed = {**self.contract, "instructions": "different"}
+            self.registry.record_external_integration_review_input(
+                replace(review_input, contract=changed,
+                        contract_sha256=_review_contract_sha256(changed)), expected_revision=revision,
+            )
+        (Path(review_input.validation_evidence["review_packet"]["path"]) / "contract.json").write_text("{}")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_PACKET_FILE_MISMATCH"):
+            self.registry.record_external_integration_review_input(review_input, expected_revision=revision)
+        after = self.registry.control_center_snapshot(observed_at=self.stamp(7))
+        self.assertEqual(after.revision, revision)
+        self.assertEqual(after.attempts[0]["outcome"], "FAILED")
+
+    def test_operator_checks_actual_git_ancestry_pr_and_merge_ci(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Factory Test")
+        git("config", "user.email", "factory@example.test")
+        source = repo / "source.txt"
+        source.write_text("base\n")
+        git("add", "source.txt")
+        git("commit", "-q", "-m", "base")
+        self.base = git("rev-parse", "HEAD")
+        source.write_text("implementation\n")
+        git("commit", "-qam", "implementation")
+        self.commit = git("rev-parse", "HEAD")
+        source.write_text("integrated\n")
+        git("commit", "-qam", "merge-equivalent")
+        self.merge = git("rev-parse", "HEAD")
+        source.write_text("head\n")
+        git("commit", "-qam", "head")
+        self.head = git("rev-parse", "HEAD")
+        review_input = self.review_input()
+        raw_input = asdict(review_input)
+        external = raw_input.pop("external_integration")
+        raw_input.pop("contract_sha256")
+        spec = {"repository": str(repo), "review_input": raw_input,
+                "external_integration": external}
+        pr = {"merged": True, "merge_commit_sha": self.merge, "html_url": self.pr}
+        run = {"head_sha": self.merge, "name": "Validate app", "head_branch": "main",
+               "status": "completed", "conclusion": "success",
+               "html_url": "https://github.com/tanner-art/working/actions/runs/123"}
+        revision = self.registry.dispatch_control()["revision"]
+        args = (self.root / "registry.sqlite3", self.root / "config.json",
+                self.root / "release", self.root / "preservation.json", self.head,
+                revision, spec)
+        with patch("scripts.factory_registry.operator.preflight"), \
+                patch("scripts.factory_registry.operator._github_public_json",
+                      side_effect=(pr, {**run, "conclusion": "failure"})):
+            with self.assertRaisesRegex(OperatorError, "CI does not validate"):
+                record_external_integration_review_input(*args)
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with patch("scripts.factory_registry.operator.preflight"), \
+                patch("scripts.factory_registry.operator._github_public_json",
+                      side_effect=(pr, run)):
+            result = record_external_integration_review_input(*args)
+        self.assertFalse(result["review_passed"])
+        self.assertEqual(self.registry.review_input("TASK-232")["implementation_commit"], self.commit)
+        wrong = {**spec, "external_integration": {**external, "integration_commit": "f" * 40}}
+        with self.assertRaises(OperatorError):
+            record_external_integration_review_input(*args[:-1], wrong)

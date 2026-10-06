@@ -104,6 +104,9 @@ class ReviewInput:
     contract: Mapping[str, Any]
     validation_evidence: Mapping[str, Any]
     recorded_at: str
+    # Present only for an externally integrated implementation whose original
+    # Registry attempt remains terminal FAILED. This is not an attempt ID.
+    external_integration: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

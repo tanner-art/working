@@ -562,6 +562,39 @@ def review_source_is_green(github, repository, review_input):
     if not (verify and all(item.get('state') in {'SUCCESS', 'PASS'} for item in verify)):
         return False
 
+    external = getattr(review_input, 'external_integration', None)
+    if external is not None:
+        ci = review_input.validation_evidence.get('ci')
+        if not isinstance(ci, dict) or not isinstance(external, dict):
+            return False
+        run_url = ci.get('run_url')
+        run_match = re.fullmatch(
+            rf'https://github\.com/{re.escape(repository)}/actions/runs/([1-9]\d*)',
+            run_url if isinstance(run_url, str) else '',
+        )
+        merge = source.get('mergeCommit')
+        if (run_match is None or source.get('state') != 'MERGED'
+                or not isinstance(merge, dict)
+                or merge.get('oid') != external.get('integration_commit')
+                or external.get('historical_commit') != review_input.implementation_commit
+                or ci.get('validated_commit') != external.get('integration_commit')
+                or ci.get('contains_implementation_commit') != review_input.implementation_commit
+                or ci.get('pr_url') != review_input.pr_url):
+            return False
+        try:
+            run = json.loads(github(
+                'run', 'view', run_match.group(1), '--repo', repository,
+                '--json', 'headSha,status,conclusion,workflowName,url',
+            ))
+        except Exception:
+            return False
+        return (isinstance(run, dict)
+                and run.get('headSha') == external['integration_commit']
+                and run.get('status') == 'completed'
+                and run.get('conclusion') == 'success'
+                and run.get('workflowName') == 'Validate app'
+                and run.get('url') == run_url)
+
     # Keep the original exact-PR-head proof unchanged.  A merged PR advances
     # headRefOid, so its separately proved merge path must never weaken this.
     if source.get('headRefOid') == review_input.implementation_commit:
@@ -1579,7 +1612,7 @@ def main():
                 if registry_review:
                     decided_at = datetime.now(timezone.utc).isoformat()
                     evidence = Evidence(id=f'review-verdict:{attempt}', package_id=body['task'], kind='review', uri=data['pr'], summary='Structured independent review verdict.', recorded_at=decided_at, metadata={'attempt_id': attempt, 'reviewed_commit': verdict.reviewed_commit, 'reviewed_base_commit': verdict.reviewed_base_commit, 'contract_sha256': verdict.contract_sha256, 'review_input_evidence_id': review_input.id})
-                    registry_control.record_review_outcome(ReviewOutcome(id=f'review-outcome:{attempt}', review_package_id=body['task'], target_package_id=review_input.target_package_id, implementer_worker_id=registry_control.registry.successful_package_worker(review_input.target_package_id), reviewer_worker_id=lane, requested_at=review_input.recorded_at, decided_at=decided_at, state=verdict.state, findings=verdict.findings, changes_requested=verdict.changes_requested, approval_evidence_ids=(evidence.id,) if verdict.state.value == 'APPROVED' else (), reviewed_commit=verdict.reviewed_commit, reviewed_base_commit=verdict.reviewed_base_commit, contract_sha256=verdict.contract_sha256, review_input_evidence_id=review_input.id, reviewer_attempt_id=attempt), evidence, expected_revision=registry_control.registry.dispatch_control()['revision'])
+                    registry_control.record_review_outcome(ReviewOutcome(id=f'review-outcome:{attempt}', review_package_id=body['task'], target_package_id=review_input.target_package_id, implementer_worker_id=registry_control.registry.review_implementer_worker(body['task']), reviewer_worker_id=lane, requested_at=review_input.recorded_at, decided_at=decided_at, state=verdict.state, findings=verdict.findings, changes_requested=verdict.changes_requested, approval_evidence_ids=(evidence.id,) if verdict.state.value == 'APPROVED' else (), reviewed_commit=verdict.reviewed_commit, reviewed_base_commit=verdict.reviewed_base_commit, contract_sha256=verdict.contract_sha256, review_input_evidence_id=review_input.id, reviewer_attempt_id=attempt), evidence, expected_revision=registry_control.registry.dispatch_control()['revision'])
                 data['registry_runtime_finished'] = True
                 runtime_monitor = None
             save_record(record, data, 'review')

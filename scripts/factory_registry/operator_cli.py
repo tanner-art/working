@@ -31,6 +31,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_canary_spec,
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
+    record_external_integration_review_input,
     parse_review_input_spec,
     parse_bounded_run_scope,
     preflight,
@@ -213,6 +214,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser("record-review-input", help="Record immutable historical implementation facts for a registered review")
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser(
+        "record-external-integration-review-input",
+        help="Bind an exact externally merged implementation to a pending Registry review",
+    )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
 
@@ -465,6 +473,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"kind": "threadline-factory-record-review-input", "passed": True,
                 "review_package_id": review_input.review_package_id, "review_input_id": review_input.id,
                 "revision": revision}
+    if args.command == "record-external-integration-review-input":
+        return dict(record_external_integration_review_input(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "external integration review spec"),
+        ))
     if args.command == "bind-legacy-source":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=False))
