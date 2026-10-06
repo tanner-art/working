@@ -536,6 +536,15 @@ class RunnerRegistryControl:
     def record_review_outcome(self, outcome: ReviewOutcome, evidence: Evidence, *, expected_revision: int) -> int:
         return self.registry.record_review_outcome(outcome, evidence=evidence, expected_revision=expected_revision, operation_id=f"review-outcome:{outcome.id}")
 
+    def succeed_review(self, attempt_id: str, outcome: ReviewOutcome, evidence: Evidence) -> int:
+        """Finish the reviewer attempt and save its verdict in one Registry transaction."""
+        return self.registry.record_review_outcome(
+            outcome, evidence=evidence,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            operation_id=f"review-outcome:{outcome.id}",
+            review_attempt_id=attempt_id,
+        )
+
     def fail(self, attempt_id: str, detail: str) -> None:
         ended_at = utc_now()
         try:

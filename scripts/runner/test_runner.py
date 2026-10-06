@@ -1052,6 +1052,8 @@ class LifecycleTests(unittest.TestCase):
             ('malformed', {'state': 'APPROVED', 'changes_requested': []}, False),
             ('codex-approved', {'state': 'APPROVED', 'changes_requested': []}, True),
             ('codex-bare-json', {'state': 'APPROVED', 'changes_requested': []}, False),
+            ('persist-failure', {'state': 'APPROVED', 'changes_requested': []}, False),
+            ('interrupt-before-verdict', {'state': 'APPROVED', 'changes_requested': []}, False),
         )
         for name, changes, accepted in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1141,11 +1143,19 @@ class LifecycleTests(unittest.TestCase):
                 registry.pre_launch.return_value = 3
                 registry.registry.dispatch_control.return_value = {'revision': 4}
                 registry.registry.successful_package_worker.return_value = 'implementer'
+                if name == 'persist-failure':
+                    registry.succeed_review.side_effect = RegistryConflict('REVIEW_INPUT_MISMATCH')
+                if name == 'interrupt-before-verdict':
+                    registry.registry.review_implementer_worker.side_effect = KeyboardInterrupt(
+                        'injected before atomic verdict'
+                    )
                 with patch.object(runner, 'run', side_effect=fake_run), \
                         patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
                         patch.object(runner.os, 'getpgid', return_value=901), \
                         patch('sys.argv', ['runner', '--config', str(config_path)]), \
-                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                        (self.assertRaises(KeyboardInterrupt) if name == 'interrupt-before-verdict'
+                         else contextlib.nullcontext()):
                     runner.main()
                 checkout = next(args for args, _ in calls if args[:3] == ['git', 'worktree', 'add'])
                 self.assertEqual(checkout[-1], commit)
@@ -1165,19 +1175,32 @@ class LifecycleTests(unittest.TestCase):
                     self.assertEqual(provider[provider.index('--permission-mode') + 1], 'dontAsk')
                     self.assertEqual(provider[provider.index('--add-dir') + 1], packet['path'])
                 if accepted:
+                    registry.succeed.assert_not_called()
                     self.assertEqual(
-                        registry.record_review_outcome.call_count, 1,
+                        registry.succeed_review.call_count, 1,
                         (root / 'state' / 'issue-1.json').read_text(),
                     )
                     self.assertEqual(
-                        registry.record_review_outcome.call_args.args[0].state,
+                        registry.succeed_review.call_args.args[1].state,
                         ReviewOutcomeState(changes['state']),
                     )
                 else:
-                    registry.record_review_outcome.assert_not_called()
                     saved = json.loads((root / 'state' / 'issue-1.json').read_text())
                     self.assertEqual(saved['status'], 'failed')
-                    self.assertIn('review verdict rejected', saved['error'])
+                    if name == 'persist-failure':
+                        registry.succeed_review.assert_called_once()
+                        registry.fail.assert_called_once()
+                        registry.succeed.assert_not_called()
+                        self.assertIn('REVIEW_INPUT_MISMATCH', saved['error'])
+                    elif name == 'interrupt-before-verdict':
+                        registry.succeed_review.assert_not_called()
+                        registry.fail.assert_called_once()
+                        registry.succeed.assert_not_called()
+                        self.assertTrue(saved['interrupted'])
+                        self.assertIn('injected before atomic verdict', saved['error'])
+                    else:
+                        registry.succeed_review.assert_not_called()
+                        self.assertIn('review verdict rejected', saved['error'])
 
 if __name__ == '__main__':
     unittest.main()
