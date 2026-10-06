@@ -182,6 +182,11 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
                              "reviewed_base_commit": self.base,
                              "contract_sha256": review_input.contract_sha256,
                              "review_input_evidence_id": review_input.id})
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_REQUEST_TIME_MISMATCH"):
+            self.registry.record_review_outcome(
+                replace(outcome, id="forged-request-time", requested_at=self.stamp(9)),
+                evidence=evidence, expected_revision=self.registry.dispatch_control()["revision"],
+            )
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_INDEPENDENCE_REQUIRED"):
             self.registry.record_review_outcome(replace(outcome, implementer_worker_id="claude"),
                                                 evidence=evidence, expected_revision=self.registry.dispatch_control()["revision"])
@@ -306,6 +311,10 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
         )
         self.add_older_failed_author()
         self.registry.register_feature(Feature("OTHER", "Other work", 1, TaskStatus.READY))
+        self.registry.register_worker(Worker(
+            "reviewer2", "reviewer2", ("independent-review",), (Lane.ASSURANCE,),
+            last_heartbeat_at=self.stamp(7), usage_state="NORMAL",
+        ))
         self.registry.register_work_package(WorkPackage(
             "TASK-999", "OTHER", "Unrelated", "CONTROL_PLANE", Lane.PLATFORM,
             ("implementation",), 1, ("preserve",), status=TaskStatus.READY,
@@ -321,9 +330,81 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
             self.registry.review_implementer_worker("TASK-232")
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_IMPLEMENTER_PROVENANCE_REQUIRED"):
             self.registry.acquire_lease(
-                "TASK-232", "claude", acquired_at=self.stamp(9),
+                "TASK-232", "reviewer2", acquired_at=self.stamp(9),
                 expires_at=self.stamp(120), expected_dispatch_revision=live_revision,
             )
+
+    def test_external_approval_rejects_new_target_attempt_after_review_lease(self):
+        review_input = self.review_input()
+        self.registry.record_external_integration_review_input(
+            review_input, expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.register_worker(Worker(
+            "w3", "w3", ("implementation",), (Lane.PLATFORM,),
+            last_heartbeat_at=self.stamp(7), usage_state="NORMAL",
+        ))
+        self.registry.set_dispatch_control(
+            expected_revision=self.registry.dispatch_control()["revision"],
+            expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=self.stamp(8), reason="unscoped review fixture",
+        )
+        self.registry.acquire_lease("TASK-232", "claude", acquired_at=self.stamp(9),
+                                    expires_at=self.stamp(120))
+        self.registry.transition_work_package(
+            "TASK-231", expected_status=TaskStatus.VERIFY_REVIEW,
+            new_status=TaskStatus.READY, changed_at=self.stamp(10),
+        )
+        first = self.registry.acquire_lease("TASK-231", "w3", acquired_at=self.stamp(11),
+                                            expires_at=self.stamp(120))
+        self.registry.begin_attempt_runtime(
+            "w3-cancelled", package_id="TASK-231", worker_id="w3", runner_pid=os.getpid(),
+            started_at=self.stamp(12), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "w3-cancelled", ended_at=self.stamp(13), outcome="CANCELLED",
+            next_status=TaskStatus.READY, reason="cancelled fixture",
+        )
+        self.assertIsNotNone(first.id)
+        second = self.registry.acquire_lease("TASK-231", "w3", acquired_at=self.stamp(14),
+                                             expires_at=self.stamp(120))
+        self.registry.release_lease(
+            second.id, released_at=self.stamp(15), reason="return to review",
+            next_status=TaskStatus.VERIFY_REVIEW,
+        )
+        self.registry.begin_attempt_runtime(
+            "review-after-change", package_id="TASK-232", worker_id="claude",
+            runner_pid=os.getpid(), started_at=self.stamp(17),
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "review-after-change", ended_at=self.stamp(18), outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW, reason="review fixture",
+        )
+        outcome = ReviewOutcome(
+            id="forged-review-verdict", review_package_id="TASK-232", target_package_id="TASK-231",
+            implementer_worker_id="codex-a", reviewer_worker_id="claude",
+            requested_at=self.stamp(16), decided_at=self.stamp(19),
+            state=ReviewOutcomeState.APPROVED, findings=("claimed exact proof",),
+            approval_evidence_ids=("forged-review-evidence",), reviewed_commit=self.commit,
+            reviewed_base_commit=self.base, contract_sha256=review_input.contract_sha256,
+            review_input_evidence_id=review_input.id, reviewer_attempt_id="review-after-change",
+        )
+        evidence = Evidence(
+            "forged-review-evidence", "TASK-232", "review", self.pr, "Review fixture",
+            self.stamp(18), {"attempt_id": "review-after-change", "reviewed_commit": self.commit,
+                             "reviewed_base_commit": self.base,
+                             "contract_sha256": review_input.contract_sha256,
+                             "review_input_evidence_id": review_input.id},
+        )
+        with self.assertRaisesRegex(RegistryConflict, "EXTERNAL_INTEGRATION_PROVENANCE_INVALID"):
+            self.registry.record_review_outcome(
+                outcome, evidence=evidence,
+                expected_revision=self.registry.dispatch_control()["revision"],
+            )
+        snapshot = self.registry.control_center_snapshot(observed_at=self.stamp(20))
+        self.assertEqual({item["id"]: item["status"] for item in snapshot.work_packages}["TASK-231"],
+                         "VERIFY_REVIEW")
+        self.assertFalse(snapshot.review_outcomes)
 
     def test_operator_checks_actual_git_ancestry_pr_and_merge_ci(self):
         repo = self.root / "repo"
