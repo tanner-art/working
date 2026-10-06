@@ -250,6 +250,30 @@ class QueueTests(unittest.TestCase):
                     with self.assertRaises(RegistryConflict):
                         verified_readiness_handoff(control, body, base)
 
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                revision=19, work_packages=(package,))
+            changed_body = {**body, 'instructions': 'Issue body changed after registration'}
+            with self.assertRaises(RegistryConflict):
+                verified_readiness_handoff(control, changed_body, base)
+
+            wrong_target = {**package, 'provider_diagnostics': {
+                **package['provider_diagnostics'],
+                'readiness_proof': {**proof, 'target_ref': 'another-branch'},
+            }}
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                revision=20, work_packages=(wrong_target,))
+            with self.assertRaises(RegistryConflict):
+                verified_readiness_handoff(control, body, base)
+
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                revision=21, work_packages=(package,))
+            (repo / 'later.md').write_text('target ref moved\n')
+            subprocess.run(['git', '-C', directory, 'add', 'later.md'], check=True)
+            subprocess.run(['git', '-C', directory, '-c', 'user.name=Test',
+                            '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'later'], check=True)
+            with self.assertRaises(RegistryConflict):
+                verified_readiness_handoff(control, body, base)
+
     def test_claude_review_adapter_preserves_wrapper_and_replaces_unsafe_flags(self):
         command = review_command({
             'provider': 'anthropic',
