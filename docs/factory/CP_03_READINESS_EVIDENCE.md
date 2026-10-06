@@ -37,7 +37,10 @@ This branch is not installed, merged, or dispatched.
 - Scheduler and Control Center show missing or malformed stored proof reasons
   without Git access. Preclaim reports a package-local deferrable rejection
   with the exact failed checks and pair details, leaving other queue work able
-  to continue.
+  to continue. Lease-time feature, review-input and proof losses are converted
+  to the same deferrable pair result, so a changed packet after preclaim does
+  not make the runner record a failed Registry package or project a failure
+  label from an uncommitted state.
 - GitHub label writes remain downstream of committed Registry state; this
   branch adds no label authority.
 
@@ -47,12 +50,17 @@ This branch is not installed, merged, or dispatched.
   Git tree with `main` pinned to `a227aa9`; its queue digest is
   `065122d2ccb407d3dfb1c5172702b98ec1e46d30362f2706aa7e4ca3728d8f56`.
 - Factory Registry discovery: 289 tests passed with local loopback enabled.
-- Runner discovery: 324 tests passed with local loopback enabled.
+- Runner discovery: 326 tests passed with local loopback enabled.
 - New negatives cover proofless ON_DECK promotion, proofless external bridge,
   moved/tampered inputs, missing proof projection and preclaim, and requeue
   rollback. Two concurrent READY registrations of one ON_DECK feature both
   commit with the feature READY. A valid snapshot followed by packet tampering
   still fails the lease transaction.
+- A runner-control race test tampers with the review packet after preclaim and
+  confirms claim defers with the precise gate while the Registry package stays
+  READY and unleased. Read-only lineage views exercise five rejection cases
+  for the external bridge: unexpected successful attempt, wrong integration
+  commit, wrong repository head, wrong evidence URL, and wrong implementer.
 - Client Vitest: 69 files and 758 tests passed. Client TypeScript, Vite
   production build, and API TypeScript check passed using a private copy of
   complete local dependencies; no dependency or lockfile changed.
