@@ -1647,13 +1647,21 @@ def main():
             # run() deliberately raises SystemExit for an interrupted child. Close
             # Registry ownership before allowing the original exit status to escape.
             if data is not None and started_at is not None:
+                review_interrupted_before_verdict = (
+                    registry_review and registry_lifecycle is not None
+                    and not registry_lifecycle.finish_completed
+                )
                 if registry_lifecycle is not None:
                     try:
-                        finished = (
-                            registry_lifecycle.succeed()
-                            if data.get('pr')
-                            else registry_lifecycle.fail(str(exc))
-                        )
+                        if registry_lifecycle.finish_completed:
+                            finished = True
+                        elif registry_review:
+                            # The PR URL predates the atomic review verdict.
+                            finished = registry_lifecycle.fail(str(exc))
+                        elif data.get('pr'):
+                            finished = registry_lifecycle.succeed()
+                        else:
+                            finished = registry_lifecycle.fail(str(exc))
                         if finished or registry_lifecycle.finish_completed:
                             data['registry_runtime_finished'] = True
                         else:
@@ -1668,7 +1676,7 @@ def main():
                     except Exception:
                         data['registry_recovery_required'] = True
                 runtime_monitor = None
-                if not data.get('pr'):
+                if not data.get('pr') or review_interrupted_before_verdict:
                     preserve_interrupted_attempt(
                         state, record, data, issue=n, task_id=body.get('task'),
                         title=issue.get('title'), agent=agent,
