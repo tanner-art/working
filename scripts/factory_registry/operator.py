@@ -24,7 +24,7 @@ from contextlib import contextmanager
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
-from scripts.runner.task_readiness import contract_shape_reasons
+from scripts.runner.task_readiness import contract_shape_reasons, registration_proof
 
 from .models import (
     DispatchSnapshot,
@@ -2448,6 +2448,27 @@ def _package(value: Mapping[str, Any], *, queue_contract: Mapping[str, Any]) -> 
         )
     except (KeyError, TypeError, ValueError) as error:
         raise OperatorError("canary package is invalid") from error
+
+
+def prepare_ready_package(
+    package: WorkPackage, contract: Mapping[str, Any], *,
+    repository: Path, target_ref: str,
+) -> WorkPackage:
+    """Pin a READY package to a verified, readable planning tree."""
+    try:
+        proof = registration_proof(
+            contract, repository=repository, target_ref=target_ref,
+            acceptance_criteria=package.acceptance_criteria,
+        )
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        raise OperatorError(f"READY contract validation failed for {package.id}: {error}") from error
+    if not proof:
+        return package
+    diagnostics = dict(package.provider_diagnostics)
+    if diagnostics.get("queue_contract_sha256") != proof["queue_contract_sha256"]:
+        raise OperatorError(f"READY contract hash mismatch for {package.id}")
+    diagnostics["readiness_proof"] = proof
+    return replace(package, provider_diagnostics=diagnostics)
 
 
 def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, WorkPackage]:

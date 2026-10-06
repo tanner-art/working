@@ -79,7 +79,16 @@ class SQLiteRegistryTest(unittest.TestCase):
             ("independent-review",), 100, ("reviewed",),
             status=TaskStatus.READY, kind=PackageKind.REVIEW,
             dependency_ids=("TARGET",),
-            provider_diagnostics={"readiness_schema_version": 2},
+            provider_diagnostics={"readiness_schema_version": 2,
+                                  "queue_contract_sha256": "c" * 64,
+                                  "readiness_proof": {
+                                      "base_commit": "b" * 40, "target_ref": "main",
+                                      "queue_contract_sha256": "c" * 64,
+                                      "acceptance_sha256": hashlib.sha256(
+                                          b'["reviewed"]'
+                                      ).hexdigest(),
+                                      "planning_sha256": {"docs/PLAN.md": "d" * 64},
+                                  }},
         ))
         self.registry.register_worker(Worker(
             "reviewer", "Reviewer", ("independent-review",), (Lane.ASSURANCE,),
@@ -108,6 +117,13 @@ class SQLiteRegistryTest(unittest.TestCase):
             observed_at="2026-10-05T12:00:00Z"
         ).work_packages if item["id"] == "REVIEW")
         self.assertIn("REVIEW_INPUT_COUNT_INVALID:0", projected["review_readiness_reasons"])
+        from scripts.factory_registry.control_center_projection import project_control_center
+        control = project_control_center(self.registry.control_center_snapshot(
+            observed_at="2026-10-05T12:00:00Z"
+        ))
+        review_card = next(package for feature in control["features"]
+                           for package in feature["packages"] if package["id"] == "REVIEW")
+        self.assertIn("REVIEW_INPUT_COUNT_INVALID:0", review_card["blockReason"])
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_NOT_READY"):
             self.registry.acquire_lease(
                 "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:00Z",
@@ -170,6 +186,48 @@ class SQLiteRegistryTest(unittest.TestCase):
             expires_at="2026-10-05T13:00:02Z",
         )
         self.assertEqual(lease.package_id, "REVIEW")
+
+    def test_v2_ready_contract_and_feature_promotion_are_atomic(self) -> None:
+        self.registry.register_feature(Feature(
+            "PENDING", "Pending", 10, TaskStatus.ON_DECK,
+        ))
+
+        def candidate(digest: str, *, criteria=("verify outcome",)) -> WorkPackage:
+            proof = {
+                "base_commit": "b" * 40, "target_ref": "main",
+                "queue_contract_sha256": digest,
+                "acceptance_sha256": hashlib.sha256(json.dumps(
+                    criteria, separators=(",", ":")
+                ).encode()).hexdigest(),
+                "planning_sha256": {"docs/PLAN.md": "d" * 64},
+            }
+            return WorkPackage(
+                "TASK-READY", "PENDING", "ready", "ORCHESTRATION", Lane.PLATFORM,
+                ("registry",), 10, criteria, status=TaskStatus.READY,
+                provider_diagnostics={"readiness_schema_version": 2,
+                                      "queue_contract_sha256": digest,
+                                      "readiness_proof": proof},
+            )
+
+        with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+            self.registry.register_work_package(candidate("bad"))
+        with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+            self.registry.register_work_package(candidate("a" * 64, criteria=()))
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM features WHERE id='PENDING'"
+            ).fetchone()[0], "ON_DECK")
+            self.assertIsNone(connection.execute(
+                "SELECT id FROM work_packages WHERE id='TASK-READY'"
+            ).fetchone())
+        self.registry.register_work_package(candidate("a" * 64))
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM features WHERE id='PENDING'"
+            ).fetchone()[0], "READY")
+            self.assertEqual(connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK-READY'"
+            ).fetchone()[0], "READY")
 
     def test_uses_wal_and_expected_schema_version(self) -> None:
         self.assertEqual(self.registry.journal_mode(), "wal")

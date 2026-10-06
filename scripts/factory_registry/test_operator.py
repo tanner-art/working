@@ -44,6 +44,7 @@ from scripts.factory_registry.operator import (
     parse_historical_reconciliation_spec,
     parse_followup_review_spec,
     preflight,
+    prepare_ready_package,
     prepare_dry_run,
     record_review_decision,
     reconcile_historical_package,
@@ -487,6 +488,49 @@ class OperatorFixture(unittest.TestCase):
         spec["implementation"]["provider_diagnostics"] = {"exclusive_paths": ["other.py"]}
         with self.assertRaisesRegex(OperatorError, "exclusive paths mismatch"):
             parse_canary_spec(spec)
+
+    def test_v2_ready_preparation_attaches_verified_proof_before_registry_write(self):
+        repository = self.root / "planning-repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", str(repository)], check=True)
+        (repository / "PLAN.md").write_text("Scoped plan\n")
+        (repository / "existing.py").write_text("pass\n")
+        subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+        subprocess.run([
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ], check=True)
+        subprocess.run(["git", "-C", str(repository), "branch", "-M", "main"], check=True)
+        base = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+        contract = {
+            "schema_version": 2, "task": "TASK-1", "instructions": "Make the scoped change",
+            "paths": ["existing.py"], "depends_on": [],
+            "readiness": {
+                "base_commit": base, "planning_paths": ["PLAN.md"],
+                "existing_paths": ["existing.py"], "new_paths": [],
+                "integration_paths": ["existing.py"], "test_paths": ["existing.py"],
+                "dependency_kinds": {},
+            },
+        }
+        package = WorkPackage(
+            "TASK-1", "FEATURE", "task", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 1, ("reviewed",), status=TaskStatus.READY,
+            provider_diagnostics={"readiness_schema_version": 2,
+                                  "queue_contract_sha256": operator_module.queue_contract_digest(contract)},
+        )
+        prepared = prepare_ready_package(
+            package, contract, repository=repository, target_ref="main"
+        )
+        self.assertEqual(prepared.provider_diagnostics["readiness_proof"]["base_commit"], base)
+        self.assertNotIn("readiness_proof", package.provider_diagnostics)
+        with self.assertRaisesRegex(OperatorError, "BASE_COMMIT_MISSING"):
+            prepare_ready_package(
+                package, {**contract, "readiness": {**contract["readiness"],
+                                                    "base_commit": "a" * 40}},
+                repository=repository, target_ref="main",
+            )
 
     def followup_review(self):
         contract = {
