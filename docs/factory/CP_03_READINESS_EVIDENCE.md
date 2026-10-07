@@ -1,5 +1,34 @@
 # CP-03 readiness implementation evidence (TASK-404)
 
+## TASK-408 cross-module canary (pending exact-head runner validation)
+
+This validation canary exercises the already integrated CP-03 v2 proof; it is
+not a reimplementation and does not retroactively make merged PR #407 a
+Factory attempt. The registered identity is Registry revision `22986`, base
+and exact head `f5b3535764161649639be06724bddd863f28869b`, and target `main`.
+Its disposable Registry/repository test registers that exact base/target pair,
+then proves Registry preclaim and the implementation-child prompt preserve the
+registered queue, acceptance, and planning identities. The registered queue
+contract SHA-256 is
+`658446d106fe31cd05b8cb84cd42a649e44928c57def93a93e5abc08ee3ac93c`.
+
+The canary records all planning-file hashes supplied by the CP-03 contract,
+including this evidence note at
+`148a93ee593ec66929b11c6b27073c35ba4a1b00f747c46a46bfc2bc35c9699f`.
+It also proves that a tampered stored planning hash, a moved base, and a source
+issue or queue-contract mismatch fail at preclaim, before a provider launch,
+without a lease or active ownership.
+
+Focused command (run from the repository root):
+
+```sh
+PYTHONPATH=scripts/runner python3 -m unittest scripts.factory_registry.test_cp03_canary_integration
+```
+
+Result: passed locally — 2 tests in 13.433 seconds. The remaining operational
+gate is runner-owned exact-head Python/CI and independent Claude review; the
+provider child does not run the shared-lock `pnpm check` or build.
+
 Implementation issue: #400. Independent review issue: #401 (TASK-405).
 Original issue base: `a227aa9b8f548f3beb40defe1e2110ce1ce6d55d`, after PR #399.
 Current integration base: `e3a51109f4ee7ba15ccae8955b66654e1cc6e40a`.
