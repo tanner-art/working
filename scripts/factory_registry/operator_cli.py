@@ -504,8 +504,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             allowed_modes=("STOPPING",),
             require_empty_ownership=False,
             require_workers=False,
+            allow_stopping_ownership_reconciliation=True,
         ))
-        return dict(reconcile(args.database, expected_revision=args.expect_revision))
+        result = dict(reconcile(args.database, expected_revision=args.expect_revision))
+        # The transient allowance ends as soon as ownership has been drained.
+        preflight(**_preflight_args(
+            args,
+            expected_revision=result["control"]["revision"],
+            allowed_modes=("STOPPING",),
+            require_workers=False,
+        ))
+        return result
     if args.command == "requeue-failed":
         observed_at = args.observed_at or utc_now()
         preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))

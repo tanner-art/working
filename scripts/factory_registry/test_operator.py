@@ -572,6 +572,81 @@ class OperatorFixture(unittest.TestCase):
                         require_permissions_gate=False,
                     )
 
+    def test_reconcile_cli_drains_stopping_runtime_then_rechecks_full_preservation(self):
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=observed_at, reason="test run",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", "codex-a", acquired_at=observed_at,
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "stopping-attempt", package_id="TASK-201", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=observed_at,
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=utc_now(), reason="test stop",
+        )
+        self.config_path.write_text(json.dumps(self.config(strict=True)))
+        harden_paths(self.database, self.config_path, self.release)
+        self.state.chmod(0o700)
+        self.worktrees.chmod(0o700)
+        revision = self.registry.dispatch_control()["revision"]
+        arguments = [
+            "reconcile", "--database", str(self.database),
+            "--config", str(self.config_path), "--release", str(self.release),
+            "--release-commit", COMMIT, "--preservation", str(self.preservation),
+            "--expect-revision", str(revision),
+        ]
+
+        with self.assertRaisesRegex(OperatorError, "unreleased_live_leases"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, revision, allowed_modes=("STOPPING",),
+                require_empty_ownership=False,
+            )
+        with self.assertRaisesRegex(OperatorError, "Registry revision mismatch"):
+            preflight(
+                self.database, self.config_path, self.release, self.preservation,
+                COMMIT, revision - 1, allowed_modes=("STOPPING",),
+                require_empty_ownership=False,
+                allow_stopping_ownership_reconciliation=True,
+            )
+        with mock.patch.object(
+            operator_module, "APPROVED_PRESERVATION_SHA256", "0" * 64
+        ):
+            with redirect_stderr(StringIO()):
+                self.assertEqual(operator_main(arguments), 1)
+        self.assertEqual(len(self.registry.active_attempt_runtimes()), 1)
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(operator_main(arguments), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["resolved"], ["stopping-attempt"])
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "STOPPING")
+        self.assertEqual(self.registry.active_attempt_runtimes(), ())
+        self.assertEqual(self.registry.active_unbound_leases(), ())
+        self.assertEqual(
+            verify_preservation(
+                self.registry.control_center_snapshot(observed_at=utc_now()),
+                self.preservation,
+            )["unreleased_live_leases"], 0,
+        )
+
     def test_release_gate_rejects_unmanifested_or_omitted_runtime_files(self):
         runtime = self.release / "scripts" / "runner" / "registry_control.py"
         original = runtime.read_bytes()
@@ -1880,6 +1955,83 @@ class OperatorFixture(unittest.TestCase):
             data = plistlib.loads(plist.read_bytes())
             if "runner" in label:
                 self.assertIn("--dry-run", data["ProgramArguments"])
+        self.assertTrue(any(call[1] == "bootstrap" for call in calls))
+
+    def test_prepare_dry_run_recovers_stopping_ownership_before_release_migration(self):
+        old_release = self.root / "previous-release"
+        shutil.copytree(self.release, old_release)
+        old_config = self.config(strict=True)
+        old_config["gh"] = str(old_release / "scripts" / "runner" / "github.py")
+        old_config["agents"]["claude"]["command"][1] = str(
+            old_release / "scripts" / "runner" / "claude_keychain.py"
+        )
+        self.config_path.write_text(json.dumps(old_config))
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=observed_at, reason="test run",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", "codex-a", acquired_at=observed_at,
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "stopping-attempt", package_id="TASK-201", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=observed_at,
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=utc_now(), reason="test stop",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        arguments = (
+            self.database, self.config_path, self.release, self.preservation,
+        )
+        for commit, expected_revision, message in (
+            (COMMIT, revision - 1, "Registry revision mismatch"),
+            ("b" * 40, revision, "release commit mismatch"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(OperatorError, message):
+                    prepare_dry_run(
+                        *arguments, commit, expected_revision, self.migration(),
+                        home=self.root / "home",
+                    )
+                self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+                self.assertEqual(len(self.registry.active_attempt_runtimes()), 1)
+
+        calls = []
+
+        def launchctl(arguments, **kwargs):
+            calls.append(arguments)
+            if arguments[1] == "print":
+                return subprocess.CompletedProcess(arguments, 1)
+            return subprocess.CompletedProcess(arguments, 0)
+
+        result = prepare_dry_run(
+            *arguments, COMMIT, revision, self.migration(),
+            home=self.root / "home", run=launchctl, uid=501,
+        )
+        self.assertTrue(result["passed"])
+        control = self.registry.dispatch_control()
+        self.assertEqual(control["dispatch_mode"], "PAUSED")
+        self.assertTrue(control["kill_switch_engaged"])
+        self.assertEqual(self.registry.active_attempt_runtimes(), ())
+        self.assertEqual(self.registry.active_unbound_leases(), ())
+        self.assertEqual(
+            json.loads(self.config_path.read_text())["gh"],
+            str(self.release.resolve() / "scripts" / "runner" / "github.py"),
+        )
         self.assertTrue(any(call[1] == "bootstrap" for call in calls))
 
     def test_prepare_dry_run_rejects_stale_config_at_shared_lock_boundary(self):

@@ -314,6 +314,8 @@ def verify_release(release: Path, expected_commit: str) -> Mapping[str, Any]:
 def verify_preservation(
     registry_snapshot: Any,
     preservation_path: Path,
+    *,
+    allow_unreleased_live_leases: bool = False,
 ) -> Mapping[str, Any]:
     if not preservation_path.is_absolute() or not preservation_path.is_file():
         raise OperatorError("preservation snapshot must be an existing absolute file")
@@ -357,11 +359,17 @@ def verify_preservation(
             1 for lease in registry_snapshot.leases if lease.get("released_at") is None
         ),
     }
-    if approved_counts != APPROVED_PRESERVATION_COUNTS:
+    expected_counts = dict(APPROVED_PRESERVATION_COUNTS)
+    if allow_unreleased_live_leases:
+        # STOPPING reconciliation must be able to inspect the approved import
+        # before releasing the ownership that made it STOPPING. All historical
+        # counts remain pinned; only this transient count is checked afterward.
+        expected_counts["unreleased_live_leases"] = approved_counts["unreleased_live_leases"]
+    if approved_counts != expected_counts:
         raise OperatorError(
             "preservation snapshot does not match approved cutover counts: "
             + json.dumps(
-                {"expected": APPROVED_PRESERVATION_COUNTS, "actual": approved_counts},
+                {"expected": expected_counts, "actual": approved_counts},
                 sort_keys=True,
             )
         )
@@ -506,7 +514,7 @@ def verify_preservation(
         "tasks": expected["expected_tasks"],
         "workers": expected["expected_workers"],
         "unexplained_records": 0,
-        "unreleased_live_leases": 0,
+        "unreleased_live_leases": approved_counts["unreleased_live_leases"],
         "approved_counts": dict(APPROVED_PRESERVATION_COUNTS),
     }
 
@@ -2223,6 +2231,7 @@ def preflight(
     canary_feature_id: str | None = None,
     run_package_ids: Sequence[str] | None = None,
     allow_allowed_authors_pending_recovery: bool = False,
+    allow_stopping_ownership_reconciliation: bool = False,
 ) -> Mapping[str, Any]:
     # A config replacement can survive an interrupted allowlist operation before
     # its Registry receipt does.  Nothing may pass a normal operational gate
@@ -2258,10 +2267,20 @@ def preflight(
         "active_unbound_leases", "runtime_orphans",
     )):
         raise OperatorError("active or orphaned Registry ownership is present")
+    if allow_stopping_ownership_reconciliation and (
+        tuple(allowed_modes) != ("STOPPING",)
+        or require_empty_ownership
+        or not require_kill_switch
+        or require_workers
+    ):
+        raise OperatorError("transient ownership is allowed only for STOPPING reconciliation")
     registry = SQLiteRegistry(database)
     snapshot = registry.control_center_snapshot(observed_at=observed_at)
     _require_installed_preservation(database, preservation_path)
-    preservation = verify_preservation(snapshot, preservation_path)
+    preservation = verify_preservation(
+        snapshot, preservation_path,
+        allow_unreleased_live_leases=allow_stopping_ownership_reconciliation,
+    )
     release_evidence = verify_release(release, expected_commit)
     config = _load_object(config_path, "runner config")
     if require_config:
@@ -3301,11 +3320,15 @@ def prepare_dry_run(
     run=None,
     uid: int | None = None,
 ) -> Mapping[str, Any]:
+    stopping = SQLiteRegistry(database).dispatch_control()["dispatch_mode"] == "STOPPING"
     preflight(
         database, config_path, release, preservation_path, expected_commit,
-        expected_revision, allowed_modes=("PAUSED", "LIVE"), require_config=False,
+        expected_revision,
+        allowed_modes=("STOPPING",) if stopping else ("PAUSED", "LIVE"),
+        require_config=False,
         require_permissions_gate=False, require_empty_ownership=False,
-        require_kill_switch=False,
+        require_kill_switch=stopping,
+        allow_stopping_ownership_reconciliation=stopping,
     )
     initial_control = SQLiteRegistry(database).dispatch_control()
     if (
