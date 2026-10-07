@@ -14,6 +14,7 @@ import tempfile
 import re
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -167,7 +168,8 @@ def _verify_operator_review_packet(review_input: ReviewInput) -> None:
             or manifest.get("files") != files):
         raise RegistryConflict("REVIEW_PACKET_BINDING_MISMATCH")
     required_files = {"base-to-implementation.diff", "changed-files.txt", "contract.json", "validation-evidence.json"}
-    if (set(files) != required_files or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in files.values())):
+    if (set(files) not in (required_files, required_files | {"review-verdict-schema.json"})
+            or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in files.values())):
         raise RegistryConflict("REVIEW_PACKET_FILE_MANIFEST_INVALID")
     try:
         for name, digest in files.items():
@@ -179,6 +181,56 @@ def _verify_operator_review_packet(review_input: ReviewInput) -> None:
     if (not isinstance(contract, Mapping) or dict(contract) != dict(review_input.contract)
             or _review_contract_sha256(dict(contract)) != review_input.contract_sha256):
         raise RegistryConflict("REVIEW_PACKET_CONTRACT_MISMATCH")
+
+
+def _review_input_from_evidence(row: sqlite3.Row) -> ReviewInput:
+    metadata = json.loads(row["metadata_json"])
+    if not isinstance(metadata, Mapping):
+        raise RegistryConflict("REVIEW_INPUT_INVALID")
+    return ReviewInput(
+        id=row["id"], review_package_id=row["package_id"],
+        target_package_id=metadata["target_package_id"],
+        implementation_attempt_id=metadata["implementation_attempt_id"],
+        implementation_commit=metadata["implementation_commit"],
+        base_commit=metadata["base_commit"], pr_url=row["uri"],
+        contract_sha256=metadata["contract_sha256"], contract=metadata["contract"],
+        validation_evidence=metadata["validation_evidence"],
+        recorded_at=row["recorded_at"],
+        external_integration=metadata.get("external_integration"),
+    )
+
+
+def _with_native_review_ci(
+    connection: sqlite3.Connection, review_input: ReviewInput,
+) -> ReviewInput:
+    """Join a later immutable CI receipt without changing the original input."""
+    rows = connection.execute(
+        "SELECT id, recorded_at, metadata_json FROM evidence "
+        "WHERE package_id=? AND kind='review-ci' ORDER BY recorded_at, id",
+        (review_input.review_package_id,),
+    ).fetchall()
+    if not rows:
+        return review_input
+    if len(rows) != 1 or review_input.external_integration is not None:
+        raise RegistryConflict("REVIEW_CI_ATTESTATION_COUNT_INVALID")
+    row = rows[0]
+    metadata = json.loads(row["metadata_json"])
+    if (not isinstance(metadata, Mapping)
+            or any(metadata.get(key) != expected for key, expected in (
+                ("review_input_id", review_input.id),
+                ("target_package_id", review_input.target_package_id),
+                ("implementation_attempt_id", review_input.implementation_attempt_id),
+                ("implementation_commit", review_input.implementation_commit),
+                ("base_commit", review_input.base_commit),
+                ("pr_url", review_input.pr_url),
+            ))
+            or "ci" in review_input.validation_evidence
+            or row["recorded_at"] <= review_input.recorded_at
+            or not isinstance(metadata.get("ci"), Mapping)):
+        raise RegistryConflict("REVIEW_CI_ATTESTATION_MISMATCH")
+    return replace(review_input, validation_evidence={
+        **review_input.validation_evidence, "ci": dict(metadata["ci"]),
+    })
 
 
 def _utc_now() -> str:
@@ -3084,17 +3136,101 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def record_native_review_ci(
+        self, review_package_id: str, review_input_id: str,
+        implementation_commit: str, base_commit: str, pr_url: str, run_url: str,
+        *, expected_revision: int, recorded_at: str,
+    ) -> int:
+        """Append exact successful CI proof after a native runner attempt."""
+        recorded_at = _normalize_timestamp(recorded_at)
+        ci = {"state": "SUCCESS", "implementation_commit": implementation_commit,
+              "pr_url": pr_url, "run_url": run_url}
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("REVIEW_CI_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                rows = connection.execute(
+                    "SELECT id, package_id, uri, recorded_at, metadata_json FROM evidence "
+                    "WHERE package_id=? AND kind='review-input'", (review_package_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    raise RegistryConflict("REVIEW_INPUT_REQUIRED")
+                review_input = _review_input_from_evidence(rows[0])
+                if (review_input.id != review_input_id
+                        or review_input.external_integration is not None
+                        or review_input.implementation_commit != implementation_commit
+                        or review_input.base_commit != base_commit
+                        or review_input.pr_url != pr_url
+                        or recorded_at <= review_input.recorded_at):
+                    raise RegistryConflict("REVIEW_CI_ATTESTATION_MISMATCH")
+                review = connection.execute(
+                    "SELECT status, kind FROM work_packages WHERE id=?", (review_package_id,),
+                ).fetchone()
+                attempt = connection.execute(
+                    "SELECT package_id, outcome, ended_at FROM attempts WHERE id=?",
+                    (review_input.implementation_attempt_id,),
+                ).fetchone()
+                if (review is None or review["kind"] != "REVIEW" or review["status"] != "READY"
+                        or attempt is None or attempt["package_id"] != review_input.target_package_id
+                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None
+                        or connection.execute("SELECT 1 FROM attempts WHERE package_id=? LIMIT 1", (review_package_id,)).fetchone()):
+                    raise RegistryConflict("REVIEW_CI_LINEAGE_INVALID")
+                if connection.execute(
+                    "SELECT 1 FROM evidence WHERE package_id=? AND kind='review-ci' LIMIT 1",
+                    (review_package_id,),
+                ).fetchone():
+                    raise RegistryConflict("REVIEW_CI_ALREADY_RECORDED")
+                _verify_operator_review_packet(replace(review_input, validation_evidence={
+                    **review_input.validation_evidence, "ci": ci,
+                }))
+                evidence_id = f"review-ci:{review_input_id}"
+                metadata = {
+                    "review_input_id": review_input_id,
+                    "target_package_id": review_input.target_package_id,
+                    "implementation_attempt_id": review_input.implementation_attempt_id,
+                    "implementation_commit": implementation_commit,
+                    "base_commit": review_input.base_commit,
+                    "pr_url": pr_url, "ci": ci,
+                }
+                connection.execute(
+                    "INSERT INTO evidence (id, package_id, kind, uri, summary, recorded_at, metadata_json) "
+                    "VALUES (?, ?, 'review-ci', ?, ?, ?, ?)",
+                    (evidence_id, review_package_id, run_url,
+                     "Verified exact-head CI for immutable native review input.",
+                     recorded_at, _json(metadata)),
+                )
+                self._insert_event(connection, "NATIVE_REVIEW_CI_RECORDED", recorded_at,
+                                   review_package_id, None,
+                                   review_input.implementation_attempt_id,
+                                   {"review_input_id": review_input_id, "ci_evidence_id": evidence_id})
+                revision = self._bump_revision(connection)
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
     def review_input(self, review_package_id: str) -> Mapping[str, Any]:
         """Return the single immutable input assigned to a review package."""
         with self._connection() as connection:
             rows = connection.execute("SELECT id, package_id, uri, recorded_at, metadata_json FROM evidence WHERE package_id=? AND kind='review-input' ORDER BY recorded_at, id", (review_package_id,)).fetchall()
-        if len(rows) != 1:
-            raise RegistryConflict("REVIEW_INPUT_REQUIRED", review_package_id)
-        row = rows[0]
-        value = {"id": row["id"], "review_package_id": row["package_id"], "pr_url": row["uri"], "recorded_at": row["recorded_at"], **json.loads(row["metadata_json"])}
-        if not {"target_package_id", "implementation_attempt_id", "implementation_commit", "base_commit", "contract_sha256", "contract", "validation_evidence"}.issubset(value):
-            raise RegistryConflict("REVIEW_INPUT_INVALID", str(row["id"]))
-        return value
+            if len(rows) != 1:
+                raise RegistryConflict("REVIEW_INPUT_REQUIRED", review_package_id)
+            review_input = _with_native_review_ci(
+                connection, _review_input_from_evidence(rows[0]),
+            )
+            _verify_operator_review_packet(review_input)
+            return dict(review_input.__dict__)
 
     @staticmethod
     def _review_readiness_reasons(
@@ -3119,7 +3255,7 @@ class SQLiteRegistry:
             (target["id"],),
         ).fetchall()
         inputs = connection.execute(
-            """SELECT id, uri, recorded_at, metadata_json FROM evidence
+            """SELECT id, package_id, uri, recorded_at, metadata_json FROM evidence
                WHERE package_id=? AND kind='review-input' ORDER BY recorded_at, id""",
             (review_package_id,),
         ).fetchall()
@@ -3128,22 +3264,10 @@ class SQLiteRegistry:
         else:
             row = inputs[0]
             try:
-                metadata = json.loads(row["metadata_json"])
-                if not isinstance(metadata, Mapping):
-                    raise ValueError("review input metadata is not an object")
-                external = metadata.get("external_integration")
-                review_input = ReviewInput(
-                    id=row["id"], review_package_id=review_package_id,
-                    target_package_id=metadata["target_package_id"],
-                    implementation_attempt_id=metadata["implementation_attempt_id"],
-                    implementation_commit=metadata["implementation_commit"],
-                    base_commit=metadata["base_commit"], pr_url=row["uri"],
-                    contract_sha256=metadata["contract_sha256"],
-                    contract=metadata["contract"],
-                    validation_evidence=metadata["validation_evidence"],
-                    recorded_at=row["recorded_at"],
-                    external_integration=external,
+                review_input = _with_native_review_ci(
+                    connection, _review_input_from_evidence(row),
                 )
+                external = review_input.external_integration
                 _review_input_evidence(review_input)
                 _verify_operator_review_packet(review_input)
                 if review_input.target_package_id != target["id"]:

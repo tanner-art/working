@@ -2628,6 +2628,61 @@ def _github_public_json(url: str) -> Mapping[str, Any]:
     return result
 
 
+def record_native_review_ci(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Attest green GitHub CI for an already immutable native runner input."""
+    required = {"review_package_id", "review_input_id", "implementation_commit",
+                "pr_url", "run_url"}
+    if _sensitive_paths(spec) or set(spec) != required or any(
+        not isinstance(spec[key], str) or not spec[key] for key in required
+    ):
+        raise OperatorError("native review CI spec is invalid")
+    match = re.fullmatch(
+        r"https://github\.com/([^/]+)/([^/]+)/pull/([1-9]\d*)", spec["pr_url"],
+    )
+    if match is None or not re.fullmatch(r"[0-9a-f]{40}", spec["implementation_commit"]):
+        raise OperatorError("native review CI identity is invalid")
+    owner, repo, number = match.groups()
+    run_match = re.fullmatch(
+        rf"https://github\.com/{re.escape(owner)}/{re.escape(repo)}/actions/runs/([1-9]\d*)",
+        spec["run_url"],
+    )
+    if run_match is None:
+        raise OperatorError("native review CI run URL is invalid")
+    api = f"https://api.github.com/repos/{owner}/{repo}"
+    pull = _github_public_json(f"{api}/pulls/{number}")
+    run = _github_public_json(f"{api}/actions/runs/{run_match.group(1)}")
+    head, base = pull.get("head"), pull.get("base")
+    if (pull.get("html_url") != spec["pr_url"] or pull.get("merged") is True
+            or not isinstance(head, Mapping) or not isinstance(base, Mapping)
+            or head.get("sha") != spec["implementation_commit"]
+            or base.get("ref") != "main"
+            or run.get("head_sha") != spec["implementation_commit"]
+            or run.get("head_branch") != head.get("ref")
+            or run.get("name") != "Validate app"
+            or run.get("event") != "pull_request"
+            or run.get("status") != "completed"
+            or run.get("conclusion") != "success"
+            or run.get("html_url") != spec["run_url"]):
+        raise OperatorError("native review CI does not validate the exact PR head")
+    observed_at = utc_now()
+    preflight(database, config_path, release, preservation_path,
+              expected_commit, expected_revision, observed_at=observed_at,
+              require_workers=False)
+    revision = SQLiteRegistry(database).record_native_review_ci(
+        spec["review_package_id"], spec["review_input_id"],
+        spec["implementation_commit"], base.get("sha"),
+        spec["pr_url"], spec["run_url"],
+        expected_revision=expected_revision, recorded_at=observed_at,
+    )
+    return {"kind": "threadline-factory-record-native-review-ci", "passed": True,
+            "review_package_id": spec["review_package_id"],
+            "review_input_id": spec["review_input_id"],
+            "previous_revision": expected_revision, "revision": revision}
+
+
 def parse_external_integration_review_spec(value: Mapping[str, Any]) -> tuple[Path, ReviewInput]:
     if _sensitive_paths(value) or set(value) != {"repository", "review_input", "external_integration"}:
         raise OperatorError("external integration review spec is invalid")
