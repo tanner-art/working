@@ -12,7 +12,7 @@ An agent must NOT:
 - refactor unrelated systems
 - change product behavior outside acceptance criteria
 - alter NORTH_STAR.md or ARCHITECTURE.md unless explicitly assigned
-- merge into main
+- merge into main, without preauthorized approval
 
 If additional work is discovered:
 1. Describe the issue.
