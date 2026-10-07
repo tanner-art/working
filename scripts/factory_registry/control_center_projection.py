@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from .models import ControlCenterReadSnapshot
 from .repository import Registry
+from scripts.runner.task_readiness import ready_contract_reasons
 
 
 SCHEMA_VERSION = 2
@@ -559,6 +560,14 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
         feature_packages = []
         for package in packages_by_feature.get(feature_id, []):
             package_id = str(package.get("id", ""))
+            readiness_reasons = list(package.get("review_readiness_reasons") or ())
+            readiness_reasons.extend(ready_contract_reasons(package))
+            if (package.get("status") == "READY"
+                    and _mapping(package.get("provider_diagnostics")).get("readiness_schema_version") == 2
+                    and feature.get("status") not in {"READY", "ACTIVE", "VERIFY_REVIEW"}):
+                readiness_reasons.append(
+                    f"FEATURE_NOT_READY:{feature_id}:{feature.get('status')}"
+                )
             lease = active_leases.get(package_id)
             package_attempts = attempts.get(package_id, [])
             review_state = (
@@ -598,7 +607,11 @@ def project_control_center(snapshot: ControlCenterReadSnapshot) -> dict[str, Any
                 "pullRequestUrl": _safe_url(package.get("pr_url")),
                 "reviewState": review_state,
                 "failureCode": package.get("failure_code") if isinstance(package.get("failure_code"), str) else None,
-                "blockReason": package.get("failure_detail") if isinstance(package.get("failure_detail"), str) else None,
+                "blockReason": (
+                    ",".join(sorted(set(str(reason) for reason in readiness_reasons)))
+                    if readiness_reasons else
+                    package.get("failure_detail") if isinstance(package.get("failure_detail"), str) else None
+                ),
                 "acceptanceCriteria": _strings(package.get("acceptance_criteria")),
                 "evidence": [_evidence(item) for item in evidence.get(package_id, [])],
                 "attempts": projected_attempts,

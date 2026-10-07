@@ -6,7 +6,9 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.factory_registry import (
     Attempt,
@@ -67,6 +69,341 @@ class SQLiteRegistryTest(unittest.TestCase):
                 dependency_ids=dependencies,
             )
         )
+
+    def test_v2_review_ready_is_derived_from_immutable_registry_input(self) -> None:
+        self.feature()
+        self.registry.register_work_package(WorkPackage(
+            "TARGET", "FEATURE-1", "target", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 100, ("implemented",), status=TaskStatus.READY,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 100, ("reviewed",),
+            status=TaskStatus.READY, kind=PackageKind.REVIEW,
+            dependency_ids=("TARGET",),
+            provider_diagnostics={"readiness_schema_version": 2,
+                                  "queue_contract_sha256": "c" * 64,
+                                  "readiness_proof": {
+                                      "base_commit": "b" * 40, "target_ref": "main",
+                                      "queue_contract_sha256": "c" * 64,
+                                      "acceptance_sha256": hashlib.sha256(
+                                          b'["reviewed"]'
+                                      ).hexdigest(),
+                                      "planning_sha256": {"docs/PLAN.md": "d" * 64},
+                                  }},
+        ))
+        self.registry.register_worker(Worker(
+            "reviewer", "Reviewer", ("independent-review",), (Lane.ASSURANCE,),
+        ))
+        self.worker("implementer", "registry")
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-10-05T09:59:00Z", reason="disposable review fixture",
+        )
+        self.registry.acquire_lease(
+            "TARGET", "implementer", acquired_at="2026-10-05T10:00:00Z",
+            expires_at="2026-10-05T11:00:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1", package_id="TARGET", worker_id="implementer",
+            runner_pid=1, started_at="2026-10-05T10:00:01Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.finish_attempt_runtime(
+            "attempt-1", ended_at="2026-10-05T10:10:00Z", outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW, reason="fixture implementation",
+        )
+        projected = next(item for item in self.registry.dispatch_snapshot(
+            observed_at="2026-10-05T12:00:00Z"
+        ).work_packages if item["id"] == "REVIEW")
+        self.assertIn("REVIEW_INPUT_COUNT_INVALID:0", projected["review_readiness_reasons"])
+        from scripts.factory_registry.control_center_projection import project_control_center
+        control = project_control_center(self.registry.control_center_snapshot(
+            observed_at="2026-10-05T12:00:00Z"
+        ))
+        review_card = next(package for feature in control["features"]
+                           for package in feature["packages"] if package["id"] == "REVIEW")
+        self.assertIn("REVIEW_INPUT_COUNT_INVALID:0", review_card["blockReason"])
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_NOT_READY"):
+            self.registry.acquire_lease(
+                "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:00Z",
+                expires_at="2026-10-05T13:00:00Z",
+            )
+        packet = self.root / "review-packet"
+        packet.mkdir()
+        contract = {"task": "TARGET", "instructions": "review exact implementation"}
+        contents = {
+            "base-to-implementation.diff": b"diff",
+            "changed-files.txt": b"file\n",
+            "contract.json": (json.dumps(contract, sort_keys=True) + "\n").encode(),
+            "validation-evidence.json": b"{}",
+        }
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+        files = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        manifest = {
+            "schema_version": 1, "implementation_attempt_id": "attempt-1",
+            "implementation_commit": "a" * 40, "base_commit": "b" * 40,
+            "files": files,
+        }
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        self.registry.record_review_input(ReviewInput(
+            id="review-input-1", review_package_id="REVIEW", target_package_id="TARGET",
+            implementation_attempt_id="attempt-1", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://example.test/pr/1",
+            contract_sha256=hashlib.sha256(json.dumps(
+                contract, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest(),
+            contract=contract,
+            validation_evidence={
+                "ci": {"state": "SUCCESS", "implementation_commit": "a" * 40,
+                       "pr_url": "https://example.test/pr/1"},
+                "review_packet": {"path": str(packet),
+                                  "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                                  "files": files},
+            },
+            recorded_at="2026-10-05T10:11:00Z",
+        ))
+
+        def reasons():
+            return next(item for item in self.registry.dispatch_snapshot(
+                observed_at="2026-10-05T12:00:00Z"
+            ).work_packages if item["id"] == "REVIEW")["review_readiness_reasons"]
+
+        self.assertEqual(reasons(), ())
+        # The dispatch snapshot can be valid before a prerequisite disappears.
+        # The lease transaction must recheck the packet instead of trusting it.
+        eligible_snapshot = self.registry.dispatch_snapshot(observed_at="2026-10-05T12:00:00Z")
+        self.assertEqual(next(item for item in eligible_snapshot.work_packages
+                              if item["id"] == "REVIEW")["review_readiness_reasons"], ())
+        (packet / "contract.json").write_text("tampered")
+        self.assertIn("REVIEW_INPUT_INVALID:REVIEW_PACKET_FILE_MISMATCH", reasons())
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_NOT_READY"):
+            self.registry.acquire_lease(
+                "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:01Z",
+                expires_at="2026-10-05T13:00:01Z",
+            )
+        (packet / "contract.json").write_bytes(contents["contract.json"])
+        self.assertEqual(reasons(), ())
+        lease = self.registry.acquire_lease(
+            "REVIEW", "reviewer", acquired_at="2026-10-05T12:00:02Z",
+            expires_at="2026-10-05T13:00:02Z",
+        )
+        self.assertEqual(lease.package_id, "REVIEW")
+
+    def test_v2_ready_contract_and_feature_promotion_are_atomic(self) -> None:
+        self.registry.register_feature(Feature(
+            "PENDING", "Pending", 10, TaskStatus.ON_DECK,
+        ))
+
+        def candidate(digest: str, *, criteria=("verify outcome",),
+                      package_id="TASK-READY", feature_id="PENDING") -> WorkPackage:
+            proof = {
+                "base_commit": "b" * 40, "target_ref": "main",
+                "queue_contract_sha256": digest,
+                "acceptance_sha256": hashlib.sha256(json.dumps(
+                    criteria, separators=(",", ":")
+                ).encode()).hexdigest(),
+                "planning_sha256": {"docs/PLAN.md": "d" * 64},
+            }
+            return WorkPackage(
+                package_id, feature_id, "ready", "ORCHESTRATION", Lane.PLATFORM,
+                ("registry",), 10, criteria, status=TaskStatus.READY,
+                provider_diagnostics={"readiness_schema_version": 2,
+                                      "queue_contract_sha256": digest,
+                                      "readiness_proof": proof},
+            )
+
+        with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+            self.registry.register_work_package(candidate("bad"))
+        with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+            self.registry.register_work_package(candidate("a" * 64, criteria=()))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-PROOFLESS", "PENDING", "proofless", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 10, ("verify outcome",), status=TaskStatus.ON_DECK,
+            provider_diagnostics={"readiness_schema_version": 2,
+                                  "queue_contract_sha256": "a" * 64},
+        ))
+        with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+            self.registry.transition_work_package(
+                "TASK-PROOFLESS", expected_status=TaskStatus.ON_DECK,
+                new_status=TaskStatus.READY, changed_at="2026-10-05T10:00:00Z",
+            )
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM features WHERE id='PENDING'"
+            ).fetchone()[0], "ON_DECK")
+            self.assertIsNone(connection.execute(
+                "SELECT id FROM work_packages WHERE id='TASK-READY'"
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK-PROOFLESS'"
+            ).fetchone()[0], "ON_DECK")
+        self.registry.register_work_package(candidate("a" * 64))
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM features WHERE id='PENDING'"
+            ).fetchone()[0], "READY")
+            self.assertEqual(connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK-READY'"
+            ).fetchone()[0], "READY")
+        self.registry.register_feature(Feature("SECOND", "Second", 10, TaskStatus.ON_DECK))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(self.registry.register_work_package, (
+                candidate("a" * 64, package_id="SECOND-A", feature_id="SECOND"),
+                candidate("a" * 64, package_id="SECOND-B", feature_id="SECOND"),
+            )))
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT status FROM features WHERE id='SECOND'"
+            ).fetchone()[0], "READY")
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM work_packages WHERE feature_id='SECOND' AND status='READY'"
+            ).fetchone()[0], 2)
+
+    def test_review_readiness_accepts_verified_external_integration_lineage(self) -> None:
+        from scripts.factory_registry.test_external_integration_review import ExternalIntegrationReviewTests
+
+        fixture = ExternalIntegrationReviewTests()
+        fixture.setUp()
+        try:
+            review_input = fixture.review_input()
+            fixture.registry.record_external_integration_review_input(
+                review_input, expected_revision=fixture.registry.dispatch_control()["revision"],
+            )
+            with fixture.registry._connection() as connection:
+                self.assertEqual(
+                    fixture.registry._review_readiness_reasons(connection, "TASK-232"), ()
+                )
+
+            class OverriddenCursor:
+                def __init__(self, cursor, replacement):
+                    self.cursor, self.replacement = cursor, replacement
+
+                def fetchall(self):
+                    return self.replacement if isinstance(self.replacement, list) else self.cursor.fetchall()
+
+                def fetchone(self):
+                    return self.replacement if isinstance(self.replacement, dict) else self.cursor.fetchone()
+
+            class ReadOnlyLineageView:
+                def __init__(self, connection, field, value):
+                    self.connection, self.field, self.value = connection, field, value
+
+                def execute(self, query, params=()):
+                    cursor = self.connection.execute(query, params)
+                    if self.field == "successful_attempt" and "AND outcome='SUCCEEDED'" in query:
+                        return OverriddenCursor(cursor, [{"id": "unexpected-success", "worker_id": "codex-a"}])
+                    if self.field in {"integration_commit", "repository_head", "evidence_uri"} and (
+                        "FROM historical_package_reconciliations" in query
+                    ):
+                        row = dict(cursor.fetchone())
+                        return OverriddenCursor(cursor, {**row, self.field: self.value})
+                    if self.field == "worker_id" and "ORDER BY started_at DESC, id DESC LIMIT 1" in query:
+                        row = dict(cursor.fetchone())
+                        return OverriddenCursor(cursor, {**row, "worker_id": self.value})
+                    return cursor
+
+            for field, value in (
+                ("successful_attempt", None),
+                ("integration_commit", "f" * 40),
+                ("repository_head", "f" * 40),
+                ("evidence_uri", "https://example.test/wrong"),
+                ("worker_id", "wrong-worker"),
+            ):
+                with self.subTest(field=field), fixture.registry._connection() as connection:
+                    reasons = fixture.registry._review_readiness_reasons(
+                        ReadOnlyLineageView(connection, field, value), "TASK-232"
+                    )
+                    self.assertIn("REVIEW_EXTERNAL_INTEGRATION_LINEAGE_INVALID", reasons)
+            (Path(review_input.validation_evidence["review_packet"]["path"]) /
+             "contract.json").write_text("tampered")
+            with fixture.registry._connection() as connection:
+                self.assertIn(
+                    "REVIEW_INPUT_INVALID:REVIEW_PACKET_FILE_MISMATCH",
+                    fixture.registry._review_readiness_reasons(connection, "TASK-232"),
+                )
+        finally:
+            fixture.temporary.cleanup()
+
+    def test_external_bridge_cannot_promote_v2_review_without_proof(self) -> None:
+        from scripts.factory_registry.test_external_integration_review import ExternalIntegrationReviewTests
+
+        fixture = ExternalIntegrationReviewTests()
+        original = SQLiteRegistry.register_work_package
+
+        def register_proofless_review(registry, package):
+            if package.id == "TASK-232":
+                package = replace(package, provider_diagnostics={
+                    **package.provider_diagnostics, "readiness_schema_version": 2,
+                })
+            return original(registry, package)
+
+        with patch.object(SQLiteRegistry, "register_work_package", register_proofless_review):
+            fixture.setUp()
+        try:
+            revision = fixture.registry.dispatch_control()["revision"]
+            with self.assertRaisesRegex(RegistryConflict, "READY_CONTRACT_INCOMPLETE"):
+                fixture.registry.record_external_integration_review_input(
+                    fixture.review_input(), expected_revision=revision,
+                )
+            snapshot = fixture.registry.control_center_snapshot(observed_at=fixture.stamp(7))
+            self.assertEqual(
+                next(item["status"] for item in snapshot.work_packages
+                     if item["id"] == "TASK-232"), "ON_DECK",
+            )
+            self.assertFalse([item for item in snapshot.evidence
+                              if item["package_id"] == "TASK-232" and item["kind"] == "review-input"])
+        finally:
+            fixture.temporary.cleanup()
+
+    def test_v2_external_bridge_review_can_claim_with_verified_lineage(self) -> None:
+        from scripts.factory_registry.test_external_integration_review import ExternalIntegrationReviewTests
+
+        fixture = ExternalIntegrationReviewTests()
+        original = SQLiteRegistry.register_work_package
+
+        def register_v2_review(registry, package):
+            if package.id == "TASK-232":
+                digest = package.provider_diagnostics["queue_contract_sha256"]
+                proof = {
+                    "base_commit": "b" * 40, "target_ref": "main",
+                    "queue_contract_sha256": digest,
+                    "acceptance_sha256": hashlib.sha256(b'["strict verdict"]').hexdigest(),
+                    "planning_sha256": {"docs/PLAN.md": "d" * 64},
+                }
+                package = replace(package, provider_diagnostics={
+                    **package.provider_diagnostics, "readiness_schema_version": 2,
+                    "readiness_proof": proof,
+                })
+            return original(registry, package)
+
+        with patch.object(SQLiteRegistry, "register_work_package", register_v2_review):
+            fixture.setUp()
+        try:
+            fixture.registry.record_external_integration_review_input(
+                fixture.review_input(),
+                expected_revision=fixture.registry.dispatch_control()["revision"],
+            )
+            with fixture.registry._connection() as connection:
+                self.assertEqual(
+                    fixture.registry._review_readiness_reasons(connection, "TASK-232"), ()
+                )
+            fixture.registry.set_dispatch_control(
+                expected_revision=fixture.registry.dispatch_control()["revision"],
+                expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False,
+                changed_at=fixture.stamp(8), reason="v2 external review fixture",
+            )
+            lease = fixture.registry.acquire_lease(
+                "TASK-232", "claude", acquired_at=fixture.stamp(9),
+                expires_at=fixture.stamp(120),
+            )
+            self.assertEqual(lease.package_id, "TASK-232")
+        finally:
+            fixture.temporary.cleanup()
 
     def test_uses_wal_and_expected_schema_version(self) -> None:
         self.assertEqual(self.registry.journal_mode(), "wal")

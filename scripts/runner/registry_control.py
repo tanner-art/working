@@ -165,16 +165,16 @@ class RunnerRegistryControl:
         )
         if requires_readiness:
             if package is None:
-                raise RegistryConflict("TASK_NOT_READY", "PACKAGE_MISSING")
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", "PACKAGE_MISSING")
             if not isinstance(task_contract, dict) or task_contract.get("schema_version") != 2:
-                raise RegistryConflict("TASK_NOT_READY", "V2_CONTRACT_REQUIRED")
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", "V2_CONTRACT_REQUIRED")
             readiness = check_packet(
                 task_contract, repository=self.repository,
                 run_base=self.integration_base(), package=package,
                 snapshot=snapshot, github_issue=github_issue,
             )
             if readiness.state != "READY":
-                raise RegistryConflict("TASK_NOT_READY", ",".join(readiness.reasons))
+                raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", ",".join(readiness.reasons))
         if package is not None and package.get("kind") == "REVIEW":
             self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
@@ -197,7 +197,8 @@ class RunnerRegistryControl:
                 None,
             )
             reasons = (
-                ",".join(reason.code for reason in matching.reasons)
+                ",".join(f"{reason.code}:{reason.detail}" if reason.detail else reason.code
+                         for reason in matching.reasons)
                 if matching is not None else "PAIR_NOT_FOUND"
             )
             raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", reasons)
@@ -245,14 +246,22 @@ class RunnerRegistryControl:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("registry lease duration must be a positive integer")
         acquired = datetime.now(timezone.utc)
-        lease = self.registry.acquire_lease(
-            package_id,
-            worker_id,
-            acquired_at=acquired.isoformat(),
-            expires_at=(acquired + timedelta(seconds=lease_seconds)).isoformat(),
-            expected_dispatch_revision=expected_revision,
-            operation_id=f"claim:{package_id}:{worker_id}:{expected_revision}",
-        )
+        try:
+            lease = self.registry.acquire_lease(
+                package_id,
+                worker_id,
+                acquired_at=acquired.isoformat(),
+                expires_at=(acquired + timedelta(seconds=lease_seconds)).isoformat(),
+                expected_dispatch_revision=expected_revision,
+                operation_id=f"claim:{package_id}:{worker_id}:{expected_revision}",
+            )
+        except RegistryConflict as error:
+            if error.code in {"FEATURE_NOT_READY", "REVIEW_NOT_READY", "READY_CONTRACT_INCOMPLETE"}:
+                raise RegistryConflict(
+                    "DISPATCH_PAIR_INELIGIBLE",
+                    f"{error.code}:{error.detail}" if error.detail else error.code,
+                ) from error
+            raise
         return lease.id
 
     def claim_with_retry(
