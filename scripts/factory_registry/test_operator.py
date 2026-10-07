@@ -532,6 +532,80 @@ class OperatorFixture(unittest.TestCase):
                 repository=repository, target_ref="main",
             )
 
+    def test_v2_bounded_pilot_prewrite_gate_matches_registered_feature(self):
+        repository = self.root / "v2-pilot-repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", str(repository)], check=True)
+        (repository / "PLAN.md").write_text("Scoped v2 plan\n")
+        subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+        subprocess.run([
+            "git", "-C", str(repository), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "base",
+        ], check=True)
+        subprocess.run(["git", "-C", str(repository), "branch", "-M", "main"], check=True)
+        base = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True,
+        ).strip()
+        spec = self.canary()
+        for key, path, issue in (("implementation", "implementation.py", 201),
+                                 ("review", "review.py", 202)):
+            package = spec[key]
+            package["source_ref"] = str(issue)
+            contract = package["queue_contract"]
+            contract["schema_version"] = 2
+            contract["paths"] = [path]
+            contract["readiness"] = {
+                "base_commit": base, "planning_paths": ["PLAN.md"],
+                "existing_paths": [], "new_paths": [path],
+                "integration_paths": [path], "test_paths": [path],
+                "dependency_kinds": {"TASK-201": "coding"} if key == "review" else {},
+            }
+        feature, implementation, review = operator_module.parse_bounded_pilot_spec(
+            {"pairs": [spec]}
+        )[0]
+        implementation = prepare_ready_package(
+            implementation, spec["implementation"]["queue_contract"],
+            repository=repository, target_ref="main",
+        )
+        review = prepare_ready_package(
+            review, spec["review"]["queue_contract"],
+            repository=repository, target_ref="main",
+        )
+        now = utc_now()
+        self.sync_workers(now)
+        snapshot = self.registry.dispatch_snapshot(observed_at=now)
+        gate = canary_worker_gate(snapshot, implementation, review,
+                                  observed_at=now, scoped=True)
+        self.assertEqual(gate["independent_pairs"], [["codex-a", "claude"]])
+        self.assertNotIn(feature.id, {item["id"] for item in snapshot.features})
+        self.registry.register_bounded_pilot(
+            [(feature, implementation, review)],
+            expected_revision=self.registry.dispatch_control()["revision"], recorded_at=now,
+        )
+        registered = self.registry.dispatch_snapshot(observed_at=now)
+        self.assertIn({"id": feature.id, "status": "READY"},
+                      [{"id": item["id"], "status": item["status"]}
+                       for item in registered.features])
+        self.assertEqual(implementation.provider_diagnostics["readiness_proof"]["base_commit"], base)
+
+        blocked = operator_module.parse_bounded_pilot_spec({"pairs": [{
+            **spec, "feature": {**spec["feature"], "id": "BLOCKED-FEATURE"},
+            "implementation": {**spec["implementation"], "feature_id": "BLOCKED-FEATURE",
+                               "required_capabilities": ["missing-capability"]},
+            "review": {**spec["review"], "feature_id": "BLOCKED-FEATURE"},
+        }]})[0]
+        blocked_implementation = prepare_ready_package(
+            blocked[1], spec["implementation"]["queue_contract"],
+            repository=repository, target_ref="main",
+        )
+        blocked_review = prepare_ready_package(
+            blocked[2], spec["review"]["queue_contract"],
+            repository=repository, target_ref="main",
+        )
+        with self.assertRaisesRegex(OperatorError, "no eligible implementation worker"):
+            canary_worker_gate(snapshot, blocked_implementation, blocked_review,
+                               observed_at=now, scoped=True)
+
     def followup_review(self):
         contract = {
             "task": "TASK-203",

@@ -1988,12 +1988,20 @@ def canary_worker_gate(
             "ready_at": observed_at,
         }
 
+    if implementation.feature_id != review.feature_id:
+        raise OperatorError("canary pair feature mismatch")
+    if any(feature.get("id") == implementation.feature_id for feature in snapshot.features):
+        raise OperatorError("canary feature already registered")
+
     candidate = DispatchSnapshot(
         revision=snapshot.revision,
         observed_at=snapshot.observed_at,
         active_parent_limit=snapshot.active_parent_limit,
         orchestra_reserve_percent=snapshot.orchestra_reserve_percent,
-        features=snapshot.features,
+        # Registration inserts this READY feature alongside its packages.
+        # Include it in the prewrite snapshot so v2 readiness sees the same
+        # feature state that dispatch will see after the atomic insert.
+        features=(*snapshot.features, {"id": implementation.feature_id, "status": TaskStatus.READY.value}),
         work_packages=(
             *snapshot.work_packages,
             package_record(implementation),
