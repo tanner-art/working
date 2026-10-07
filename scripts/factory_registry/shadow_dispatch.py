@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .models import DispatchSnapshot
+from scripts.runner.task_readiness import ready_contract_reasons
 
 
 class ShadowDispatchError(ValueError):
@@ -27,11 +28,15 @@ class ShadowDispatchError(ValueError):
 
 class RejectionCode(str, Enum):
     PACKAGE_NOT_READY = "PACKAGE_NOT_READY"
+    FEATURE_NOT_READY = "FEATURE_NOT_READY"
     PACKAGE_LANE_UNASSIGNED = "PACKAGE_LANE_UNASSIGNED"
     PACKAGE_READY_TIME_INVALID = "PACKAGE_READY_TIME_INVALID"
     PACKAGE_NOT_YET_READY = "PACKAGE_NOT_YET_READY"
     DEPENDENCY_BLOCKED = "DEPENDENCY_BLOCKED"
     DEPENDENCY_MISSING = "DEPENDENCY_MISSING"
+    REVIEW_PREREQUISITE_MISSING = "REVIEW_PREREQUISITE_MISSING"
+    REVIEW_INDEPENDENCE_REQUIRED = "REVIEW_INDEPENDENCE_REQUIRED"
+    READY_CONTRACT_INVALID = "READY_CONTRACT_INVALID"
     PACKAGE_HAS_ACTIVE_LEASE = "PACKAGE_HAS_ACTIVE_LEASE"
     NO_ELIGIBLE_WORKER = "NO_ELIGIBLE_WORKER"
     WORKER_ROLE_INELIGIBLE = "WORKER_ROLE_INELIGIBLE"
@@ -508,6 +513,7 @@ def _worker_reasons(
 def _package_reasons(
     package: Mapping[str, Any],
     package_by_id: Mapping[str, Mapping[str, Any]],
+    feature_by_id: Mapping[str, Mapping[str, Any]],
     dependencies: Mapping[str, tuple[str, ...]],
     actively_leased_packages: set[str],
     observed_at: datetime,
@@ -515,6 +521,15 @@ def _package_reasons(
     reasons: list[Reason] = []
     if package.get("status") != "READY":
         reasons.append(_reason(RejectionCode.PACKAGE_NOT_READY, str(package.get("status"))))
+    if (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2:
+        for prerequisite in ready_contract_reasons(package):
+            reasons.append(_reason(RejectionCode.READY_CONTRACT_INVALID, prerequisite))
+        feature = feature_by_id.get(str(package.get("feature_id")))
+        if feature is None or feature.get("status") not in {"READY", "ACTIVE", "VERIFY_REVIEW"}:
+            reasons.append(_reason(
+                RejectionCode.FEATURE_NOT_READY,
+                f"{package.get('feature_id')}:{feature.get('status') if feature else 'MISSING'}",
+            ))
     if not package.get("lane"):
         reasons.append(_reason(RejectionCode.PACKAGE_LANE_UNASSIGNED))
     package_id = str(package.get("id"))
@@ -550,6 +565,8 @@ def _package_reasons(
                     f"{dependency_id}:{dependency.get('status')}",
                 )
             )
+    for prerequisite in package.get("review_readiness_reasons", ()):
+        reasons.append(_reason(RejectionCode.REVIEW_PREREQUISITE_MISSING, str(prerequisite)))
     return tuple(sorted(set(reasons)))
 
 
@@ -575,6 +592,14 @@ def _pair_reasons(
     missing = sorted(required - capabilities)
     if missing:
         reasons.append(_reason(RejectionCode.CAPABILITY_MISMATCH, ",".join(missing)))
+    if (package.get("kind") == "REVIEW"
+            and (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2):
+        target_ids = [str(edge.get("dependency_id")) for edge in snapshot.dependencies
+                      if edge.get("package_id") == package.get("id")]
+        target = next((item for item in snapshot.work_packages
+                       if item.get("id") == target_ids[0]), None) if len(target_ids) == 1 else None
+        if target is not None and target.get("wip_implementer_worker_id") == worker.get("id"):
+            reasons.append(_reason(RejectionCode.REVIEW_INDEPENDENCE_REQUIRED, str(worker.get("id"))))
     if not reasons:
         reasons.extend(_capacity_package_reasons(snapshot, package, worker, policy))
     return tuple(sorted(set(reasons)))
@@ -670,6 +695,7 @@ def decide_shadow(
     workers = tuple(sorted(snapshot.workers, key=lambda value: str(value.get("id"))))
     packages = tuple(sorted(snapshot.work_packages, key=lambda value: str(value.get("id"))))
     package_by_id = {str(value.get("id")): value for value in packages}
+    feature_by_id = {str(value.get("id")): value for value in snapshot.features}
     worker_by_id = {str(value.get("id")): value for value in workers}
     dependencies: dict[str, list[str]] = {}
     for dependency in snapshot.dependencies:
@@ -764,6 +790,7 @@ def decide_shadow(
                 reasons := _package_reasons(
                     package,
                     package_by_id,
+                    feature_by_id,
                     normalized_dependencies,
                     actively_leased_packages,
                     observed_at,

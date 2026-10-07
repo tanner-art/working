@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from task_readiness import check_packet, contract_shape_reasons, inventory
+from task_readiness import check_packet, contract_shape_reasons, inventory, registration_proof
 from registry_control import RunnerRegistryControl, queue_contract_digest
 from scripts.factory_registry import Feature, Lane, RegistryConflict, SQLiteRegistry, TaskStatus, Worker, WorkPackage
 
@@ -34,13 +34,21 @@ class TaskReadinessTests(unittest.TestCase):
         self.package = {"id": "TASK-1", "source_system": "github_issue", "source_ref": "101"}
         self.snapshot = SimpleNamespace(work_packages=(self.package,), active_leases=(), dependencies=())
         self.contract = {
-            "schema_version": 2, "paths": ["src/existing.py", "tests/test_existing.py", "src/new.py"],
+            "schema_version": 2, "instructions": "Implement the exact scoped change.",
+            "paths": ["src/existing.py", "tests/test_existing.py", "src/new.py"],
             "depends_on": [], "readiness": {
                 "base_commit": self.base, "planning_paths": ["docs/PLAN.md"],
                 "existing_paths": ["src/existing.py", "tests/test_existing.py"],
                 "new_paths": ["src/new.py"], "integration_paths": ["src/existing.py"],
                 "test_paths": ["tests/test_existing.py"], "dependency_kinds": {},
             },
+        }
+        self.package["acceptance_criteria"] = ["reviewed result"]
+        self.package["provider_diagnostics"] = {
+            "readiness_proof": registration_proof(
+                self.contract, repository=self.repo, target_ref="main",
+                acceptance_criteria=("reviewed result",),
+            ),
         }
 
     def check(self, contract=None, snapshot=None, github_issue=101):
@@ -53,6 +61,43 @@ class TaskReadinessTests(unittest.TestCase):
         self.assertEqual(self.check().state, "READY")
         self.assertEqual(self.check({"paths": ["src/existing.py"]}).state, "NEEDS_PREPARATION")
         self.assertEqual(contract_shape_reasons(self.contract), ())
+
+    def test_registration_resolves_planning_content_and_exact_target_ref(self):
+        proof = registration_proof(
+            self.contract, repository=self.repo, target_ref="main",
+            acceptance_criteria=("reviewed result",),
+        )
+        self.assertEqual(proof["base_commit"], self.base)
+        self.assertEqual(len(proof["planning_sha256"]["docs/PLAN.md"]), 64)
+        self.assertEqual(len(proof["queue_contract_sha256"]), 64)
+        with self.assertRaisesRegex(ValueError, "ACCEPTANCE_CRITERIA_MISSING"):
+            registration_proof(self.contract, repository=self.repo, target_ref="main",
+                               acceptance_criteria=())
+        with self.assertRaisesRegex(ValueError, "TARGET_REF_INVALID"):
+            registration_proof(self.contract, repository=self.repo, target_ref="--bad",
+                               acceptance_criteria=("reviewed",))
+        (self.repo / "docs/PLAN.md").write_text("changed")
+        subprocess.run(["git", "-C", str(self.repo), "add", "docs/PLAN.md"], check=True)
+        subprocess.run([
+            "git", "-C", str(self.repo), "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid", "commit", "-qm", "advance",
+        ], check=True)
+        with self.assertRaisesRegex(ValueError, "BASE_REF_CHANGED"):
+            registration_proof(self.contract, repository=self.repo, target_ref="main",
+                               acceptance_criteria=("reviewed",))
+
+    def test_claim_rechecks_registered_planning_and_acceptance_hashes(self):
+        self.assertEqual(self.check().state, "READY")
+        proof = self.package["provider_diagnostics"]["readiness_proof"]
+        self.package["provider_diagnostics"]["readiness_proof"] = {
+            **proof, "planning_sha256": {"docs/PLAN.md": "0" * 64},
+        }
+        self.assertIn("REGISTRATION_PROOF_CHANGED", self.check().reasons)
+        self.package["provider_diagnostics"]["readiness_proof"] = proof
+        self.package["acceptance_criteria"] = ["changed"]
+        self.assertIn("REGISTRATION_PROOF_CHANGED", self.check().reasons)
+        self.package["provider_diagnostics"].pop("readiness_proof")
+        self.assertIn("REGISTRATION_PROOF_MISSING", self.check().reasons)
 
     def test_registration_shape_fails_closed_without_git_access(self):
         contract = {**self.contract, "readiness": {**self.contract["readiness"],
@@ -146,7 +191,11 @@ class TaskReadinessTests(unittest.TestCase):
             "TASK-1", "FEATURE", "Task", "ORCHESTRATION", Lane.PLATFORM,
             ("registry",), 10, ("verified",), status=TaskStatus.READY,
             provider_diagnostics={"queue_contract_sha256": queue_contract_digest(self.contract),
-                                  "readiness_schema_version": 2},
+                                  "readiness_schema_version": 2,
+                                  "readiness_proof": registration_proof(
+                                      self.contract, repository=self.repo, target_ref="main",
+                                      acceptance_criteria=("verified",),
+                                  )},
         ))
         incomplete = {**self.contract, "readiness": {**self.contract["readiness"],
                       "planning_paths": ["docs/MISSING.md"]}}
@@ -170,7 +219,7 @@ class TaskReadinessTests(unittest.TestCase):
         controller = RunnerRegistryControl(database, self.repo)
         with self.assertRaisesRegex(RegistryConflict, "V2_CONTRACT_REQUIRED"):
             controller.pre_claim("TASK-1", "worker-a", github_issue=101)
-        with self.assertRaisesRegex(RegistryConflict, "TASK_NOT_READY"):
+        with self.assertRaisesRegex(RegistryConflict, "DISPATCH_PAIR_INELIGIBLE"):
             controller.pre_claim("TASK-1", "worker-a", task_contract=self.contract, github_issue=102)
         with self.assertRaisesRegex(RegistryConflict, "EXISTING_PATH_MISSING:docs/MISSING.md"):
             controller.pre_claim("TASK-2", "worker-a", task_contract=incomplete, github_issue=102)

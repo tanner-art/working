@@ -207,6 +207,59 @@ class ShadowDispatchTest(unittest.TestCase):
         ))
         self.assertIn(Assignment("review", "reviewer"), decision.proposed_assignments)
 
+    def test_registry_review_prerequisite_reason_revokes_scheduler_eligibility(self) -> None:
+        implementation = package("implementation", status="VERIFY_REVIEW")
+        review = package(
+            "review", lane="ASSURANCE", capabilities=("independent-review",),
+            kind="REVIEW", capacity_size="VERY_SMALL",
+        )
+        review["review_readiness_reasons"] = ("REVIEW_INPUT_COUNT_INVALID:0",)
+        reviewer = worker(
+            "reviewer", capabilities=("independent-review",), lanes=("ASSURANCE",)
+        )
+        decision = decide_shadow(snapshot(
+            packages=(implementation, review), workers=(reviewer,),
+            dependencies=({"package_id": "review", "dependency_id": "implementation"},),
+        ))
+        evaluation = next(item for item in decision.package_evaluations if item.id == "review")
+        self.assertIn("REVIEW_PREREQUISITE_MISSING", reason_codes(evaluation))
+        self.assertEqual(evaluation.reasons[0].detail, "REVIEW_INPUT_COUNT_INVALID:0")
+        self.assertNotIn(Assignment("review", "reviewer"), decision.proposed_assignments)
+
+    def test_v2_review_never_proposes_its_implementer(self) -> None:
+        implementation = package("implementation", status="VERIFY_REVIEW")
+        implementation["wip_implementer_worker_id"] = "implementer"
+        review = package(
+            "review", lane="ASSURANCE", capabilities=("independent-review",),
+            kind="REVIEW", capacity_size="VERY_SMALL",
+        )
+        review["provider_diagnostics"]["readiness_schema_version"] = 2
+        reviewers = (worker("implementer", capabilities=("independent-review",), lanes=("ASSURANCE",)),
+                     worker("reviewer", capabilities=("independent-review",), lanes=("ASSURANCE",)))
+        decision = decide_shadow(snapshot(
+            packages=(implementation, review), workers=reviewers,
+            dependencies=({"package_id": "review", "dependency_id": "implementation"},),
+        ))
+        pair = next(item for item in decision.pair_evaluations
+                    if item.package_id == "review" and item.worker_id == "implementer")
+        self.assertIn("REVIEW_INDEPENDENCE_REQUIRED", reason_codes(pair))
+        self.assertNotIn(Assignment("review", "implementer"), decision.proposed_assignments)
+
+    def test_v2_ready_child_names_missing_feature_gate(self) -> None:
+        task = package("task")
+        task["provider_diagnostics"]["readiness_schema_version"] = 2
+        candidate = replace(
+            snapshot(packages=(task,), workers=(worker("builder"),)),
+            features=({"id": "FEATURE-1", "status": "ON_DECK"},),
+        )
+        decision = decide_shadow(candidate)
+        evaluation = next(item for item in decision.package_evaluations if item.id == "task")
+        self.assertIn("FEATURE_NOT_READY", reason_codes(evaluation))
+        self.assertIn("READY_CONTRACT_INVALID", reason_codes(evaluation))
+        self.assertIn("FEATURE-1:ON_DECK", [reason.detail for reason in evaluation.reasons])
+        self.assertIn("REGISTRATION_PROOF_MISSING", [reason.detail for reason in evaluation.reasons])
+        self.assertFalse(decision.proposed_assignments)
+
     def test_dependency_then_priority_best_fit_oldest_and_stable_ids(self) -> None:
         packages = (
             package("blocked", priority=1000),

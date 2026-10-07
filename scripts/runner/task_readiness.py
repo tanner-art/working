@@ -7,6 +7,7 @@ invalidated. Version 2 packets opt in to a complete, fail-closed contract.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -49,6 +50,124 @@ def _git_commit(repo: pathlib.Path, ref: str) -> str | None:
     )
     commit = result.stdout.strip()
     return commit if result.returncode == 0 and _SHA.fullmatch(commit) else None
+
+
+def _regular_git_blob(repo: pathlib.Path, commit: str, path: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", commit, "--", path],
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    if result.returncode != 0:
+        return False
+    rows = result.stdout.splitlines()
+    if len(rows) != 1 or not rows[0].endswith("\t" + path):
+        return False
+    return rows[0].split(" ", 1)[0] in {"100644", "100755"}
+
+
+def registration_proof(
+    contract: Mapping[str, Any], *, repository: pathlib.Path,
+    target_ref: str, acceptance_criteria: tuple[str, ...],
+) -> Mapping[str, Any]:
+    """Resolve the immutable version-2 planning tree before Registry READY."""
+    if contract.get("schema_version") != 2:
+        return {}
+    reasons = list(contract_shape_reasons(contract))
+    if (not isinstance(target_ref, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", target_ref)
+            or ".." in target_ref or target_ref.endswith("/")):
+        reasons.append("TARGET_REF_INVALID")
+    if not acceptance_criteria or any(
+        not isinstance(item, str) or not item.strip() for item in acceptance_criteria
+    ):
+        reasons.append("ACCEPTANCE_CRITERIA_MISSING")
+    if not isinstance(contract.get("instructions"), str) or not contract["instructions"].strip():
+        reasons.append("CONTRACT_UNREADABLE")
+    if not repository.is_dir() or not _git(repository, "rev-parse", "--is-inside-work-tree"):
+        reasons.append("REPOSITORY_UNAVAILABLE")
+    declared = contract.get("readiness")
+    base = declared.get("base_commit") if isinstance(declared, Mapping) else None
+    if isinstance(base, str) and _SHA.fullmatch(base) and "REPOSITORY_UNAVAILABLE" not in reasons:
+        if not _git(repository, "cat-file", "-e", f"{base}^{{commit}}"):
+            reasons.append("BASE_COMMIT_MISSING")
+        elif "TARGET_REF_INVALID" not in reasons and _git_commit(repository, target_ref) != base:
+            reasons.append("BASE_REF_CHANGED")
+    if reasons:
+        raise ValueError(",".join(sorted(set(reasons))))
+    assert isinstance(declared, Mapping) and isinstance(base, str)
+    planning_hashes: dict[str, str] = {}
+    for path in sorted(set(declared["planning_paths"])):
+        if not _regular_git_blob(repository, base, path):
+            reasons.append(f"PLANNING_CONTRACT_UNREADABLE:{path}")
+            continue
+        result = subprocess.run(
+            ["git", "-C", str(repository), "show", f"{base}:{path}"],
+            capture_output=True, check=False, timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout:
+            reasons.append(f"PLANNING_CONTRACT_UNREADABLE:{path}")
+        else:
+            planning_hashes[path] = hashlib.sha256(result.stdout).hexdigest()
+    for path in sorted(set(declared["existing_paths"]) | set(declared["integration_paths"])
+                       | set(declared["test_paths"])):
+        if path not in set(declared["new_paths"]) and not _regular_git_blob(
+            repository, base, path
+        ):
+            reasons.append(f"EXISTING_PATH_MISSING:{path}")
+    for path in declared["new_paths"]:
+        if _git(repository, "cat-file", "-e", f"{base}:{path}"):
+            reasons.append(f"NEW_PATH_ALREADY_EXISTS:{path}")
+    if reasons:
+        raise ValueError(",".join(sorted(set(reasons))))
+    encoded = json.dumps(contract, separators=(",", ":"), sort_keys=True,
+                         ensure_ascii=False).encode("utf-8")
+    criteria = json.dumps(acceptance_criteria, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+    return {
+        "base_commit": base, "target_ref": target_ref,
+        "queue_contract_sha256": hashlib.sha256(encoded).hexdigest(),
+        "acceptance_sha256": hashlib.sha256(criteria).hexdigest(),
+        "planning_sha256": planning_hashes,
+    }
+
+
+def ready_contract_reasons(package: Mapping[str, Any]) -> tuple[str, ...]:
+    """Check the stored v2 proof without needing Git or a mutable issue body."""
+    diagnostics = package.get("provider_diagnostics") or {}
+    if not isinstance(diagnostics, Mapping):
+        return ("REGISTRATION_DIAGNOSTICS_INVALID",)
+    if diagnostics.get("readiness_schema_version") != 2:
+        return ()
+    criteria = package.get("acceptance_criteria") or ()
+    proof = diagnostics.get("readiness_proof")
+    digest = diagnostics.get("queue_contract_sha256")
+    reasons = []
+    if not package.get("lane"):
+        reasons.append("PACKAGE_LANE_UNASSIGNED")
+    if (not isinstance(criteria, (list, tuple)) or not criteria
+            or any(not isinstance(item, str) or not item.strip() for item in criteria)):
+        reasons.append("ACCEPTANCE_CRITERIA_MISSING")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        reasons.append("QUEUE_CONTRACT_HASH_MISSING")
+    if not isinstance(proof, Mapping):
+        return tuple(sorted(set((*reasons, "REGISTRATION_PROOF_MISSING"))))
+    acceptance_digest = hashlib.sha256(json.dumps(
+        criteria, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest() if isinstance(criteria, (list, tuple)) else None
+    if proof.get("queue_contract_sha256") != digest or proof.get("acceptance_sha256") != acceptance_digest:
+        reasons.append("REGISTRATION_PROOF_HASH_MISMATCH")
+    if not isinstance(proof.get("base_commit"), str) or not _SHA.fullmatch(proof["base_commit"]):
+        reasons.append("REGISTRATION_BASE_COMMIT_INVALID")
+    target_ref = proof.get("target_ref")
+    if (not isinstance(target_ref, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", target_ref)
+            or ".." in target_ref or target_ref.endswith("/")):
+        reasons.append("REGISTRATION_TARGET_REF_INVALID")
+    planning = proof.get("planning_sha256")
+    if (not isinstance(planning, Mapping) or not planning
+            or any(not _safe_path(path) or not isinstance(value, str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", value)
+                   for path, value in planning.items())):
+        reasons.append("REGISTRATION_PLANNING_HASH_INVALID")
+    return tuple(sorted(set(reasons)))
 
 
 def contract_shape_reasons(contract: Mapping[str, Any]) -> tuple[str, ...]:
@@ -183,6 +302,27 @@ def check_packet(
             reasons.append(f"ACTIVE_PATH_OWNERSHIP_UNKNOWN:{other.get('id')}")
         elif set(paths or ()) & set(other_paths):
             reasons.append(f"EXCLUSIVE_PATH_COLLISION:{other.get('id')}")
+    if contract.get("schema_version") == 2:
+        diagnostics = package.get("provider_diagnostics") or {}
+        proof = diagnostics.get("readiness_proof") if isinstance(diagnostics, Mapping) else None
+        if not isinstance(proof, Mapping):
+            reasons.append("REGISTRATION_PROOF_MISSING")
+        elif (repository is not None
+              and _git_commit(repository, str(proof.get("target_ref")))
+              != _git_commit(repository, run_base)):
+            reasons.append("REGISTRATION_TARGET_REF_MISMATCH")
+        elif repository is not None:
+            try:
+                actual_proof = registration_proof(
+                    contract, repository=repository,
+                    target_ref=str(proof.get("target_ref")),
+                    acceptance_criteria=tuple(package.get("acceptance_criteria") or ()),
+                )
+            except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+                reasons.append(f"REGISTRATION_PROOF_INVALID:{error}")
+            else:
+                if dict(proof) != actual_proof:
+                    reasons.append("REGISTRATION_PROOF_CHANGED")
     return Readiness("READY" if not reasons else "BLOCKED", tuple(sorted(set(reasons))), base_commit)
 
 
