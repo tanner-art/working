@@ -1,11 +1,12 @@
 # CP-03 readiness implementation evidence (TASK-404)
 
 Implementation issue: #400. Independent review issue: #401 (TASK-405).
-Exact source base: `a227aa9b8f548f3beb40defe1e2110ce1ce6d55d`, after PR #399.
+Original issue base: `a227aa9b8f548f3beb40defe1e2110ce1ce6d55d`, after PR #399.
+Current integration base: `e3a51109f4ee7ba15ccae8955b66654e1cc6e40a`.
 The fresh pair supersedes the stale-base #391/#392 contracts without changing
 their Registry history. The earlier prototype commits `650817c` and `d0f3a78`
 informed this local implementation; they are not a successful Factory attempt.
-This branch is not installed, merged, or dispatched.
+This combined branch is not installed, merged, or dispatched.
 
 ## Implemented in TASK-404 scope
 
@@ -46,11 +47,14 @@ This branch is not installed, merged, or dispatched.
 
 ## Current validation
 
-- The exact issue #400 contract passes `registration_proof` against this local
-  Git tree with `main` pinned to `a227aa9`; its queue digest is
-  `065122d2ccb407d3dfb1c5172702b98ec1e46d30362f2706aa7e4ca3728d8f56`.
-- Factory Registry discovery: 289 tests passed with local loopback enabled.
-- Runner discovery: 326 tests passed with local loopback enabled.
+- Issue #400 was validated against its original `a227aa9` base with queue
+  digest `065122d2ccb407d3dfb1c5172702b98ec1e46d30362f2706aa7e4ca3728d8f56`.
+  Its base and issue/task identities are stale for a new Factory registration;
+  a fresh exact-base pair is required after integration.
+- On the current integration base, Factory Registry discovery: 298 tests passed
+  with local loopback enabled.
+- On the current integration base, runner discovery: 329 tests passed with local
+  loopback enabled.
 - New negatives cover proofless ON_DECK promotion, proofless external bridge,
   moved/tampered inputs, missing proof projection and preclaim, and requeue
   rollback. Two concurrent READY registrations of one ON_DECK feature both
@@ -61,22 +65,18 @@ This branch is not installed, merged, or dispatched.
   READY and unleased. Read-only lineage views exercise five rejection cases
   for the external bridge: unexpected successful attempt, wrong integration
   commit, wrong repository head, wrong evidence URL, and wrong implementer.
-- Client Vitest: 69 files and 758 tests passed. Client TypeScript, Vite
-  production build, and API TypeScript check passed using a private copy of
-  complete local dependencies; no dependency or lockfile changed.
-- `pnpm check` attempted missing npm downloads and could not resolve the
-  registry host. Its three underlying checks passed directly from the local
-  dependency tree. No lint script is configured.
-- Python compilation with a writable cache prefix and `git diff --check`
-  passed. The final diff stays within the issue's declared paths.
+- `pnpm check` passed: 69 Vitest files and 758 tests, client TypeScript, Vite
+  production build, and API TypeScript. Lockfile-pinned dependencies were
+  installed from the local package store; no dependency or lockfile changed.
+- `git diff --check e3a5110..HEAD` passed. No lint script is configured.
+  The combined diff stays within issues #398 and #400's declared paths.
 
 ## Remaining acceptance dependency
 
-Issue #398 owns actual implementation-child prompt handoff in `runner.py` and
-`test_runner.py`. Its separately reviewed change must send the verified
-Registry acceptance criteria and planning hashes to the worker before CP-03
-can be declared complete. CP-01/CP-02 proof, Registry registration, independent
-TASK-405 review, and a guarded Factory run also remain separate operational
-gates. The operator currently pins the local `main` ref; issue #398 must verify
-the worker checkout of `origin/<base_ref>` matches that exact proof tree. This
-local code does not bypass or attest those gates.
+Issue #398's implementation-child prompt handoff is included on this combined
+branch. It supplies the verified Registry acceptance criteria and planning
+hashes and rejects drift before provider launch. Its original reviewed patch is
+unchanged by the current-main replay. Fresh exact-head independent review,
+integrated CI, exact-base Registry issue contracts and a guarded Factory run
+remain separate operational gates. This local code does not bypass or attest
+those gates.
