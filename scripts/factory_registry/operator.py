@@ -3320,11 +3320,15 @@ def prepare_dry_run(
     run=None,
     uid: int | None = None,
 ) -> Mapping[str, Any]:
+    stopping = SQLiteRegistry(database).dispatch_control()["dispatch_mode"] == "STOPPING"
     preflight(
         database, config_path, release, preservation_path, expected_commit,
-        expected_revision, allowed_modes=("PAUSED", "LIVE"), require_config=False,
+        expected_revision,
+        allowed_modes=("STOPPING",) if stopping else ("PAUSED", "LIVE"),
+        require_config=False,
         require_permissions_gate=False, require_empty_ownership=False,
-        require_kill_switch=False,
+        require_kill_switch=stopping,
+        allow_stopping_ownership_reconciliation=stopping,
     )
     initial_control = SQLiteRegistry(database).dispatch_control()
     if (

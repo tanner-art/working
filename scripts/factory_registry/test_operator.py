@@ -1957,6 +1957,83 @@ class OperatorFixture(unittest.TestCase):
                 self.assertIn("--dry-run", data["ProgramArguments"])
         self.assertTrue(any(call[1] == "bootstrap" for call in calls))
 
+    def test_prepare_dry_run_recovers_stopping_ownership_before_release_migration(self):
+        old_release = self.root / "previous-release"
+        shutil.copytree(self.release, old_release)
+        old_config = self.config(strict=True)
+        old_config["gh"] = str(old_release / "scripts" / "runner" / "github.py")
+        old_config["agents"]["claude"]["command"][1] = str(
+            old_release / "scripts" / "runner" / "claude_keychain.py"
+        )
+        self.config_path.write_text(json.dumps(old_config))
+        now = datetime.now(timezone.utc) - timedelta(minutes=1)
+        observed_at = now.isoformat()
+        self.sync_workers(observed_at)
+        feature, implementation, review = parse_canary_spec(self.canary())
+        self.registry.register_canary_bundle(
+            feature, implementation, review,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            recorded_at=observed_at,
+        )
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=observed_at, reason="test run",
+        )
+        self.registry.acquire_lease(
+            "TASK-201", "codex-a", acquired_at=observed_at,
+            expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        self.registry.begin_attempt_runtime(
+            "stopping-attempt", package_id="TASK-201", worker_id="codex-a",
+            runner_pid=os.getpid(), started_at=observed_at,
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.engage_dispatch_kill_switch(
+            changed_at=utc_now(), reason="test stop",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        arguments = (
+            self.database, self.config_path, self.release, self.preservation,
+        )
+        for commit, expected_revision, message in (
+            (COMMIT, revision - 1, "Registry revision mismatch"),
+            ("b" * 40, revision, "release commit mismatch"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(OperatorError, message):
+                    prepare_dry_run(
+                        *arguments, commit, expected_revision, self.migration(),
+                        home=self.root / "home",
+                    )
+                self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+                self.assertEqual(len(self.registry.active_attempt_runtimes()), 1)
+
+        calls = []
+
+        def launchctl(arguments, **kwargs):
+            calls.append(arguments)
+            if arguments[1] == "print":
+                return subprocess.CompletedProcess(arguments, 1)
+            return subprocess.CompletedProcess(arguments, 0)
+
+        result = prepare_dry_run(
+            *arguments, COMMIT, revision, self.migration(),
+            home=self.root / "home", run=launchctl, uid=501,
+        )
+        self.assertTrue(result["passed"])
+        control = self.registry.dispatch_control()
+        self.assertEqual(control["dispatch_mode"], "PAUSED")
+        self.assertTrue(control["kill_switch_engaged"])
+        self.assertEqual(self.registry.active_attempt_runtimes(), ())
+        self.assertEqual(self.registry.active_unbound_leases(), ())
+        self.assertEqual(
+            json.loads(self.config_path.read_text())["gh"],
+            str(self.release.resolve() / "scripts" / "runner" / "github.py"),
+        )
+        self.assertTrue(any(call[1] == "bootstrap" for call in calls))
+
     def test_prepare_dry_run_rejects_stale_config_at_shared_lock_boundary(self):
         self.config_path.write_text(json.dumps(self.config(strict=False)))
         control = self.registry.dispatch_control()
