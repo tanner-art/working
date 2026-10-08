@@ -3,8 +3,8 @@ import type { AppState } from './domain'
 import { objectLabels } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { localDateKey } from './morningDigest'
-import { activeTemporalDecisions, temporalFactIsCurrent } from './temporalConfirmation'
-import { createCalendarCommitment } from './calendarEntry'
+import { activeTemporalDecisions, deadlineProposal, temporalFactIsCurrent } from './temporalConfirmation'
+import { confirmCommitmentDeadline, createCalendarCommitment, scheduleCommitment } from './calendarEntry'
 import { buildCalendarMonth, buildCalendarTimeGrid, dayAriaLabel, dayNumber, monthLabel, navigateCalendarDate, parseLocalDateKey, weekStart, WEEKDAY_LABELS } from './calendar'
 import type { CalendarDayCell } from './calendar'
 
@@ -20,10 +20,12 @@ export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onO
   const [mode, setMode] = useState<CalendarMode>('month')
   const [selected, setSelected] = useState(todayKey)
   const [commitment, setCommitment] = useState('')
+  const [scheduleMessage, setScheduleMessage] = useState('')
   const confirmedEventIds = useMemo(() => new Set(activeTemporalDecisions(model)
     .filter(entry => entry.target.kind === 'event-scheduling' && temporalFactIsCurrent(model, entry))
     .map(entry => entry.target.kind === 'event-scheduling' ? entry.target.eventId : '')), [model])
   const eventReady = (event: { id: string }) => confirmedEventIds.has(event.id)
+  const confirmedDeadlineIds = useMemo(() => new Set(activeTemporalDecisions(model).filter(entry => entry.target.kind === 'fixed-deadline' && temporalFactIsCurrent(model, entry)).map(entry => entry.target.kind === 'fixed-deadline' ? entry.target.objectId : '')), [model])
   const selectedDate = parseLocalDateKey(selected)
   const month = useMemo(() => buildCalendarMonth(model, selectedDate.getFullYear(), selectedDate.getMonth(), new Date(), eventReady), [model, selected, confirmedEventIds])
   const timeGrid = useMemo(() => buildCalendarTimeGrid(model, mode === 'week' ? weekStart(selected) : selected, mode === 'week' ? 7 : 1, new Date(), eventReady), [model, mode, selected, confirmedEventIds])
@@ -37,6 +39,8 @@ export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onO
     onUpdate(current => ({ ...current, objects: [item, ...current.objects] }))
     setCommitment('')
   }
+  const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId)) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
+  const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId)) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
 
   return <div className="page calendar-page">
     <header className="page-header"><div><p className="eyebrow">Time, scheduled and proposed</p><h1>Calendar</h1></div></header>
@@ -47,7 +51,7 @@ export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onO
       {mode === 'month' ? <MonthGrid calendar={month} selected={selected} onSelect={setSelected} /> : <TimeGrid days={timeGrid.days} onOpen={onOpen} />}
     </div>
     {mode === 'month' && selectedCell && <SelectedDayDetail day={selectedCell} onOpen={onOpen} />}
-    <section className="list-section"><div className="section-heading"><div><p className="section-label">Not tied to a time</p><h2>Unscheduled commitments</h2></div><span>{unscheduled.length} shown</span></div>{unscheduled.length ? <ul className="detail-list">{unscheduled.map(o => <li key={o.id}><button type="button" className="commitment-row clickable-row" onClick={() => onOpen(o.id)}><span className="time-dot" /><div><strong>{o.summary}</strong><small>No CalendarEvent time chosen yet.</small></div><span className="kind-chip">{objectLabels[o.kind]}</span></button></li>)}</ul> : <div className="empty">No unscheduled commitments. Confirmed obligations without an event appear here.</div>}</section>
+    <section className="list-section"><div className="section-heading"><div><p className="section-label">Not tied to a time</p><h2>Unscheduled commitments</h2></div><span>{unscheduled.length} shown</span></div>{scheduleMessage && <p role="alert">{scheduleMessage}</p>}{unscheduled.length ? <ul className="detail-list">{unscheduled.map(o => { const setup = state.objects.find(item => item.id === o.id)?.history.find(entry => entry.commitmentSetup)?.commitmentSetup; return <li key={o.id}><div className="commitment-row"><button type="button" className="clickable-row" onClick={() => onOpen(o.id)}><span className="time-dot" /><div><strong>{o.summary}</strong><small>No CalendarEvent time chosen yet.</small></div><span className="kind-chip">{objectLabels[o.kind]}</span></button>{deadlineProposal(model, o.id) && !confirmedDeadlineIds.has(o.id) && <button type="button" className="secondary" onClick={() => confirmDeadline(o.id)}>Confirm deadline</button>}{setup?.date && setup.time && <button type="button" className="secondary" onClick={() => schedule(o.id)}>Confirm CalendarEvent</button>}</div></li> })}</ul> : <div className="empty">No unscheduled commitments. Confirmed obligations without an event appear here.</div>}</section>
   </div>
 }
 

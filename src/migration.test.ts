@@ -29,6 +29,18 @@ function storage(initial: string | null) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('TASK-002 migration', () => {
+  it('reconciles exactly one valid Commitment scheduling audit and rejects multiple schedules', () => {
+    const item = thought({ id: 'commitment-audit', kind: 'commitment', status: 'review' })
+    const confirmed = confirmObject(item)
+    confirmed.history.push({ at: '2026-09-14T10:00:00.000Z', event: 'Set Commitment details', commitmentSetup: { title: 'Reading', date: '2026-09-15', time: '09:00', dependencyIds: [], source: 'review-commitment-resolution' } })
+    confirmed.history.push({ at: '2026-09-14T10:01:00.000Z', event: 'Scheduled Commitment CalendarEvent', commitmentSchedule: { eventId: 'commitment-event', startsAt: '2026-09-15T09:00:00.000Z', temporalContext: 'local', source: 'commitment-calendar-scheduling' } })
+    const baseline = legacyUiProjection(migrateLegacyState(legacy([item])))
+    const model = reconcileLegacyUi({ ...baseline, objects: [confirmed] })
+    expect(model.calendarEvents).toMatchObject([{ id: 'commitment-event', objectIds: ['commitment-audit'] }])
+    const duplicate = structuredClone(confirmed)
+    duplicate.history.push({ at: '2026-09-14T10:02:00.000Z', event: 'Scheduled Commitment CalendarEvent', commitmentSchedule: { eventId: 'second-event', startsAt: '2026-09-15T10:00:00.000Z', temporalContext: 'local', source: 'commitment-calendar-scheduling' } })
+    expect(() => reconcileLegacyUi({ ...baseline, objects: [duplicate] })).toThrow('invalid or ambiguous')
+  })
   it('reconstructs confirmed reminder audit evidence and rejects forged or invalid lifecycle history', () => {
     const target = thought({ id: 'target', kind: 'idea', status: 'confirmed' })
     const source = thought({ id: 'source', kind: 'reminder', status: 'review' })
