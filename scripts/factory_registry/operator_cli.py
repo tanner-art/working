@@ -32,6 +32,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
     record_external_integration_review_input,
+    record_native_review_ci,
     parse_review_input_spec,
     parse_bounded_run_scope,
     preflight,
@@ -215,6 +216,13 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser("record-review-input", help="Record immutable historical implementation facts for a registered review")
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser(
+        "record-native-review-ci",
+        help="Append verified exact-head CI to an immutable native review input",
+    )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
 
@@ -499,6 +507,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"kind": "threadline-factory-record-review-input", "passed": True,
                 "review_package_id": review_input.review_package_id, "review_input_id": review_input.id,
                 "revision": revision}
+    if args.command == "record-native-review-ci":
+        return dict(record_native_review_ci(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "native review CI spec"),
+        ))
     if args.command == "record-external-integration-review-input":
         return dict(record_external_integration_review_input(
             args.database, args.config, args.release, args.preservation,

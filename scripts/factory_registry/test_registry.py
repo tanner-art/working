@@ -795,6 +795,111 @@ class SQLiteRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(RegistryConflict, "REVIEW_PACKET_FILE_MISMATCH"):
             _verify_operator_review_packet(review_input)
 
+    def test_native_review_ci_is_append_only_and_unlocks_exact_packet(self) -> None:
+        self.feature()
+        self.registry.register_work_package(WorkPackage(
+            "TARGET", "FEATURE-1", "target", "ORCHESTRATION", Lane.PLATFORM,
+            ("registry",), 100, ("implemented",), status=TaskStatus.READY,
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "REVIEW", "FEATURE-1", "review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 100, ("reviewed",),
+            status=TaskStatus.READY, kind=PackageKind.REVIEW,
+            dependency_ids=("TARGET",),
+        ))
+        self.worker("implementer", "registry")
+        self.registry.set_dispatch_control(
+            expected_revision=self.registry.dispatch_control()["revision"],
+            expected_mode="PAUSED", new_mode="LIVE", kill_switch_engaged=False,
+            changed_at="2026-10-07T10:00:00Z", reason="native review CI fixture",
+        )
+        self.registry.acquire_lease(
+            "TARGET", "implementer", acquired_at="2026-10-07T10:00:01Z",
+            expires_at="2026-10-07T11:00:00Z",
+        )
+        self.registry.begin_attempt_runtime(
+            "attempt-1", package_id="TARGET", worker_id="implementer",
+            runner_pid=1, started_at="2026-10-07T10:00:02Z",
+            expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        contract = {"task": "TARGET", "instructions": "review exact commit"}
+        packet = self.root / "native-packet"
+        packet.mkdir()
+        contents = {
+            "base-to-implementation.diff": b"diff",
+            "changed-files.txt": b"file\n",
+            "contract.json": (json.dumps(contract, sort_keys=True) + "\n").encode(),
+            "validation-evidence.json": b"{}",
+            "review-verdict-schema.json": b"{}",
+        }
+        for name, content in contents.items():
+            (packet / name).write_bytes(content)
+        files = {name: hashlib.sha256(content).hexdigest() for name, content in contents.items()}
+        manifest = {"schema_version": 1, "implementation_attempt_id": "attempt-1",
+                    "implementation_commit": "a" * 40, "base_commit": "b" * 40,
+                    "files": files}
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        (packet / "manifest.json").write_bytes(manifest_bytes)
+        review_input = ReviewInput(
+            id="input-1", review_package_id="REVIEW", target_package_id="TARGET",
+            implementation_attempt_id="attempt-1", implementation_commit="a" * 40,
+            base_commit="b" * 40, pr_url="https://github.com/owner/repo/pull/1",
+            contract_sha256=hashlib.sha256(json.dumps(
+                contract, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest(), contract=contract,
+            validation_evidence={"review_packet": {
+                "path": str(packet), "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "files": files,
+            }}, recorded_at="2026-10-07T10:10:00Z",
+        )
+        self.registry.finish_attempt_runtime(
+            "attempt-1", ended_at="2026-10-07T10:10:00Z", outcome="SUCCEEDED",
+            next_status=TaskStatus.VERIFY_REVIEW, reason="native implementation",
+            review_inputs=(review_input,),
+        )
+        with self.registry._connection() as connection:
+            self.assertIn("REVIEW_PACKET_REQUIRED", ",".join(
+                self.registry._review_readiness_reasons(connection, "REVIEW"),
+            ))
+        self.registry.engage_dispatch_kill_switch(
+            reason="prepare native CI", changed_at="2026-10-07T10:11:00Z",
+        )
+        self.registry.set_dispatch_control(
+            expected_revision=self.registry.dispatch_control()["revision"],
+            expected_mode="STOPPING", new_mode="PAUSED", kill_switch_engaged=True,
+            changed_at="2026-10-07T10:12:00Z", reason="drained",
+        )
+        revision = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_CI_ATTESTATION_MISMATCH"):
+            self.registry.record_native_review_ci(
+                "REVIEW", "input-1", "a" * 40, "c" * 40,
+                review_input.pr_url, "https://github.com/owner/repo/actions/runs/1",
+                expected_revision=revision, recorded_at="2026-10-07T10:13:00Z",
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        self.assertEqual(self.registry.record_native_review_ci(
+            "REVIEW", "input-1", "a" * 40, "b" * 40,
+            review_input.pr_url, "https://github.com/owner/repo/actions/runs/1",
+            expected_revision=revision, recorded_at="2026-10-07T10:13:00Z",
+        ), revision + 1)
+        with self.registry._connection() as connection:
+            original = connection.execute(
+                "SELECT metadata_json FROM evidence WHERE id='input-1'",
+            ).fetchone()[0]
+            self.assertNotIn('"ci"', original)
+            self.assertEqual(self.registry._review_readiness_reasons(connection, "REVIEW"), ())
+        self.assertEqual(self.registry.review_input("REVIEW")["validation_evidence"]["ci"]["state"], "SUCCESS")
+        with self.assertRaisesRegex(RegistryConflict, "REVIEW_CI_ALREADY_RECORDED"):
+            self.registry.record_native_review_ci(
+                "REVIEW", "input-1", "a" * 40, "b" * 40,
+                review_input.pr_url, "https://github.com/owner/repo/actions/runs/1",
+                expected_revision=revision + 1, recorded_at="2026-10-07T10:14:00Z",
+            )
+        (packet / "contract.json").write_text("tampered")
+        with self.registry._connection() as connection:
+            self.assertIn("REVIEW_INPUT_INVALID:REVIEW_PACKET_FILE_MISMATCH",
+                          self.registry._review_readiness_reasons(connection, "REVIEW"))
+
     def test_initialize_additively_upgrades_version_one_registry(self) -> None:
         legacy_database = self.root / "legacy.sqlite3"
         with sqlite3.connect(legacy_database) as connection:

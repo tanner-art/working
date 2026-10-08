@@ -1134,6 +1134,7 @@ def verify_review_packet(review_input):
 DEFERRABLE_REGISTRY_CODES = frozenset({
     'DISPATCH_PAIR_INELIGIBLE', 'QUEUE_CONTRACT_MISMATCH',
     'REVIEW_INDEPENDENCE_REQUIRED', 'REVIEW_INPUT_REQUIRED',
+    'REVIEW_PACKET_REQUIRED',
     'DISPATCH_REVISION_CHANGED', 'LEASE_CONFLICT', 'PACKAGE_NOT_READY',
     'WORKER_NOT_IDLE', 'WORKER_HAS_ACTIVE_LEASE', 'LANE_NOT_APPROVED',
     'CAPABILITY_MISMATCH', 'ACTIVE_PARENT_LIMIT',
@@ -1464,7 +1465,9 @@ def main():
                 if registry_review:
                     verify_review_packet(review_input)
             except RegistryConflict as error:
-                if registry_review and error.code == 'REVIEW_INPUT_REQUIRED':
+                if registry_review and error.code in {
+                    'REVIEW_INPUT_REQUIRED', 'REVIEW_PACKET_REQUIRED',
+                }:
                     print(json.dumps({'issue': n, 'status': 'defer',
                                       'reason': error.code}))
                     continue

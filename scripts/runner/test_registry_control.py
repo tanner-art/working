@@ -1040,7 +1040,12 @@ class RunnerRegistryControlTests(unittest.TestCase):
             contract=contract, validation_evidence={"focused": "passed"}, recorded_at=completed_at,
         )
         control.succeed("attempt-atomic", review_inputs=(review_input,), ended_at=completed_at)
-        self.assertEqual(self.registry.review_input("REVIEW-1")["id"], "review-input-atomic")
+        self.assertEqual(
+            next(item["id"] for item in self.registry.control_center_snapshot(
+                observed_at=completed_at,
+            ).evidence if item["package_id"] == "REVIEW-1" and item["kind"] == "review-input"),
+            "review-input-atomic",
+        )
         with self.registry._connection() as connection:
             self.assertEqual(connection.execute("SELECT status FROM work_packages WHERE id='TASK-1'").fetchone()[0], "VERIFY_REVIEW")
             runtime_seconds = connection.execute(
