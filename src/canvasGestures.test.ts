@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { idleGestureState, reduceCanvasGesture } from './canvasGestures'
+import { beginPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
 
 const node = (pointerId = 1, x = 20, y = 30) => ({ pointerId, x, y })
 const canvas = { kind: 'canvas' as const }
@@ -21,9 +22,11 @@ describe('canvasGestures', () => {
     expect(result.state.mode).toBe('edit-menu')
   })
 
-  it('turns a held node into one move and one commit after screen slop', () => {
+  it('turns a selected node drag into one move and one commit after screen slop', () => {
     let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
-    result = step(result.state, { type: 'hold', pointerId: 1 })
+    result = step(result.state, { type: 'pointer-up', pointerId: 1 })
+    expect(result.effects).toEqual([{ type: 'select', id: 'thought' }])
+    result = step(result.state, { type: 'pointer-down', sample: node(), target: thought })
     result = step(result.state, { type: 'pointer-move', sample: node(1, 29, 30) })
     expect(result.state.mode).toBe('moving-node')
     expect(result.effects.some(effect => effect.type === 'begin-move')).toBe(true)
@@ -60,6 +63,13 @@ describe('canvasGestures', () => {
     expect(result.effects).toContainEqual({ type: 'commit-resize', id: 'thought', delta: { x: 20, y: 10 } })
   })
 
+  it('starts resize when edit mode was entered outside the hold-to-open path', () => {
+    const result = reduceResizePointerDown(idleGestureState(), node(), 'thought', true)
+
+    expect(result.state).toMatchObject({ mode: 'resizing', target: { kind: 'resize', id: 'thought' }, menuOpened: true })
+    expect(result.effects).toEqual([{ type: 'begin-resize', id: 'thought', start: node() }])
+  })
+
   it('switches to pinch when a second pointer arrives and cancels the node gesture', () => {
     let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
     result = step(result.state, { type: 'pointer-down', sample: node(2, 100, 30), target: canvas })
@@ -85,6 +95,31 @@ describe('canvasGestures', () => {
     expect(stateAfterCleanup.mode).toBe('pinch-zooming')
     result = step(stateAfterCleanup, { type: 'pointer-move', sample: node(2, 112, 30) })
     expect(result.effects).toContainEqual({ type: 'preview-pinch', first: node(), second: node(2, 112, 30) })
+  })
+
+  it('commits the latest pinch preview even before React renders that preview', () => {
+    const interaction = createPinchInteraction()
+    const first = node()
+    const second = node(2, 100, 30)
+    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second)
+
+    const renderedPreview = previewPinchInteraction(interaction, first, node(2, 180, 50))
+    const latestPreview = previewPinchInteraction(interaction, first, node(2, 220, 70))
+
+    expect(latestPreview).not.toEqual(renderedPreview)
+    expect(commitPinchInteraction(interaction)).toEqual(latestPreview)
+    expect(interaction).toEqual({ start: null, preview: null })
+  })
+
+  it('cancels transient interaction on an outside tap without committing movement', () => {
+    let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
+    result = step(result.state, { type: 'pointer-move', sample: node(1, 40, 30) })
+    expect(result.state.mode).toBe('moving-node')
+
+    result = step(result.state, { type: 'outside-tap' })
+
+    expect(result.state).toEqual(idleGestureState())
+    expect(result.effects).toEqual([{ type: 'cancel' }])
   })
 
   it('resets on cancellation so stale pointers cannot commit', () => {
