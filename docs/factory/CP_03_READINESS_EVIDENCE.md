@@ -80,3 +80,40 @@ unchanged by the current-main replay. Fresh exact-head independent review,
 integrated CI, exact-base Registry issue contracts and a guarded Factory run
 remain separate operational gates. This local code does not bypass or attest
 those gates.
+
+## TASK-419 CP-03 cross-module canary (issue #419)
+
+This validation canary is pinned to base/head
+`d197a35a10041d95a5b8f34ef1eba1fc1de6c758` with target ref `main`, Registry
+revision `24040`, queue-contract SHA-256
+`282f6e0d03db9ee41d3f74866adb40313fc88072a40a95d93f50b6457ed52ad2`, and
+acceptance-criteria SHA-256
+`7bce1c9390b56c5a18f6d473a53fa3ed04f6fa51e03353b958abdf25a7ea91cc`.
+Its planning-file SHA-256 contract is:
+
+- `AGENTS.md`: `b1de2b77b56b147a701550ed738c1e19203bec39399dbf8f25fd6255c6f387ac`
+- `TASKS.md`: `04ab551e9057b445ceb313ce77556d902801bcc7f7cdf704f7e7f3b87c694038`
+- `docs/ARCHITECTURE.md`: `d0f9feafa19aa2368348094e01fe52424282db1d1183f453a398e5b4845d24dd`
+- `docs/DECISIONS.md`: `cf72aab01fe62d89d43c254d0114c0c6c7b9c1ed4e100352e8b0ee4a2c69252e`
+- `docs/NORTH_STAR.md`: `f187c86595999dc5806f422de317094f7c911c3fc2479a5b4acb4b791839a70c`
+- `docs/ROADMAP.md`: `e741b94c4a827df12e8a684122c4275dd12535cdbf75856d7301efe5e46a8bb2`
+- `docs/factory/CONTROL_PLANE_HARDENING_RECONCILIATION_2026-09-25.md`: `78450414cba865b5a3dbcca6f811a57fbef518fbb29ce1006daf28834cd4cacd`
+- `docs/factory/CP_03_READINESS_EVIDENCE.md`: `148a93ee593ec66929b11c6b27073c35ba4a1b00f747c46a46bfc2bc35c9699f`
+- `docs/factory/R1_READINESS_SOLO_VALIDATION_2026-09-27.md`: `2844aa34589865d16c1ff2b1d64e4af794d2ddd0b132670cb6a6d795ecc6a305`
+
+- `python3 -m unittest scripts.factory_registry.test_cp03_canary_integration`
+  exercises an isolated Git repository and temporary Registry. It proves the
+  registered v2 queue, acceptance, planning hashes, exact base, target ref,
+  and Registry revision reach the implementation-child prompt after Registry
+  preclaim. It also proves a tampered planning digest, a moved `main` base, a
+  mismatched source issue, and a changed queue contract fail before simulated
+  provider launch with no active lease or attempt ownership.
+- Focused normal Python coverage passed: `python3 scripts/runner/test_task_readiness.py`
+  ran 9 tests, and `python3 scripts/runner/test_runner.py` ran 58 tests. The
+  canary command above ran 1 test; all three commands exited successfully.
+
+The operational gate remaining after local validation is exact-head CI plus
+independent Claude review, followed by the separately authorized guarded
+Factory run. This canary validates already integrated CP-03 code; it does not
+retroactively make merged PR #407 a Factory attempt. Historical #411 and #415
+attempts remain historical evidence and are not rewritten by this result.
