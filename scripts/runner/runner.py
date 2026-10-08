@@ -855,6 +855,7 @@ def verified_readiness_handoff(registry_control, body, base):
         f'Exact base commit: {base}',
         f'Target ref: {target_ref}',
         f'Queue contract SHA-256: {contract_hash}',
+        f'Acceptance criteria SHA-256: {criteria_hash}',
         'Acceptance criteria:',
         *(f'- {item}' for item in criteria),
         'Planning file SHA-256:',

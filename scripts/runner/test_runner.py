@@ -230,7 +230,8 @@ class QueueTests(unittest.TestCase):
             handoff, revision = verified_readiness_handoff(control, body, base)
             prompt = build_agent_prompt(398, body, readiness_handoff=handoff)
             self.assertEqual(revision, 17)
-            for value in (base, 'HEAD', digest, proof['planning_sha256']['plan.md'],
+            for value in (base, 'HEAD', digest, proof['acceptance_sha256'],
+                          proof['planning_sha256']['plan.md'],
                           'One verified handoff', 'Registry revision: 17'):
                 self.assertIn(value, prompt)
             for changed in (
@@ -247,8 +248,15 @@ class QueueTests(unittest.TestCase):
                         mutated.update(changed)
                     control.registry.dispatch_snapshot.return_value = SimpleNamespace(
                         revision=18, work_packages=(mutated,))
-                    with self.assertRaises(RegistryConflict):
+                    provider_launch = Mock()
+
+                    def launch_after_verified_handoff():
                         verified_readiness_handoff(control, body, base)
+                        provider_launch()
+
+                    with self.assertRaises(RegistryConflict):
+                        launch_after_verified_handoff()
+                    provider_launch.assert_not_called()
 
             control.registry.dispatch_snapshot.return_value = SimpleNamespace(
                 revision=19, work_packages=(package,))
