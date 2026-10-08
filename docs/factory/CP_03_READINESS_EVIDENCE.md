@@ -80,3 +80,38 @@ unchanged by the current-main replay. Fresh exact-head independent review,
 integrated CI, exact-base Registry issue contracts and a guarded Factory run
 remain separate operational gates. This local code does not bypass or attest
 those gates.
+
+## TASK-413 disposable cross-module canary (blocked 2026-10-08)
+
+This is a validation canary for the installed CP-03 v2 path, not a
+reimplementation and not credit for merged PR #407. The earlier #411 attempt
+remains historical evidence and is not rewritten by this canary.
+
+The declared Registry proof identity is revision `23307`, exact base
+`c43b9ec59b2f2ed88ebfcb002ebc5f7c8f17e79b`, target `main`, and queue-contract
+SHA-256 `fad130e9112a5ce49aeefc9c555a2a9263b18ae77772235261bad879c7099472`.
+The assigned head is that same base. The disposable test registers a v2 package
+against a temporary Git repository and SQLite Registry, preclaims it, and builds
+the real implementation-child prompt. Its remaining assertions hold preclaim
+before provider launch for a changed planning blob, moved target base, changed
+queue contract, and mismatched source issue, while asserting no active lease,
+active attempt, or task event is created by any rejection.
+
+Command run:
+
+```
+python3 -m unittest scripts.factory_registry.test_cp03_canary_integration -v
+```
+
+Result: failed at the required new acceptance-hash assertion, before the
+subsequent negative cases could run. The real
+`verified_readiness_handoff` prompt contained the Registry revision, exact base,
+target ref, queue-contract SHA-256, acceptance-criteria text, and planning
+SHA-256, but omitted the registered `acceptance_sha256`. Therefore this canary
+cannot truthfully establish the required handoff of all three registered hash
+classes. No provider was launched and no live Registry was read or written.
+
+Remaining gate: add the registered acceptance SHA-256 to the runner-owned
+implementation-child handoff, then rerun this focused canary along with the
+normal Python suite, shared `pnpm check`/build, exact-head CI, and independent
+Claude review. That runner change is outside TASK-413's declared editable paths.
