@@ -1057,7 +1057,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(['registry', 'pre-claim'], calls)
         self.assertNotIn(['gh', 'issue', 'view'], [call[:3] for call in calls])
 
-    def test_missing_review_input_defers_only_that_review_and_continues_the_poll(self):
+    def _assert_unready_review_defers_and_poll_continues(self, code):
         import contextlib, io, json, pathlib, tempfile
         import runner
         from scripts.factory_registry.repository import RegistryConflict
@@ -1089,7 +1089,7 @@ class LifecycleTests(unittest.TestCase):
             issues = [issue(1, 'REVIEW'), issue(2, 'PARENT')]
             registry = Mock()
             registry.pre_claim.side_effect = lambda task, *_args, **_kwargs: (
-                (_ for _ in ()).throw(RegistryConflict('REVIEW_INPUT_REQUIRED'))
+                (_ for _ in ()).throw(RegistryConflict(code))
                 if task == 'TASK-1' else 7
             )
             registry.claim_package.return_value = 'deferred'
@@ -1111,7 +1111,7 @@ class LifecycleTests(unittest.TestCase):
 
             events = [json.loads(line) for line in output.getvalue().splitlines()]
             self.assertIn(
-                {'issue': 1, 'status': 'defer', 'reason': 'REVIEW_INPUT_REQUIRED'}, events,
+                {'issue': 1, 'status': 'defer', 'reason': code}, events,
             )
             self.assertEqual(
                 [call.args[0] for call in registry.pre_claim.call_args_list],
@@ -1122,6 +1122,64 @@ class LifecycleTests(unittest.TestCase):
             registry.reserve_attempt.assert_called_once()
             self.assertEqual(registry.reserve_attempt.call_args.kwargs['package_id'], 'TASK-2')
             self.assertEqual(commands.count(['agent']), 1)
+
+    def test_missing_review_input_defers_only_that_review_and_continues_the_poll(self):
+        self._assert_unready_review_defers_and_poll_continues('REVIEW_INPUT_REQUIRED')
+
+    def test_native_review_waiting_for_ci_defers_and_continues_the_poll(self):
+        self._assert_unready_review_defers_and_poll_continues('REVIEW_PACKET_REQUIRED')
+
+    def test_bounded_native_review_waiting_for_ci_defers_before_claim(self):
+        import contextlib, io, json, pathlib, tempfile
+        import runner
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = {
+                'repo': directory, 'state': str(root / 'state'),
+                'worktrees': str(root / 'trees'), 'path': '/usr/bin:/bin',
+                'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm', 'github': 'owner/repo',
+                'allowed_authors': ['owner'],
+                'capacity_collectors': {'codex-a': {'command': ['capacity']}},
+                'agents': {'codex-a': {'command': ['agent']}},
+            }
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            issue = {
+                'number': 1, 'title': 'review', 'author': {'login': 'owner'},
+                'state': 'OPEN',
+                'labels': [{'name': 'runner:ready'}, {'name': 'agent:codex-a'}],
+                'body': json.dumps({
+                    'task': 'TASK-1', 'paths': ['docs/review.md'],
+                    'instructions': 'Review the implementation.',
+                    'depends_on': [2], 'kind': 'REVIEW', 'lane': 'ASSURANCE',
+                }),
+            }
+            registry = Mock()
+            registry.registry.dispatch_control.return_value = {'bounded_run': {}}
+            registry.bounded_source_issues.return_value = (1,)
+            registry.proposed_worker.return_value = 'codex-a'
+            registry.review_input.side_effect = RegistryConflict('REVIEW_PACKET_REQUIRED')
+
+            def fake_run(args, **_kwargs):
+                if args[:3] == ['gh', 'issue', 'view']:
+                    return json.dumps(issue)
+                return ''
+
+            output = io.StringIO()
+            with patch.object(runner, 'run', side_effect=fake_run), \
+                    patch.object(runner, 'refresh_capacity_observations'), \
+                    patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                    patch('sys.argv', ['runner', '--config', str(config_path), '--agent', 'codex-a']), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                runner.main()
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertIn(
+                {'issue': 1, 'status': 'defer', 'reason': 'REVIEW_PACKET_REQUIRED'}, events,
+            )
+            registry.pre_claim.assert_not_called()
+            registry.claim_with_retry.assert_not_called()
 
     def test_preclaim_error_does_not_overwrite_existing_claim(self):
         calls, record = self.exercise_poll(preclaim_error=True)

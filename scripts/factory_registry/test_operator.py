@@ -69,6 +69,35 @@ COMMIT = "a" * 40
 
 
 class OperatorFixture(unittest.TestCase):
+    def test_native_review_ci_records_verified_exact_head_after_preflight(self):
+        spec = {
+            "review_package_id": "TASK-409",
+            "review_input_id": "review-input:TASK-409:attempt-1",
+            "implementation_commit": "a" * 40,
+            "pr_url": "https://github.com/owner/repo/pull/11",
+            "run_url": "https://github.com/owner/repo/actions/runs/12",
+        }
+        pr = {"html_url": spec["pr_url"], "state": "open", "merged": False,
+              "head": {"sha": "a" * 40, "ref": "runner/task-408"},
+              "base": {"sha": "b" * 40, "ref": "main"}}
+        run = {"head_sha": "a" * 40, "head_branch": "runner/task-408",
+               "name": "Validate app", "path": ".github/workflows/ci.yml",
+               "pull_requests": [{"number": 11}], "event": "pull_request",
+               "status": "completed", "conclusion": "success",
+               "html_url": spec["run_url"]}
+        with mock.patch.object(operator_module, "_github_public_json", side_effect=(pr, run)), \
+                mock.patch.object(operator_module, "preflight") as gate, \
+                mock.patch.object(operator_module, "SQLiteRegistry") as registry:
+            registry.return_value.record_native_review_ci.return_value = 2
+            result = operator_module.record_native_review_ci(
+                Path("/tmp/registry"), Path("/tmp/config"), Path("/tmp/release"),
+                Path("/tmp/preservation"), "c" * 40, 1, spec,
+            )
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["revision"], 2)
+            gate.assert_called_once()
+            registry.return_value.record_native_review_ci.assert_called_once()
+
     def test_native_review_ci_rejects_failed_exact_head_before_registry_write(self):
         spec = {
             "review_package_id": "TASK-409",
@@ -77,11 +106,12 @@ class OperatorFixture(unittest.TestCase):
             "pr_url": "https://github.com/owner/repo/pull/11",
             "run_url": "https://github.com/owner/repo/actions/runs/12",
         }
-        pr = {"html_url": spec["pr_url"], "merged": False,
+        pr = {"html_url": spec["pr_url"], "state": "open", "merged": False,
               "head": {"sha": "a" * 40, "ref": "runner/task-408"},
               "base": {"sha": "b" * 40, "ref": "main"}}
         run = {"head_sha": "a" * 40, "head_branch": "runner/task-408",
-               "name": "Validate app", "event": "pull_request",
+               "name": "Validate app", "path": ".github/workflows/ci.yml",
+               "pull_requests": [{"number": 11}], "event": "pull_request",
                "status": "completed", "conclusion": "failure",
                "html_url": spec["run_url"]}
         with mock.patch.object(operator_module, "_github_public_json", side_effect=(pr, run)), \

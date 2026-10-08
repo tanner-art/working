@@ -184,20 +184,23 @@ def _verify_operator_review_packet(review_input: ReviewInput) -> None:
 
 
 def _review_input_from_evidence(row: sqlite3.Row) -> ReviewInput:
-    metadata = json.loads(row["metadata_json"])
-    if not isinstance(metadata, Mapping):
-        raise RegistryConflict("REVIEW_INPUT_INVALID")
-    return ReviewInput(
-        id=row["id"], review_package_id=row["package_id"],
-        target_package_id=metadata["target_package_id"],
-        implementation_attempt_id=metadata["implementation_attempt_id"],
-        implementation_commit=metadata["implementation_commit"],
-        base_commit=metadata["base_commit"], pr_url=row["uri"],
-        contract_sha256=metadata["contract_sha256"], contract=metadata["contract"],
-        validation_evidence=metadata["validation_evidence"],
-        recorded_at=row["recorded_at"],
-        external_integration=metadata.get("external_integration"),
-    )
+    try:
+        metadata = json.loads(row["metadata_json"])
+        if not isinstance(metadata, Mapping):
+            raise RegistryConflict("REVIEW_INPUT_INVALID")
+        return ReviewInput(
+            id=row["id"], review_package_id=row["package_id"],
+            target_package_id=metadata["target_package_id"],
+            implementation_attempt_id=metadata["implementation_attempt_id"],
+            implementation_commit=metadata["implementation_commit"],
+            base_commit=metadata["base_commit"], pr_url=row["uri"],
+            contract_sha256=metadata["contract_sha256"], contract=metadata["contract"],
+            validation_evidence=metadata["validation_evidence"],
+            recorded_at=row["recorded_at"],
+            external_integration=metadata.get("external_integration"),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RegistryConflict("REVIEW_INPUT_INVALID") from error
 
 
 def _with_native_review_ci(
@@ -205,7 +208,7 @@ def _with_native_review_ci(
 ) -> ReviewInput:
     """Join a later immutable CI receipt without changing the original input."""
     rows = connection.execute(
-        "SELECT id, recorded_at, metadata_json FROM evidence "
+        "SELECT id, uri, recorded_at, metadata_json FROM evidence "
         "WHERE package_id=? AND kind='review-ci' ORDER BY recorded_at, id",
         (review_input.review_package_id,),
     ).fetchall()
@@ -216,6 +219,9 @@ def _with_native_review_ci(
     row = rows[0]
     metadata = json.loads(row["metadata_json"])
     if (not isinstance(metadata, Mapping)
+            or row["id"] != f"review-ci:{review_input.id}"
+            or not isinstance(metadata.get("ci"), Mapping)
+            or row["uri"] != metadata.get("ci", {}).get("run_url")
             or any(metadata.get(key) != expected for key, expected in (
                 ("review_input_id", review_input.id),
                 ("target_package_id", review_input.target_package_id),
@@ -225,8 +231,7 @@ def _with_native_review_ci(
                 ("pr_url", review_input.pr_url),
             ))
             or "ci" in review_input.validation_evidence
-            or row["recorded_at"] <= review_input.recorded_at
-            or not isinstance(metadata.get("ci"), Mapping)):
+            or row["recorded_at"] <= review_input.recorded_at):
         raise RegistryConflict("REVIEW_CI_ATTESTATION_MISMATCH")
     return replace(review_input, validation_evidence={
         **review_input.validation_evidence, "ci": dict(metadata["ci"]),

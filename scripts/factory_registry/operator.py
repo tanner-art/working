@@ -2655,13 +2655,18 @@ def record_native_review_ci(
     pull = _github_public_json(f"{api}/pulls/{number}")
     run = _github_public_json(f"{api}/actions/runs/{run_match.group(1)}")
     head, base = pull.get("head"), pull.get("base")
-    if (pull.get("html_url") != spec["pr_url"] or pull.get("merged") is True
+    if (pull.get("html_url") != spec["pr_url"] or pull.get("state") != "open"
+            or pull.get("merged") is True
             or not isinstance(head, Mapping) or not isinstance(base, Mapping)
             or head.get("sha") != spec["implementation_commit"]
             or base.get("ref") != "main"
             or run.get("head_sha") != spec["implementation_commit"]
             or run.get("head_branch") != head.get("ref")
             or run.get("name") != "Validate app"
+            or run.get("path") != ".github/workflows/ci.yml"
+            or not isinstance(run.get("pull_requests"), list)
+            or not any(isinstance(item, Mapping) and item.get("number") == int(number)
+                       for item in run.get("pull_requests", ()))
             or run.get("event") != "pull_request"
             or run.get("status") != "completed"
             or run.get("conclusion") != "success"
