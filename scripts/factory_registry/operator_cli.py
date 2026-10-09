@@ -466,7 +466,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ))
     if args.command == "register-followup-review":
         observed_at = args.observed_at or utc_now()
-        preflight(**_preflight_args(args, observed_at=observed_at, require_workers=True))
+        # The follow-up can be the only runnable package. The global worker gate
+        # requires an implementation front and rejects that valid review-only
+        # state; the exact-target reviewer gate below is authoritative here.
+        preflight(**_preflight_args(args, observed_at=observed_at))
         spec = _load_object(args.spec, "follow-up review spec")
         review = parse_followup_review_spec(spec)
         repository = pathlib.Path(_load_object(args.config, "runner config")["repo"])

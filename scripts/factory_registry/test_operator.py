@@ -693,6 +693,41 @@ class OperatorFixture(unittest.TestCase):
             }
         }
 
+    def test_followup_review_cli_uses_exact_reviewer_gate_without_implementation_front(self):
+        """A review-only retry must not require a new implementation worker."""
+        spec_path = self.root / "review-only-followup.json"
+        spec_path.write_text(json.dumps(self.followup_review()))
+        review = parse_followup_review_spec(self.followup_review())
+        def preflight_review_only(**kwargs):
+            if kwargs.get("require_workers"):
+                raise OperatorError("no eligible implementation worker")
+            return {"passed": True}
+        output, errors = StringIO(), StringIO()
+        with mock.patch(
+            "scripts.factory_registry.operator_cli.preflight",
+            side_effect=preflight_review_only,
+        ) as preflight_gate, mock.patch(
+            "scripts.factory_registry.operator_cli.prepare_ready_package",
+            return_value=review,
+        ), mock.patch(
+            "scripts.factory_registry.operator_cli.SQLiteRegistry",
+        ) as registry, mock.patch(
+            "scripts.factory_registry.operator_cli.followup_review_worker_gate",
+            return_value={"independent_pairs": [["codex-a", "claude"]]},
+        ) as reviewer_gate, redirect_stdout(output), redirect_stderr(errors):
+            registry.return_value.successful_package_worker.return_value = "codex-a"
+            registry.return_value.register_followup_review.return_value = 12
+            self.assertEqual(operator_main([
+                "register-followup-review", "--database", str(self.database),
+                "--config", str(self.config_path), "--release", str(self.release),
+                "--release-commit", COMMIT, "--preservation", str(self.preservation),
+                "--expect-revision", "11", "--spec", str(spec_path),
+            ]), 0, errors.getvalue())
+        self.assertTrue(preflight_gate.called)
+        self.assertNotIn("require_workers", preflight_gate.call_args.kwargs)
+        reviewer_gate.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue())["review_package_id"], "TASK-203")
+
     def test_telemetry_canary_and_worker_gate_are_revision_checked(self):
         now = utc_now()
         self.sync_workers(now)
@@ -883,6 +918,7 @@ class OperatorFixture(unittest.TestCase):
         )
         source = self.root / "approved-preservation.json"
         source.write_bytes(self.preservation.read_bytes())
+        source.chmod(0o644)
         harden_paths(self.database, self.config_path, self.release)
         revision = self.registry.dispatch_control()["revision"]
         with self.assertRaisesRegex(OperatorError, "0600"):
