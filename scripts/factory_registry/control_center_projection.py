@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -406,8 +407,23 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
                 item for item in snapshot.historical_reconciliations
                 if item.get("id") == external.get("id") and item.get("package_id") == target_id
             ]
+            required_provenance = (
+                external.get("id"), external.get("historical_commit"),
+                external.get("integration_commit"), external.get("repository_head"),
+                external.get("implementer_worker_id"), external_input.get("uri"),
+                input_metadata.get("implementation_commit"), input_metadata.get("base_commit"),
+                input_metadata.get("contract_sha256"),
+            )
+            commit_provenance = (
+                external.get("historical_commit"), external.get("integration_commit"),
+                external.get("repository_head"), input_metadata.get("implementation_commit"),
+                input_metadata.get("base_commit"),
+            )
             if (
-                len(target_attempts) != 1
+                any(not isinstance(value, str) or not value for value in required_provenance)
+                or any(re.fullmatch(r"[0-9a-f]{40,64}", value) is None for value in commit_provenance)
+                or re.fullmatch(r"[0-9a-f]{64}", input_metadata["contract_sha256"]) is None
+                or len(target_attempts) != 1
                 or target_attempts[0].get("worker_id") != implementer
                 or target_attempts[0].get("outcome") not in {"FAILED", "BLOCKED"}
                 or _iso(target_attempts[0].get("ended_at")) is None
@@ -416,8 +432,6 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
                 or input_metadata.get("target_package_id") != target_id
                 or input_metadata.get("implementation_attempt_id") != f"external-integration:{external.get('id')}"
                 or external.get("implementer_worker_id") != implementer
-                or not isinstance(input_metadata.get("implementation_commit"), str)
-                or not isinstance(input_metadata.get("base_commit"), str)
                 or len(reconciliations) != 1
             ):
                 raise ControlCenterProjectionError("structured external review provenance is invalid")
