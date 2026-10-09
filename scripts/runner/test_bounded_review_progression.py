@@ -8,10 +8,11 @@ import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from registry_control import RunnerRegistryControl, queue_contract_digest
 from runner import materialize_review_packet
-from task_readiness import registration_proof
+from task_readiness import check_packet, registration_proof
 from scripts.factory_registry.models import (
     Feature, Lane, PackageKind, ReviewInput, TaskStatus, Worker, WorkPackage,
 )
@@ -278,6 +279,69 @@ class BoundedReviewProgressionTests(unittest.TestCase):
                 expected_contract_sha256=queue_contract_digest(self.review),
                 changed_at=(self.now + timedelta(minutes=11)).isoformat(),
             )
+        self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "LIVE")
+
+    def test_source_check_crossing_deadline_cannot_publish_review(self):
+        self.activate()
+        self.finish_parent()
+        clock = [self.now + timedelta(seconds=3)]
+
+        def slow_source_check(_review_input):
+            clock[0] = self.now + timedelta(minutes=11)
+            return True
+
+        with patch("registry_control.utc_now", side_effect=lambda: clock[0].isoformat()), \
+                patch("scripts.factory_registry.sqlite_registry._utc_now",
+                      side_effect=lambda: clock[0].isoformat()):
+            result = self.control.advance_bounded_reviews(
+                ({"number": 2, "body": self.review},),
+                normalize_contract=lambda issue: issue["body"],
+                source_is_green=slow_source_check,
+            )
+            self.assertEqual(result[0]["state"], "WAITING")
+            self.assertIn("RUN_DEADLINE_EXPIRED", result[0]["reasons"])
+            # Even a stale caller-supplied timestamp cannot bypass the
+            # Registry's own persisted-deadline check.
+            with self.assertRaisesRegex(RegistryConflict, "RUN_DEADLINE_EXPIRED"):
+                self.registry.promote_bounded_review(
+                    "TASK-2", expected_revision=self.registry.dispatch_control()["revision"],
+                    expected_run_id="stage-a-fixture",
+                    expected_contract_sha256=queue_contract_digest(self.review),
+                    changed_at=(self.now + timedelta(seconds=3)).isoformat(),
+                )
+        package = next(item for item in self.registry.dispatch_snapshot(
+            observed_at=self.now.isoformat()).work_packages
+                       if item["id"] == "TASK-2")
+        self.assertEqual(package["status"], "ON_DECK")
+
+    def test_unavailable_contract_check_does_not_block_other_review(self):
+        second = self.contract(3, kind="PARENT", paths=[
+            "src/second.py", "tests/test_second.py",
+        ], dependencies=[])
+        second_review = self.contract(4, kind="REVIEW", paths=["docs/SECOND_REVIEW.md"],
+                                      dependencies=[3])
+        self.register("TASK-3", second, TaskStatus.READY, PackageKind.PARENT,
+                      Lane.PLATFORM, ("code",), ())
+        self.register("TASK-4", second_review, TaskStatus.ON_DECK, PackageKind.REVIEW,
+                      Lane.ASSURANCE, ("independent-review",), ("TASK-3",))
+        self.activate(("TASK-1", "TASK-2", "TASK-3", "TASK-4"))
+        self.finish_parent()
+
+        def check_with_first_unavailable(contract, **kwargs):
+            if contract["task"] == "TASK-2":
+                raise OSError("Git unavailable")
+            return check_packet(contract, **kwargs)
+
+        with patch("registry_control.check_packet", side_effect=check_with_first_unavailable):
+            result = self.control.advance_bounded_reviews(
+                ({"number": 2, "body": self.review},
+                 {"number": 4, "body": second_review}),
+                normalize_contract=lambda issue: issue["body"],
+                source_is_green=lambda _input: True,
+            )
+        self.assertEqual(result[0]["reasons"], ("QUEUE_CONTRACT_UNAVAILABLE",))
+        self.assertEqual(result[1]["state"], "WAITING")
+        self.assertNotIn("QUEUE_CONTRACT_UNAVAILABLE", result[1]["reasons"])
         self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "LIVE")
 
     def test_failed_first_root_does_not_stop_second_independent_root(self):

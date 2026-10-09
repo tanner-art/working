@@ -3477,7 +3477,11 @@ class SQLiteRegistry:
                 if (control is None or control["dispatch_mode"] != "LIVE"
                         or control["kill_switch_engaged"]):
                     raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                # A caller timestamp can become stale while GitHub and Git
+                # checks run. The Registry clock must independently enforce
+                # the persisted deadline at the moment of the write.
                 scope = self._assert_scope_membership(connection, review_package_id, changed_at)
+                self._assert_scope_membership(connection, review_package_id, _utc_now())
                 if scope is None or scope["run_id"] != expected_run_id:
                     raise RegistryConflict("RUN_SCOPE_CHANGED")
                 package = connection.execute(

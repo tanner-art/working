@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -261,13 +262,20 @@ class RunnerRegistryControl:
             if contract is not None:
                 if contract.get("task") != package_id:
                     reasons.append("QUEUE_CONTRACT_MISMATCH")
-                readiness = check_packet(
-                    contract, repository=self.repository,
-                    run_base=scope["base_ref"], package=package,
-                    snapshot=snapshot, github_issue=int(source_ref),
-                )
-                if readiness.state != "READY":
-                    reasons.extend(readiness.reasons)
+                try:
+                    readiness = check_packet(
+                        contract, repository=self.repository,
+                        run_base=scope["base_ref"], package=package,
+                        snapshot=snapshot, github_issue=int(source_ref),
+                    )
+                except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+                    # A failed contract read blocks only this review. Registry
+                    # conflicts and programming errors remain visible to the
+                    # runner rather than being mistaken for a ready packet.
+                    reasons.append("QUEUE_CONTRACT_UNAVAILABLE")
+                else:
+                    if readiness.state != "READY":
+                        reasons.extend(readiness.reasons)
             review_input = None
             if not reasons:
                 try:
@@ -277,6 +285,8 @@ class RunnerRegistryControl:
                         reasons.append("REVIEW_SOURCE_OR_CI_NOT_GREEN")
                 except (RegistryConflict, OSError, ValueError, KeyError, TypeError) as error:
                     reasons.append(getattr(error, "code", "REVIEW_SOURCE_UNAVAILABLE"))
+            if not reasons and utc_now() >= scope["deadline"]:
+                reasons.append("RUN_DEADLINE_EXPIRED")
             if not reasons:
                 candidate = replace(snapshot, work_packages=tuple(
                     {**item, "status": "READY"} if item.get("id") == package_id else item
@@ -300,12 +310,16 @@ class RunnerRegistryControl:
                         if not reasons:
                             reasons.append("INDEPENDENT_REVIEWER_OR_CAPACITY_UNAVAILABLE")
             if not reasons:
+                promotion_at = utc_now()
+                if promotion_at >= scope["deadline"]:
+                    reasons.append("RUN_DEADLINE_EXPIRED")
+            if not reasons:
                 try:
                     self.registry.promote_bounded_review(
                         package_id, expected_revision=snapshot.revision,
                         expected_run_id=scope["run_id"],
                         expected_contract_sha256=queue_contract_digest(contract),
-                        changed_at=observed_at,
+                        changed_at=promotion_at,
                     )
                 except RegistryConflict as error:
                     reasons.append(error.code)
