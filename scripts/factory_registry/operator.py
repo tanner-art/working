@@ -134,6 +134,24 @@ V5_TO_V6_STATEMENTS = (
 )
 HEARTBEAT_FRESH_SECONDS = 180
 USAGE_FRESH_SECONDS = 900
+NO_COMMIT_CLEANUP_ID = "no-commit-cleanup-20261009"
+NO_COMMIT_CLEANUP_EVIDENCE = "https://github.com/tanner-art/working/issues/365#issuecomment-6073222435"
+# One owner-authorized, independently auditable cleanup. Statuses are pinned so
+# drift or a later implementation cannot silently be classified as historical.
+NO_COMMIT_CLEANUP = {
+    "TASK-102": ("ON_DECK", "DONE"),
+    "TASK-110": ("ON_DECK", "DONE"),
+    "TASK-113": ("BLOCKED", "DONE"),
+    "TASK-214": ("BLOCKED", "DONE"),
+    "TASK-215": ("BLOCKED", "DONE"),
+    "TASK-329": ("BLOCKED", "DONE"),
+    "TASK-330": ("READY", "DONE"),
+    "TASK-401": ("READY", "DONE"),
+    "TASK-402": ("READY", "DONE"),
+    "TASK-422": ("BLOCKED", "DONE"),
+    "TASK-423": ("READY", "DONE"),
+    "TASK-425": ("READY", "BLOCKED"),
+}
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
 REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/__init__.py",
@@ -450,6 +468,68 @@ def verify_preservation(
                 "preservation_import_id": import_id,
             },
         }
+    # The preservation snapshot pins the imported identity and original state.
+    # A reviewed, append-only reconciliation may retire that state later; require
+    # its exact Registry record and matching event before accepting DONE.
+    reconciliations = {
+        str(item.get("package_id")): item
+        for item in registry_snapshot.historical_reconciliations
+    }
+    for task_id, preserved in expected_packages.items():
+        record = reconciliations.get(task_id)
+        if record is None:
+            continue
+        request = {
+            key: record.get(key) for key in (
+                "id", "package_id", "disposition", "historical_commit",
+                "integration_commit", "repository_head", "evidence_uri",
+            )
+        }
+        events = [
+            event for event in registry_snapshot.events
+            if event.get("event_type") == "HISTORICAL_PACKAGE_RECONCILED"
+            and event.get("package_id") == task_id
+        ]
+        valid = (
+            preserved["status"] in {"ON_DECK", "READY", "VERIFY_REVIEW", "BLOCKED"}
+            and record.get("disposition") in {"INTEGRATED_ELSEWHERE", "SUPERSEDED"}
+            and all(re.fullmatch(r"[0-9a-f]{40,64}", str(record.get(key, "")))
+                    for key in ("historical_commit", "integration_commit", "repository_head"))
+            and isinstance(record.get("evidence_uri"), str)
+            and bool(record["evidence_uri"])
+            and len(events) == 1
+            and events[0].get("recorded_at") == record.get("recorded_at")
+            and all((events[0].get("detail") or {}).get(key) == value
+                    for key, value in request.items())
+            and (events[0].get("detail") or {}).get("previous_status") == preserved["status"]
+            and (events[0].get("detail") or {}).get("review_passed") is False
+        )
+        if not valid:
+            mismatches.setdefault("invalid_historical_reconciliations", []).append(task_id)
+            continue
+        preserved["status"] = "DONE"
+    for task_id, (previous, target) in NO_COMMIT_CLEANUP.items():
+        if task_id not in expected_packages:
+            continue
+        events = [
+            event for event in registry_snapshot.events
+            if event.get("event_type") == "HISTORICAL_NO_COMMIT_CLASSIFIED"
+            and event.get("package_id") == task_id
+        ]
+        if not events:
+            continue
+        detail = events[0].get("detail") or {}
+        if (len(events) != 1 or expected_packages[task_id]["status"] != previous
+                or detail != {
+                    "operation_id": NO_COMMIT_CLEANUP_ID,
+                    "evidence_uri": NO_COMMIT_CLEANUP_EVIDENCE,
+                    "previous_status": previous,
+                    "new_status": target,
+                    "review_passed": False,
+                }):
+            mismatches.setdefault("invalid_no_commit_classification", []).append(task_id)
+            continue
+        expected_packages[task_id]["status"] = target
     actual_packages = {
         str(item.get("id")): {
             key: item.get(key)
@@ -2886,6 +2966,37 @@ def reconcile_historical_package(
             "reconciliation_id": value["id"], "package_id": value["package_id"],
             "disposition": value["disposition"], "review_passed": False,
             "previous_revision": expected_revision, "revision": revision}
+
+
+def classify_approved_no_commit_batch(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Apply the exact owner-reviewed obsolete/deferred no-commit classification."""
+    if (_sensitive_paths(spec) or set(spec) != {"id", "evidence_uri", "recorded_at"}
+            or spec.get("id") != NO_COMMIT_CLEANUP_ID
+            or spec.get("evidence_uri") != NO_COMMIT_CLEANUP_EVIDENCE):
+        raise OperatorError("no-commit cleanup spec does not match the approved decision")
+    recorded_at = str(spec["recorded_at"])
+    _parse_time(recorded_at, "no-commit cleanup recorded_at")
+    preflight(database, config_path, release, preservation_path, expected_commit,
+              expected_revision, observed_at=recorded_at, require_workers=False)
+    revision = SQLiteRegistry(database).classify_historical_no_commit_batch(
+        cleanup_id=NO_COMMIT_CLEANUP_ID, targets=NO_COMMIT_CLEANUP,
+        evidence_uri=NO_COMMIT_CLEANUP_EVIDENCE,
+        expected_revision=expected_revision, recorded_at=recorded_at,
+    )
+    verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=recorded_at),
+        preservation_path,
+    )
+    return {
+        "kind": "threadline-factory-no-commit-cleanup", "passed": True,
+        "operation_id": NO_COMMIT_CLEANUP_ID,
+        "retired_package_ids": sorted(key for key, (_, target) in NO_COMMIT_CLEANUP.items() if target == "DONE"),
+        "deferred_package_ids": sorted(key for key, (_, target) in NO_COMMIT_CLEANUP.items() if target == "BLOCKED"),
+        "review_passed": False, "previous_revision": expected_revision, "revision": revision,
+    }
 
 
 def parse_review_outcome_spec(

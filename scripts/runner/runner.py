@@ -724,9 +724,11 @@ def refresh_capacity_observations(registry_control, config, worker, state, usage
     except BlockingIOError:
         return False
     try:
-        collected = registry_control.refresh_configured_capacity(
-            config, busy_workers=(worker,) if worker.startswith('claude') else (),
-        )
+        # A polling lane is not a busy provider.  The Registry collector
+        # excludes workers with an active lease, including this lane once it
+        # has claimed work; excluding Claude merely because Claude is polling
+        # prevents the idle reviewer from ever receiving a local health fact.
+        collected = registry_control.refresh_configured_capacity(config)
         write_collected_usage(usage_path, config, collected)
         for item in collected:
             if item.get('error_class'):
