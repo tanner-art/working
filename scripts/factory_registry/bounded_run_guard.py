@@ -96,6 +96,8 @@ def _primary_failure(state: pathlib.Path, run_id: str, now: datetime,
                      live_since: datetime) -> str | None:
     try:
         heartbeat = json.loads(_heartbeat_path(state, run_id, "primary").read_text(encoding="utf-8"))
+        if not isinstance(heartbeat, dict):
+            return "primary stopper heartbeat unavailable"
         if heartbeat.get("run_id") != run_id or heartbeat.get("role") != "primary":
             return "primary stopper identity mismatch"
         checked_at = _time(heartbeat.get("checked_at"))

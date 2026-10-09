@@ -120,6 +120,44 @@ class BoundedRunGuardTests(unittest.TestCase):
         self.assertIn("primary stopper heartbeat unavailable", record["reason"])
         self.assertEqual(record["action"], "stop-requested")
 
+    def test_non_object_primary_heartbeat_requests_stop_without_crashing(self) -> None:
+        self.enable()
+        path = guard._heartbeat_path(self.state, self.run_id, "primary")
+        for payload in ("null", "[]", '"string"', "17"):
+            with self.subTest(payload=payload):
+                path.write_text(payload, encoding="utf-8")
+                with patch.object(guard, "request_stop", return_value=False) as stopper:
+                    record = self.run_guard("watchdog")
+                self.assertEqual(record["action"], "stop-failed")
+                self.assertEqual(record["reason"], "primary stopper heartbeat unavailable")
+                self.assertEqual(stopper.call_args.args[2], self.run_id)
+
+    def test_live_without_bounded_scope_requests_unscoped_stop(self) -> None:
+        control = self.registry.dispatch_control()
+        self.registry.set_dispatch_control(
+            expected_revision=control["revision"], expected_mode="PAUSED",
+            new_mode="LIVE", kill_switch_engaged=False,
+            changed_at=self.stamp(self.now), reason="missing scope",
+            bounded_run=None,
+        )
+        with patch.object(guard, "request_stop", side_effect=lambda db, why, run_id: (
+            stop(db, why, expected_run_id=run_id) and True
+        )) as stopper:
+            record = self.run_guard()
+        self.assertEqual(record["action"], "stop-requested")
+        self.assertIn("no bounded run scope", record["reason"])
+        self.assertIsNone(stopper.call_args.args[2])
+
+    def test_stopping_is_terminal_for_guard_and_does_not_repeat_stop(self) -> None:
+        self.enable()
+        stop(self.database, "already stopping", expected_run_id=self.run_id)
+        revision = self.registry.dispatch_control()["revision"]
+        with patch.object(guard, "request_stop") as stopper:
+            record = self.run_guard("watchdog")
+        self.assertEqual(record["action"], "standby")
+        stopper.assert_not_called()
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+
     def test_fresh_primary_can_warm_up_but_must_observe_live(self) -> None:
         self.enable()
         self.live_primary_heartbeat(observed_mode="PAUSED")
