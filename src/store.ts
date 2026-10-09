@@ -130,7 +130,31 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
     (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&
-    (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction))
+    (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction)) &&
+    (item.commitmentSetup === undefined || isCommitmentSetupAudit(item.commitmentSetup)) &&
+    (item.commitmentSchedule === undefined || isCommitmentScheduleAudit(item.commitmentSchedule))
+}
+
+function isCommitmentSetupAudit(value: NonNullable<HistoryEvent['commitmentSetup']>): boolean {
+  return !!value && typeof value.title === 'string' && !!value.title.trim() &&
+    (value.date === undefined || validDate(value.date)) &&
+    (value.time === undefined || validTime(value.time)) && !(value.time && !value.date) &&
+    Array.isArray(value.dependencyIds) && value.dependencyIds.every(id => typeof id === 'string' && !!id) &&
+    new Set(value.dependencyIds).size === value.dependencyIds.length && value.source === 'review-commitment-resolution'
+}
+
+function validDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value
+}
+
+function validTime(value: string): boolean {
+  return /^\d{2}:\d{2}$/.test(value) && Number(value.slice(0, 2)) < 24 && Number(value.slice(3, 5)) < 60
+}
+
+function isCommitmentScheduleAudit(value: NonNullable<HistoryEvent['commitmentSchedule']>): boolean {
+  return !!value && typeof value.eventId === 'string' && !!value.eventId && typeof value.startsAt === 'string' &&
+    Number.isFinite(Date.parse(value.startsAt)) && typeof value.temporalContext === 'string' && !!value.temporalContext.trim() &&
+    value.source === 'commitment-calendar-scheduling'
 }
 
 function isReminderInstructionAudit(value: NonNullable<HistoryEvent['reminderInstruction']>): boolean {

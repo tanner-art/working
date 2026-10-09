@@ -167,3 +167,17 @@ describe('interpretation provenance persistence', () => {
     expect(reloaded.state.objects[0].interpretation.method).toBeUndefined()
   })
 })
+
+describe('Commitment audit validation', () => {
+  it('rejects malformed setup and scheduling audit records before they reach persistence', () => {
+    const valid = makeObject({ kind: 'commitment', originalContent: 'Promise', source: 'text', confidence: .6,
+      interpretation: { summary: 'Promise', suggestedKind: 'commitment', rationale: 'r' } })
+    valid.history.push({ at: valid.createdAt, event: 'Set Commitment details', commitmentSetup: { title: 'Promise', time: '09:00', dependencyIds: [], source: 'review-commitment-resolution' } })
+    expect(saveState({ objects: [valid], canvas: [] })).toContain('format is invalid')
+    valid.history.at(-1)!.commitmentSetup = { title: 'Promise', date: '2026-10-02', time: '09:00', dependencyIds: ['x', 'x'], source: 'review-commitment-resolution' }
+    expect(saveState({ objects: [valid], canvas: [] })).toContain('format is invalid')
+    valid.history.at(-1)!.commitmentSetup = { title: 'Promise', date: '2026-10-02', time: '09:00', dependencyIds: [], source: 'review-commitment-resolution' }
+    valid.history.push({ at: valid.createdAt, event: 'Scheduled Commitment CalendarEvent', commitmentSchedule: { eventId: '', startsAt: 'not-an-instant', temporalContext: '', source: 'commitment-calendar-scheduling' } })
+    expect(saveState({ objects: [valid], canvas: [] })).toContain('format is invalid')
+  })
+})

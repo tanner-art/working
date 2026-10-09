@@ -62,6 +62,23 @@ export interface HistoryEvent {
   sourceCorrection?: { correctionId: string; from: string; to: string }
   /** Reminder lifecycle evidence. The instruction itself remains attached to its semantic target. */
   reminderInstruction?: ReminderInstructionAudit
+  /** Explicit obligation details collected by the Commitment Review flow. */
+  commitmentSetup?: CommitmentSetupAudit
+  /** A separately requested CalendarEvent for an already-confirmed Commitment. */
+  commitmentSchedule?: CommitmentScheduleAudit
+}
+export interface CommitmentSetupAudit {
+  title: string
+  date?: string
+  time?: string
+  dependencyIds: string[]
+  source: 'review-commitment-resolution'
+}
+export interface CommitmentScheduleAudit {
+  eventId: string
+  startsAt: string
+  temporalContext: string
+  source: 'commitment-calendar-scheduling'
 }
 /** Executable meaning still awaiting a dedicated confirmation gesture. */
 export interface ProposedAction { summary: string }
