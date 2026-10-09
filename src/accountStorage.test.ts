@@ -8,6 +8,11 @@ import { correctOriginal } from './reviewRevision'
 import { bankObjects, confirmObject, reviewObjects, updateObject } from './objectWorkflow'
 import { addCanvas, createCanvasRecord, LEGACY_CANVAS_ID } from './canvasBank'
 import { emptyGroupingReviewState, persistGroupingProposal } from './groupingProposal'
+import { scheduleStagedAction, stageAction } from './actionStaging'
+import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
+import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
+import { activeTemporalDecisions } from './temporalConfirmation'
+import { confirmedActions } from './objectWorkflow'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -170,6 +175,19 @@ describe('explicit account session', () => {
 describe('guided account merge', () => {
   const thought = (content: string) => makeObject({ kind: 'idea', originalContent: content, source: 'text', confidence: .9,
     interpretation: { summary: content, rationale: 'Explicit', suggestedKind: 'idea' } })
+  const scheduledActionAndReminder = (source: string, mode: 'specific' | 'daily-log') => {
+    const action = { ...thought(`${source} action`), id: `${source}:action`, kind: 'action' as const, status: 'review' as const,
+      interpretation: { summary: `${source} action`, rationale: 'Explicit work', suggestedKind: 'action' as const } }
+    const idea = { ...thought(`${source} idea`), id: `${source}:idea` }
+    const reminder = { ...thought(`${source} reminder`), id: `${source}:reminder`, kind: 'reminder' as const, status: 'review' as const,
+      interpretation: { summary: `${source} reminder`, rationale: 'User requested a reminder', suggestedKind: 'reminder' as const } }
+    let state = legacyUiProjection(accountData({ objects: [action, idea, reminder], canvas: [] }, defaultSettings, { enabled: false }).model)
+    state = { ...state, objects: state.objects.map(item => item.id === action.id ? stageAction(item) : item) }
+    state = scheduleStagedAction(state, action.id, '2026-10-10T09:00:00.000Z', 'UTC')
+    state = resolveReminderInState(state, reminder.id, { targetId: idea.id, mode,
+      ...(mode === 'specific' ? { dueAt: '2026-10-10T08:00:00.000Z' } : {}) })
+    return accountData(state, defaultSettings, { enabled: false })
+  }
 
   it('combines disjoint device histories without mutating either source', () => {
     const macCanvas = { ...createCanvasRecord('2026-09-22T00:00:00.000Z', 'canvas:mac'), title: 'Mac map', elements: [{ id: 'mac-node', type: 'text' as const, x: 1, y: 2 }] }
@@ -199,6 +217,90 @@ describe('guided account merge', () => {
     const conflict = structuredClone(duplicate)
     conflict.model.captures[0] = { ...conflict.model.captures[0], originalContent: 'Changed elsewhere' }
     expect(() => mergeAccountData(account, conflict, { settings: 'account', digest: 'account' })).toThrow('Merge stopped: capture identity')
+  })
+
+  it('imports a scheduled Action and resolved Reminder into an empty account without losing their effects', () => {
+    const device = scheduledActionAndReminder('device', 'daily-log')
+    const before = structuredClone(device)
+    const result = mergeAccountData(payload(), device, { settings: 'account', digest: 'account' })
+    expect(device).toEqual(before)
+    expect(result.data.model.stagedActions).toEqual(device.model.stagedActions)
+    expect(result.data.model.reminderInstructions).toEqual(device.model.reminderInstructions)
+    expect(result.data.model.calendarEvents).toEqual(device.model.calendarEvents)
+    expect(result.data.model.temporalHistory).toEqual(device.model.temporalHistory)
+    expect(activeTemporalDecisions(result.data.model)).toHaveLength(1)
+    expect(dailyLogReminderProjection(result.data.model)).toHaveLength(1)
+    expect(confirmedActions(legacyUiProjection(result.data.model).objects)).toEqual([])
+    expect(result.preview.added.events).toBe(1)
+  })
+
+  it('unions distinct scheduled Actions and both Reminder modes with valid downstream projections', () => {
+    const account = scheduledActionAndReminder('account', 'daily-log')
+    const device = scheduledActionAndReminder('device', 'specific')
+    const before = structuredClone({ account, device })
+    const result = mergeAccountData(account, device, { settings: 'account', digest: 'account' })
+    expect({ account, device }).toEqual(before)
+    expect(result.data.model.stagedActions?.map(item => item.objectId)).toEqual(['account:action', 'device:action'])
+    expect(result.data.model.reminderInstructions?.map(item => item.targetId)).toEqual(['account:idea', 'device:idea'])
+    expect(result.data.model.calendarEvents).toHaveLength(2)
+    expect(activeTemporalDecisions(result.data.model)).toHaveLength(2)
+    expect(dailyLogReminderProjection(result.data.model)).toHaveLength(1)
+    expect(specificReminderProjection(result.data.model, new Date('2026-10-10T10:00:00.000Z'))).toHaveLength(1)
+    expect(result.preview.added.events).toBe(1)
+  })
+
+  it('preserves older device temporal decisions when the account was updated later', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-10-09T08:00:00.000Z'))
+      const device = scheduledActionAndReminder('older-device', 'daily-log')
+      vi.setSystemTime(new Date('2026-10-09T09:00:00.000Z'))
+      const account = scheduledActionAndReminder('newer-account', 'specific')
+      const merged = mergeAccountData(account, device, { settings: 'account', digest: 'account' }).data.model
+      expect(merged.temporalHistory?.map(entry => entry.at)).toEqual([
+        '2026-10-09T08:00:00.000Z', '2026-10-09T09:00:00.000Z',
+      ])
+      expect(activeTemporalDecisions(merged)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('deduplicates identical staged Actions and Reminder instructions and retains optional field presence', () => {
+    const account = scheduledActionAndReminder('shared', 'specific')
+    const result = mergeAccountData(account, structuredClone(account), { settings: 'account', digest: 'account' })
+    expect(result.data.model.stagedActions).toEqual(account.model.stagedActions)
+    expect(result.data.model.reminderInstructions).toEqual(account.model.reminderInstructions)
+    const model = result.data.model
+    expect(result.preview.duplicates).toBe(model.captures.length + model.interpretations.length + model.semanticObjects.length +
+      model.reminderInstructions!.length + model.stagedActions!.length + model.calendarEvents.length + model.relationships.length +
+      model.canvasBank!.canvases.length + model.temporalHistory!.length)
+    const absent = payload()
+    delete absent.model.stagedActions
+    const bothAbsent = mergeAccountData(absent, structuredClone(absent), { settings: 'account', digest: 'account' })
+    expect(bothAbsent.data.model.stagedActions).toBeUndefined()
+    expect(bothAbsent.data.model.reminderInstructions).toBeUndefined()
+    const explicitEmpty = payload()
+    explicitEmpty.model.reminderInstructions = []
+    const withEmpty = mergeAccountData(absent, explicitEmpty, { settings: 'account', digest: 'account' })
+    expect(withEmpty.data.model.stagedActions).toEqual([])
+    expect(withEmpty.data.model.reminderInstructions).toEqual([])
+  })
+
+  it('rejects divergent stable Action and Reminder identities without changing either source', () => {
+    const original = scheduledActionAndReminder('shared', 'daily-log')
+    const projected = legacyUiProjection(original.model)
+    const actionConflict = accountData({ objects: projected.objects.map(item => item.id === 'shared:action' ? {
+      ...item, history: item.history.map(entry => entry.actionStage ? { ...entry, actionStage: { ...entry.actionStage, priority: 5 as const } } : entry),
+    } : item), canvas: [] }, defaultSettings, { enabled: false })
+    const instruction = original.model.reminderInstructions![0]
+    const reminderConflict = accountData(setReminderDeliveryState(legacyUiProjection(original.model), instruction.id, 'handled'),
+      defaultSettings, { enabled: false })
+    for (const divergent of [actionConflict, reminderConflict]) {
+      const before = structuredClone({ original, divergent })
+      expect(() => mergeAccountData(original, divergent, { settings: 'account', digest: 'account' })).toThrow('Merge stopped:')
+      expect({ original, divergent }).toEqual(before)
+    }
   })
 
   it('carries source corrections through merge and deduplicates identical copies', () => {

@@ -88,6 +88,8 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   const interpretations = mergeRecords(account.model.interpretations, device.model.interpretations, 'interpretation')
   const sourceCorrections = mergeRecords(account.model.sourceCorrections ?? [], device.model.sourceCorrections ?? [], 'source correction')
   const semanticObjects = mergeRecords(account.model.semanticObjects, device.model.semanticObjects, 'semantic object')
+  const reminderInstructions = mergeRecords(account.model.reminderInstructions ?? [], device.model.reminderInstructions ?? [], 'reminder instruction')
+  const stagedActions = mergeRecords(account.model.stagedActions ?? [], device.model.stagedActions ?? [], 'staged action')
   const calendarEvents = mergeRecords(account.model.calendarEvents, device.model.calendarEvents, 'calendar event')
   const relationships = mergeRecords(account.model.relationships, device.model.relationships, 'relationship')
   const canvasBank = mergeCanvasBanks(
@@ -95,6 +97,9 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     device.model.canvasBank ?? bankFromLegacy(device.model.canvas, device.model.canvasViewport),
   )
   const temporalHistory = mergeRecords(account.model.temporalHistory ?? [], device.model.temporalHistory ?? [], 'temporal decision')
+  // Each source is chronological; the union must be chronological too, even when the
+  // device recorded an older decision than the account's latest decision.
+  const mergedTemporalHistory = temporalHistory.merged.sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
   const groupingProposals = mergeRecords(account.model.groupingReview?.proposals ?? [], device.model.groupingReview?.proposals ?? [], 'grouping proposal')
   const groupingRelationships = mergeRecords(account.model.groupingReview?.relationships ?? [], device.model.groupingReview?.relationships ?? [], 'grouping relationship')
   const groupingHistory = mergeRecords(account.model.groupingReview?.history ?? [], device.model.groupingReview?.history ?? [], 'grouping decision')
@@ -112,6 +117,8 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     ...(sourceCorrections.merged.length ? { sourceCorrections: sourceCorrections.merged } : {}),
     interpretations: interpretations.merged,
     semanticObjects: semanticObjects.merged,
+    ...(account.model.reminderInstructions !== undefined || device.model.reminderInstructions !== undefined ? { reminderInstructions: reminderInstructions.merged } : {}),
+    ...(account.model.stagedActions !== undefined || device.model.stagedActions !== undefined ? { stagedActions: stagedActions.merged } : {}),
     calendarEvents: calendarEvents.merged,
     relationships: relationships.merged,
     legacyUiIds,
@@ -119,7 +126,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     canvas: structuredClone(account.model.canvas),
     ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
     canvasBank: canvasBank.merged,
-    ...(temporalHistory.merged.length ? { temporalHistory: temporalHistory.merged } : {}),
+    ...(mergedTemporalHistory.length ? { temporalHistory: mergedTemporalHistory } : {}),
     ...(groupingReview ? { groupingReview } : {}),
   }
   const data = validateData({
@@ -136,7 +143,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
         canvases: canvasBank.added,
         events: calendarEvents.added,
       },
-      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates + groupingProposals.duplicates + groupingRelationships.duplicates + groupingHistory.duplicates,
+      duplicates: captures.duplicates + sourceCorrections.duplicates + interpretations.duplicates + semanticObjects.duplicates + reminderInstructions.duplicates + stagedActions.duplicates + calendarEvents.duplicates + relationships.duplicates + canvasBank.duplicates + temporalHistory.duplicates + groupingProposals.duplicates + groupingRelationships.duplicates + groupingHistory.duplicates,
       settings: choices.settings,
       digest: choices.digest,
     },
