@@ -389,17 +389,60 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
             and _iso(attempt.get("ended_at")) is not None
             and _iso(attempt.get("ended_at")) <= requested_at
         ]
-        if not completed_implementations:
-            raise ControlCenterProjectionError("structured review implementer provenance is missing")
-        actual_implementation = max(
-            completed_implementations,
-            key=lambda attempt: (
-                str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
-                str(attempt.get("id")),
-            ),
-        )
-        if actual_implementation.get("worker_id") != implementer:
-            raise ControlCenterProjectionError("structured review implementer is invalid")
+        external_inputs = [
+            item for item in snapshot.evidence
+            if item.get("package_id") == review_package_id
+            and item.get("kind") == "review-input"
+            and _mapping(item.get("metadata")).get("external_integration") is not None
+        ]
+        external_input = None
+        if external_inputs:
+            if len(external_inputs) != 1 or completed_implementations:
+                raise ControlCenterProjectionError("structured external review provenance is invalid")
+            external_input = external_inputs[0]
+            input_metadata = _mapping(external_input.get("metadata"))
+            external = _mapping(input_metadata.get("external_integration"))
+            reconciliations = [
+                item for item in snapshot.historical_reconciliations
+                if item.get("id") == external.get("id") and item.get("package_id") == target_id
+            ]
+            if (
+                len(target_attempts) != 1
+                or target_attempts[0].get("worker_id") != implementer
+                or target_attempts[0].get("outcome") not in {"FAILED", "BLOCKED"}
+                or _iso(target_attempts[0].get("ended_at")) is None
+                or str(_iso(target_attempts[0].get("ended_at"))) > requested_at
+                or _iso(external_input.get("recorded_at")) != requested_at
+                or input_metadata.get("target_package_id") != target_id
+                or input_metadata.get("implementation_attempt_id") != f"external-integration:{external.get('id')}"
+                or external.get("implementer_worker_id") != implementer
+                or not isinstance(input_metadata.get("implementation_commit"), str)
+                or not isinstance(input_metadata.get("base_commit"), str)
+                or len(reconciliations) != 1
+            ):
+                raise ControlCenterProjectionError("structured external review provenance is invalid")
+            historical = reconciliations[0]
+            if (
+                historical.get("disposition") != "INTEGRATED_ELSEWHERE"
+                or historical.get("historical_commit") != input_metadata.get("implementation_commit")
+                or historical.get("integration_commit") != external.get("integration_commit")
+                or historical.get("repository_head") != external.get("repository_head")
+                or historical.get("evidence_uri") != external_input.get("uri")
+                or external.get("historical_commit") != input_metadata.get("implementation_commit")
+            ):
+                raise ControlCenterProjectionError("structured external review provenance is invalid")
+        else:
+            if not completed_implementations:
+                raise ControlCenterProjectionError("structured review implementer provenance is missing")
+            actual_implementation = max(
+                completed_implementations,
+                key=lambda attempt: (
+                    str(_iso(attempt.get("ended_at"))), str(_iso(attempt.get("started_at"))),
+                    str(attempt.get("id")),
+                ),
+            )
+            if actual_implementation.get("worker_id") != implementer:
+                raise ControlCenterProjectionError("structured review implementer is invalid")
         if any(attempt.get("worker_id") == reviewer for attempt in target_attempts):
             raise ControlCenterProjectionError("structured review independence is invalid")
         if any(
@@ -445,6 +488,13 @@ def _project_reviews(snapshot: ControlCenterReadSnapshot) -> list[dict[str, Any]
                 or str(_iso(item.get("recorded_at"))) > decided_at
             ):
                 raise ControlCenterProjectionError("structured review evidence is missing")
+            if external_input is not None and (
+                metadata.get("review_input_evidence_id") != external_input.get("id")
+                or metadata.get("reviewed_commit") != input_metadata.get("implementation_commit")
+                or metadata.get("reviewed_base_commit") != input_metadata.get("base_commit")
+                or metadata.get("contract_sha256") != input_metadata.get("contract_sha256")
+            ):
+                raise ControlCenterProjectionError("structured external review evidence is invalid")
             approval_evidence.append(_evidence(item))
         reviews.append({
             "id": str(outcome.get("id", "")),
