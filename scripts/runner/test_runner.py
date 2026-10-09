@@ -1228,6 +1228,7 @@ class LifecycleTests(unittest.TestCase):
             registry = Mock()
             registry.registry.dispatch_control.return_value = {'bounded_run': {}}
             registry.bounded_source_issues.return_value = (1,)
+            registry.advance_bounded_reviews.return_value = ()
             registry.proposed_worker.return_value = 'codex-a'
             registry.review_input.side_effect = RegistryConflict('REVIEW_PACKET_REQUIRED')
 

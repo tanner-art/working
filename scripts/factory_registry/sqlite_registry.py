@@ -748,18 +748,58 @@ class SQLiteRegistry:
                     ).fetchone()[0])
                     scope = _bounded_run_scope(bounded_run, active_parent_limit=limit)
                     if scope is not None:
-                        known = {
-                            item["id"] for item in connection.execute(
-                                "SELECT id FROM work_packages WHERE status='READY'"
-                            ).fetchall()
-                        }
-                        if not set(scope["package_ids"]).issubset(known):
-                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
                         scoped = connection.execute(
-                            "SELECT id, kind FROM work_packages WHERE id IN ("
+                            "SELECT id, kind, status, source_system, source_ref, "
+                            "provider_diagnostics_json FROM work_packages WHERE id IN ("
                             + ",".join("?" for _ in scope["package_ids"]) + ")",
                             tuple(scope["package_ids"]),
                         ).fetchall()
+                        if len(scoped) != len(scope["package_ids"]):
+                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
+                        waiting_reviews = [row for row in scoped if row["status"] == "ON_DECK"]
+                        if any(row["status"] not in {"READY", "ON_DECK"} for row in scoped):
+                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
+                        if waiting_reviews:
+                            # An ON_DECK entry is authorization for a later
+                            # review, not permission to claim it now. Legacy
+                            # and dependent implementation rows cannot enter
+                            # this progression envelope.
+                            by_id = {row["id"]: row for row in scoped}
+                            if not any(row["kind"] == "PARENT" and row["status"] == "READY"
+                                       for row in scoped):
+                                raise RegistryConflict("RUN_READY_ROOT_REQUIRED")
+                            for row in scoped:
+                                diagnostics = json.loads(row["provider_diagnostics_json"])
+                                if (row["kind"] not in {"PARENT", "REVIEW"}
+                                        or diagnostics.get("readiness_schema_version") != 2
+                                        or row["source_system"] != "github_issue"
+                                        or not isinstance(row["source_ref"], str)
+                                        or not row["source_ref"].isdigit()):
+                                    raise RegistryConflict("RUN_V2_PAIR_REQUIRED", row["id"])
+                                self._require_ready_row_contract(connection, row["id"])
+                                dependencies = connection.execute(
+                                    "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                                    (row["id"],),
+                                ).fetchall()
+                                if row["kind"] == "PARENT":
+                                    if row["status"] != "READY" or dependencies:
+                                        raise RegistryConflict("RUN_INDEPENDENT_ROOT_REQUIRED", row["id"])
+                                elif (row["status"] != "ON_DECK"
+                                      or len(dependencies) != 1
+                                      or dependencies[0]["dependency_id"] not in by_id
+                                      or by_id[dependencies[0]["dependency_id"]]["kind"] != "PARENT"):
+                                    raise RegistryConflict("RUN_REVIEW_PAIR_REQUIRED", row["id"])
+                            review_targets = [
+                                connection.execute(
+                                    "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                                    (row["id"],),
+                                ).fetchone()["dependency_id"]
+                                for row in scoped if row["kind"] == "REVIEW"
+                            ]
+                            if (len(review_targets) != len(set(review_targets))
+                                    or {row["id"] for row in scoped if row["kind"] == "PARENT"}
+                                    != set(review_targets)):
+                                raise RegistryConflict("RUN_REVIEW_PAIR_REQUIRED")
                         if scoped and all(row["kind"] == "REVIEW" for row in scoped):
                             for row in scoped:
                                 target = connection.execute(
@@ -3396,6 +3436,94 @@ class SQLiteRegistry:
             reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
         return tuple(sorted(set(reasons)))
 
+    def promote_bounded_review(
+        self, review_package_id: str, *, expected_revision: int,
+        expected_run_id: str, expected_contract_sha256: str,
+        changed_at: str,
+    ) -> int:
+        """CAS-promote one pre-authorized review; never unlock a successor parent.
+
+        The caller verifies the exact GitHub contract, pinned Git tree, CI and
+        reviewer pairing against the snapshot at expected_revision. This
+        transaction rejects any intervening Registry change and rechecks the
+        authoritative run, dependency, and immutable input before publication.
+        """
+        changed_at = _normalize_timestamp(changed_at)
+        operation_id = (
+            f"bounded-review-ready:{expected_run_id}:{review_package_id}:"
+            f"{expected_contract_sha256}:{expected_revision}"
+        )
+        request = {
+            "review_package_id": review_package_id,
+            "expected_revision": expected_revision,
+            "expected_run_id": expected_run_id,
+            "expected_contract_sha256": expected_contract_sha256,
+        }
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if (control is None or control["dispatch_mode"] != "LIVE"
+                        or control["kill_switch_engaged"]):
+                    raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                scope = self._assert_scope_membership(connection, review_package_id, changed_at)
+                if scope is None or scope["run_id"] != expected_run_id:
+                    raise RegistryConflict("RUN_SCOPE_CHANGED")
+                package = connection.execute(
+                    "SELECT feature_id, kind, status, source_system, source_ref, "
+                    "provider_diagnostics_json FROM work_packages WHERE id=?",
+                    (review_package_id,),
+                ).fetchone()
+                if package is None or package["kind"] != "REVIEW" or package["status"] != "ON_DECK":
+                    raise RegistryConflict("REVIEW_NOT_ON_DECK", review_package_id)
+                diagnostics = json.loads(package["provider_diagnostics_json"])
+                if (diagnostics.get("readiness_schema_version") != 2
+                        or diagnostics.get("queue_contract_sha256") != expected_contract_sha256
+                        or package["source_system"] != "github_issue"
+                        or not str(package["source_ref"] or "").isdigit()):
+                    raise RegistryConflict("REVIEW_CONTRACT_CHANGED", review_package_id)
+                feature_id = self._require_ready_row_contract(connection, review_package_id)
+                reasons = self._review_readiness_reasons(connection, review_package_id)
+                if reasons:
+                    raise RegistryConflict("REVIEW_NOT_READY", ",".join(reasons))
+                self._promote_feature_for_ready_package(connection, feature_id, changed_at)
+                connection.execute(
+                    "UPDATE work_packages SET status='READY', ready_at=?, updated_at=? WHERE id=?",
+                    (changed_at, changed_at, review_package_id),
+                )
+                self._insert_event(
+                    connection, "BOUNDED_REVIEW_READY", changed_at,
+                    review_package_id, None, None,
+                    {"run_id": expected_run_id, "queue_contract_sha256": expected_contract_sha256},
+                )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                    result={"revision": revision}, recorded_at=changed_at,
+                )
+                connection.commit()
+                return revision
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                    error=error, recorded_at=changed_at,
+                )
+                raise
+
     @staticmethod
     def _expire_leases(connection: sqlite3.Connection, now: str) -> int:
         expired = connection.execute(
@@ -5580,7 +5708,7 @@ class SQLiteRegistry:
                     connection, item["id"]
                 )}
                 if (item["kind"] == PackageKind.REVIEW.value
-                    and item["status"] == TaskStatus.READY.value
+                    and item["status"] in {TaskStatus.ON_DECK.value, TaskStatus.READY.value}
                     and item["provider_diagnostics"].get("readiness_schema_version") == 2)
                 else item
                 for item in control_packages

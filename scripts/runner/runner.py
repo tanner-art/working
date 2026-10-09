@@ -1373,6 +1373,20 @@ def main():
         state, stale_claim_seconds,
         close_disappeared_registry_attempt if registry_control is not None else None,
     )
+    if bounded_registry_mode:
+        def verified_review_contract(issue):
+            if issue['author']['login'] not in c['allowed_authors']:
+                raise ValueError('Queue issue requires an allowed author')
+            return normalized_contract(issue)
+
+        for result in registry_control.advance_bounded_reviews(
+            issues,
+            normalize_contract=verified_review_contract,
+            source_is_green=lambda review_input: review_source_is_green(
+                github, c['github'], review_input,
+            ),
+        ):
+            print(json.dumps({'review_progress': result}))
     for issue in sorted(issues,key=lambda i:i['number']):
         n=issue['number']; record=state/f'issue-{n}.json'; data=None
         body={}; agent=None

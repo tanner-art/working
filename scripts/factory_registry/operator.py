@@ -24,7 +24,7 @@ from contextlib import contextmanager
 
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
-from scripts.runner.task_readiness import contract_shape_reasons, registration_proof
+from scripts.runner.task_readiness import contract_shape_reasons, ready_contract_reasons, registration_proof
 
 from .models import (
     DispatchSnapshot,
@@ -2185,6 +2185,30 @@ def bounded_run_worker_gate(
     run_packages = tuple(item for item in snapshot.work_packages if item.get("id") in allowed)
     if {str(item.get("id")) for item in run_packages} != allowed:
         raise OperatorError("bounded run package allowlist is not registered READY work")
+    waiting_reviews = tuple(item for item in run_packages if item.get("status") == "ON_DECK")
+    if waiting_reviews:
+        # Stage A authorizes only independently runnable, pre-pinned v2 roots
+        # and their waiting reviews. Dependencies on another implementation
+        # require verified merge provenance and a separately versioned packet.
+        if (any(item.get("kind") != "REVIEW" for item in waiting_reviews)
+                or not any(item.get("kind") == "PARENT" and item.get("status") == "READY"
+                           for item in run_packages)):
+            raise OperatorError("bounded progression requires READY implementation roots and ON_DECK reviews")
+        for item in run_packages:
+            diagnostics = item.get("provider_diagnostics") or {}
+            if (item.get("kind") not in {"PARENT", "REVIEW"}
+                    or diagnostics.get("readiness_schema_version") != 2
+                    or ready_contract_reasons(item)
+                    or item.get("source_system") != "github_issue"
+                    or not str(item.get("source_ref") or "").isdigit()):
+                raise OperatorError(f"bounded progression requires pinned v2 source: {item.get('id')}")
+            if item.get("kind") == "PARENT" and (
+                item.get("status") != "READY"
+                or any(edge.get("package_id") == item.get("id") for edge in snapshot.dependencies)
+            ):
+                raise OperatorError(f"bounded progression requires independent READY root: {item.get('id')}")
+            if item.get("kind") == "REVIEW" and item.get("status") != "ON_DECK":
+                raise OperatorError(f"bounded progression requires waiting review: {item.get('id')}")
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
     review_only = not parents
