@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from scripts.factory_registry.operator import (  # noqa: E402
     OperatorError,
     canary_worker_gate,
+    classify_approved_no_commit_batch,
     enable_live,
     followup_review_worker_gate,
     migrate_registry_v3_to_v4,
@@ -116,6 +117,13 @@ def _parser() -> argparse.ArgumentParser:
     command = subparsers.add_parser(
         "reconcile-historical-package",
         help="Retire an integrated or superseded historical package with exact Git ancestry evidence",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser(
+        "classify-approved-no-commit-batch",
+        help="Apply the exact owner-approved no-commit historical cleanup",
     )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
@@ -538,6 +546,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.database, args.config, args.release, args.preservation,
             args.release_commit, args.expect_revision,
             _load_object(args.spec, "historical reconciliation spec"),
+        ))
+    if args.command == "classify-approved-no-commit-batch":
+        return dict(classify_approved_no_commit_batch(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "no-commit cleanup spec"),
         ))
     if args.command == "stop":
         return dict(stop(args.database, args.reason, expected_run_id=args.run_id))
