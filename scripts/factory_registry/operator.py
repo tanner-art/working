@@ -450,6 +450,46 @@ def verify_preservation(
                 "preservation_import_id": import_id,
             },
         }
+    # The preservation snapshot pins the imported identity and original state.
+    # A reviewed, append-only reconciliation may retire that state later; require
+    # its exact Registry record and matching event before accepting DONE.
+    reconciliations = {
+        str(item.get("package_id")): item
+        for item in registry_snapshot.historical_reconciliations
+    }
+    for task_id, preserved in expected_packages.items():
+        record = reconciliations.get(task_id)
+        if record is None:
+            continue
+        request = {
+            key: record.get(key) for key in (
+                "id", "package_id", "disposition", "historical_commit",
+                "integration_commit", "repository_head", "evidence_uri",
+            )
+        }
+        events = [
+            event for event in registry_snapshot.events
+            if event.get("event_type") == "HISTORICAL_PACKAGE_RECONCILED"
+            and event.get("package_id") == task_id
+        ]
+        valid = (
+            preserved["status"] in {"ON_DECK", "READY", "VERIFY_REVIEW", "BLOCKED"}
+            and record.get("disposition") in {"INTEGRATED_ELSEWHERE", "SUPERSEDED"}
+            and all(re.fullmatch(r"[0-9a-f]{40,64}", str(record.get(key, "")))
+                    for key in ("historical_commit", "integration_commit", "repository_head"))
+            and isinstance(record.get("evidence_uri"), str)
+            and bool(record["evidence_uri"])
+            and len(events) == 1
+            and events[0].get("recorded_at") == record.get("recorded_at")
+            and all((events[0].get("detail") or {}).get(key) == value
+                    for key, value in request.items())
+            and (events[0].get("detail") or {}).get("previous_status") == preserved["status"]
+            and (events[0].get("detail") or {}).get("review_passed") is False
+        )
+        if not valid:
+            mismatches.setdefault("invalid_historical_reconciliations", []).append(task_id)
+            continue
+        preserved["status"] = "DONE"
     actual_packages = {
         str(item.get("id")): {
             key: item.get(key)
