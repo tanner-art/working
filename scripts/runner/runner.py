@@ -724,9 +724,11 @@ def refresh_capacity_observations(registry_control, config, worker, state, usage
     except BlockingIOError:
         return False
     try:
-        collected = registry_control.refresh_configured_capacity(
-            config, busy_workers=(worker,) if worker.startswith('claude') else (),
-        )
+        # A polling lane is not a busy provider.  The Registry collector
+        # excludes workers with an active lease, including this lane once it
+        # has claimed work; excluding Claude merely because Claude is polling
+        # prevents the idle reviewer from ever receiving a local health fact.
+        collected = registry_control.refresh_configured_capacity(config)
         write_collected_usage(usage_path, config, collected)
         for item in collected:
             if item.get('error_class'):
@@ -1371,6 +1373,20 @@ def main():
         state, stale_claim_seconds,
         close_disappeared_registry_attempt if registry_control is not None else None,
     )
+    if bounded_registry_mode:
+        def verified_review_contract(issue):
+            if issue['author']['login'] not in c['allowed_authors']:
+                raise ValueError('Queue issue requires an allowed author')
+            return normalized_contract(issue)
+
+        for result in registry_control.advance_bounded_reviews(
+            issues,
+            normalize_contract=verified_review_contract,
+            source_is_green=lambda review_input: review_source_is_green(
+                github, c['github'], review_input,
+            ),
+        ):
+            print(json.dumps({'review_progress': result}))
     for issue in sorted(issues,key=lambda i:i['number']):
         n=issue['number']; record=state/f'issue-{n}.json'; data=None
         body={}; agent=None

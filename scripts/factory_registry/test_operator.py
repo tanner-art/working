@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -692,6 +693,41 @@ class OperatorFixture(unittest.TestCase):
             }
         }
 
+    def test_followup_review_cli_uses_exact_reviewer_gate_without_implementation_front(self):
+        """A review-only retry must not require a new implementation worker."""
+        spec_path = self.root / "review-only-followup.json"
+        spec_path.write_text(json.dumps(self.followup_review()))
+        review = parse_followup_review_spec(self.followup_review())
+        def preflight_review_only(**kwargs):
+            if kwargs.get("require_workers"):
+                raise OperatorError("no eligible implementation worker")
+            return {"passed": True}
+        output, errors = StringIO(), StringIO()
+        with mock.patch(
+            "scripts.factory_registry.operator_cli.preflight",
+            side_effect=preflight_review_only,
+        ) as preflight_gate, mock.patch(
+            "scripts.factory_registry.operator_cli.prepare_ready_package",
+            return_value=review,
+        ), mock.patch(
+            "scripts.factory_registry.operator_cli.SQLiteRegistry",
+        ) as registry, mock.patch(
+            "scripts.factory_registry.operator_cli.followup_review_worker_gate",
+            return_value={"independent_pairs": [["codex-a", "claude"]]},
+        ) as reviewer_gate, redirect_stdout(output), redirect_stderr(errors):
+            registry.return_value.successful_package_worker.return_value = "codex-a"
+            registry.return_value.register_followup_review.return_value = 12
+            self.assertEqual(operator_main([
+                "register-followup-review", "--database", str(self.database),
+                "--config", str(self.config_path), "--release", str(self.release),
+                "--release-commit", COMMIT, "--preservation", str(self.preservation),
+                "--expect-revision", "11", "--spec", str(spec_path),
+            ]), 0, errors.getvalue())
+        self.assertTrue(preflight_gate.called)
+        self.assertNotIn("require_workers", preflight_gate.call_args.kwargs)
+        reviewer_gate.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue())["review_package_id"], "TASK-203")
+
     def test_telemetry_canary_and_worker_gate_are_revision_checked(self):
         now = utc_now()
         self.sync_workers(now)
@@ -882,6 +918,7 @@ class OperatorFixture(unittest.TestCase):
         )
         source = self.root / "approved-preservation.json"
         source.write_bytes(self.preservation.read_bytes())
+        source.chmod(0o644)
         harden_paths(self.database, self.config_path, self.release)
         revision = self.registry.dispatch_control()["revision"]
         with self.assertRaisesRegex(OperatorError, "0600"):
@@ -1130,6 +1167,111 @@ class OperatorFixture(unittest.TestCase):
             ).fetchone()[0], "INTEGRATED_ELSEWHERE")
             with self.assertRaisesRegex(sqlite3.IntegrityError, "APPEND_ONLY"):
                 connection.execute("DELETE FROM historical_package_reconciliations WHERE id='historical-cli'")
+
+    def test_no_commit_cleanup_is_atomic_audited_and_replay_safe(self):
+        self.registry.register_feature(Feature("HISTORY", "History", 1, TaskStatus.READY))
+        targets = operator_module.NO_COMMIT_CLEANUP
+        for package_id, (previous, _) in targets.items():
+            self.registry.register_work_package(WorkPackage(
+                package_id, "HISTORY", package_id, "OPERATIONS", Lane.PLATFORM,
+                ("registry",), 1, ("historical",), status=TaskStatus(previous),
+            ))
+        before = self.registry.dispatch_control()["revision"]
+        revision = self.registry.classify_historical_no_commit_batch(
+            cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID, targets=targets,
+            evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+            expected_revision=before, recorded_at=utc_now(),
+        )
+        self.assertEqual(revision, before + 1)
+        snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
+        statuses = {item["id"]: item["status"] for item in snapshot.work_packages}
+        self.assertEqual({key: statuses[key] for key in targets},
+                         {key: target for key, (_, target) in targets.items()})
+        events = [item for item in snapshot.events
+                  if item["event_type"] == "HISTORICAL_NO_COMMIT_CLASSIFIED"]
+        self.assertEqual(len(events), len(targets))
+        self.assertTrue(all(item["detail"]["review_passed"] is False for item in events))
+        self.assertEqual(self.registry.classify_historical_no_commit_batch(
+            cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID, targets=targets,
+            evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+            expected_revision=before, recorded_at=utc_now(),
+        ), revision)
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with self.assertRaisesRegex(RegistryConflict, "OPERATION_ID_REUSED"):
+            self.registry.classify_historical_no_commit_batch(
+                cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID,
+                targets={"TASK-102": ("ON_DECK", "BLOCKED")},
+                evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+                expected_revision=revision, recorded_at=utc_now(),
+            )
+
+    def test_no_commit_cleanup_rejects_unexpected_provenance_before_any_write(self):
+        self.registry.register_feature(Feature("HISTORY", "History", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-102", "HISTORY", "old", "OPERATIONS", Lane.PLATFORM,
+            ("registry",), 1, ("historical",), status=TaskStatus.ON_DECK,
+        ))
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE work_packages SET pr_url='https://github.com/owner/repo/pull/1' WHERE id='TASK-102'")
+        before = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "NO_COMMIT_PACKAGE_CHANGED"):
+            self.registry.classify_historical_no_commit_batch(
+                cleanup_id="proof", targets={"TASK-102": ("ON_DECK", "DONE")},
+                evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+                expected_revision=before, recorded_at=utc_now(),
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], before)
+
+    def test_preservation_accepts_only_audited_retirement_on_next_verification(self):
+        database = self.root / "preserved-reconciliation.sqlite3"
+        registry = SQLiteRegistry(database)
+        registry.initialize()
+        source = json.loads(self.preservation.read_text())
+        source["open_task_mapping"] = [
+            {"issue": 101, "task": "TASK-PRESERVED", "title": "Preserved task", "status": "BLOCKED"},
+            {"issue": 102, "task": "TASK-NEXT", "title": "Another preserved task", "status": "ON DECK"},
+        ]
+        preservation = self.root / "preserved-reconciliation.json"
+        preservation.write_text(json.dumps(source, sort_keys=True))
+        preservation.chmod(0o600)
+        digest = hashlib.sha256(preservation.read_bytes()).hexdigest()
+        registry.import_preservation_snapshot(
+            source, source_uri=str(preservation), source_sha256=digest,
+            imported_at="2026-09-25T08:00:00Z",
+        )
+        observed_at = "2026-09-28T11:00:01Z"
+        with mock.patch.object(operator_module, "APPROVED_PRESERVATION_SHA256", digest):
+            before = registry.control_center_snapshot(observed_at=observed_at)
+            verify_preservation(before, preservation)
+            revision = registry.reconcile_historical_package(
+                reconciliation_id="preserved-retirement", package_id="TASK-PRESERVED",
+                disposition="SUPERSEDED", historical_commit="b" * 40,
+                integration_commit="c" * 40, repository_head="c" * 40,
+                evidence_uri="https://github.com/example/repo/issues/1#issuecomment-2",
+                expected_revision=before.revision, recorded_at=observed_at,
+            )
+            after = registry.control_center_snapshot(observed_at=observed_at)
+            self.assertEqual(after.revision, revision)
+            self.assertEqual(verify_preservation(after, preservation)["tasks"], 2)
+            self.assertEqual(
+                {item["id"]: item["status"] for item in after.work_packages}
+                ["TASK-PRESERVED"], "DONE",
+            )
+            without_event = replace(after, events=tuple(
+                event for event in after.events
+                if event["event_type"] != "HISTORICAL_PACKAGE_RECONCILED"
+            ))
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(without_event, preservation)
+            without_record = replace(after, historical_reconciliations=())
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(without_record, preservation)
+            altered = replace(after, work_packages=tuple(
+                {**item, "title": "Changed identity"} if item["id"] == "TASK-PRESERVED" else item
+                for item in after.work_packages
+            ))
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(altered, preservation)
 
     def test_reviewed_registry_v5_migration_preserves_v4_history(self):
         self.registry.register_feature(

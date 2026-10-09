@@ -313,3 +313,4 @@ class ControlCenterReadSnapshot:
     events: tuple[Mapping[str, Any], ...]
     preservation_imports: tuple[Mapping[str, Any], ...]
     preserved_artifacts: tuple[Mapping[str, Any], ...]
+    historical_reconciliations: tuple[Mapping[str, Any], ...] = ()

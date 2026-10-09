@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -24,7 +25,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome, TaskStatus  # noqa: E402
 from scripts.factory_registry.repository import RegistryConflict  # noqa: E402
-from scripts.factory_registry.shadow_dispatch import decide_shadow  # noqa: E402
+from scripts.factory_registry.shadow_dispatch import ShadowDispatchError, decide_shadow  # noqa: E402
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry  # noqa: E402
 from scripts.factory_registry.codex_capacity import (  # noqa: E402
     collect_rate_limits, normalize_buckets, share_buckets,
@@ -215,6 +216,117 @@ class RunnerRegistryControl:
         snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
         scope = self.registry.dispatch_control().get("bounded_run")
         return scope_dispatch_snapshot(snapshot, scope["package_ids"], scope["parent_limit"]) if scope else snapshot
+
+    def advance_bounded_reviews(self, issues, *, normalize_contract, source_is_green):
+        """Advance only exact, pre-authorized ON_DECK reviews during LIVE.
+
+        One deferred review never suppresses another independent pair. The
+        Registry performs the final compare-and-swap after this read-only Git,
+        source, capacity, and reviewer-separation evaluation.
+        """
+        control = self.registry.dispatch_control()
+        scope = control.get("bounded_run")
+        if control["dispatch_mode"] != "LIVE" or control["kill_switch_engaged"] or not scope:
+            return ()
+        issue_by_number = {int(issue["number"]): issue for issue in issues}
+        results = []
+        for package_id in scope["package_ids"]:
+            observed_at = utc_now()
+            snapshot = self.registry.dispatch_snapshot(observed_at=observed_at)
+            package = next((item for item in snapshot.work_packages
+                            if item.get("id") == package_id), None)
+            if package is None or package.get("status") != "ON_DECK":
+                continue
+            if package.get("kind") != "REVIEW":
+                results.append({"package_id": package_id, "state": "WAITING",
+                                "reasons": ("UNSUPPORTED_ON_DECK_KIND",)})
+                continue
+            reasons = []
+            if observed_at >= scope["deadline"]:
+                reasons.append("RUN_DEADLINE_EXPIRED")
+            source_ref = package.get("source_ref")
+            if (package.get("source_system") != "github_issue"
+                    or not str(source_ref or "").isdigit()):
+                reasons.append("GITHUB_SOURCE_MISMATCH")
+                issue = None
+            else:
+                issue = issue_by_number.get(int(source_ref))
+                if issue is None:
+                    reasons.append("GITHUB_SOURCE_UNAVAILABLE")
+            contract = None
+            if issue is not None:
+                try:
+                    contract = normalize_contract(issue)
+                except (ValueError, KeyError, TypeError):
+                    reasons.append("QUEUE_CONTRACT_INVALID")
+            if contract is not None:
+                if contract.get("task") != package_id:
+                    reasons.append("QUEUE_CONTRACT_MISMATCH")
+                try:
+                    readiness = check_packet(
+                        contract, repository=self.repository,
+                        run_base=scope["base_ref"], package=package,
+                        snapshot=snapshot, github_issue=int(source_ref),
+                    )
+                except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+                    # A failed contract read blocks only this review. Registry
+                    # conflicts and programming errors remain visible to the
+                    # runner rather than being mistaken for a ready packet.
+                    reasons.append("QUEUE_CONTRACT_UNAVAILABLE")
+                else:
+                    if readiness.state != "READY":
+                        reasons.extend(readiness.reasons)
+            review_input = None
+            if not reasons:
+                try:
+                    review_input = self.review_input(package_id)
+                    implementer = self.registry.review_implementer_worker(package_id)
+                    if not source_is_green(review_input):
+                        reasons.append("REVIEW_SOURCE_OR_CI_NOT_GREEN")
+                except (RegistryConflict, OSError, ValueError, KeyError, TypeError) as error:
+                    reasons.append(getattr(error, "code", "REVIEW_SOURCE_UNAVAILABLE"))
+            if not reasons and utc_now() >= scope["deadline"]:
+                reasons.append("RUN_DEADLINE_EXPIRED")
+            if not reasons:
+                candidate = replace(snapshot, work_packages=tuple(
+                    {**item, "status": "READY"} if item.get("id") == package_id else item
+                    for item in snapshot.work_packages
+                ))
+                candidate = scope_dispatch_snapshot(
+                    candidate, scope["package_ids"], scope["parent_limit"]
+                )
+                try:
+                    decision = decide_shadow(candidate)
+                except ShadowDispatchError:
+                    reasons.append("SCHEDULER_INPUT_INVALID")
+                else:
+                    proposed = {item.worker_id for item in decision.proposed_assignments
+                                if item.package_id == package_id}
+                    if not any(worker != implementer for worker in proposed):
+                        reasons.extend(reason.code for reason in decision.global_rejections)
+                        reasons.extend(reason.code for pair in decision.pair_evaluations
+                                       if pair.package_id == package_id
+                                       for reason in pair.reasons)
+                        if not reasons:
+                            reasons.append("INDEPENDENT_REVIEWER_OR_CAPACITY_UNAVAILABLE")
+            if not reasons:
+                promotion_at = utc_now()
+                if promotion_at >= scope["deadline"]:
+                    reasons.append("RUN_DEADLINE_EXPIRED")
+            if not reasons:
+                try:
+                    self.registry.promote_bounded_review(
+                        package_id, expected_revision=snapshot.revision,
+                        expected_run_id=scope["run_id"],
+                        expected_contract_sha256=queue_contract_digest(contract),
+                        changed_at=promotion_at,
+                    )
+                except RegistryConflict as error:
+                    reasons.append(error.code)
+            results.append({"package_id": package_id,
+                            "state": "WAITING" if reasons else "READY",
+                            "reasons": tuple(sorted(set(reasons)))})
+        return tuple(results)
 
     def bounded_source_issues(self) -> tuple[int, ...]:
         """Return explicitly registered GitHub issue references for this run."""

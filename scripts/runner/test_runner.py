@@ -19,7 +19,7 @@ from runner import (build_agent_environment, build_agent_prompt, build_review_pr
                     usage_policy_enabled, review_source_is_green)
 from usage_policy import worker_state
 from scripts.factory_registry.repository import RegistryConflict
-from registry_control import queue_contract_digest
+from registry_control import RunnerRegistryControl, queue_contract_digest
 class QueueTests(unittest.TestCase):
     def issue(self,body=None):
         return {'author':{'login':'owner'},'labels':[{'name':'agent:codex-a'}], 'body':body or '{"task":"TASK-015","paths":["docs/example.md"],"instructions":"Write a note"}'}
@@ -419,6 +419,68 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn('outside-scope.md', calls[-1][0])
 
 class ProcessTests(unittest.TestCase):
+    def test_idle_claude_lane_probes_and_publishes_real_local_health(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            state.mkdir()
+            usage_path = state / 'usage.json'
+            measured_at = '2026-09-26T10:01:00Z'
+            config = {
+                'agents': {'claude': {'model': 'sonnet', 'account': 'review',
+                    'capacity_mode': 'provider_signal', 'capacity_scopes': ['provider_signal']}},
+                'claude_health_probe': {'worker_id': 'claude', 'command': ['fake-claude'],
+                    'cadence_seconds': 60},
+                'usage_policy': {'stale_after_seconds': 60},
+            }
+            control = RunnerRegistryControl(state / 'unused-registry.sqlite')
+            control.registry = Mock()
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                workers=({'id': 'claude', 'provider_diagnostics': {}},),
+                active_leases=(), usage_observations=(),
+            )
+            with patch('registry_control.utc_now', return_value=measured_at), \
+                    patch('registry_control.probe_claude_health', return_value={
+                        'succeeded': True, 'limit_signal': None, 'returncode': 0,
+                        'observed_at': measured_at,
+                    }) as probe:
+                self.assertTrue(refresh_capacity_observations(
+                    control, config, 'claude', state, usage_path, [None],
+                ))
+            probe.assert_called_once_with(['fake-claude'], timeout=20)
+            control.registry.record_worker_capacity_observations.assert_called_once()
+            usage = json.loads(usage_path.read_text())
+            claude = usage['workers']['claude']['review']
+            self.assertEqual(claude['observed_at'], '2026-09-26T10:01:00.000000Z')
+            self.assertEqual(claude['capacity_mode'], 'provider_signal')
+            self.assertNotIn('used_percent', claude)
+            self.assertEqual(worker_state(config, usage, 'claude', 'review', now=
+                datetime.datetime(2026, 9, 26, 10, 1, 1,
+                                  tzinfo=datetime.timezone.utc)), 'normal')
+
+    def test_active_claude_lease_excludes_probe_and_creates_no_health_fact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            state.mkdir()
+            usage_path = state / 'usage.json'
+            config = {
+                'agents': {'claude': {'model': 'sonnet', 'account': 'review',
+                    'capacity_mode': 'provider_signal', 'capacity_scopes': ['provider_signal']}},
+                'claude_health_probe': {'worker_id': 'claude', 'command': ['fake-claude']},
+            }
+            control = RunnerRegistryControl(state / 'unused-registry.sqlite')
+            control.registry = Mock()
+            control.registry.dispatch_snapshot.return_value = SimpleNamespace(
+                workers=({'id': 'claude', 'provider_diagnostics': {}},),
+                active_leases=({'worker_id': 'claude'},), usage_observations=(),
+            )
+            with patch('registry_control.probe_claude_health') as probe:
+                self.assertTrue(refresh_capacity_observations(
+                    control, config, 'claude', state, usage_path, [None],
+                ))
+            probe.assert_not_called()
+            control.registry.record_worker_capacity_observations.assert_not_called()
+            self.assertEqual(json.loads(usage_path.read_text()), {'workers': {}})
+
     def test_capacity_refresh_publishes_configured_workers_not_registry_only_alias(self):
         with tempfile.TemporaryDirectory() as directory:
             state = pathlib.Path(directory) / 'state'
@@ -1166,6 +1228,7 @@ class LifecycleTests(unittest.TestCase):
             registry = Mock()
             registry.registry.dispatch_control.return_value = {'bounded_run': {}}
             registry.bounded_source_issues.return_value = (1,)
+            registry.advance_bounded_reviews.return_value = ()
             registry.proposed_worker.return_value = 'codex-a'
             registry.review_input.side_effect = RegistryConflict('REVIEW_PACKET_REQUIRED')
 
