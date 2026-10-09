@@ -3141,6 +3141,93 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def classify_historical_no_commit_batch(
+        self, *, cleanup_id: str, targets: Mapping[str, tuple[str, str]],
+        evidence_uri: str, expected_revision: int, recorded_at: str,
+    ) -> int:
+        """Atomically remove a pinned, no-commit legacy batch from dispatch.
+
+        The append-only event and operation receipt describe supersession or
+        deferral; DONE here never implies implementation or review approval.
+        """
+        recorded_at = _normalize_timestamp(recorded_at)
+        if not cleanup_id or not targets or not evidence_uri:
+            raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION")
+        request = {
+            "id": cleanup_id, "targets": {key: list(value) for key, value in sorted(targets.items())},
+            "evidence_uri": evidence_uri,
+        }
+        operation_id = f"historical-no-commit:{cleanup_id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("NO_COMMIT_CLASSIFICATION_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                for package_id, (previous, target) in targets.items():
+                    if target not in {"DONE", "BLOCKED"} or previous not in {"ON_DECK", "READY", "BLOCKED"}:
+                        raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION", package_id)
+                    package = connection.execute(
+                        "SELECT status, pr_url FROM work_packages WHERE id=?", (package_id,)
+                    ).fetchone()
+                    if package is None:
+                        raise RegistryNotFound(f"work package {package_id}")
+                    if package["status"] != previous or package["pr_url"] is not None:
+                        raise RegistryConflict("NO_COMMIT_PACKAGE_CHANGED", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
+                        (package_id,),
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM evidence WHERE package_id=? LIMIT 1", (package_id,)
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM review_outcomes WHERE review_package_id=? LIMIT 1", (package_id,)
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_PROVENANCE_PRESENT", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM task_events WHERE event_type='HISTORICAL_NO_COMMIT_CLASSIFIED' "
+                        "AND package_id=? LIMIT 1", (package_id,),
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_ALREADY_CLASSIFIED", package_id)
+                for package_id, (previous, target) in sorted(targets.items()):
+                    connection.execute(
+                        "UPDATE work_packages SET status=?, updated_at=? WHERE id=?",
+                        (target, recorded_at, package_id),
+                    )
+                    self._insert_event(
+                        connection, "HISTORICAL_NO_COMMIT_CLASSIFIED", recorded_at,
+                        package_id, None, None, {
+                            "operation_id": cleanup_id, "evidence_uri": evidence_uri,
+                            "previous_status": previous, "new_status": target,
+                            "review_passed": False,
+                        },
+                    )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at,
+                )
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
     def record_native_review_ci(
         self, review_package_id: str, review_input_id: str,
         implementation_commit: str, base_commit: str, pr_url: str, run_url: str,

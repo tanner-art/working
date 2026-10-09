@@ -1168,6 +1168,60 @@ class OperatorFixture(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.IntegrityError, "APPEND_ONLY"):
                 connection.execute("DELETE FROM historical_package_reconciliations WHERE id='historical-cli'")
 
+    def test_no_commit_cleanup_is_atomic_audited_and_replay_safe(self):
+        self.registry.register_feature(Feature("HISTORY", "History", 1, TaskStatus.READY))
+        targets = operator_module.NO_COMMIT_CLEANUP
+        for package_id, (previous, _) in targets.items():
+            self.registry.register_work_package(WorkPackage(
+                package_id, "HISTORY", package_id, "OPERATIONS", Lane.PLATFORM,
+                ("registry",), 1, ("historical",), status=TaskStatus(previous),
+            ))
+        before = self.registry.dispatch_control()["revision"]
+        revision = self.registry.classify_historical_no_commit_batch(
+            cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID, targets=targets,
+            evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+            expected_revision=before, recorded_at=utc_now(),
+        )
+        self.assertEqual(revision, before + 1)
+        snapshot = self.registry.control_center_snapshot(observed_at=utc_now())
+        statuses = {item["id"]: item["status"] for item in snapshot.work_packages}
+        self.assertEqual({key: statuses[key] for key in targets},
+                         {key: target for key, (_, target) in targets.items()})
+        events = [item for item in snapshot.events
+                  if item["event_type"] == "HISTORICAL_NO_COMMIT_CLASSIFIED"]
+        self.assertEqual(len(events), len(targets))
+        self.assertTrue(all(item["detail"]["review_passed"] is False for item in events))
+        self.assertEqual(self.registry.classify_historical_no_commit_batch(
+            cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID, targets=targets,
+            evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+            expected_revision=before, recorded_at=utc_now(),
+        ), revision)
+        self.assertEqual(self.registry.dispatch_control()["revision"], revision)
+        with self.assertRaisesRegex(RegistryConflict, "OPERATION_ID_REUSED"):
+            self.registry.classify_historical_no_commit_batch(
+                cleanup_id=operator_module.NO_COMMIT_CLEANUP_ID,
+                targets={"TASK-102": ("ON_DECK", "BLOCKED")},
+                evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+                expected_revision=revision, recorded_at=utc_now(),
+            )
+
+    def test_no_commit_cleanup_rejects_unexpected_provenance_before_any_write(self):
+        self.registry.register_feature(Feature("HISTORY", "History", 1, TaskStatus.READY))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-102", "HISTORY", "old", "OPERATIONS", Lane.PLATFORM,
+            ("registry",), 1, ("historical",), status=TaskStatus.ON_DECK,
+        ))
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE work_packages SET pr_url='https://github.com/owner/repo/pull/1' WHERE id='TASK-102'")
+        before = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "NO_COMMIT_PACKAGE_CHANGED"):
+            self.registry.classify_historical_no_commit_batch(
+                cleanup_id="proof", targets={"TASK-102": ("ON_DECK", "DONE")},
+                evidence_uri=operator_module.NO_COMMIT_CLEANUP_EVIDENCE,
+                expected_revision=before, recorded_at=utc_now(),
+            )
+        self.assertEqual(self.registry.dispatch_control()["revision"], before)
+
     def test_preservation_accepts_only_audited_retirement_on_next_verification(self):
         database = self.root / "preserved-reconciliation.sqlite3"
         registry = SQLiteRegistry(database)
