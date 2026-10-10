@@ -4,7 +4,7 @@ import { stageAction } from './actionStaging'
 import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
-import { searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
+import { createUniversalSearchIndex, searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
 import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, workspaceHistoryLocation, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
@@ -134,5 +134,23 @@ describe('workspace search navigation contract', () => {
     expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/search', { threadlineSearchEntry: 'this-document' }))).toBe(true)
     expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/search', { threadlineSearchEntry: 'other-document' }))).toBe(false)
     expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/', { threadlineSearchOrigin: 'this-document' }))).toBe(false)
+  })
+
+  it('executes the six-type query-to-destination matrix through one checked host boundary', () => {
+    const state = fixture()
+    const results = createUniversalSearchIndex(searchDocumentsFromAppState(state)).query('orchid')
+    const kinds = ['capture', 'action', 'commitment', 'reminder', 'idea', 'canvas'] as const
+    const opened: SearchDestination[] = []
+    const context = { state, snapshotToken: 'matrix', stateIsCurrent: true, available: true }
+    for (const kind of kinds) {
+      const result = results.find(item => item.document.kind === kind)
+      expect(result).toBeDefined()
+      expect(performWorkspaceNavigation({ type: 'open-search-result', document: result!.document, snapshotToken: 'matrix' },
+        context, { open: destination => { opened.push(destination) }, close: () => undefined })).toEqual({ ok: true })
+    }
+    expect(opened).toEqual([
+      { view: 'review', objectId: 'a' }, { view: 'schedule', objectId: 'a' }, { view: 'calendar', objectId: 'c' },
+      { view: 'review', reminderId: 'reminder:r' }, { view: 'review', objectId: 'i' }, { view: 'canvas', canvasId: 'canvas:orchid' },
+    ])
   })
 })
