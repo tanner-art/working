@@ -67,9 +67,21 @@ class IntegratedAssuranceTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
                 "VALUES(?,?,?,?,?,?,?)",
+                ("initial-review-input", "TASK-2", "review-input",
+                 "https://github.com/o/r/pull/1", "Initial review input",
+                 self.now.isoformat(), json.dumps({"target_package_id": "TASK-1",
+                    "implementation_commit": self.integrated, "base_commit": self.base,
+                    "contract_sha256": "e" * 64})),
+            )
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
                 ("review-evidence", "TASK-2", "review", "https://github.com/o/r/pull/1",
                  "approved", self.now.isoformat(),
-                 json.dumps({"reviewed_commit": self.integrated})),
+                 json.dumps({"reviewed_commit": self.integrated,
+                             "reviewed_base_commit": self.base,
+                             "contract_sha256": "e" * 64,
+                             "review_input_evidence_id": "initial-review-input"})),
             )
             connection.execute(
                 "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
@@ -117,6 +129,9 @@ class IntegratedAssuranceTests(unittest.TestCase):
             "integration-receipt", "TASK-1", "integration-acceptance",
             "https://github.com/o/r/pull/1", "Integrated on main", self.now.isoformat(),
             {"implementation_commit": self.integrated,
+             "reviewed_commit": self.integrated,
+             "reviewed_base_commit": self.base,
+             "pr_head_commit": self.integrated,
              "pr_url": "https://github.com/o/r/pull/1",
              "review_outcome_id": "review-outcome", "review_evidence_id": "review-evidence",
              "merged_main_commit": self.integrated, "merged_main_tree": self.tree,
@@ -136,17 +151,22 @@ class IntegratedAssuranceTests(unittest.TestCase):
             changed_files=["src/feature.py"],
         )
         self.meta = {
-            "schema_version": 1, "package_id": "TASK-3",
+            "schema_version": 2, "package_id": "TASK-3",
             "integrated_commit": self.integrated, "integrated_tree": self.tree,
             "base_commit": self.base, "target_ref": "main",
             "ordered_parent_shas": [self.integrated],
             "included_packages": [{
                 "package_id": "TASK-1", "implementation_commit": self.integrated,
+                "reviewed_commit": self.integrated,
+                "reviewed_base_commit": self.base,
+                "pr_head_commit": self.integrated,
+                "prior_review_outcome_ids": [],
                 "pr_url": "https://github.com/o/r/pull/1",
                 "review_package_id": "TASK-2", "review_outcome_id": "review-outcome",
                 "review_evidence_id": "review-evidence",
                 "integration_receipt_id": "integration-receipt",
             }],
+            "shared_path_handoffs": [],
             "acceptance_matrix": [{"criterion": "visible feature works",
                                    "result": "PASS", "evidence_id": "matrix-proof"}],
             "ci": {"commit": self.integrated, "state": "SUCCESS",
@@ -174,23 +194,8 @@ class IntegratedAssuranceTests(unittest.TestCase):
                         self.now.isoformat(), meta or self.meta)
 
     def seed_v2_review_provenance(self):
-        with self.registry._connection() as connection:
-            connection.execute(
-                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
-                "VALUES(?,?,?,?,?,?,?)",
-                ("initial-review-input", "TASK-2", "review-input",
-                 "https://github.com/o/r/pull/1", "Initial review input",
-                 self.now.isoformat(), json.dumps({"target_package_id": "TASK-1",
-                    "implementation_commit": self.integrated, "base_commit": self.base,
-                    "contract_sha256": "e" * 64})),
-            )
-            connection.execute(
-                "UPDATE evidence SET metadata_json=? WHERE id='review-evidence'",
-                (json.dumps({"reviewed_commit": self.integrated,
-                             "reviewed_base_commit": self.base,
-                             "contract_sha256": "e" * 64,
-                             "review_input_evidence_id": "initial-review-input"}),),
-            )
+        # Baseline fixture already carries the exact v2 review-input chain.
+        pass
 
     def test_input_requires_pinned_approved_ancestors_and_matrix(self):
         before = self.registry.dispatch_control()["revision"]
@@ -208,6 +213,51 @@ class IntegratedAssuranceTests(unittest.TestCase):
             "TASK-3", expected_status=TaskStatus.ON_DECK, new_status=TaskStatus.READY,
             changed_at=self.now.isoformat(),
         )
+
+    def test_schema_one_cannot_bypass_v2_assurance_at_any_registry_entry(self):
+        legacy_item = {key: value for key, value in self.meta["included_packages"][0].items()
+                       if key not in {"reviewed_commit", "reviewed_base_commit",
+                                      "pr_head_commit", "prior_review_outcome_ids"}}
+        legacy = {key: value for key, value in self.meta.items()
+                  if key != "shared_path_handoffs"}
+        legacy.update(schema_version=1, included_packages=[legacy_item])
+        before = self.registry.dispatch_control()["revision"]
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_INPUT_INVALID"):
+            self.registry.validate_integrated_assurance_candidate(self.evidence(legacy))
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_INPUT_INVALID"):
+            self.registry.record_integrated_assurance_input(
+                self.evidence(legacy), expected_revision=before,
+            )
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM evidence WHERE package_id='TASK-3' "
+                "AND kind='integrated-assurance-input'"
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT status FROM work_packages WHERE id='TASK-3'"
+            ).fetchone()[0], "ON_DECK")
+        # Simulate a legacy row already present before the validator upgrade.
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("old-assurance-input", "TASK-3", "integrated-assurance-input",
+                 self.meta["ci"]["run_url"], "Legacy input", self.now.isoformat(),
+                 json.dumps(legacy)),
+            )
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_INPUT_INVALID"):
+            self.registry.integrated_assurance_input("TASK-3")
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_INPUT_INVALID"):
+            self.registry.transition_work_package(
+                "TASK-3", expected_status=TaskStatus.ON_DECK,
+                new_status=TaskStatus.READY, changed_at=self.now.isoformat(),
+            )
+        self.assertFalse(verify_integrated_source(
+            replace(self.registry.validate_integrated_assurance_candidate(self.evidence()),
+                    schema_version=1), repository=self.repo,
+            github=lambda *args: self.fail("v1 source verifier must not call GitHub"),
+            repository_name="o/r",
+        ))
 
     def test_missing_or_changes_requested_ancestor_blocks(self):
         package = {"id": "TASK-3", "kind": "EVALUATION", "lane": "ASSURANCE",
@@ -256,7 +306,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
         with self.registry._connection() as connection:
             connection.execute("UPDATE evidence SET uri=? WHERE id='review-evidence'",
                                ("https://github.com/o/r/pull/9",))
-        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REVIEW_EVIDENCE_INVALID"):
             self.registry.validate_integrated_assurance_candidate(self.evidence())
 
     def test_source_requires_exact_main_pr_tree_ci_and_diff(self):
@@ -464,6 +514,8 @@ class IntegratedAssuranceTests(unittest.TestCase):
                                "url": meta["ci"]["run_url"]})
         self.assertTrue(verify_integrated_source(
             value, repository=self.repo, github=github, repository_name="o/r"))
+        # Advancing the review base to `source` would hide the intermediate
+        # base..source delta from the independent reviewer.
         advanced_base = replace(value,
             included_packages=({**item, "reviewed_base_commit": source},),
             integration_receipts=({**value.integration_receipts[0],

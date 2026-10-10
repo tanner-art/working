@@ -68,7 +68,10 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
             "acceptance_matrix", "ci", "contract_sha256", "review_packet"}
     if version == 2:
         keys.add("shared_path_handoffs")
-    if not isinstance(raw, Mapping) or set(raw) != keys or version not in (1, 2):
+    # Every EVALUATION, including a sparse historical package without a
+    # readiness-schema marker, must use the complete v2 lineage contract.
+    # V1 omitted reviewed/base/PR-head lineage and historical implementers.
+    if not isinstance(raw, Mapping) or version != 2 or set(raw) != keys:
         raise RegistryConflict("ASSURANCE_INPUT_INVALID", "schema")
     if package.get("kind") != "EVALUATION" or package.get("lane") != "ASSURANCE" or raw["package_id"] != package.get("id"):
         raise RegistryConflict("ASSURANCE_PACKAGE_MISMATCH")
@@ -250,6 +253,8 @@ def verify_integrated_source(value: IntegratedAssuranceInput, *, repository: pat
     This is an observation, not an authority source: a failure defers the gate.
     All authoritative review/receipt facts were resolved from Registry first.
     """
+    if value.schema_version != 2:
+        return False
     def git(*args: str) -> str | None:
         try:
             result = subprocess.run(["git", "-C", str(repository), *args],

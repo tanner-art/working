@@ -2266,6 +2266,8 @@ class SQLiteRegistry:
                         "metadata": dict(candidate.metadata)}
         raw = evidence["metadata"]
         version = raw.get("schema_version") if isinstance(raw, Mapping) else None
+        if version != 2:
+            raise RegistryConflict("ASSURANCE_INPUT_INVALID", "schema")
         included = raw.get("included_packages") if isinstance(raw, Mapping) else None
         if not isinstance(included, list):
             raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included packages")
