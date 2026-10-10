@@ -7,7 +7,7 @@ import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, set
 import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
 import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
-import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke } from './canvasStrokes'
+import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
 import { MobileCanvasToolbar } from './surfaces/canvas'
 
 function ColorControl({ label, value, colors, onChange }: { label: string; value: string; colors: readonly string[]; onChange: (value: string) => void }) {
@@ -355,7 +355,16 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     setSelected(branch.childId)
     setEditMode(true)
   }
-  const removeSelected = () => { if (!selected) return; onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null) }
+  const removeSelected = () => {
+    if (selectedStrokeIds.size > 0) {
+      const remaining = removeSelectedCanvasStrokes(elements, selectedStrokeIds)
+      if (remaining !== elements) onCommit(remaining)
+      setSelectedStrokeIds(new Set()); dismissRefinementPreview()
+      return
+    }
+    if (!selected) return
+    onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null)
+  }
   const fit = (selection = false) => {
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -383,7 +392,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <button disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
     <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
     <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
-    <button disabled={!selected} onClick={removeSelected}>Delete</button>
+    <button disabled={!selected && selectedStrokeIds.size === 0} onClick={removeSelected}>Delete</button>
     <span/>
     <button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button>
     <button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button>
@@ -410,7 +419,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
         <button type="button" disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
         <button type="button" disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>Connect</button>
         <button type="button" disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
-        <button type="button" disabled={!selected} onClick={removeSelected}>Delete</button>
+        <button type="button" disabled={!selected && selectedStrokeIds.size === 0} onClick={removeSelected}>Delete</button>
         <button type="button" disabled={!canUndo} onClick={onUndo}>Undo</button>
         <button type="button" disabled={!canRedo} onClick={onRedo}>Redo</button>
         <button type="button" onClick={() => fit()}>Fit canvas</button>
@@ -434,7 +443,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <ColorControl label="Line color" value={selectedElement.connectionColor ?? DEFAULT_CONNECTION_COLOR} colors={CONNECTION_COLORS} onChange={connectionColor => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionColor }))} />
     </>}
     </div>
-    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size === 1 ? 'One stroke selected · preview refinement or circle another selection' : 'Lasso active · circle one stroke to preview refinement · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
+    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size > 0 ? `${selectedStrokeIds.size} ${selectedStrokeIds.size === 1 ? 'stroke' : 'strokes'} selected · ${selectedStrokeIds.size === 1 ? 'preview refinement or Delete' : 'Delete selection'}` : 'Lasso active · circle strokes to select · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
     <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
