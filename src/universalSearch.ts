@@ -1,6 +1,6 @@
 import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, SemanticObject, SourceCorrection } from './domain'
 import { bankFromLegacy, isCanvasRecord } from './canvasBank'
-import { reconcileLegacyUi } from './migration'
+import { isPersistedState, reconcileLegacyUi } from './migration'
 
 export type SearchKind = 'capture' | 'action' | 'commitment' | 'reminder' | 'idea' | 'canvas'
 export type SearchField = 'original' | 'corrected-source' | 'current-meaning' | 'reminder-source' | 'canvas-title' | 'canvas-element'
@@ -24,7 +24,7 @@ const kindSet = new Set<SearchKind>(kindOrder)
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200
 const validText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 const stableIds = (value: unknown): value is string[] => Array.isArray(value) && value.every(validId) && new Set(value).size === value.length
-const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase('en-US')
+const normalize = (value: string) => value.normalize('NFKC').toLowerCase()
 
 function textFields(fields: Partial<Record<SearchField, string>>): Partial<Record<SearchField, string>> {
   const safe: Partial<Record<SearchField, string>> = {}
@@ -39,14 +39,22 @@ export function createUniversalSearchIndex(input: readonly SearchDocument[]) {
     get size() { return entries.length },
     /** Replace from a fresh source projection after edits, merges, or account reloads. */
     replace(next: readonly SearchDocument[]) { entries = compile(next) },
-    query(raw: string, limit = 100): SearchResult[] {
+    query(raw: string, limit = Number.MAX_SAFE_INTEGER): SearchResult[] {
       const terms = normalize(raw.trim()).split(/\s+/).filter(Boolean)
       if (!terms.length || !Number.isFinite(limit) || limit <= 0) return []
       const results: SearchResult[] = []
       for (const entry of entries) {
-        if (!terms.every(term => entry.fields.some(([, value]) => value.includes(term)))) continue
-        const matchedFields = entry.fields.filter(([, value]) => value && terms.some(term => value.includes(term))).map(([field]) => field)
-        if (!matchedFields.length) continue
+        let allTermsMatched = true
+        for (const term of terms) {
+          let found = false
+          for (const [, value] of entry.fields) if (value.includes(term)) { found = true; break }
+          if (!found) { allTermsMatched = false; break }
+        }
+        if (!allTermsMatched) continue
+        const matchedFields: SearchField[] = []
+        for (const [field, value] of entry.fields) {
+          for (const term of terms) if (value.includes(term)) { matchedFields.push(field); break }
+        }
         results.push({ document: { ...entry.document, captureIds: [...entry.document.captureIds],
           interpretationIds: [...entry.document.interpretationIds], fields: { ...entry.document.fields } }, matchedFields })
         if (results.length >= limit) break
@@ -69,8 +77,19 @@ function compile(input: readonly SearchDocument[]) {
     seen.set(key, { kind: source.kind, id: source.id, captureIds: [...source.captureIds],
       interpretationIds: [...source.interpretationIds], ...(validId(source.targetId) ? { targetId: source.targetId } : {}), fields })
   }
-  const entries = [...seen.values()].sort((a, b) => kindOrder.indexOf(a.kind) - kindOrder.indexOf(b.kind) || a.id.localeCompare(b.id))
-    .map(document => ({ document, fields: fieldOrder.map(field => [field, document.fields[field] ? normalize(document.fields[field]) : ''] as const) }))
+  const buckets = new Map(kindOrder.map(kind => [kind, [] as SearchDocument[]]))
+  for (const document of seen.values()) buckets.get(document.kind)!.push(document)
+  const entries: { document: SearchDocument; fields: (readonly [SearchField, string])[] }[] = []
+  for (const kind of kindOrder) {
+    for (const document of buckets.get(kind)!.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
+      const fields: (readonly [SearchField, string])[] = []
+      for (const field of fieldOrder) {
+        const value = document.fields[field]
+        if (value) fields.push([field, normalize(value)])
+      }
+      entries.push({ document, fields })
+    }
+  }
   return entries
 }
 
@@ -125,7 +144,7 @@ function canvasDocuments(canvases: readonly CanvasRecord[]): SearchDocument[] {
 
 /** Canonical source adapter shared by local and account projections. It never mutates or stores the source. */
 export function searchDocumentsFromModel(model: PersistedState): SearchDocument[] {
-  if (!model || !Array.isArray(model.captures) || !Array.isArray(model.semanticObjects) || !Array.isArray(model.interpretations)) return []
+  if (!isPersistedState(model)) return []
   const captures = new Map(model.captures.filter(value => value && validId(value.id) && validText(value.originalContent)).map(value => [value.id, value]))
   const interpretations = new Set(model.interpretations.filter(value => value && validId(value.id)).map(value => value.id))
   const corrections = Array.isArray(model.sourceCorrections) ? model.sourceCorrections : []

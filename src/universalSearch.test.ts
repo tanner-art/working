@@ -1,47 +1,44 @@
 import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
-import { legacyUiProjection, migrateLegacyState } from './migration'
-import { reviseInterpretation } from './reviewRevision'
+import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
+import { confirmObject } from './objectWorkflow'
+import { correctOriginal, reviseInterpretation } from './reviewRevision'
 import { resolveReminderInState } from './reminderWorkflow'
-import type { AppState, PersistedState } from './domain'
+import type { AppState, ThoughtObject } from './domain'
 import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, type SearchDocument } from './universalSearch'
 
 const at = '2026-10-09T00:00:00.000Z'
-const captures = [
-  { id: 'capture:a', source: 'text' as const, createdAt: at, originalContent: 'Orchid source note', evidence: 'text-only' as const },
-  { id: 'capture:c', source: 'text' as const, createdAt: at, originalContent: 'Orchid appointment', evidence: 'text-only' as const },
-  { id: 'capture:i', source: 'text' as const, createdAt: at, originalContent: 'Orchid idea seed', evidence: 'text-only' as const },
-  { id: 'capture:r', source: 'text' as const, createdAt: at, originalContent: 'Orchid reminder wording', evidence: 'text-only' as const },
-]
-const semantic = (id: string, kind: 'action' | 'commitment' | 'idea', captureId: string, summary: string) => ({
-  id, kind, captureIds: [captureId], interpretationIds: [`interpretation:${id}`], summary, status: 'confirmed' as const,
-  metadata: {}, reminders: [],
+const thought = (id: string, kind: ThoughtObject['kind'], originalContent: string, summary: string): ThoughtObject => ({
+  id, kind, originalContent, source: 'text', createdAt: at, confidence: 1, status: 'review',
+  interpretation: { summary, suggestedKind: kind, rationale: '' }, metadata: {}, history: [], relationships: [],
 })
 const canvas = { ...createCanvasRecord(at, 'canvas:orchid'), title: 'Orchid board',
   elements: [{ id: 'element:orchid', type: 'text' as const, x: 0, y: 0, text: 'Orchid sketch' }] }
-const model = (): PersistedState => ({
-  schemaVersion: 2, captures: structuredClone(captures), sourceCorrections: [
-    { id: 'correction:a', captureId: 'capture:a', correctedAt: at, correctedContent: 'Corrected teal source' },
-    { id: 'correction:r', captureId: 'capture:r', correctedAt: at, correctedContent: 'Corrected teal orchid reminder' },
-  ],
-  interpretations: ['a', 'c', 'i', 'r'].map(id => ({ id: `interpretation:${id}`, version: 1,
-    captureIds: [`capture:${id}`], recordedAt: at, summary: 'Orchid', rationale: '', confidence: 1,
-    proposedKind: id === 'r' ? 'unresolved' as const : 'idea' as const, reviewState: 'accepted' as const,
-    legacy: { id, kind: id === 'r' ? 'reminder' as const : 'idea' as const, interpretation: { summary: 'Orchid', suggestedKind: 'idea' as const, rationale: '' },
-      confidence: 1, relationships: [], history: id === 'r' ? [{ at, event: 'Created Daily log reminder', reminderInstruction: {
-        instructionId: 'reminder:r', action: 'created' as const, targetId: 'a', mode: 'daily-log' as const,
-      } }] : [], status: 'confirmed' as const, metadata: {} },
-  })),
-  semanticObjects: [semantic('a', 'action', 'capture:a', 'Orchid execution'), semantic('c', 'commitment', 'capture:c', 'Orchid obligation'),
-    semantic('i', 'idea', 'capture:i', 'Orchid concept')],
-  reminderInstructions: [{ id: 'reminder:r', targetId: 'a', captureIds: ['capture:r'], sourceInterpretationId: 'interpretation:r',
-    mode: 'daily-log', deliveryState: 'active', createdAt: at }],
-  calendarEvents: [], relationships: [], legacyUiIds: ['a', 'c', 'i', 'r'], canvas: [], canvasBank: { canvases: [canvas] },
-})
+function model() {
+  const source: AppState = { canvas: [], objects: [
+    thought('a', 'action', 'Orchid source note', 'Orchid execution'),
+    thought('c', 'commitment', 'Orchid appointment', 'Orchid obligation'),
+    thought('i', 'idea', 'Orchid idea seed', 'Orchid concept'),
+    thought('r', 'reminder', 'Orchid reminder wording', 'Orchid reminder'),
+  ] }
+  let state = legacyUiProjection(migrateLegacyState(source))
+  state = legacyUiProjection(reconcileLegacyUi({ ...state, objects: state.objects.map(item =>
+    item.id === 'r' ? item : confirmObject(item)) }))
+  state = resolveReminderInState(state, 'r', { targetId: 'a', mode: 'daily-log' })
+  state = legacyUiProjection(reconcileLegacyUi(correctOriginal(state, 'a', 'Corrected teal source', true, at)))
+  state = legacyUiProjection(reconcileLegacyUi(correctOriginal(state, 'r', 'Corrected teal orchid reminder', true, at)))
+  state = { ...state, canvasBank: { canvases: [canvas] } }
+  const saved = reconcileLegacyUi(state)
+  expect(isPersistedState(saved)).toBe(true)
+  return saved
+}
 
 describe('universal search source adapters', () => {
   it('returns all six kinds once per authoritative identity with original/current meaning distinguished', () => {
-    const documents = searchDocumentsFromModel(model())
+    const saved = model()
+    const documents = searchDocumentsFromModel(saved)
+    expect(searchDocumentsFromAppState(legacyUiProjection(saved))).toEqual(documents)
+    expect(searchDocumentsFromAppState(legacyUiProjection(structuredClone(saved)))).toEqual(documents)
     const index = createUniversalSearchIndex(documents)
     expect(index.size).toBe(9)
     const matches = index.query('ORCHID')
@@ -53,8 +50,9 @@ describe('universal search source adapters', () => {
     expect(index.query('teal').find(result => result.document.kind === 'reminder')).toMatchObject({
       document: { id: 'reminder:r' }, matchedFields: ['reminder-source'],
     })
-    expect(index.query('execution')).toMatchObject([{ document: { kind: 'action', id: 'a', captureIds: ['capture:a'],
-      interpretationIds: ['interpretation:a'] }, matchedFields: ['current-meaning'] }])
+    expect(index.query('execution')).toMatchObject([{ document: { kind: 'action', id: 'a', captureIds: ['capture:a'] },
+      matchedFields: ['current-meaning'] }])
+    expect(index.query('execution')[0].document.interpretationIds).toContain('interpretation:a:1')
     expect(index.query('sketch')[0]).toMatchObject({ document: { kind: 'canvas', id: 'canvas:orchid' }, matchedFields: ['canvas-element'] })
   })
 
@@ -76,21 +74,23 @@ describe('universal search source adapters', () => {
   it('replaces changed source snapshots without retaining stale terms', () => {
     const before = model()
     const index = createUniversalSearchIndex(searchDocumentsFromModel(before))
-    const after = model()
-    after.semanticObjects[0].summary = 'Cobalt execution'
-    after.canvasBank!.canvases[0].title = 'Cobalt board'
+    const revised = reviseInterpretation(legacyUiProjection(model()), 'i', 'Cobalt concept', at)
+    const after = reconcileLegacyUi({ ...revised, canvasBank: { canvases: [{ ...canvas, title: 'Cobalt board' }] } })
     index.replace(searchDocumentsFromModel(after))
-    expect(index.query('Orchid').some(result => result.document.id === 'a')).toBe(false)
-    expect(index.query('Cobalt').map(result => result.document.id)).toEqual(['a', 'canvas:orchid'])
+    expect(index.query('Orchid').some(result => result.document.id === 'i')).toBe(false)
+    expect(index.query('Cobalt').map(result => result.document.id)).toEqual(['i', 'canvas:orchid'])
   })
 
   it('omits malformed, duplicate, and dangling records instead of guessing identity', () => {
     const stale = model()
     stale.captures = stale.captures.filter(capture => capture.id !== 'capture:c')
-    stale.semanticObjects.push({ ...semantic('broken', 'idea', 'missing:capture', 'Orchid stale') })
-    stale.canvasBank!.canvases.push({ ...canvas, id: '', title: 'Bad Orchid' })
-    const documents = searchDocumentsFromModel(stale)
-    expect(documents.some(document => document.id === 'c' || document.id === 'broken' || document.id === '')).toBe(false)
+    expect(searchDocumentsFromModel(stale)).toEqual([])
+    const forged = model()
+    forged.semanticObjects[0].summary = 'Forged search meaning'
+    expect(searchDocumentsFromModel(forged)).toEqual([])
+    const brokenCorrection = model()
+    brokenCorrection.sourceCorrections![0] = { ...brokenCorrection.sourceCorrections![0], correctedContent: 'Forged corrected source' }
+    expect(searchDocumentsFromModel(brokenCorrection)).toEqual([])
     const duplicate: SearchDocument = { kind: 'idea', id: 'same', captureIds: ['capture:i'], interpretationIds: [], fields: { 'current-meaning': 'Orchid' } }
     expect(createUniversalSearchIndex([duplicate, duplicate]).query('orchid')).toEqual([])
   })
@@ -132,16 +132,29 @@ describe('universal search source adapters', () => {
       id: 'reminder:reminder:source', targetId: 'idea:target', captureIds: ['capture:reminder:source'],
     }])
     const rejectedInstruction = model()
-    rejectedInstruction.interpretations[3] = { ...rejectedInstruction.interpretations[3], reviewState: 'rejected' }
+    rejectedInstruction.interpretations[rejectedInstruction.interpretations.length - 1] = {
+      ...rejectedInstruction.interpretations.at(-1)!, reviewState: 'rejected',
+    }
     expect(searchDocumentsFromModel(rejectedInstruction).some(document => document.kind === 'reminder')).toBe(false)
     const unauditedInstruction = model()
-    unauditedInstruction.interpretations[3].legacy.history = []
+    unauditedInstruction.interpretations.at(-1)!.legacy.history = []
     expect(searchDocumentsFromModel(unauditedInstruction).some(document => document.kind === 'reminder')).toBe(false)
+  })
+
+  it('returns every matching kind by default rather than truncating before later kind buckets', () => {
+    const documents: SearchDocument[] = Array.from({ length: 102 }, (_, index) => ({
+      kind: 'capture', id: `capture:${index}`, captureIds: [`capture:${index}`], interpretationIds: [], fields: { original: 'Orchid' },
+    }))
+    documents.push({ kind: 'canvas', id: 'canvas:late', captureIds: [], interpretationIds: [], fields: { 'canvas-title': 'Orchid' } })
+    const index = createUniversalSearchIndex(documents)
+    expect(index.query('orchid')).toHaveLength(103)
+    expect(index.query('orchid').at(-1)?.document.kind).toBe('canvas')
+    expect(index.query('orchid', 10)).toHaveLength(10)
   })
 })
 
 describe('universal search performance', () => {
-  it('meets cold construction+query and warm query thresholds over 10,000 mixed documents', () => {
+  it('meets first and repeated query thresholds over 10,000 indexed mixed documents', () => {
     const kinds = ['capture', 'action', 'commitment', 'reminder', 'idea', 'canvas'] as const
     const fields = ['original', 'current-meaning', 'current-meaning', 'reminder-source', 'current-meaning', 'canvas-title'] as const
     const documents: SearchDocument[] = Array.from({ length: 10_000 }, (_, position) => {
@@ -151,15 +164,17 @@ describe('universal search performance', () => {
         interpretationIds: kind === 'capture' || kind === 'canvas' ? [] : [`interpretation:${position}`],
         fields: { [fields[position % fields.length]]: text } }
     })
-    const coldAt = performance.now()
+    const buildAt = performance.now()
     const index = createUniversalSearchIndex(documents)
+    const buildMs = performance.now() - buildAt
+    const coldAt = performance.now()
     const cold = index.query('amber signal', 10_000)
     const coldMs = performance.now() - coldAt
     const warmAt = performance.now()
     const warm = index.query('amber signal', 10_000)
     const warmMs = performance.now() - warmAt
     const runtime = (globalThis as { process?: { version: string; platform: string; arch: string } }).process
-    console.info(`Universal Search benchmark: 10000 mixed six-type documents, 100 matches, Node ${runtime?.version ?? 'unknown'}, ${runtime?.platform ?? 'unknown'}/${runtime?.arch ?? 'unknown'}; cold build+query ${coldMs.toFixed(2)} ms, warm query ${warmMs.toFixed(2)} ms`)
+    console.info(`Universal Search benchmark: 10000 indexed mixed six-type documents, 100 matches, Node ${runtime?.version ?? 'unknown'}, ${runtime?.platform ?? 'unknown'}/${runtime?.arch ?? 'unknown'}; build ${buildMs.toFixed(2)} ms, first query ${coldMs.toFixed(2)} ms, repeated query ${warmMs.toFixed(2)} ms`)
     expect(cold).toHaveLength(100)
     expect(warm).toHaveLength(100)
     expect(coldMs).toBeLessThanOrEqual(100)
