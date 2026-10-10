@@ -410,6 +410,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (!outcome.ok) setWorkspaceRouteError(outcome.message)
     else setWorkspaceRouteError('')
   }
+  const focusAfterSearch = () => requestAnimationFrame(() => {
+    const target = document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]') ??
+      document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"], .sidebar .nav-item')
+    if (target?.isConnected) target.focus()
+  })
   const exitWorkspaceRoute = () => {
     leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
     if (window.location.pathname !== '/search') acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
@@ -426,7 +431,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       canOpen: () => canOpenSearchResultFromView(view, !searchHandoffGuards.canLeave()),
       close: () => {
         exitWorkspaceRoute()
-        requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]')?.focus())
+        focusAfterSearch()
       },
       open: destination => {
         exitWorkspaceRoute()
@@ -466,6 +471,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       } else {
         acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
         setWorkspaceRouteError('')
+        if (!target && activeWorkspaceSurface) focusAfterSearch()
       }
     }
     window.addEventListener('popstate', onPopState)
