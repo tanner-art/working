@@ -1,8 +1,30 @@
-import type { AppState, ThoughtObject } from './domain'
+import type { AppState, TemporalDecision, ThoughtObject } from './domain'
 import { confirmObject } from './objectWorkflow'
 import { makeObject } from './store'
 import { reconcileLegacyUi } from './migration'
-import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision } from './temporalConfirmation'
+import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision, validTemporalDate } from './temporalConfirmation'
+
+/** One explicit Calendar save confirms an unlinked event, never an obligation. */
+export function createDirectCalendarEvent(state: AppState, input: { title: string; date: string; time: string }): AppState {
+  const title = input.title.trim()
+  const temporalContext = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  if (!title || !validTemporalDate(input.date) || !/^\d{2}:\d{2}$/.test(input.time) ||
+      Number(input.time.slice(0, 2)) >= 24 || Number(input.time.slice(3, 5)) >= 60 || !temporalContext.trim()) {
+    throw new Error('Enter an event title, valid date and start time.')
+  }
+  const [year, month, day] = input.date.split('-').map(Number)
+  const [hour, minute] = input.time.split(':').map(Number)
+  const local = new Date(year, month - 1, day, hour, minute)
+  if (local.getFullYear() !== year || local.getMonth() !== month - 1 || local.getDate() !== day ||
+      local.getHours() !== hour || local.getMinutes() !== minute) throw new Error('That local time does not exist. Choose another start time.')
+  const model = reconcileLegacyUi(state)
+  const eventId = crypto.randomUUID()
+  const entry: TemporalDecision = { id: crypto.randomUUID(), at: new Date().toISOString(), source: 'calendar-direct-confirmation',
+    decision: 'confirmed', target: { kind: 'direct-calendar-event', eventId, title, startsAt: local.toISOString(), temporalContext } }
+  const next = { ...state, temporalHistory: [...(model.temporalHistory ?? []), entry] }
+  reconcileLegacyUi(next) // fail closed before a caller can publish or save the event
+  return next
+}
 
 /**
  * Calendar entry is an explicit confirmation of an obligation. It deliberately

@@ -88,7 +88,7 @@ describe('dedicated temporal confirmation', () => {
       m => { m.temporalHistory![0].at = 'yesterday' },
       m => { m.temporalHistory![0].at = '2026-02-30T12:00:00Z' },
       m => { m.temporalHistory![0].at = '2025-09-14T12:00:00Z' },
-      m => { m.temporalHistory![0].target.interpretationId = 'missing' },
+      m => { Object.assign(m.temporalHistory![0].target, { interpretationId: 'missing' }) },
       m => { Object.assign(m.temporalHistory![0].target, { objectId: 'different' }) },
       m => { Object.assign(m.temporalHistory![0].target, { date: '2026-09-16' }) },
       m => { Object.assign(m.temporalHistory![1].target, { eventId: 'other' }) },
