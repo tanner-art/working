@@ -141,6 +141,8 @@ def ready_contract_reasons(package: Mapping[str, Any]) -> tuple[str, ...]:
     proof = diagnostics.get("readiness_proof")
     digest = diagnostics.get("queue_contract_sha256")
     reasons = []
+    if diagnostics.get("on_deck_recontract_requires_promotion") is True:
+        reasons.append("ON_DECK_RECONTRACT_REQUIRES_PROMOTION")
     if not package.get("lane"):
         reasons.append("PACKAGE_LANE_UNASSIGNED")
     if (not isinstance(criteria, (list, tuple)) or not criteria

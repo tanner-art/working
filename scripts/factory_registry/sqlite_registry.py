@@ -46,7 +46,7 @@ from .lifecycle import (
     validate_dispatch_transition,
     validate_package_transition,
 )
-from scripts.runner.task_readiness import ready_contract_reasons
+from scripts.runner.task_readiness import ready_contract_reasons, registration_proof
 
 
 CURRENT_SCHEMA_VERSION = 6
@@ -2517,6 +2517,231 @@ class SQLiteRegistry:
                 raise RegistryConflict("BOUNDED_PILOT_REGISTRATION_CONFLICT", str(error)) from error
             except Exception:
                 connection.rollback()
+                raise
+
+    def recontract_on_deck_pair(
+        self,
+        implementation: WorkPackage,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+        operation_id: str,
+        repository: Path,
+        target_ref: str,
+        contracts: tuple[Mapping[str, Any], Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Attach verified v2 contracts to an existing pair; never publish READY.
+
+        This deliberately does not reconcile dependency edges or import a PR.
+        A predecessor review with CHANGES_REQUESTED must be repaired by a
+        separately reviewed reconciliation, not treated as a successful gate.
+        """
+        recorded_at = _normalize_timestamp(recorded_at)
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise RegistryConflict("OPERATION_ID_REQUIRED")
+        if target_ref not in {"main", "origin/main"}:
+            raise RegistryConflict("ON_DECK_TARGET_REF_INVALID")
+        if len(contracts) != 2:
+            raise RegistryConflict("ON_DECK_CONTRACT_PAIR_REQUIRED")
+        if (implementation.status != TaskStatus.ON_DECK or review.status != TaskStatus.ON_DECK
+                or implementation.kind != PackageKind.PARENT or review.kind != PackageKind.REVIEW
+                or implementation.feature_id != review.feature_id
+                or review.lane != Lane.ASSURANCE
+                or tuple(review.dependency_ids) != (implementation.id,)
+                or not {cap.lower() for cap in review.required_capabilities}
+                & {"review", "independent-review"}):
+            raise RegistryConflict("ON_DECK_PAIR_INVALID")
+        packages = (implementation, review)
+        for package in packages:
+            diagnostics = package.provider_diagnostics
+            source_ref = diagnostics.get("github_source_ref")
+            if (not isinstance(source_ref, str) or not re.fullmatch(r"[1-9]\d*", source_ref)
+                    or diagnostics.get("readiness_schema_version") != 2
+                    or not isinstance(diagnostics.get("exclusive_paths"), list)
+                    or ready_contract_reasons({
+                        "lane": package.lane.value if package.lane else None,
+                        "acceptance_criteria": package.acceptance_criteria,
+                        "provider_diagnostics": diagnostics,
+                    })):
+                raise RegistryConflict("ON_DECK_CONTRACT_INCOMPLETE", package.id)
+        if (implementation.provider_diagnostics["github_source_ref"]
+                == review.provider_diagnostics["github_source_ref"]):
+            raise RegistryConflict("REVIEW_SOURCE_NOT_INDEPENDENT")
+        request = {
+            "feature_id": implementation.feature_id,
+            "target_ref": target_ref,
+            "packages": [{
+                "id": package.id,
+                "source_ref": package.provider_diagnostics["github_source_ref"],
+                "dependency_ids": list(package.dependency_ids),
+                "acceptance_criteria": list(package.acceptance_criteria),
+                "provider_diagnostics": dict(package.provider_diagnostics),
+            } for package in packages],
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="RECONTRACT_ON_DECK_PAIR", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return replay
+                self._require_control_schema(connection)
+                self._require_revision(connection, expected_revision)
+                for package, contract in zip(packages, contracts):
+                    try:
+                        current_proof = registration_proof(
+                            contract, repository=repository, target_ref=target_ref,
+                            acceptance_criteria=package.acceptance_criteria,
+                        )
+                    except (ValueError, OSError) as error:
+                        raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id) from error
+                    if current_proof != package.provider_diagnostics["readiness_proof"]:
+                        raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if (control is None or control["dispatch_mode"] != "PAUSED"
+                        or not control["kill_switch_engaged"]):
+                    raise RegistryConflict("ON_DECK_RECONTRACT_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                candidate_paths = {
+                    path for package in packages
+                    for path in package.provider_diagnostics["exclusive_paths"]
+                }
+                for other in connection.execute(
+                    """SELECT id,provider_diagnostics_json FROM work_packages
+                       WHERE id NOT IN (?,?) AND status IN ('READY','ACTIVE')""",
+                    (implementation.id, review.id),
+                ):
+                    other_paths = json.loads(other["provider_diagnostics_json"]).get("exclusive_paths")
+                    if not isinstance(other_paths, list):
+                        raise RegistryConflict("ACTIVE_PATH_OWNERSHIP_UNKNOWN", other["id"])
+                    if candidate_paths & set(other_paths):
+                        raise RegistryConflict("EXCLUSIVE_PATH_COLLISION", other["id"])
+                feature = connection.execute(
+                    "SELECT status FROM features WHERE id=?", (implementation.feature_id,)
+                ).fetchone()
+                if feature is None or feature["status"] not in {"ON_DECK", "READY"}:
+                    raise RegistryConflict("ON_DECK_FEATURE_INVALID", implementation.feature_id)
+                before: dict[str, Any] = {}
+                for package in packages:
+                    row = connection.execute(
+                        "SELECT * FROM work_packages WHERE id=?", (package.id,)
+                    ).fetchone()
+                    if row is None:
+                        raise RegistryNotFound(f"work package {package.id}")
+                    expected_fields = {
+                        "feature_id": package.feature_id, "title": package.title,
+                        "category": package.category, "lane": package.lane.value,
+                        "kind": package.kind.value,
+                        "capacity_size": package.capacity_size.value,
+                        "capacity_risk": package.capacity_risk.value,
+                        "priority": package.priority, "status": "ON_DECK",
+                        "required_capabilities_json": _json(package.required_capabilities),
+                    }
+                    if any(row[key] != value for key, value in expected_fields.items()):
+                        raise RegistryConflict("ON_DECK_PACKAGE_IDENTITY_CHANGED", package.id)
+                    source_ref = package.provider_diagnostics["github_source_ref"]
+                    if (row["source_system"] not in {None, "github_issue"}
+                            or row["source_ref"] not in {None, source_ref}):
+                        raise RegistryConflict("SOURCE_BINDING_MISMATCH", package.id)
+                    if (row["branch"] is not None or row["pr_url"] is not None
+                            or row["started_at"] is not None or row["ready_at"] is not None
+                            or connection.execute(
+                                "SELECT 1 FROM attempts WHERE package_id=? LIMIT 1", (package.id,)
+                            ).fetchone()):
+                        raise RegistryConflict("ON_DECK_PACKAGE_HAS_HISTORY", package.id)
+                    actual_dependencies = tuple(item["dependency_id"] for item in connection.execute(
+                        "SELECT dependency_id FROM task_dependencies WHERE package_id=? ORDER BY dependency_id",
+                        (package.id,),
+                    ))
+                    if actual_dependencies != tuple(sorted(package.dependency_ids)):
+                        raise RegistryConflict("DEPENDENCY_REGISTRY_MISMATCH", package.id)
+                    old_diagnostics = json.loads(row["provider_diagnostics_json"])
+                    if old_diagnostics.get("on_deck_recontract_requires_promotion") is True:
+                        raise RegistryConflict("ON_DECK_PAIR_ALREADY_RECONTRACTED", package.id)
+                    old_proof = old_diagnostics.get("readiness_proof")
+                    if old_proof is not None and old_proof != package.provider_diagnostics["readiness_proof"]:
+                        raise RegistryConflict("EXISTING_REGISTRATION_PROOF_IMMUTABLE", package.id)
+                    old_paths = old_diagnostics.get("exclusive_paths")
+                    if old_paths is not None and old_paths != package.provider_diagnostics["exclusive_paths"]:
+                        raise RegistryConflict("EXISTING_PATH_OWNERSHIP_CHANGED", package.id)
+                    before[package.id] = {
+                        "source_system": row["source_system"], "source_ref": row["source_ref"],
+                        "acceptance_criteria": json.loads(row["acceptance_criteria_json"]),
+                        "diagnostics": old_diagnostics,
+                    }
+                for dependency_id in implementation.dependency_ids:
+                    predecessor = connection.execute(
+                        "SELECT status, kind FROM work_packages WHERE id=?", (dependency_id,)
+                    ).fetchone()
+                    if predecessor is None:
+                        raise RegistryConflict("DEPENDENCY_MISSING", dependency_id)
+                    if predecessor["kind"] == PackageKind.REVIEW.value:
+                        outcome = connection.execute(
+                            "SELECT state FROM review_outcomes WHERE review_package_id=?",
+                            (dependency_id,),
+                        ).fetchone()
+                        if outcome is None or outcome["state"] != ReviewOutcomeState.APPROVED.value:
+                            raise RegistryConflict("DEPENDENCY_REVIEW_NOT_APPROVED", dependency_id)
+                evidence_id = str(uuid.uuid4())
+                for package in packages:
+                    old = before[package.id]["diagnostics"]
+                    new_diagnostics = dict(old)
+                    for key in ("queue_contract_sha256", "readiness_schema_version",
+                                "exclusive_paths", "github_source_ref", "readiness_proof"):
+                        new_diagnostics[key] = package.provider_diagnostics[key]
+                    # Proof preparation is not a READY authorization. A later
+                    # reviewed operation must clear this exact fail-closed marker.
+                    new_diagnostics["on_deck_recontract_requires_promotion"] = True
+                    updated = connection.execute(
+                        """UPDATE work_packages SET acceptance_criteria_json=?,
+                           provider_diagnostics_json=?, source_system='github_issue',
+                           source_ref=?, updated_at=? WHERE id=? AND status='ON_DECK'""",
+                        (_json(package.acceptance_criteria), _json(new_diagnostics),
+                         package.provider_diagnostics["github_source_ref"], recorded_at, package.id),
+                    ).rowcount
+                    if updated != 1:
+                        raise RegistryConflict("ON_DECK_STATUS_CHANGED", package.id)
+                connection.execute(
+                    """INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (evidence_id, implementation.id, "ON_DECK_RECONTRACT", None,
+                     "Existing ON_DECK pair bound to verified v2 contracts without promotion",
+                     recorded_at, _json({"operation_id": operation_id, "review_package_id": review.id,
+                                         "before": before, "request": request})),
+                )
+                self._insert_event(
+                    connection, "ON_DECK_PAIR_RECONTRACTED", recorded_at,
+                    implementation.id, None, None,
+                    {"review_package_id": review.id, "evidence_id": evidence_id,
+                     "operation_id": operation_id, "promoted": False},
+                )
+                revision = self._bump_revision(connection)
+                result = {"revision": revision, "evidence_id": evidence_id,
+                          "package_ids": [implementation.id, review.id],
+                          "status": "ON_DECK"}
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="RECONTRACT_ON_DECK_PAIR", request=request,
+                    result=result, recorded_at=recorded_at,
+                )
+                connection.commit()
+                return result
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="RECONTRACT_ON_DECK_PAIR", request=request,
+                    error=error, recorded_at=recorded_at,
+                )
                 raise
 
     def register_followup_review(
