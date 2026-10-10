@@ -161,6 +161,39 @@ describe('universal search source adapters', () => {
     expect(searchProjectionFromAppState(statusSaved).complete).toBe(true)
   })
 
+  it('fails closed when a resolved Reminder is changed to Idea or Action without a valid migration transition', () => {
+    for (const kind of ['idea', 'action'] as const) {
+      const resolved = legacyUiProjection(model())
+      const changed = { ...resolved, objects: resolved.objects.map(object =>
+        object.id === 'r' ? updateObject(object, { ...object, kind }) : object) }
+      expect(() => reconcileLegacyUi(changed)).toThrow('Saved model is invalid or ambiguous')
+      const projection = searchProjectionFromAppState(changed)
+      expect(projection.complete).toBe(false)
+    }
+  })
+
+  it('does not report a completed or archived Reminder as missing without a review decision', () => {
+    for (const status of ['complete', 'archived'] as const) {
+      const resolved = legacyUiProjection(model())
+      const changed = legacyUiProjection(reconcileLegacyUi({ ...resolved, objects: resolved.objects.map(object =>
+        object.id === 'r' ? setObjectStatus(object, status) : object) }))
+      const projection = searchProjectionFromAppState(changed)
+      expect(projection.complete).toBe(true)
+      expect(projection.omittedCount).toBe(0)
+      expect(projection.documents.some(document => document.kind === 'reminder')).toBe(false)
+      expect(projection.documents.some(document => document.id === 'capture:r')).toBe(true)
+    }
+  })
+
+  it('still reports broken reminder target and creation provenance as incomplete', () => {
+    const brokenTarget = model()
+    brokenTarget.reminderInstructions![0].targetId = 'missing-target'
+    expect(searchProjectionFromAppState({ ...legacyUiProjection(model()), model: brokenTarget }).complete).toBe(false)
+    const missingCreation = model()
+    missingCreation.interpretations.at(-1)!.legacy.history = []
+    expect(searchProjectionFromAppState({ ...legacyUiProjection(model()), model: missingCreation }).complete).toBe(false)
+  })
+
   it('returns every matching kind by default rather than truncating before later kind buckets', () => {
     const documents: SearchDocument[] = Array.from({ length: 102 }, (_, index) => ({
       kind: 'capture', id: `capture:${index}`, captureIds: [`capture:${index}`], interpretationIds: [], fields: { original: 'Orchid' },
