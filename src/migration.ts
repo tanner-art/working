@@ -331,11 +331,27 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
     if (old && (!equal(item.history.slice(0, old.history.length), old.history) || item.confidence !== old.confidence)) return fail()
+    const additions = old ? item.history.slice(old.history.length) : item.history
     if (old) {
-      // Only the summary may change, and only through recorded revisions; other interpretation fields are frozen.
-      const { summary: _next, ...nextRest } = item.interpretation
-      const { summary: _prior, ...priorRest } = old.interpretation
-      if (!equal(nextRest, priorRest)) return fail()
+      // A Commitment setup may retire an old proposed date, but only when its
+      // exact setup and confirmation gestures are the final new history events.
+      // The original proposal remains in the prior interpretation version.
+      const setupEntry = additions.at(-2)
+      const confirmationEntry = additions.at(-1)
+      const setup = setupEntry?.event === 'Set Commitment details' ? setupEntry.commitmentSetup : undefined
+      const confirmation = confirmationEntry?.event === 'Confirmed as commitment' ? confirmationEntry.confirmation : undefined
+      const retiredProposedDate = old.interpretation.suggestedDate !== undefined && item.interpretation.suggestedDate === undefined &&
+        old.status === 'review' && item.kind === 'commitment' && item.status === 'confirmed' &&
+        setup?.source === 'review-commitment-resolution' && setup.title === item.interpretation.summary &&
+        setup.date === item.metadata.deadline && equal(setup.dependencyIds, item.relationships.map(link => link.targetId)) &&
+        item.relationships.every(link => link.type === 'depends_on') && confirmation?.objectId === item.id &&
+        confirmation.transition === 'commitment' && confirmation.summary === item.interpretation.summary &&
+        confirmation.source === 'review-confirmation'
+      // Only summary and this one audited removal may differ; all other
+      // interpretation provenance stays immutable across the resolution.
+      const { summary: _next, suggestedDate: nextDate, ...nextRest } = item.interpretation
+      const { summary: _prior, suggestedDate: priorDate, ...priorRest } = old.interpretation
+      if (!equal(nextRest, priorRest) || (!retiredProposedDate && nextDate !== priorDate)) return fail()
     }
     if (old && item.interpretation.summary !== old.interpretation.summary) {
       // Every summary change since the saved baseline must be an unbroken chain of recorded revisions.
@@ -347,7 +363,6 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       }
       if (summary !== item.interpretation.summary) return fail()
     }
-    const additions = old ? item.history.slice(old.history.length) : item.history
     if (additions.some(h => h.event.startsWith('Confirmed as ') && !h.confirmation)) return fail()
     // A capture can be reviewed while its first save is pending/failed. Retain a
     // proposed baseline before recording the dedicated gestures in that same save.

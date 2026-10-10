@@ -30,7 +30,7 @@ export function resolveCommitment(object: ThoughtObject, details: CommitmentDeta
   const { deadline: _priorDeadline, ...otherMetadata } = commitment.metadata
   const { suggestedDate: _priorSuggestedDate, ...otherInterpretation } = commitment.interpretation
   const revision = commitment.interpretation.summary === choice.title ? [] : [{ at, event: 'Revised interpretation', reviewRevision: { from: commitment.interpretation.summary, to: choice.title } }]
-  return confirmObject({ ...commitment, interpretation: { ...otherInterpretation, summary: choice.title, suggestedKind: 'commitment' },
+  return confirmObject({ ...commitment, interpretation: { ...otherInterpretation, summary: choice.title },
     metadata: { ...otherMetadata, ...(choice.date ? { deadline: choice.date } : {}) },
     relationships: choice.dependencyIds.map(targetId => ({ targetId, type: 'depends_on' })),
     history: [...commitment.history, ...revision, { at, event: 'Set Commitment details', commitmentSetup: choice }] })
@@ -46,7 +46,11 @@ export function resolveCommitmentInState(state: AppState, objectId: string, deta
   if (details.dependencyIds.some(id => !targets.some(target => target.id === id))) {
     throw new Error('A selected dependency is no longer available. Refresh Review and try again.')
   }
-  return { ...state, objects: state.objects.map(item => item.id === objectId ? resolved : item) }
+  const next = { ...state, objects: state.objects.map(item => item.id === objectId ? resolved : item) }
+  // Validate the candidate before App installs it. A migration rejection must
+  // stay inside the Review form's recoverable error path, not blank the root.
+  readModel(next)
+  return next
 }
 
 export function commitmentRouteId(objectId: string): string { return `commitment:${encodeURIComponent(objectId)}` }

@@ -49,6 +49,35 @@ describe('Review target choices and Commitment validation', () => {
     expect(reloaded.interpretations.filter(item => item.legacy.id === 'action').map(item => item.version)).toEqual([1, 2])
   })
 
+  it('resolves the seeded proposed Commitment date with a fresh Action dependency without losing the proposal', () => {
+    let raw: string | null = null
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    let state = loadStateResult().state
+    const proposedDate = state.objects.find(item => item.id === 'welcome-commitment')!.interpretation.suggestedDate
+    expect(proposedDate).toBeDefined()
+    expect(state.objects.find(item => item.id === 'welcome-commitment')!.status).toBe('review')
+    state = { ...state, objects: state.objects.map(item => item.id === 'welcome-action' ? stageAction(item) : item) }
+    expect(saveState(state)).toBeUndefined()
+    const unaudited = { ...state, objects: state.objects.map(item => item.id === 'welcome-commitment'
+      ? { ...item, interpretation: { ...item.interpretation, suggestedDate: undefined } } : item) }
+    expect(() => reconcileCurrentSession(unaudited)).toThrow('invalid or ambiguous')
+
+    state = resolveCommitmentInState(state, 'welcome-commitment',
+      { title: 'Product planning block', dependencyIds: ['welcome-action'] }, reconcileCurrentSession, at)
+    const current = reconcileCurrentSession(state)
+    expect(current.relationships).toMatchObject([{ sourceId: 'welcome-commitment', targetId: 'welcome-action', type: 'depends_on' }])
+    expect(current.calendarEvents).toEqual([])
+    expect(saveState(state)).toBeUndefined()
+
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    const readings = reloaded.state.model!.interpretations.filter(item => item.legacy.id === 'welcome-commitment')
+    expect(readings[0].legacy.interpretation.suggestedDate).toBe(proposedDate)
+    expect(readings.at(-1)!.legacy.interpretation.suggestedDate).toBeUndefined()
+    expect(readings.at(-1)!.legacy.history.some(entry => entry.commitmentSetup?.source === 'review-commitment-resolution')).toBe(true)
+    expect(reloaded.state.model!.calendarEvents).toEqual([])
+  })
+
   it('uses the current account session for both choices and their decisions without reloading', async () => {
     let row: AccountRow | null = null
     const adapter: AccountAdapter = {
@@ -96,6 +125,18 @@ describe('Review target choices and Commitment validation', () => {
       expect(raw).toBe(saved)
       expect(write).not.toHaveBeenCalled()
     }
+  })
+
+  it('rejects a candidate projection failure before installing a Commitment into UI state', () => {
+    const state = legacyUiProjection(initial())
+    const before = structuredClone(state)
+    const readModel = (current: AppState) => {
+      if (current.objects.find(item => item.id === 'commitment')?.status === 'confirmed') throw Error('candidate projection rejected')
+      return reconcileCurrentSession(current)
+    }
+    expect(() => resolveCommitmentInState(state, 'commitment', { title: 'commitment', dependencyIds: [] }, readModel))
+      .toThrow('candidate projection rejected')
+    expect(state).toEqual(before)
   })
 
   it('keeps Review visible and decisions fail closed when the canonical snapshot is unavailable', () => {
