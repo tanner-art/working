@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject } from './objectWorkflow'
+import { confirmObject, reverseObject } from './objectWorkflow'
 import { correctOriginal, reviseInterpretation } from './reviewRevision'
 import { resolveReminderInState } from './reminderWorkflow'
 import type { AppState, ThoughtObject } from './domain'
-import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, type SearchDocument } from './universalSearch'
+import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, searchProjectionFromAppState, type SearchDocument } from './universalSearch'
 
 const at = '2026-10-09T00:00:00.000Z'
 const thought = (id: string, kind: ThoughtObject['kind'], originalContent: string, summary: string): ThoughtObject => ({
@@ -139,6 +139,20 @@ describe('universal search source adapters', () => {
     const unauditedInstruction = model()
     unauditedInstruction.interpretations.at(-1)!.legacy.history = []
     expect(searchDocumentsFromModel(unauditedInstruction).some(document => document.kind === 'reminder')).toBe(false)
+  })
+
+  it('does not report intentional reminder reversal as missing search content', () => {
+    const resolved = legacyUiProjection(model())
+    const before = searchProjectionFromAppState(resolved)
+    expect(before.complete).toBe(true)
+    expect(before.documents.some(document => document.kind === 'reminder')).toBe(true)
+    const reversed = legacyUiProjection(reconcileLegacyUi({ ...resolved, objects: resolved.objects.map(object =>
+      object.id === 'r' ? reverseObject(object) : object) }))
+    const after = searchProjectionFromAppState(reversed)
+    expect(after.complete).toBe(true)
+    expect(after.omittedCount).toBe(0)
+    expect(after.documents.some(document => document.kind === 'reminder')).toBe(false)
+    expect(after.documents.some(document => document.id === 'capture:r')).toBe(true)
   })
 
   it('returns every matching kind by default rather than truncating before later kind buckets', () => {

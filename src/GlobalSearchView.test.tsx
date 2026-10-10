@@ -48,6 +48,12 @@ describe('global Search surface', () => {
     expect(searchResultPreview({ ...result, document: { ...result.document, fields: { 'corrected-source': `${'x'.repeat(200)} orchid ending` } } }, 'orchid').text).toContain('orchid')
   })
 
+  it('does not show a degraded-index warning for a valid resolved workspace', () => {
+    const markup = renderToStaticMarkup(<GlobalSearchView state={state} snapshotToken="current" navigate={() => ({ ok: true })} initialQuery="orchid" />)
+    expect(markup).not.toContain('Some items could not be indexed')
+    expect(markup).not.toContain('results may be incomplete')
+  })
+
   it('distinguishes the empty prompt from a genuine no-match result', () => {
     const noQuery = renderToStaticMarkup(<GlobalSearchView state={state} snapshotToken="current" navigate={() => ({ ok: true })} />)
     const noMatch = renderToStaticMarkup(<GlobalSearchView state={state} snapshotToken="current" navigate={() => ({ ok: true })} initialQuery="doesnotexist" />)
