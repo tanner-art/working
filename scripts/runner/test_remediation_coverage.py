@@ -46,6 +46,7 @@ class RemediationCoverageTests(unittest.TestCase):
         self.registry.register_feature(Feature("F", "Feature", 1, TaskStatus.READY))
         self.registry.register_feature(Feature("RF", "Remediation feature", 1, TaskStatus.READY))
         self.registry.register_worker(Worker("builder", "Builder", ("code",), (Lane.FEATURE,)))
+        self.registry.register_worker(Worker("original-builder", "Original builder", ("code",), (Lane.FEATURE,)))
         self.registry.register_worker(Worker("claude", "Claude", ("independent-review",), (Lane.ASSURANCE,)))
         for package_id, kind, status, lane in (
             ("TASK-177", PackageKind.PARENT, TaskStatus.VERIFY_REVIEW, Lane.FEATURE),
@@ -66,7 +67,7 @@ class RemediationCoverageTests(unittest.TestCase):
                 "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
                 "findings_json,changes_requested_json,approval_evidence_ids_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                ("original-verdict", "TASK-178", "TASK-177", "builder", "claude",
+                ("original-verdict", "TASK-178", "TASK-177", "original-builder", "claude",
                  self.original_decided_at, self.original_decided_at, "CHANGES_REQUESTED",
                  json.dumps(self.original_findings), json.dumps(self.original_requests), "[]"),
             )
@@ -198,6 +199,8 @@ class RemediationCoverageTests(unittest.TestCase):
         self.assertEqual(fact["source_implementation_commit"], self.original_reviewed)
         self.assertEqual(fact["reviewed_commit"], self.reviewed)
         self.assertEqual(fact["prior_review_outcome_ids"], ("original-verdict",))
+        self.assertEqual(set(fact["implementer_worker_ids"]), {"original-builder", "builder"})
+        self.assertEqual(fact["remediation_relation"]["merged_main_commit"], self.merged)
 
     def test_existing_v6_database_without_triggers_installs_them_before_insert(self):
         with self.registry._connection() as connection:

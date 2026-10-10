@@ -155,7 +155,25 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
             raise RegistryConflict("ASSURANCE_PATCH_TRANSFER_UNSUPPORTED", package_id)
         included_ids.append(package_id)
         included_shas.append(receipt_meta["merged_main_commit"])
-        implementers.append(review["implementer_worker_id"])
+        historical_implementers = (review.get("implementer_worker_ids") if version == 2
+                                   else (review["implementer_worker_id"],))
+        if (not isinstance(historical_implementers, (tuple, list))
+                or not historical_implementers
+                or review["implementer_worker_id"] not in historical_implementers
+                or any(not isinstance(worker, str) or not worker for worker in historical_implementers)):
+            raise RegistryConflict("ASSURANCE_REVIEW_SEPARATION_INVALID", package_id)
+        implementers.extend(historical_implementers)
+        if version == 2:
+            relation = review.get("remediation_relation")
+            if relation is not None and (not isinstance(relation, Mapping)
+                    or relation.get("original_package_id") != package_id
+                    or relation.get("original_reviewed_commit") != item["implementation_commit"]
+                    or relation.get("remediation_review_package_id") != item["review_package_id"]
+                    or relation.get("reviewed_commit") != item["reviewed_commit"]
+                    or relation.get("merged_main_commit") != receipt_meta["merged_main_commit"]
+                    or relation.get("merged_main_tree") != receipt_meta["merged_main_tree"]
+                    or relation.get("pr_url") != item["pr_url"]):
+                raise RegistryConflict("ASSURANCE_REMEDIATION_RECEIPT_MISMATCH", package_id)
         if version == 2:
             histories.append({"package_id": package_id,
                               "prior_outcomes": list(review.get("prior_review_outcomes", ()))})
@@ -186,7 +204,7 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
             raise RegistryConflict("ASSURANCE_SHARED_PATH_HANDOFF_INVALID")
     matrix = raw.get("acceptance_matrix")
     criteria = package.get("acceptance_criteria") or ()
-    if (not isinstance(matrix, list) or len(matrix) != len(criteria)
+    if (not criteria or not isinstance(matrix, list) or not matrix or len(matrix) != len(criteria)
             or [item.get("criterion") for item in matrix if isinstance(item, Mapping)] != list(criteria)):
         raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
     for item in matrix:
@@ -239,7 +257,9 @@ def verify_integrated_source(value: IntegratedAssuranceInput, *, repository: pat
 
     try:
         main = json.loads(github("api", f"repos/{repository_name}/git/ref/heads/main"))
-        if not ancestor(value.integrated_commit, main["object"]["sha"]):
+        if (not value.integration_receipts
+                or value.integrated_commit != value.integration_receipts[-1]["merged_main_commit"]
+                or not ancestor(value.integrated_commit, main["object"]["sha"])):
             return False
         if git("rev-parse", f"{value.integrated_commit}^{{tree}}") != value.integrated_tree:
             return False
@@ -256,7 +276,11 @@ def verify_integrated_source(value: IntegratedAssuranceInput, *, repository: pat
             # Historical source and accepted review may be non-ancestral after
             # a cumulative transfer. That requires separate reviewed transfer
             # proof; these fields alone must not assert patch equivalence.
-            if (not ancestor(prior, merged) or not ancestor(merged, value.integrated_commit)
+            if (git("rev-parse", f"{merged}^1") != prior
+                    or not ancestor(prior, reviewed)
+                    or not ancestor(prior, pr_head)
+                    or git("rev-parse", f"{reviewed}^{{tree}}") != receipt["merged_main_tree"]
+                    or not ancestor(prior, merged) or not ancestor(merged, value.integrated_commit)
                     or not ancestor(value.base_commit, item["implementation_commit"])
                     or not ancestor(item["implementation_commit"], reviewed)
                     or not ancestor(reviewed, merged)

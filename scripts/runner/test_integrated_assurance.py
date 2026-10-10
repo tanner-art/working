@@ -325,6 +325,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                          "reviewed_commit": item["reviewed_commit"],
                          "review_pr_url": item["pr_url"],
                          "source_implementation_commit": item["implementation_commit"],
+                         "implementer_worker_ids": ("builder",),
                          "prior_review_outcome_ids": (), "prior_review_outcomes": ()}
             for package_id, item in (("TASK-1", first_item), ("TASK-4", second_item))
         }
@@ -379,6 +380,21 @@ class IntegratedAssuranceTests(unittest.TestCase):
             value, repository=self.repo,
             github=lambda *args: json.dumps({"object": {"sha": self.base}}),
             repository_name="o/r"))
+        sibling = subprocess.check_output(
+            ["git", "-C", str(self.repo), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "commit-tree", second_tree,
+             "-p", self.base], input="sibling second writer", text=True,
+        ).strip()
+        sibling_item = {**second_item, "implementation_commit": sibling,
+                        "reviewed_commit": sibling, "pr_head_commit": sibling}
+        sibling_receipt = {**receipts["TASK-4"], "metadata": {
+            **receipts["TASK-4"]["metadata"], "implementation_commit": sibling,
+            "reviewed_commit": sibling, "pr_head_commit": sibling}}
+        sibling_value = replace(value,
+            included_packages=(first_item, sibling_item),
+            integration_receipts=(receipts["TASK-1"]["metadata"], sibling_receipt["metadata"]))
+        self.assertFalse(verify_integrated_source(
+            sibling_value, repository=self.repo, github=github, repository_name="o/r"))
 
     def test_v2_distinct_source_reviewed_pr_head_merge_and_prior_review(self):
         source = self.integrated
@@ -388,10 +404,13 @@ class IntegratedAssuranceTests(unittest.TestCase):
         self.write("src/feature.py", "independently reviewed integration")
         self.commit("reviewed integration")
         reviewed = self.git("rev-parse", "HEAD")
-        self.write("docs/merge.md", "merge envelope")
-        self.commit("merge envelope")
-        merged = self.git("rev-parse", "HEAD")
         tree = self.git("rev-parse", "HEAD^{tree}")
+        merged = subprocess.check_output(
+            ["git", "-C", str(self.repo), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "commit-tree", tree,
+             "-p", self.base, "-p", reviewed],
+            input="reviewed merge result", text=True,
+        ).strip()
         item = {**self.meta["included_packages"][0], "implementation_commit": source,
                 "reviewed_commit": reviewed, "pr_head_commit": pr_head,
                 "prior_review_outcome_ids": ["earlier-changes-requested"]}
@@ -410,6 +429,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                              "reviewer_worker_id": "claude", "approval_evidence_ids": ["review-evidence"],
                              "reviewed_commit": reviewed, "review_pr_url": item["pr_url"],
                              "source_implementation_commit": source,
+                             "implementer_worker_ids": ("builder",),
                              "prior_review_outcome_ids": ("earlier-changes-requested",),
                              "prior_review_outcomes": ({"id": "earlier-changes-requested",
                                                         "state": "CHANGES_REQUESTED"},)}}
@@ -421,7 +441,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                                    "review_evidence_id": "review-evidence",
                                    "merged_main_commit": merged, "merged_main_tree": tree,
                                    "inclusion_mode": "ancestry",
-                                   "changed_paths": ["src/feature.py", "docs/merge.md"]}}}
+                                   "changed_paths": ["src/feature.py"]}}}
         value = parse_assurance_input(evidence, package=package, dependencies=("TASK-1",),
                                       review_facts=review, receipts=receipts)
         self.assertEqual(value.review_histories[0]["prior_outcomes"][0]["id"],
@@ -437,6 +457,38 @@ class IntegratedAssuranceTests(unittest.TestCase):
                                "url": meta["ci"]["run_url"]})
         self.assertTrue(verify_integrated_source(
             value, repository=self.repo, github=github, repository_name="o/r"))
+        self.assertFalse(verify_integrated_source(
+            replace(value, integrated_commit=reviewed),
+            repository=self.repo, github=github, repository_name="o/r"))
+        self.write("docs/unreviewed.md", "unreviewed merge delta")
+        self.commit("unreviewed merge delta")
+        unreviewed_tree = self.git("rev-parse", "HEAD^{tree}")
+        unreviewed_merge = subprocess.check_output(
+            ["git", "-C", str(self.repo), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "commit-tree", unreviewed_tree,
+             "-p", self.base, "-p", reviewed],
+            input="unreviewed merge result", text=True,
+        ).strip()
+        changed_receipt = {**value.integration_receipts[0],
+                           "merged_main_commit": unreviewed_merge,
+                           "merged_main_tree": unreviewed_tree,
+                           "changed_paths": ["src/feature.py", "docs/unreviewed.md"]}
+        unreviewed_value = replace(value, integrated_commit=unreviewed_merge,
+                                   integrated_tree=unreviewed_tree,
+                                   ordered_parent_shas=(unreviewed_merge,),
+                                   integration_receipts=(changed_receipt,))
+        def unreviewed_github(*args):
+            if args[0] == "api":
+                return json.dumps({"object": {"sha": unreviewed_merge}})
+            if args[0] == "pr":
+                return json.dumps({"state": "MERGED", "headRefOid": pr_head,
+                                   "mergeCommit": {"oid": unreviewed_merge}})
+            return json.dumps({"headSha": unreviewed_merge, "status": "completed",
+                               "conclusion": "success", "workflowName": "Validate app",
+                               "url": meta["ci"]["run_url"]})
+        self.assertFalse(verify_integrated_source(
+            unreviewed_value, repository=self.repo,
+            github=unreviewed_github, repository_name="o/r"))
         with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
             parse_assurance_input({**evidence, "metadata": {**meta, "included_packages": [
                 {**item, "prior_review_outcome_ids": []}]}}, package=package,
@@ -453,6 +505,61 @@ class IntegratedAssuranceTests(unittest.TestCase):
         self.assertFalse(verify_integrated_source(
             replace(value, included_packages=({**item, "implementation_commit": sibling},)),
             repository=self.repo, github=github, repository_name="o/r"))
+
+    def test_v2_requires_nonempty_acceptance_matrix_and_all_implementers(self):
+        item = {**self.meta["included_packages"][0],
+                "reviewed_commit": self.integrated,
+                "pr_head_commit": self.integrated,
+                "prior_review_outcome_ids": []}
+        meta = {**self.meta, "schema_version": 2, "included_packages": [item],
+                "shared_path_handoffs": []}
+        evidence = {"id": "input", "package_id": "TASK-3",
+                    "kind": "integrated-assurance-input",
+                    "recorded_at": self.now.isoformat(), "metadata": meta}
+        package = {"id": "TASK-3", "kind": "EVALUATION", "lane": "ASSURANCE",
+                   "acceptance_criteria": ["visible feature works"],
+                   "provider_diagnostics": {"queue_contract_sha256": queue_contract_digest(self.contract)}}
+        fact = {"id": "review-outcome", "state": "APPROVED",
+                "review_package_id": "TASK-2", "implementer_worker_id": "builder",
+                "reviewer_worker_id": "claude", "implementer_worker_ids": ("original-builder", "builder"),
+                "approval_evidence_ids": ["review-evidence"],
+                "reviewed_commit": self.integrated, "review_pr_url": item["pr_url"],
+                "source_implementation_commit": self.integrated,
+                "prior_review_outcome_ids": (), "prior_review_outcomes": ()}
+        receipt = {"id": "integration-receipt", "package_id": "TASK-1",
+                   "kind": "integration-acceptance", "metadata": {
+                       "implementation_commit": self.integrated,
+                       "reviewed_commit": self.integrated,
+                       "pr_head_commit": self.integrated,
+                       "pr_url": "https://github.com/o/r/pull/1",
+                       "review_outcome_id": "review-outcome",
+                       "review_evidence_id": "review-evidence",
+                       "merged_main_commit": self.integrated,
+                       "merged_main_tree": self.tree,
+                       "inclusion_mode": "ancestry",
+                       "changed_paths": ["src/feature.py"]}}
+        value = parse_assurance_input(evidence, package=package,
+                                      dependencies=("TASK-1",),
+                                      review_facts={"TASK-1": fact},
+                                      receipts={"TASK-1": receipt})
+        self.assertEqual(set(value.implementer_workers), {"original-builder", "builder"})
+        mismatched_relation = {"original_package_id": "TASK-1",
+                               "original_reviewed_commit": self.integrated,
+                               "remediation_review_package_id": "TASK-2",
+                               "reviewed_commit": self.integrated,
+                               "merged_main_commit": "a" * 40,
+                               "merged_main_tree": self.tree,
+                               "pr_url": item["pr_url"]}
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REMEDIATION_RECEIPT_MISMATCH"):
+            parse_assurance_input(evidence, package=package, dependencies=("TASK-1",),
+                                  review_facts={"TASK-1": {
+                                      **fact, "remediation_relation": mismatched_relation}},
+                                  receipts={"TASK-1": receipt})
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_MATRIX_INCOMPLETE"):
+            parse_assurance_input({**evidence, "metadata": {**meta, "acceptance_matrix": []}},
+                                  package={**package, "acceptance_criteria": []},
+                                  dependencies=("TASK-1",), review_facts={"TASK-1": fact},
+                                  receipts={"TASK-1": receipt})
 
     def test_v2_registry_terminal_approval_preserves_earlier_change_request(self):
         self.seed_v2_review_provenance()

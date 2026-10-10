@@ -2190,6 +2190,11 @@ class SQLiteRegistry:
             "reviewed_commit": approval_meta.get("reviewed_commit"),
             "review_pr_url": approval["uri"],
             "source_implementation_commit": source_commit,
+            "implementer_worker_ids": tuple(dict.fromkeys(
+                [row["implementer_worker_id"] for row in outcomes]
+                + ([approved["implementer_worker_id"]] if relation is not None else [])
+            )),
+            "remediation_relation": relation,
             "prior_review_outcome_ids": tuple(row["id"] for row in prior),
             "prior_review_outcomes": tuple({
                 "id": row["id"], "state": row["state"],
