@@ -39,6 +39,8 @@ import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspac
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
+import { resolveCommitmentInState, type CommitmentDetails } from './commitmentWorkflow'
+import { readReviewTargets } from './reviewTargets'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
 import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
@@ -382,7 +384,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     update(current => ({ ...current, objects: current.objects.map(item => item.id === resolved.id ? resolved : item) }))
     if (resolved.kind === 'action') navigate('schedule')
   }
-  const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice))
+  const resolveCommitment = (id: string, details: CommitmentDetails) => update(current =>
+    resolveCommitmentInState(current, id, details, readSearchModel))
+  const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice,
+    new Date().toISOString(), cloud ? readSearchModel(current) : undefined))
   const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState))
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
   const saveObject = (updated: ThoughtObject) => update(current => ({ ...current, objects: current.objects.map(item => item.id === updated.id ? updateObject(item, updated) : item) }))
@@ -530,6 +535,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   })
+  const reviewTargets = view === 'review' ? readReviewTargets(state, readSearchModel) : { targets: [] }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
@@ -566,7 +572,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
       {view === 'capture' && <Capture registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={state.model?.semanticObjects ?? []} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={reviewTargets.targets} targetsError={reviewTargets.error} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveCommitment={resolveCommitment} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update}
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
@@ -783,7 +789,7 @@ export function focusPendingReviewChoice(disclosure: HTMLDetailsElement | null, 
   return true
 }
 
-export function Review({ registerSearchHandoffGuard, objects, targets = [], focusObjectId = null, onFocusHandled, onResolve, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; focusObjectId?: string | null; onFocusHandled?: () => void; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function Review({ registerSearchHandoffGuard, objects, targets = [], targetsError, focusObjectId = null, onFocusHandled, onResolve, onResolveCommitment, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; targetsError?: string; focusObjectId?: string | null; onFocusHandled?: () => void; onResolve: (object: ThoughtObject) => void; onResolveCommitment?: (id: string, details: CommitmentDetails) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
   const disclosure = useRef<HTMLDetailsElement>(null)
   const cards = useRef(new Map<string, HTMLElement>())
@@ -795,11 +801,11 @@ export function Review({ registerSearchHandoffGuard, objects, targets = [], focu
     if (!focusObjectId) return
     focusPendingReviewChoice(disclosure.current, cards.current.get(focusObjectId), onFocusHandled)
   }, [focusObjectId, objects, onFocusHandled])
-  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details ref={disclosure} className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id} ref={node => { if (node) cards.current.set(item.id, node); else cards.current.delete(item.id) }}>
+  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" />{targetsError && <p role="alert">{targetsError}</p>}<details ref={disclosure} className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id} ref={node => { if (node) cards.current.set(item.id, node); else cards.current.delete(item.id) }}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution registerSearchHandoffGuard={registerSearchHandoffGuard} object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution registerSearchHandoffGuard={registerSearchHandoffGuard} object={item} onComplete={onResolve} onResolveCommitment={onResolveCommitment} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
       {ideas.length ? ideas.map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No resolved ideas yet." />}

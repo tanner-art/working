@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import type { SemanticObject, ThoughtObject } from './domain'
-import { resolveCommitment, type CommitmentDetails } from './commitmentWorkflow'
+import type { CommitmentDetails } from './commitmentWorkflow'
 
 /** The four-field Review form; saving establishes an obligation, never an event. */
-export function CommitmentResolution({ object, dependencies, onResolve, onCancel }: { object: ThoughtObject; dependencies: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onCancel?: () => void }) {
+export function CommitmentResolution({ object, dependencies, onResolve, onCancel }: { object: ThoughtObject; dependencies: readonly SemanticObject[]; onResolve: (details: CommitmentDetails) => void; onCancel?: () => void }) {
   const [title, setTitle] = useState(object.interpretation.summary), [date, setDate] = useState(''), [time, setTime] = useState('')
   const [dependencyIds, setDependencyIds] = useState<readonly string[]>([]), [message, setMessage] = useState('')
-  const submit = (event: FormEvent) => { event.preventDefault(); try { const details: CommitmentDetails = { title, ...(date ? { date } : {}), ...(time ? { time } : {}), dependencyIds }; onResolve(resolveCommitment(object, details)) } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to save this commitment. Refresh Review and try again.') } }
+  const submit = (event: FormEvent) => { event.preventDefault(); try { const details: CommitmentDetails = { title, ...(date ? { date } : {}), ...(time ? { time } : {}), dependencyIds }; onResolve(details) } catch (error) { setMessage(error instanceof Error ? error.message : 'Unable to save this commitment. Refresh Review and try again.') } }
   const toggle = (id: string) => setDependencyIds(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id])
   const choices = dependencies.filter(item => item.id !== object.id)
   return <form className="commitment-resolution" onSubmit={submit} aria-label="Set commitment details">
