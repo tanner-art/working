@@ -224,6 +224,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
   const [focusedActionId, setFocusedActionId] = useState<string | null>(null)
   const [focusedReminderId, setFocusedReminderId] = useState<string | null>(null)
+  const [focusedReviewId, setFocusedReviewId] = useState<string | null>(null)
   const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
   const [workspaceRouteError, setWorkspaceRouteError] = useState('')
   const searchSession = useRef(crypto.randomUUID())
@@ -485,12 +486,14 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       },
       open: destination => {
         exitWorkspaceRoute()
-        setSelectedObjectId(null); setSelectedCaptureId(null); setFocusedActionId(null); setFocusedReminderId(null)
+        setSelectedObjectId(null); setSelectedCaptureId(null); setFocusedActionId(null); setFocusedReminderId(null); setFocusedReviewId(null)
         if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
         if (destination.view === 'canvas') {
           setView('canvas'); setBankFocusTarget(destination.canvasId); setFocusCanvasTitle(false); setFocusCanvasEntry(true); setOpenCanvasId(destination.canvasId)
         } else if ('reminderId' in destination) {
           setView('review'); setFocusedReminderId(destination.reminderId)
+        } else if ('pendingReviewId' in destination) {
+          setView('review'); setFocusedReviewId(destination.pendingReviewId)
         } else if ('captureId' in destination) {
           setView('review'); setSelectedCaptureId(destination.captureId)
         } else if ('actionId' in destination) {
@@ -563,7 +566,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
       {view === 'capture' && <Capture registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={state.model?.semanticObjects ?? []} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update}
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
@@ -770,13 +773,29 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ registerSearchHandoffGuard, objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function focusPendingReviewChoice(disclosure: HTMLDetailsElement | null, card: HTMLElement | undefined): boolean {
+  if (!disclosure || !card) return false
+  const choice = card.querySelector<HTMLButtonElement>('.review-actions button:not(:disabled)')
+  if (!choice) return false
+  disclosure.open = true
+  choice.focus()
+  return true
+}
+
+export function Review({ registerSearchHandoffGuard, objects, targets = [], focusObjectId = null, onFocusHandled, onResolve, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; focusObjectId?: string | null; onFocusHandled?: () => void; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
+  const disclosure = useRef<HTMLDetailsElement>(null)
+  const cards = useRef(new Map<string, HTMLElement>())
   useSearchHandoffGuard(registerSearchHandoffGuard, 'review', () => !rejecting)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
   const folders = bankObjects(objects)
-  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
+  useEffect(() => {
+    if (!focusObjectId) return
+    focusPendingReviewChoice(disclosure.current, cards.current.get(focusObjectId))
+    onFocusHandled?.()
+  }, [focusObjectId, objects, onFocusHandled])
+  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details ref={disclosure} className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id} ref={node => { if (node) cards.current.set(item.id, node); else cards.current.delete(item.id) }}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
@@ -806,11 +825,14 @@ export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspe
   const [fieldError, setFieldError] = useState('')
   const closeButton = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
   useEffect(() => setDraft(object), [object])
   useEffect(() => setRevision(object.interpretation.summary), [object.id, object.interpretation.summary])
   useEffect(() => setCorrection(history.currentText), [object.id, history.currentText])
   const stagedActionResolved = hasStagedActionResolution(object)
   const reminderTypeLocked = object.kind === 'reminder' && hasCreatedReminderInstruction(object)
+  const pendingClassification = reviewObjects([object]).length > 0
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !stagedActionResolved)
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
@@ -837,7 +859,9 @@ export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspe
   useEffect(() => {
     closeButton.current?.focus()
     const opener = returnFocus.current
-    return () => { requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus()) }
+    return () => {
+      if (!suspendedRef.current) requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus())
+    }
   }, [])
   useEffect(() => { if (!suspended) closeButton.current?.focus() }, [suspended])
   useEffect(() => {
@@ -874,6 +898,7 @@ export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspe
           {revisionNeedsReconfirmation(object) && <p role="note">{revisionReviewNotice(object)}</p>}
           <button className="secondary" disabled={hasUnsavedFieldEdits || !revision.trim() || revision.trim() === object.interpretation.summary} onClick={() => onRevise(revision)}>Save meaning version</button>
         </section>
+        {pendingClassification ? <p role="note">Choose Action, Commitment, Reminder, or Idea in Review when you are ready.</p> : <>
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
           <label>Type<select value={draft.kind} disabled={reminderTypeLocked} aria-describedby={reminderTypeLocked ? 'reminder-type-note' : undefined} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select>{reminderTypeLocked && <small id="reminder-type-note">Type is fixed after a Reminder is created. You can still edit its other details.</small>}</label>
@@ -882,13 +907,13 @@ export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspe
           <label>Time<input type="time" value={proposedTime} onChange={event => setProposedTime(event.target.value)} /></label>
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
           <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation || stagedActionResolved} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status} disabled={reminderTypeLocked && (status === 'inbox' || status === 'review')}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
-        </div>
+        </div></>}
         {fieldError && <p role="alert">{fieldError}</p>}
         <details className="thought-progression" open><summary>Version history ({history.progression.length})</summary><ol>{history.progression.slice().reverse().map(entry => <li key={entry.id}><div><strong>{entry.label}</strong><time>{new Date(entry.at).toLocaleString()}</time></div><p>{entry.text}</p>{entry.previousText && <details><summary>Previous version</summary><p>{entry.previousText}</p></details>}</li>)}</ol></details>
         <details><summary>Decision history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
         {(hasConfirmation(object) || stagedActionResolved) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>{stagedActionResolved && !hasConfirmation(object) ? 'Withdraw staged Action' : 'Reverse confirmation'}</button></>}
       </div>
-      <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>
+      {!pendingClassification && <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>}
     </aside>
   </div>
 }

@@ -25,6 +25,20 @@ function fixture(): AppState {
 const document = (state: AppState, kind: SearchDocument['kind']) => searchDocumentsFromAppState(state).find(item => item.kind === kind)!
 
 describe('workspace search navigation contract', () => {
+  it('returns an unresolved Capture to its four-choice Review row instead of generic object details', () => {
+    const state = legacyUiProjection(migrateLegacyState({ canvas: [], objects: [thought('pending', 'idea')] }))
+    const before = structuredClone(state)
+    const capture = document(state, 'capture')
+    expect(resolveSearchDestination(state, capture)).toEqual({ view: 'review', pendingReviewId: 'pending' })
+    const opened: SearchDestination[] = []
+    const outcome = performWorkspaceNavigation({ type: 'open-search-result', document: capture, snapshotToken: 'current' },
+      { state, snapshotToken: 'current', stateIsCurrent: true, available: true },
+      { open: destination => opened.push(destination), close: () => undefined })
+    expect(outcome).toEqual({ ok: true })
+    expect(opened).toEqual([{ view: 'review', pendingReviewId: 'pending' }])
+    expect(state).toEqual(before)
+  })
+
   it('resolves all six identities to their real in-workspace destinations without writing state', () => {
     const state = fixture()
     const before = structuredClone(state)
