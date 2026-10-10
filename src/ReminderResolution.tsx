@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { AppState, SemanticObject, ThoughtObject } from './domain'
 import type { ReminderChoice } from './reminderWorkflow'
 import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
@@ -26,11 +26,13 @@ export function ReminderResolution({ object, targets, onResolve, onCancel }: { o
 }
 
 /** Visible in-app fallback; an already-resolved stale click becomes a recoverable message. */
-export function ReminderProjections({ state, onDeliveryState }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void }) {
+export function ReminderProjections({ state, onDeliveryState, focusInstructionId = null }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void; focusInstructionId?: string | null }) {
   const now = useMemo(() => new Date(), [state])
   const inFlight = useRef(new Set<string>())
+  const rowRefs = useRef(new Map<string, HTMLLIElement>())
   const [pending, setPending] = useState<readonly string[]>([])
   const [message, setMessage] = useState('')
+  useEffect(() => { if (focusInstructionId) rowRefs.current.get(focusInstructionId)?.focus() }, [focusInstructionId])
   if (!state.model) return null
   const specific = specificReminderProjection(state.model, now)
   const daily = dailyLogReminderProjection(state.model, now)
@@ -48,7 +50,7 @@ export function ReminderProjections({ state, onDeliveryState }: { state: AppStat
   }
   const rows = (items: typeof specific) => items.map(({ instruction, target, due }) => {
     const busy = pending.includes(instruction.id)
-    return <li key={instruction.id}><strong>{target.summary}</strong>{instruction.mode === 'specific' && <span>{due ? ' Due now' : ` Due ${new Date(instruction.dueAt!).toLocaleString()}`}</span>}<small> In-app only — notification delivery is unavailable.</small><button className="secondary" type="button" disabled={busy} onClick={() => deliver(instruction.id, 'handled')}>Handled</button><button className="secondary" type="button" disabled={busy} onClick={() => deliver(instruction.id, 'dismissed')}>Dismiss</button></li>
+    return <li key={instruction.id} ref={node => { if (node) rowRefs.current.set(instruction.id, node); else rowRefs.current.delete(instruction.id) }} tabIndex={instruction.id === focusInstructionId ? -1 : undefined}><strong>{target.summary}</strong>{instruction.mode === 'specific' && <span>{due ? ' Due now' : ` Due ${new Date(instruction.dueAt!).toLocaleString()}`}</span>}<small> In-app only — notification delivery is unavailable.</small><button className="secondary" type="button" disabled={busy} onClick={() => deliver(instruction.id, 'handled')}>Handled</button><button className="secondary" type="button" disabled={busy} onClick={() => deliver(instruction.id, 'dismissed')}>Dismiss</button></li>
   })
   return <section className="reminder-projections" aria-label="Active reminders"><h2>Reminders</h2><p>Notification delivery is unavailable. Active reminders remain visible here.</p>{message && <p role="alert">{message}</p>}<h3>Specific</h3>{specific.length ? <ul>{rows(specific)}</ul> : <p>No active Specific reminders.</p>}<h3>Daily log</h3>{daily.length ? <ul>{rows(daily)}</ul> : <p>No active Daily log reminders.</p>}</section>
 }

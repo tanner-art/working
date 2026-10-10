@@ -19,7 +19,7 @@ import { CalendarView } from './CalendarView'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
@@ -29,6 +29,7 @@ import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revision
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
+import { performWorkspaceNavigation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -140,6 +141,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
+  const snapshotToken = useMemo(() => crypto.randomUUID(), [state])
   const latestState = useRef(state)
   latestState.current = state
   const [saveError, setSaveError] = useState<string | undefined>()
@@ -187,7 +189,17 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null)
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
+  const [focusedActionId, setFocusedActionId] = useState<string | null>(null)
+  const [focusedReminderId, setFocusedReminderId] = useState<string | null>(null)
+  const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
+  const searchOpener = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    const onPopState = () => setActiveWorkspaceSurface(workspaceSurfaceModuleForPath(window.location.pathname))
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
   const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
   const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
   const update = (fn: (current: AppState) => AppState) => {
@@ -367,14 +379,55 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const navigate = (next: View) => {
     if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
+    setFocusedActionId(null); setFocusedReminderId(null); setSelectedCaptureId(null)
     setView(next)
+  }
+  const openSearch = () => {
+    const searchSurface = workspaceSurfaceModuleForPath('/search')
+    if (!searchSurface || accountBusy || !accountValid || initial.error || clearing.current) return
+    if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+    searchOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    window.history.pushState({}, '', '/search')
+    setActiveWorkspaceSurface(searchSurface)
+  }
+  const navigateWorkspace = (request: WorkspaceNavigationRequest): WorkspaceNavigationOutcome => {
+    const liveAccount = auth.getState()
+    return performWorkspaceNavigation(request, {
+      state: latestState.current, snapshotToken, stateIsCurrent: latestState.current === state,
+      available: !!activeWorkspaceSurface && !accountBusy && accountValid && !initial.error && !clearing.current,
+      accountUserId: cloud?.session.userId,
+      authenticatedUserId: liveAccount.status === 'signed-in' ? liveAccount.session.user.id : undefined,
+    }, {
+      close: () => {
+        window.history.replaceState({}, '', '/')
+        setActiveWorkspaceSurface(undefined)
+        requestAnimationFrame(() => (searchOpener.current?.isConnected ? searchOpener.current : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus())
+      },
+      open: destination => {
+        window.history.replaceState({}, '', '/')
+        setSelectedObjectId(null); setSelectedCaptureId(null); setFocusedActionId(null); setFocusedReminderId(null)
+        if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+        if (destination.view === 'canvas') {
+          setView('canvas'); setBankFocusTarget(destination.canvasId); setFocusCanvasTitle(true); setOpenCanvasId(destination.canvasId)
+        } else if ('reminderId' in destination) {
+          setView('review'); setFocusedReminderId(destination.reminderId)
+        } else if ('captureId' in destination) {
+          setView('review'); setSelectedCaptureId(destination.captureId)
+        } else if ('actionId' in destination) {
+          setView('schedule'); setFocusedActionId(destination.actionId)
+        } else {
+          setView(destination.view); setSelectedObjectId(destination.objectId)
+        }
+        setActiveWorkspaceSurface(undefined)
+      },
+    })
   }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
-  if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
-  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
+  if (activeWorkspaceSurface) return <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} />
+  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -405,18 +458,42 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
-      {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
+      {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
-      {view === 'schedule' && <ScheduleView state={state} update={update} />}
+      {view === 'schedule' && <ScheduleView state={state} update={update} focusActionId={focusedActionId} />}
       {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-  </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+  </main>{selectedCaptureId && <SourceCapturePanel state={state} captureId={selectedCaptureId} onClose={() => setSelectedCaptureId(null)} />}{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
       onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
   </>
+}
+
+function SourceCapturePanel({ state, captureId, onClose }: { state: AppState; captureId: string; onClose: () => void }) {
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const source = (() => {
+    try {
+      const model = reconcileLegacyUi(state)
+      return { capture: model.captures.find(item => item.id === captureId), correction: model.sourceCorrections?.filter(item => item.captureId === captureId).at(-1) }
+    } catch { return undefined }
+  })()
+  useEffect(() => {
+    closeButton.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current() } }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown); requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar .nav-item')?.focus()) }
+  }, [])
+  return <div className="panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="source-capture-title">
+      <header><div><p className="eyebrow">Preserved source</p><h2 id="source-capture-title">Original capture</h2></div><button ref={closeButton} className="close-button" type="button" onClick={onClose} aria-label="Close original capture">×</button></header>
+      <div className="panel-scroll">{source?.capture ? <><p>{source.capture.originalContent}</p>{source.correction && <p>Current corrected wording: {source.correction.correctedContent}</p>}<small>Captured {new Date(source.capture.createdAt).toLocaleString()}</small></> : <p role="alert">This capture is no longer available. Refresh Search and try again.</p>}</div>
+    </aside>
+  </div>
 }
 
 function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
@@ -619,7 +696,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   useEffect(() => {
     closeButton.current?.focus()
     const opener = returnFocus.current
-    return () => opener?.focus()
+    return () => { requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus()) }
   }, [])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
