@@ -47,16 +47,21 @@ export function loadStateResult(): { state: AppState; error?: string } {
     return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
-/** Serialize against the last saved evidence, including revisions added in this session. */
-export function serializeState(state: AppState): PersistedState {
+/** Reconcile against this tab's latest validated save, not the model object
+ * originally loaded before one or more autosaves. */
+export function reconcileCurrentSession(state: AppState): PersistedState {
   const session = state.model && sessions.get(state.model)
   return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+}
+/** Serialize against the last saved evidence, including revisions added in this session. */
+export function serializeState(state: AppState): PersistedState {
+  return reconcileCurrentSession(state)
 }
 /** Advance a validated in-tab projection while retaining the local storage
  * revision it was loaded from. Replacing model without this lineage loses the
  * compare-and-swap guard and can collapse later audit versions. */
 export function advanceModelProjection(state: AppState): AppState {
-  const projection = reconcileLegacyUi(state)
+  const projection = reconcileCurrentSession(state)
   const session = state.model && sessions.get(state.model)
   if (session) sessions.set(projection, { model: projection, raw: session.raw })
   return { ...state, model: projection }

@@ -64,10 +64,14 @@ export function updateObject(original: ThoughtObject, draft: ThoughtObject): Tho
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
   const safeStatus = compatibleStatus(object, status)
-  return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` : `Kept in review; ${status} requires confirmation`)
+  return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` :
+    hasStagedActionResolution(object) ? 'Kept staged Action status; use Withdraw staged Action to return to Organize' :
+      `Kept in review; ${status} requires confirmation`)
 }
 
 function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
+  if (hasStagedActionResolution(object) && (status === 'review' || status === 'inbox' ||
+    (['complete', 'archived'].includes(object.status) && status === 'confirmed'))) return object.status
   return (['complete', 'archived'].includes(object.status) && status === 'confirmed') || object.status === 'review' || object.status === 'inbox' ||
     ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !hasStagedActionResolution(object)) ? 'review' : status
 }

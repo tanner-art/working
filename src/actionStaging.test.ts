@@ -7,7 +7,7 @@ import { confirmedActions } from './objectWorkflow'
 import { accountData } from './accountStorage'
 import { defaultSettings } from './settings'
 import { disabledDelivery } from './digestDelivery'
-import { loadStateResult, saveState } from './store'
+import { advanceModelProjection, loadStateResult, saveState } from './store'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -74,6 +74,31 @@ describe('Action staging lifecycle', () => {
     expect(reloaded.state.model?.temporalHistory).toHaveLength(1)
   })
 
+  it('appends v3 from the latest autosaved v2 without an intervening reload, and rejects an external write', () => {
+    let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [reviewAction()], canvas: [] }))
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult().state
+    const stagedState = { ...loaded, objects: [stageAction(loaded.objects[0])] }
+    expect(saveState(stagedState)).toBeUndefined()
+    const v2 = JSON.parse(raw!)
+    expect(v2.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2])
+    const scheduled = scheduleStagedAction(stagedState, 'action-1', '2026-10-12T09:00:00.000Z', 'UTC')
+    expect(scheduled.model?.interpretations.map(entry => entry.version)).toEqual([1, 2, 3])
+    expect(saveState(scheduled)).toBeUndefined()
+    const v3 = JSON.parse(raw!)
+    expect(JSON.stringify(v3.interpretations.slice(0, 2))).toBe(JSON.stringify(v2.interpretations))
+    expect(v3.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2, 3])
+    expect(loadStateResult().state.model?.calendarEvents).toMatchObject([{ status: 'scheduled' }])
+
+    const fresh = loadStateResult().state
+    const another = { ...fresh, objects: [setObjectStatus(fresh.objects[0], 'complete')] }
+    const projected = advanceModelProjection(another)
+    raw = `${raw} ` // another tab changed the exact storage revision after projection
+    const external = raw
+    expect(saveState(projected)).toContain('Stored data changed')
+    expect(raw).toBe(external)
+  })
+
   it('completes, archives or withdraws a staged Action without manufacturing execution confirmation', () => {
     for (const status of ['complete', 'archived', 'review'] as const) {
       let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [reviewAction()], canvas: [] }))
@@ -106,5 +131,8 @@ describe('Action staging lifecycle', () => {
     expect(model.calendarEvents).toMatchObject([{ status: 'scheduled', objectIds: ['action-1'] }])
     expect(model.stagedActions).toMatchObject([{ status: 'scheduled' }])
     expect(isPersistedState(model)).toBe(true)
+    const genericReview = updateObject(completed.objects[0], setObjectStatus(completed.objects[0], 'review'))
+    expect(genericReview.status).toBe('complete')
+    expect(reconcileLegacyUi({ ...completed, objects: [genericReview] }).calendarEvents).toMatchObject([{ status: 'scheduled' }])
   })
 })

@@ -1,7 +1,6 @@
 import type { ActionPriority, AppState, ThoughtObject } from './domain'
-import { reconcileLegacyUi } from './migration'
 import { eventProposal, recordTemporalDecision } from './temporalConfirmation'
-import { advanceModelProjection } from './store'
+import { advanceModelProjection, reconcileCurrentSession } from './store'
 
 const validPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
@@ -12,7 +11,7 @@ export function stageAction(object: ThoughtObject, priority: ActionPriority = 3)
 
 export function setStagedActionPriority(state: AppState, objectId: string, priority: ActionPriority): AppState {
   if (!validPriorities.includes(priority)) throw new Error('Action priority must be between 1 and 5.')
-  const model = reconcileLegacyUi(state)
+  const model = reconcileCurrentSession(state)
   const action = state.objects.find(object => object.id === objectId)
   const stage = model.stagedActions?.find(value => value.objectId === objectId)
   if (!action || action.kind !== 'action' || action.status !== 'confirmed' || !stage || stage.status !== 'staged') throw new Error('This Action is no longer available for priority changes. Refresh Schedule and try again.')
@@ -23,12 +22,12 @@ export function setStagedActionPriority(state: AppState, objectId: string, prior
 export function scheduleStagedAction(state: AppState, objectId: string, startsAt: string, temporalContext: string): AppState {
   if (!Number.isFinite(Date.parse(startsAt)) || !temporalContext.trim()) throw new Error('Choose a valid date, time, and temporal context.')
   const current = state.objects.find(object => object.id === objectId)
-  const model = reconcileLegacyUi(state)
+  const model = reconcileCurrentSession(state)
   const stage = model.stagedActions?.find(value => value.objectId === objectId)
   if (!current || current.kind !== 'action' || current.status !== 'confirmed' || !stage || stage.status !== 'staged') throw new Error('This Action is no longer awaiting scheduling. Refresh Schedule and try again.')
   const eventId = crypto.randomUUID()
   const candidate: AppState = { ...state, objects: state.objects.map(object => object.id !== objectId ? object : { ...object, history: [...object.history, { at: new Date().toISOString(), event: 'Scheduled staged Action', actionSchedule: { eventId, startsAt, temporalContext } }] }) }
-  const scheduled = reconcileLegacyUi(candidate)
+  const scheduled = reconcileCurrentSession(candidate)
   const target = eventProposal(scheduled, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This Action remains staged.')
   return advanceModelProjection(recordTemporalDecision(candidate, scheduled, target))

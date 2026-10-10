@@ -18,6 +18,15 @@ const prepared = () => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Commitment calendar confirmations', () => {
+  const savedCommitmentWithoutReload = () => {
+    let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [review], canvas: [] }))
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult().state
+    const resolved = { ...loaded, objects: [resolveCommitment(loaded.objects[0], { title: 'Send contract', date: '2026-10-02', time: '09:30', dependencyIds: [] })] }
+    expect(saveState(resolved)).toBeUndefined()
+    return { resolved, savedRaw: () => raw! }
+  }
+
   const loadedCommitment = () => {
     let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [review], canvas: [] }))
     vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
@@ -46,6 +55,33 @@ describe('Commitment calendar confirmations', () => {
     expect(reloaded.error).toBeUndefined()
     expect(reloaded.state.model?.calendarEvents).toMatchObject([{ objectIds: ['commitment'], status: 'scheduled' }])
     expect(reloaded.state.model?.temporalHistory).toMatchObject([{ target: { kind: 'event-scheduling' } }])
+  })
+
+  it('appends a deadline decision while preserving exact autosaved v1/v2 interpretations without a reload', () => {
+    const { resolved, savedRaw } = savedCommitmentWithoutReload()
+    const v2 = JSON.parse(savedRaw())
+    expect(v2.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2])
+    const confirmed = confirmCommitmentDeadline(resolved, 'commitment')
+    expect(confirmed.model?.interpretations.map(entry => entry.version)).toEqual([1, 2])
+    expect(saveState(confirmed)).toBeUndefined()
+    const v3 = JSON.parse(savedRaw())
+    expect(JSON.stringify(v3.interpretations)).toBe(JSON.stringify(v2.interpretations))
+    expect(v3.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2])
+    expect(v3.temporalHistory).toMatchObject([{ target: { kind: 'fixed-deadline', objectId: 'commitment' } }])
+    expect(loadStateResult().state.model?.temporalHistory).toMatchObject([{ target: { kind: 'fixed-deadline' } }])
+  })
+
+  it('appends a scheduled-event v3 to exact autosaved v1/v2 evidence without a reload', () => {
+    const { resolved, savedRaw } = savedCommitmentWithoutReload()
+    const v2 = JSON.parse(savedRaw())
+    expect(v2.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2])
+    const scheduled = scheduleCommitment(resolved, 'commitment', 'UTC')
+    expect(scheduled.model?.interpretations.map(entry => entry.version)).toEqual([1, 2, 3])
+    expect(saveState(scheduled)).toBeUndefined()
+    const v3 = JSON.parse(savedRaw())
+    expect(JSON.stringify(v3.interpretations.slice(0, 2))).toBe(JSON.stringify(v2.interpretations))
+    expect(v3.interpretations.map((entry: { version: number }) => entry.version)).toEqual([1, 2, 3])
+    expect(loadStateResult().state.model?.calendarEvents).toMatchObject([{ status: 'scheduled', objectIds: ['commitment'] }])
   })
 
   it('keeps deadline and CalendarEvent confirmations distinct and rejects invalid or repeated paths', () => {
