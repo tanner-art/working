@@ -35,10 +35,12 @@ function textFields(fields: Partial<Record<SearchField, string>>): Partial<Recor
 /** Invalid or ambiguous source identities are omitted, never guessed or merged. */
 export function createUniversalSearchIndex(input: readonly SearchDocument[]) {
   let entries = compile(input)
+  let sourceCount = input.length
   return {
     get size() { return entries.length },
+    get omittedCount() { return sourceCount - entries.length },
     /** Replace from a fresh source projection after edits, merges, or account reloads. */
-    replace(next: readonly SearchDocument[]) { entries = compile(next) },
+    replace(next: readonly SearchDocument[]) { entries = compile(next); sourceCount = next.length },
     query(raw: string, limit = Number.MAX_SAFE_INTEGER): SearchResult[] {
       const terms = normalize(raw.trim()).split(/\s+/).filter(Boolean)
       if (!terms.length || !Number.isFinite(limit) || limit <= 0) return []
@@ -134,6 +136,17 @@ function reminderDocuments(model: PersistedState, captures: Map<string, CaptureR
   })
 }
 
+/** A previously created reminder can be intentionally absent after its source is withdrawn. */
+function retiredReminderInstruction(model: PersistedState, instruction: { sourceInterpretationId: string }): boolean {
+  const source = model.interpretations.find(reading => reading?.id === instruction?.sourceInterpretationId)
+  const current = source && model.interpretations.filter(reading => reading?.legacy?.id === source.legacy?.id).at(-1)
+  if (!current) return false // Missing provenance is an incomplete projection, not a legitimate retirement.
+  if (current.reviewState === 'rejected') return true
+  const decision = current.legacy.history?.at(-1)?.reviewDecision
+  return (decision === 'reversed' || decision === 'rejected' || decision === 'superseded') &&
+    (current.legacy.status !== 'confirmed' || current.legacy.kind !== 'reminder')
+}
+
 function canvasText(elements: readonly CanvasElement[]): string {
   return elements.filter(element => element && element.type !== 'arrow' && validText(element.text)).map(element => element.text!.trim()).join(' ')
 }
@@ -159,4 +172,19 @@ export function searchDocumentsFromAppState(state: AppState): SearchDocument[] {
   if (!state) return []
   try { return searchDocumentsFromModel(reconcileLegacyUi(state)) }
   catch { return [] }
+}
+
+/** Search may be partial; callers must not present an empty projection as a complete no-match. */
+export function searchProjectionFromAppState(state: AppState): { documents: SearchDocument[]; omittedCount: number; complete: boolean } {
+  try {
+    const model = reconcileLegacyUi(state)
+    if (!isPersistedState(model)) return { documents: [], omittedCount: 0, complete: false }
+    const documents = searchDocumentsFromModel(model)
+    const bank = model.canvasBank?.canvases ?? bankFromLegacy(model.canvas, model.canvasViewport).canvases
+    const candidates = model.captures.length + model.semanticObjects.filter(object =>
+      ['action', 'commitment', 'idea'].includes(object.kind) && ['confirmed', 'complete', 'archived'].includes(object.status)).length +
+      (model.reminderInstructions?.filter(instruction => !retiredReminderInstruction(model, instruction)).length ?? 0) + bank.length
+    const omittedCount = Math.max(0, candidates - documents.length)
+    return { documents, omittedCount, complete: omittedCount === 0 }
+  } catch { return { documents: [], omittedCount: 0, complete: false } }
 }
