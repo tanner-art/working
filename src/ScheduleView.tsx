@@ -43,7 +43,7 @@ export function ScheduleView({ state, update }: { state: AppState; update: (next
   const plan = useMemo(() => calculateAdaptivePlan(state), [state])
   const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed').sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
   return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header>
-    <p className="lede">Staged Actions stay out of Today, notifications, and the Adaptive Plan until you explicitly add them. Scheduling creates a separate CalendarEvent only after confirmation.</p>
+    <p className="lede">Staged Actions stay out of Today and notifications. Adding one to the Adaptive Plan does not book calendar time. Scheduling creates a separate CalendarEvent only after confirmation.</p>
     {plan.recommendations[0] && <p role="status">Adaptive Plan recommends next: {plan.recommendations[0].title}. No time has been booked.</p>}
     <details><summary>Adaptive Plan ({plan.recommendations.length})</summary>
       {plan.recommendations.length ? <ol className="detail-list">{plan.recommendations.map((item, index) => <li key={item.objectId}><article><h3>{index === 0 ? 'Recommended next: ' : 'Also ready: '}{item.title}</h3><p>{item.explanation}</p></article></li>)}</ol>
