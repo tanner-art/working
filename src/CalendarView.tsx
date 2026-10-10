@@ -16,7 +16,11 @@ const time = (iso: string) => new Intl.DateTimeFormat('en-US', { hour: 'numeric'
 const dateLabel = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(parseLocalDateKey(key))
 
 export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
-  const model = useMemo(() => reconcileCurrentSession(state, readAccountModel?.(state)), [state, readAccountModel])
+  const projection = useMemo(() => {
+    try { return { model: reconcileCurrentSession(state, readAccountModel?.(state)), error: '' } }
+    catch (error) { return { model: undefined, error: error instanceof Error ? error.message : 'Calendar is temporarily unavailable. Retry saving or download a backup.' } }
+  }, [state, readAccountModel])
+  const model = projection.model
   const todayKey = localDateKey(new Date())
   const [mode, setMode] = useState<CalendarMode>('month')
   const [selected, setSelected] = useState(todayKey)
@@ -43,16 +47,15 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
   }, [eventDraft])
   const confirmedEventIds = useMemo(() => {
     const ids = new Set<string>()
+    if (!model) return ids
     for (const entry of activeTemporalDecisions(model)) if ((entry.target.kind === 'event-scheduling' || entry.target.kind === 'direct-calendar-event') && temporalFactIsCurrent(model, entry)) ids.add(entry.target.eventId)
     return ids
   }, [model])
   const eventReady = (event: { id: string }) => confirmedEventIds.has(event.id)
-  const confirmedDeadlineIds = useMemo(() => new Set(activeTemporalDecisions(model).filter(entry => entry.target.kind === 'fixed-deadline' && temporalFactIsCurrent(model, entry)).map(entry => entry.target.kind === 'fixed-deadline' ? entry.target.objectId : '')), [model])
+  const confirmedDeadlineIds = useMemo(() => new Set(model ? activeTemporalDecisions(model).filter(entry => entry.target.kind === 'fixed-deadline' && temporalFactIsCurrent(model, entry)).map(entry => entry.target.kind === 'fixed-deadline' ? entry.target.objectId : '') : []), [model])
   const selectedDate = parseLocalDateKey(selected)
-  const month = useMemo(() => buildCalendarMonth(model, selectedDate.getFullYear(), selectedDate.getMonth(), new Date(), eventReady), [model, selected, confirmedEventIds])
-  const timeGrid = useMemo(() => buildCalendarTimeGrid(model, mode === 'week' ? weekStart(selected) : selected, mode === 'week' ? 7 : 1, new Date(), eventReady), [model, mode, selected, confirmedEventIds])
-  const unscheduled = mode === 'month' ? month.unscheduledCommitments : timeGrid.unscheduledCommitments
-  const selectedCell = month.weeks.flat().find(day => day.date === selected)
+  const month = useMemo(() => model && buildCalendarMonth(model, selectedDate.getFullYear(), selectedDate.getMonth(), new Date(), eventReady), [model, selected, confirmedEventIds])
+  const timeGrid = useMemo(() => model && buildCalendarTimeGrid(model, mode === 'week' ? weekStart(selected) : selected, mode === 'week' ? 7 : 1, new Date(), eventReady), [model, mode, selected, confirmedEventIds])
   const go = (direction: -1 | 1) => setSelected(navigateCalendarDate(selected, mode, direction))
   const startEvent: StartEvent = (date, time, trigger) => {
     eventTriggerRef.current = trigger
@@ -83,6 +86,10 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
   }
   const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId, undefined, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
   const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
+
+  if (!model || !month || !timeGrid) return <div className="page calendar-page"><header className="page-header"><h1>Calendar</h1></header><p role="status">{projection.error}</p><p>Your edits remain in this tab. Wait for saving to finish, or use Retry saving or Download backup above.</p></div>
+  const unscheduled = mode === 'month' ? month.unscheduledCommitments : timeGrid.unscheduledCommitments
+  const selectedCell = month.weeks.flat().find(day => day.date === selected)
 
   return <div className="page calendar-page">
     <header className="page-header"><div><p className="eyebrow">Time, scheduled and proposed</p><h1>Calendar</h1></div></header>

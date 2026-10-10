@@ -39,10 +39,14 @@ function StagedActionRow({ action, state, update, readAccountModel }: { action: 
 }
 
 export function ScheduleView({ state, update, readAccountModel }: { state: AppState; update: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
-  const model = useMemo(() => reconcileCurrentSession(state, readAccountModel?.(state)), [state, readAccountModel])
+  const projection = useMemo(() => {
+    try { return { model: reconcileCurrentSession(state, readAccountModel?.(state)), error: '' } }
+    catch (error) { return { model: undefined, error: error instanceof Error ? error.message : 'Schedule is temporarily unavailable. Retry saving or download a backup.' } }
+  }, [state, readAccountModel])
   const plan = useMemo(() => calculateAdaptivePlan(state), [state])
-  const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed' &&
+  const actions = (projection.model?.stagedActions ?? []).filter(action => action.status !== 'reversed' &&
     state.objects.some(object => object.id === action.objectId && object.status === 'confirmed')).sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
+  if (!projection.model) return <main className="page schedule-page"><header className="page-header"><h1>Schedule</h1></header><p role="status">{projection.error}</p><p>Your edits remain in this tab. Wait for saving to finish, or use Retry saving or Download backup above.</p></main>
   return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header>
     <p className="lede">Staged Actions stay out of Today and notifications. Adding one to the Adaptive Plan does not book calendar time. Scheduling creates a separate CalendarEvent only after confirmation.</p>
     {plan.recommendations[0] && <p role="status">Adaptive Plan recommends next: {plan.recommendations[0].title}. No time has been booked.</p>}

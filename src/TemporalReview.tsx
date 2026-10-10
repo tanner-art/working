@@ -4,7 +4,9 @@ import { activeTemporalDecisions, deadlineProposal, eventProposal, temporalFactI
 import { decideTemporalReview } from './temporalReviewWorkflow'
 
 export function TemporalReview({ state, onUpdate, readAccountModel }: { state: AppState; onUpdate: (fn: (current: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
-  const model = readAccountModel?.(state) ?? reconcileCurrentSession(state)
+  let model: PersistedState
+  try { model = readAccountModel?.(state) ?? reconcileCurrentSession(state) }
+  catch (error) { return <section className="page" aria-label="Timing review"><h2>Confirm timing separately</h2><p role="status">{error instanceof Error ? error.message : 'Timing review is temporarily unavailable.'}</p><p>Your edits remain in this tab. Wait for saving to finish, or use Retry saving or Download backup above.</p></section> }
   const active = activeTemporalDecisions(model)
   const proposals = [
     ...model.semanticObjects.map(o => deadlineProposal(model, o.id)),
