@@ -74,6 +74,15 @@ export function leaveWorkspaceHistory(history: WorkspaceHistory, path: string, s
   else history.replaceState({}, '', '/')
 }
 
+export function recoverRejectedWorkspacePopstate(history: Readonly<{ go: (steps: number) => void }>, currentSurfaceIsOpen: boolean): void {
+  history.go(currentSurfaceIsOpen ? 1 : -1)
+}
+
+/** Only views without child-owned edit drafts may hand off directly to a result. */
+export function canOpenSearchResultFromView(view: string, objectPanelOpen: boolean, capturePanelOpen: boolean): boolean {
+  return !objectPanelOpen && !capturePanelOpen && ['today', 'capture', 'commitments', 'digest', 'beta-home'].includes(view)
+}
+
 const unavailable = 'This result has changed or is no longer available. Refresh Search and try again.'
 const fields: SearchField[] = ['original', 'corrected-source', 'current-meaning', 'reminder-source', 'canvas-title', 'canvas-element']
 const equalIds = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((id, index) => id === right[index])

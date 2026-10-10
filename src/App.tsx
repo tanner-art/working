@@ -29,7 +29,7 @@ import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revision
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
-import { enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -416,8 +416,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       accountUserId: cloud?.session.userId,
       authenticatedUserId: liveAccount.status === 'signed-in' ? liveAccount.session.user.id : undefined,
     }, {
-      canOpen: () => !selectedObjectId && !selectedCaptureId &&
-        ['today', 'capture', 'commitments', 'digest', 'beta-home'].includes(view),
+      canOpen: () => canOpenSearchResultFromView(view, !!selectedObjectId, !!selectedCaptureId),
       close: () => {
         exitWorkspaceRoute()
         requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]')?.focus())
@@ -451,7 +450,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       if (!outcome.ok) {
         // Undo Back/Forward without overwriting either history entry.
         recoveringHistory.current = true
-        window.history.go(activeWorkspaceSurface ? 1 : -1)
+        recoverRejectedWorkspacePopstate(window.history, !!activeWorkspaceSurface)
         setWorkspaceRouteError(outcome.message)
       } else {
         setWorkspaceRouteError('')

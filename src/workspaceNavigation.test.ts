@@ -5,7 +5,7 @@ import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './mig
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
-import { enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
 const at = '2026-10-09T00:00:00.000Z'
@@ -115,5 +115,19 @@ describe('workspace search navigation contract', () => {
     leaveWorkspaceHistory(history, '/search', 'new-document')
     expect(calls).toEqual(['replace:/'])
     expect(history.state).toEqual({})
+  })
+
+  it('compensates rejected Back or Forward without overwriting history and blocks editor handoff', () => {
+    const steps: number[] = []
+    recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, true)
+    recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, false)
+    expect(steps).toEqual([1, -1])
+    for (const view of ['settings', 'review', 'schedule', 'calendar', 'canvas']) {
+      expect(canOpenSearchResultFromView(view, false, false)).toBe(false)
+    }
+    expect(canOpenSearchResultFromView('today', true, false)).toBe(false)
+    expect(canOpenSearchResultFromView('today', false, true)).toBe(false)
+    expect(canOpenSearchResultFromView('today', false, false)).toBe(true)
+    expect(canOpenSearchResultFromView('capture', false, false)).toBe(true)
   })
 })
