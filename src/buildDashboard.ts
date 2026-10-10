@@ -51,6 +51,27 @@ export interface QueueFilters {
 
 export const emptyQueueFilters: QueueFilters = { state: '', lane: '', worker: '', priority: '', feature: '', blockedReason: '' }
 
+export type FeatureStage = 'ready' | 'building' | 'awaiting_review' | 'changes_requested' | 'awaiting_integration' | 'accepted' | 'blocked' | 'unknown'
+
+/** A display grouping, derived solely from this exact Registry revision. */
+export function featureStage(feature: FactoryFeature, snapshot: Pick<FactoryControlSnapshot, 'reviews'>): FeatureStage {
+  const packages = feature.packages
+  const reviews = snapshot.reviews.filter(review => packages.some(item => item.id === review.packageId))
+  if (packages.some(item => item.reviewState === 'changes_requested') || reviews.some(review => review.state === 'changes_requested')) return 'changes_requested'
+  if (packages.some(item => item.state === 'BLOCKED')) return 'blocked'
+  const approved = packages.some(item => item.reviewState === 'approved') || reviews.some(review => review.state === 'approved' && review.approvalEvidence.length > 0)
+  if (feature.state === 'DONE') return approved ? 'accepted' : 'awaiting_integration'
+  if (approved) return 'awaiting_integration'
+  if (packages.some(item => item.state === 'VERIFY_REVIEW') || reviews.some(review => review.state === 'waiting' || review.state === 'assigned')) return 'awaiting_review'
+  if (packages.some(item => item.state === 'ACTIVE')) return 'building'
+  if (packages.some(item => item.state === 'READY')) return 'ready'
+  return 'unknown'
+}
+
+export function featureStageLabel(stage: FeatureStage): string {
+  return ({ ready: 'Ready', building: 'Building', awaiting_review: 'Awaiting review', changes_requested: 'Changes requested', awaiting_integration: 'Awaiting integration', accepted: 'Accepted', blocked: 'Blocked', unknown: 'Unknown' })[stage]
+}
+
 export function filterFactoryFeatures(features: FactoryFeature[], filters: QueueFilters): FactoryFeature[] {
   return features.flatMap(feature => {
     if (filters.feature && feature.id !== filters.feature) return []
