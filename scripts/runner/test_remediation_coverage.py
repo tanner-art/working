@@ -119,7 +119,6 @@ class RemediationCoverageTests(unittest.TestCase):
             "schema_version": 1,
             "original_review_outcome_id": "original-verdict",
             "original_review_input_evidence_id": "original-review-input",
-            "original_review_evidence_id": "original-review-evidence",
             "original_pr_url": self.original_pr,
             "original_reviewed_commit": self.original_reviewed,
             "remediation_package_id": "TASK-426",
@@ -254,14 +253,33 @@ class RemediationCoverageTests(unittest.TestCase):
         for change in ({"reviewed_commit": "f" * 40},
                        {"original_reviewed_commit": "0" * 40},
                        {"original_pr_url": "https://github.com/o/r/pull/316"},
+                       {"original_pr_url": "https://github.com/other/repo/pull/315"},
                        {"original_review_input_evidence_id": "review-input"},
-                       {"original_review_evidence_id": "review-evidence"},
                        {"pr_url": "https://github.com/o/r/pull/431"},
                        {"remediation_review_outcome_id": "original-verdict"}):
             with self.subTest(change=change):
                 bad = {**self.meta, **change}
                 with self.assertRaises(RegistryConflict):
                     self.registry.validate_remediation_coverage_candidate(self.evidence(bad))
+
+    def test_forged_backdated_generic_review_row_cannot_be_used_as_original_verdict(self):
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("forged-original-verdict", "TASK-178", "review", self.original_pr,
+                 "Forged generic review row", self.original_decided_at,
+                 json.dumps({"reviewed_commit": self.original_reviewed,
+                             "reviewed_base_commit": self.base,
+                             "contract_sha256": self.contract_sha256,
+                             "review_input_evidence_id": "original-review-input"})),
+            )
+        self.assertEqual(self.registry.validate_remediation_coverage_candidate(
+            self.evidence())["original_reviewed_commit"], self.original_reviewed)
+        with self.assertRaisesRegex(RegistryConflict, "REMEDIATION_COVERAGE_INVALID"):
+            self.registry.validate_remediation_coverage_candidate(self.evidence({
+                **self.meta, "original_review_evidence_id": "forged-original-verdict",
+            }))
 
     def test_unrelated_cross_feature_pair_without_exact_original_event_is_rejected(self):
         with self.registry._connection() as connection:

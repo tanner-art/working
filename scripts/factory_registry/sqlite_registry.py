@@ -2224,7 +2224,7 @@ class SQLiteRegistry:
         """
         metadata = evidence.metadata
         fields = {"schema_version", "original_review_outcome_id",
-                  "original_review_input_evidence_id", "original_review_evidence_id",
+                  "original_review_input_evidence_id",
                   "original_pr_url", "original_reviewed_commit", "remediation_package_id",
                   "remediation_review_outcome_id", "remediation_review_evidence_id",
                   "pr_url", "reviewed_commit", "merged_main_commit", "merged_main_tree",
@@ -2237,7 +2237,7 @@ class SQLiteRegistry:
             raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "schema")
         if any(not isinstance(metadata[key], str) or not metadata[key] for key in (
             "original_review_outcome_id", "original_review_input_evidence_id",
-            "original_review_evidence_id", "remediation_package_id",
+            "remediation_package_id",
             "remediation_review_outcome_id", "remediation_review_evidence_id",
         )):
             raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "identity")
@@ -2248,6 +2248,8 @@ class SQLiteRegistry:
             if (not isinstance(metadata[key], str)
                     or not re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/[1-9]\d*", metadata[key])):
                 raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", key)
+        if metadata["original_pr_url"].rsplit("/pull/", 1)[0] != metadata["pr_url"].rsplit("/pull/", 1)[0]:
+            raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "repository")
         original = connection.execute(
             "SELECT * FROM review_outcomes WHERE id=?",
             (metadata["original_review_outcome_id"],),
@@ -2279,22 +2281,17 @@ class SQLiteRegistry:
             "SELECT package_id,kind,uri,metadata_json FROM evidence WHERE id=?",
             (metadata["original_review_input_evidence_id"],),
         ).fetchone()
-        original_verdict = connection.execute(
-            "SELECT package_id,kind,uri,recorded_at,metadata_json FROM evidence WHERE id=?",
-            (metadata["original_review_evidence_id"],),
-        ).fetchone()
         original_events = connection.execute(
             "SELECT recorded_at,detail_json FROM task_events "
             "WHERE package_id=? AND event_type='REVIEW_OUTCOME_RECORDED'",
             (evidence.package_id,),
         ).fetchall()
-        if original_input is None or original_verdict is None or len(original_events) != 1:
+        if original_input is None or len(original_events) != 1:
             raise RegistryConflict("REMEDIATION_ORIGINAL_REVIEW_PROVENANCE_INVALID")
         original_input_meta = json.loads(original_input["metadata_json"])
-        original_verdict_meta = json.loads(original_verdict["metadata_json"])
         original_event = json.loads(original_events[0]["detail_json"])
-        if (not all(isinstance(value, Mapping) for value in
-                    (original_input_meta, original_verdict_meta, original_event))
+        if (not isinstance(original_input_meta, Mapping)
+                or not isinstance(original_event, Mapping)
                 or original_input["package_id"] != original["review_package_id"]
                 or original_input["kind"] != "review-input"
                 or original_input["uri"] != metadata["original_pr_url"]
@@ -2304,17 +2301,6 @@ class SQLiteRegistry:
                 or not re.fullmatch(r"[0-9a-f]{40}", original_input_meta["base_commit"])
                 or not isinstance(original_input_meta.get("contract_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", original_input_meta["contract_sha256"])
-                or original_verdict["package_id"] != original["review_package_id"]
-                or original_verdict["kind"] != "review"
-                or original_verdict["uri"] != metadata["original_pr_url"]
-                or original_verdict_meta.get("reviewed_commit") != metadata["original_reviewed_commit"]
-                or original_verdict_meta.get("review_input_evidence_id") !=
-                    metadata["original_review_input_evidence_id"]
-                or original_verdict_meta.get("reviewed_base_commit") != original_input_meta["base_commit"]
-                or original_verdict_meta.get("contract_sha256") != original_input_meta["contract_sha256"]
-                or not _normalize_timestamp(original["requested_at"]) <=
-                    _normalize_timestamp(original_verdict["recorded_at"]) <=
-                    _normalize_timestamp(original["decided_at"])
                 or _normalize_timestamp(original_events[0]["recorded_at"]) !=
                     _normalize_timestamp(original["decided_at"])
                 or original_event.get("outcome_id") != original["id"]
