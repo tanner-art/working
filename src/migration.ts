@@ -91,6 +91,18 @@ function stagedAction(item: ThoughtObject, captureId: string): StagedAction | un
   if (schedules.length > 1) fail()
   const schedule = schedules[0]?.actionSchedule
   if (schedule && (!schedule.eventId || !Number.isFinite(Date.parse(schedule.startsAt)) || !schedule.temporalContext.trim())) fail()
+  if (item.history.slice(0, stageIndex + 1).some(entry => entry.planEligibility !== undefined)) fail()
+  const terminalIndex = later.findIndex(entry => entry.actionSchedule !== undefined ||
+    entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
+  let planEligible = false
+  for (const [index, entry] of later.entries()) {
+    if (entry.planEligibility === undefined) continue
+    const audit = entry.planEligibility!
+    if ((terminalIndex >= 0 && index >= terminalIndex) || audit.objectId !== item.id || audit.source !== 'schedule-plan-eligibility' ||
+      !Number.isFinite(Date.parse(entry.at)) || audit.eligible === planEligible ||
+      entry.event !== (audit.eligible ? 'Added Action to Adaptive Plan' : 'Removed Action from Adaptive Plan')) fail()
+    planEligible = audit.eligible
+  }
   const reversed = later.some(entry => entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
   const selectedPriority = priorities.at(-1)?.actionPriority?.priority
   if (!selectedPriority) return { id: `staged-action:${item.id}`, objectId: item.id, captureId, priority: initialPriority,

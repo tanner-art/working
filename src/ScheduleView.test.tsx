@@ -12,5 +12,7 @@ it('renders an accessible five-value priority control and an explicit CalendarEv
   expect(markup).toContain('aria-label="Priority for Prepare launch"')
   expect(markup).toContain('>5 of 5</option>')
   expect(markup).toContain('Confirm CalendarEvent')
-  expect(markup).toContain('out of Today, notifications, and the Adaptive Plan')
+  expect(markup).toContain('out of Today, notifications, and the Adaptive Plan until you explicitly add them')
+  expect(markup).toContain('Add to plan')
+  expect(markup).toContain('href="/adaptive-plan"')
 })
