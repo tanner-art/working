@@ -26,18 +26,18 @@ export function ReminderResolution({ object, targets, onResolve, onCancel }: { o
 }
 
 /** Visible in-app fallback; an already-resolved stale click becomes a recoverable message. */
-export function ReminderProjections({ state, onDeliveryState, readAccountModel, focusInstructionId = null, onFocusHandled }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void; readAccountModel?: (current: AppState) => PersistedState; focusInstructionId?: string | null; onFocusHandled?: () => void }) {
+export function ReminderProjections({ state, onDeliveryState, readModel, focusInstructionId = null, onFocusHandled }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void; readModel?: (current: AppState) => PersistedState; focusInstructionId?: string | null; onFocusHandled?: () => void }) {
   const now = useMemo(() => new Date(), [state])
   const inFlight = useRef(new Set<string>())
   const rowRefs = useRef(new Map<string, HTMLLIElement>())
   const [pending, setPending] = useState<readonly string[]>([])
   const [message, setMessage] = useState('')
-  useEffect(() => { const row = focusInstructionId ? rowRefs.current.get(focusInstructionId) : undefined; if (row) { row.focus(); onFocusHandled?.() } }, [focusInstructionId, state, readAccountModel])
+  useEffect(() => { const row = focusInstructionId ? rowRefs.current.get(focusInstructionId) : undefined; if (row) { row.focus(); onFocusHandled?.() } }, [focusInstructionId, state, readModel])
   let model = state.model
   let projectionError = ''
-  if (readAccountModel) {
-    try { model = readAccountModel(state) }
-    catch { projectionError = 'Reminders could not be verified from account data. Retry saving or download a backup.' }
+  if (readModel) {
+    try { model = readModel(state) }
+    catch { projectionError = 'Reminders could not be verified from saved data. Retry saving or download a backup.' }
   }
   if (projectionError) return <section className="reminder-projections" aria-label="Active reminders"><h2>Reminders</h2><p role="alert">{projectionError}</p></section>
   if (!model) return null
