@@ -175,6 +175,18 @@ CREATE TABLE IF NOT EXISTS evidence (
     metadata_json TEXT NOT NULL
 );
 
+CREATE TRIGGER IF NOT EXISTS remediation_coverage_is_append_only_update
+BEFORE UPDATE ON evidence WHEN OLD.kind='remediation-coverage'
+BEGIN
+    SELECT RAISE(ABORT, 'REMEDIATION_COVERAGE_APPEND_ONLY');
+END;
+
+CREATE TRIGGER IF NOT EXISTS remediation_coverage_is_append_only_delete
+BEFORE DELETE ON evidence WHEN OLD.kind='remediation-coverage'
+BEGIN
+    SELECT RAISE(ABORT, 'REMEDIATION_COVERAGE_APPEND_ONLY');
+END;
+
 CREATE TABLE IF NOT EXISTS review_outcomes (
     id TEXT PRIMARY KEY,
     review_package_id TEXT NOT NULL UNIQUE REFERENCES work_packages(id),

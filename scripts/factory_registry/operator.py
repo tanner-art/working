@@ -3832,6 +3832,99 @@ def record_integrated_assurance_input(
             "previous_revision": expected_revision, "revision": revision}
 
 
+def verify_remediation_coverage_source(
+    metadata: Mapping[str, Any], *, repository: Path,
+    github: Callable[..., str], repository_name: str,
+) -> bool:
+    """Observe the exact merged PR and Git graph; never infer from issue text."""
+    try:
+        if metadata["pr_url"].rsplit("/pull/", 1)[0] != f"https://github.com/{repository_name}":
+            return False
+        pr = json.loads(github(
+            "pr", "view", metadata["pr_url"], "--repo", repository_name,
+            "--json", "state,headRefOid,mergeCommit",
+        ))
+        remote_main = json.loads(github("api", f"repos/{repository_name}/git/ref/heads/main"))
+        if (not isinstance(pr, Mapping) or not isinstance(remote_main, Mapping)
+                or not isinstance(remote_main.get("object"), Mapping)
+                or not isinstance(pr.get("mergeCommit"), Mapping)
+                or pr.get("state") != "MERGED"
+                or pr.get("headRefOid") != metadata["reviewed_commit"]
+                or pr["mergeCommit"].get("oid") != metadata["merged_main_commit"]):
+            return False
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", str(repository), *args], capture_output=True,
+                text=True, timeout=15, check=False,
+            )
+
+        main_head = remote_main["object"]["sha"]
+        return (
+            git("rev-parse", "origin/main").stdout.strip() == main_head
+            and git("rev-parse", f"{metadata['merged_main_commit']}^{{tree}}").stdout.strip()
+                == metadata["merged_main_tree"]
+            and git("merge-base", "--is-ancestor", metadata["reviewed_commit"],
+                    metadata["merged_main_commit"]).returncode == 0
+            and git("merge-base", "--is-ancestor", metadata["merged_main_commit"],
+                    main_head).returncode == 0
+        )
+    except (KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def record_remediation_coverage(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Append a reviewed-remediation relation only after exact-source proof."""
+    if (_sensitive_paths(spec) or set(spec) != {"repository", "evidence"}
+            or not isinstance(spec.get("evidence"), Mapping)):
+        raise OperatorError("remediation coverage spec is invalid")
+    repository = Path(spec["repository"])
+    if not repository.is_absolute() or not repository.is_dir() or repository.is_symlink():
+        raise OperatorError("remediation coverage repository is invalid")
+    config = _load_object(config_path, "runner config")
+    if repository.resolve() != Path(config["repo"]).resolve():
+        raise OperatorError("remediation coverage repository does not match runner")
+    raw = spec["evidence"]
+    if (set(raw) != {"id", "package_id", "recorded_at", "metadata"}
+            or not isinstance(raw["metadata"], Mapping)):
+        raise OperatorError("remediation coverage evidence is invalid")
+    _parse_time(raw["recorded_at"], "remediation coverage time")
+    evidence = Evidence(
+        id=str(raw["id"]), package_id=str(raw["package_id"]),
+        kind="remediation-coverage", uri=raw["metadata"].get("pr_url"),
+        summary="Exact independently reviewed remediation coverage.",
+        recorded_at=str(raw["recorded_at"]), metadata=dict(raw["metadata"]),
+    )
+    registry = SQLiteRegistry(database)
+    facts = registry.validate_remediation_coverage_candidate(evidence)
+
+    def github(*args: str) -> str:
+        result = subprocess.run(
+            [config["gh"], *args], cwd=repository, capture_output=True,
+            text=True, timeout=30, check=False,
+        )
+        if result.returncode != 0:
+            raise OperatorError("remediation GitHub provenance is unavailable")
+        return result.stdout
+
+    if not verify_remediation_coverage_source(
+        evidence.metadata, repository=repository, github=github,
+        repository_name=config["github"],
+    ):
+        raise OperatorError("remediation PR merge or Git ancestry is not exact")
+    preflight(database, config_path, release, preservation_path,
+              expected_commit, expected_revision, require_workers=False)
+    revision = registry.record_remediation_coverage(
+        evidence, expected_revision=expected_revision,
+    )
+    return {"kind": "threadline-factory-record-remediation-coverage",
+            "passed": True, "evidence_id": evidence.id,
+            "previous_revision": expected_revision, "revision": revision, **facts}
+
+
 def stop(database: Path, reason: str, *, expected_run_id: str | None = None) -> Mapping[str, Any]:
     if not database.is_absolute() or not database.is_file():
         raise OperatorError("--database must be an existing absolute Registry path")
