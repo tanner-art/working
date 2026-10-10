@@ -2090,6 +2090,148 @@ class SQLiteRegistry:
         return str(row["feature_id"])
 
     @staticmethod
+    def _assurance_review_fact_v2(connection: sqlite3.Connection, target: str) -> Mapping[str, Any]:
+        """Resolve exact terminal approval without erasing earlier failed reviews."""
+        outcomes = connection.execute(
+            "SELECT * FROM review_outcomes WHERE target_package_id=? ORDER BY decided_at,id",
+            (target,),
+        ).fetchall()
+        if not outcomes:
+            raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+        prior = [row for row in outcomes if row["state"] == "CHANGES_REQUESTED"]
+        latest = outcomes[-1]
+        relation = None
+        if latest["state"] == "APPROVED":
+            approved = latest
+            source_review = outcomes[0]
+            source_candidates: set[str] = set()
+            source_rows = connection.execute(
+                "SELECT kind,metadata_json FROM evidence WHERE package_id=? "
+                "AND kind IN ('review-input','review') ORDER BY recorded_at,id",
+                (source_review["review_package_id"],),
+            ).fetchall()
+            for row in source_rows:
+                metadata = json.loads(row["metadata_json"])
+                if isinstance(metadata, Mapping):
+                    candidate = metadata.get("implementation_commit")
+                    if (isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate)
+                            and (row["kind"] != "review-input"
+                                 or metadata.get("target_package_id") == target)):
+                        source_candidates.add(candidate)
+            source_commit = next(iter(source_candidates)) if len(source_candidates) == 1 else None
+        else:
+            coverage_rows = connection.execute(
+                "SELECT * FROM evidence WHERE package_id=? AND kind='remediation-coverage'",
+                (target,),
+            ).fetchall()
+            if len(coverage_rows) != 1:
+                raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+            coverage_row = coverage_rows[0]
+            coverage = Evidence(
+                coverage_row["id"], coverage_row["package_id"], coverage_row["kind"],
+                coverage_row["uri"], coverage_row["summary"], coverage_row["recorded_at"],
+                json.loads(coverage_row["metadata_json"]),
+            )
+            relation = SQLiteRegistry._validate_remediation_coverage(connection, coverage)
+            approved = connection.execute(
+                "SELECT * FROM review_outcomes WHERE id=?",
+                (coverage.metadata["remediation_review_outcome_id"],),
+            ).fetchone()
+            source_commit = relation["original_reviewed_commit"]
+        if (approved is None or approved["state"] != "APPROVED"
+                or not isinstance(source_commit, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", source_commit)):
+            raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+        if relation is None and any(row["state"] != "CHANGES_REQUESTED" for row in outcomes[:-1]):
+            raise RegistryConflict("ASSURANCE_REVIEW_HISTORY_INVALID", target)
+        remediation_outcomes = []
+        if relation is not None:
+            remediation_outcomes = connection.execute(
+                "SELECT * FROM review_outcomes WHERE target_package_id=? ORDER BY decided_at,id",
+                (relation["remediation_package_id"],),
+            ).fetchall()
+            if (not remediation_outcomes or remediation_outcomes[-1]["id"] != approved["id"]
+                    or any(row["state"] != "CHANGES_REQUESTED"
+                           for row in remediation_outcomes[:-1])):
+                raise RegistryConflict("ASSURANCE_REMEDIATION_REVIEW_HISTORY_INVALID", target)
+        lineage_targets = (target, relation["remediation_package_id"]) if relation is not None else (target,)
+        attempt_implementers = connection.execute(
+            f"SELECT DISTINCT worker_id FROM attempts WHERE package_id IN "
+            f"({','.join('?' for _ in lineage_targets)}) AND worker_id IS NOT NULL",
+            lineage_targets,
+        ).fetchall()
+        all_implementers = tuple(dict.fromkeys(
+            [row["implementer_worker_id"] for row in [*outcomes, *remediation_outcomes]]
+            + [row["worker_id"] for row in attempt_implementers]
+        ))
+        if (not all_implementers or approved["reviewer_worker_id"] in all_implementers
+                or any(row["implementer_worker_id"] == row["reviewer_worker_id"]
+                       for row in [*outcomes, *remediation_outcomes])):
+            raise RegistryConflict("ASSURANCE_REVIEW_SEPARATION_INVALID", target)
+        approval_ids = json.loads(approved["approval_evidence_ids_json"])
+        if len(approval_ids) != 1:
+            raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+        approval = connection.execute(
+            "SELECT package_id,kind,uri,metadata_json FROM evidence WHERE id=?",
+            (approval_ids[0],),
+        ).fetchone()
+        if (approval is None or approval["kind"] != "review"
+                or approval["package_id"] != approved["review_package_id"]):
+            raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+        approval_meta = json.loads(approval["metadata_json"])
+        if not isinstance(approval_meta, Mapping):
+            raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+        review_input = connection.execute(
+            "SELECT package_id,kind,uri,metadata_json FROM evidence WHERE id=?",
+            (approval_meta.get("review_input_evidence_id"),),
+        ).fetchone()
+        input_meta = json.loads(review_input["metadata_json"]) if review_input is not None else None
+        if (review_input is None or review_input["package_id"] != approved["review_package_id"]
+                or review_input["kind"] != "review-input" or review_input["uri"] != approval["uri"]
+                or not isinstance(input_meta, Mapping)
+                or input_meta.get("target_package_id") != approved["target_package_id"]
+                or input_meta.get("implementation_commit") != approval_meta.get("reviewed_commit")
+                or input_meta.get("base_commit") != approval_meta.get("reviewed_base_commit")
+                or input_meta.get("contract_sha256") != approval_meta.get("contract_sha256")
+                or not isinstance(approval_meta.get("contract_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", approval_meta["contract_sha256"])):
+            raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+        terminal_rows = connection.execute(
+            "SELECT id,status FROM work_packages WHERE id IN (?,?,?)",
+            (target, approved["target_package_id"], approved["review_package_id"]),
+        ).fetchall()
+        terminal = {row["id"]: row["status"] for row in terminal_rows}
+        if (terminal.get(approved["target_package_id"]) != "DONE"
+                or terminal.get(approved["review_package_id"]) != "DONE"
+                or (relation is None and terminal.get(target) != "DONE")):
+            raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+        return {
+            "id": approved["id"], "state": approved["state"],
+            "review_package_id": approved["review_package_id"],
+            "implementer_worker_id": approved["implementer_worker_id"],
+            "reviewer_worker_id": approved["reviewer_worker_id"],
+            "approval_evidence_ids": approval_ids,
+            "reviewed_commit": approval_meta.get("reviewed_commit"),
+            "reviewed_base_commit": approval_meta.get("reviewed_base_commit"),
+            "review_pr_url": approval["uri"],
+            "source_implementation_commit": source_commit,
+            "implementer_worker_ids": all_implementers,
+            "remediation_relation": relation,
+            "prior_review_outcome_ids": tuple(row["id"] for row in prior),
+            "prior_review_outcomes": tuple({
+                "id": row["id"], "state": row["state"],
+                "findings": json.loads(row["findings_json"]),
+                "changes_requested": json.loads(row["changes_requested_json"]),
+            } for row in prior),
+            "remediation_prior_review_outcomes": tuple({
+                "id": row["id"], "state": row["state"],
+                "implementer_worker_id": row["implementer_worker_id"],
+                "findings": json.loads(row["findings_json"]),
+                "changes_requested": json.loads(row["changes_requested_json"]),
+            } for row in remediation_outcomes[:-1]),
+        }
+
+    @staticmethod
     def _assurance_input_from_connection(connection: sqlite3.Connection, package_id: str,
                                          candidate: Evidence | None = None):
         """Resolve exactly one pinned assurance input and all ancestor receipts."""
@@ -2123,12 +2265,19 @@ class SQLiteRegistry:
                         "kind": candidate.kind, "recorded_at": candidate.recorded_at,
                         "metadata": dict(candidate.metadata)}
         raw = evidence["metadata"]
+        version = raw.get("schema_version") if isinstance(raw, Mapping) else None
+        if version != 2:
+            raise RegistryConflict("ASSURANCE_INPUT_INVALID", "schema")
         included = raw.get("included_packages") if isinstance(raw, Mapping) else None
         if not isinstance(included, list):
             raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included packages")
         matrix = raw.get("acceptance_matrix") if isinstance(raw, Mapping) else None
         if not isinstance(matrix, list):
             raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
+        # Matrix rows are operator-supplied evidence, not an automatic
+        # acceptance verdict. Their exact integrated SHA and criterion are
+        # pinned here; the independent ASSURANCE reviewer must inspect the
+        # underlying observations before recording a structured decision.
         for cell in matrix:
             if not isinstance(cell, Mapping) or not isinstance(cell.get("evidence_id"), str):
                 raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
@@ -2150,6 +2299,17 @@ class SQLiteRegistry:
             if not isinstance(item, Mapping) or not isinstance(item.get("package_id"), str):
                 raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included package")
             target = item["package_id"]
+            if version == 2:
+                review_facts[target] = SQLiteRegistry._assurance_review_fact_v2(connection, target)
+                receipt = connection.execute(
+                    "SELECT id,package_id,kind,metadata_json FROM evidence WHERE id=?",
+                    (item.get("integration_receipt_id"),),
+                ).fetchone()
+                if receipt is not None:
+                    receipts[target] = {"id": receipt["id"], "package_id": receipt["package_id"],
+                                        "kind": receipt["kind"],
+                                        "metadata": json.loads(receipt["metadata_json"])}
+                continue
             outcomes = connection.execute(
                 "SELECT * FROM review_outcomes WHERE target_package_id=? "
                 "ORDER BY decided_at DESC, id DESC", (target,),

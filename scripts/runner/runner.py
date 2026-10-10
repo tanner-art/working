@@ -1515,6 +1515,9 @@ def main():
                         g('fetch', 'origin', 'main')
                         for included in assurance.included_packages:
                             g('fetch', 'origin', included['implementation_commit'])
+                            if assurance.schema_version == 2:
+                                g('fetch', 'origin', included['reviewed_commit'])
+                                g('fetch', 'origin', included['pr_head_commit'])
                     if not verify_integrated_source(
                         assurance, repository=repo, github=github, repository_name=c['github'],
                     ):

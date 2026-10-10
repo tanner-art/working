@@ -46,6 +46,7 @@ class RemediationCoverageTests(unittest.TestCase):
         self.registry.register_feature(Feature("F", "Feature", 1, TaskStatus.READY))
         self.registry.register_feature(Feature("RF", "Remediation feature", 1, TaskStatus.READY))
         self.registry.register_worker(Worker("builder", "Builder", ("code",), (Lane.FEATURE,)))
+        self.registry.register_worker(Worker("original-builder", "Original builder", ("code",), (Lane.FEATURE,)))
         self.registry.register_worker(Worker("claude", "Claude", ("independent-review",), (Lane.ASSURANCE,)))
         for package_id, kind, status, lane in (
             ("TASK-177", PackageKind.PARENT, TaskStatus.VERIFY_REVIEW, Lane.FEATURE),
@@ -66,7 +67,7 @@ class RemediationCoverageTests(unittest.TestCase):
                 "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
                 "findings_json,changes_requested_json,approval_evidence_ids_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                ("original-verdict", "TASK-178", "TASK-177", "builder", "claude",
+                ("original-verdict", "TASK-178", "TASK-177", "original-builder", "claude",
                  self.original_decided_at, self.original_decided_at, "CHANGES_REQUESTED",
                  json.dumps(self.original_findings), json.dumps(self.original_requests), "[]"),
             )
@@ -181,6 +182,102 @@ class RemediationCoverageTests(unittest.TestCase):
                 connection.execute("UPDATE evidence SET summary='changed' WHERE id='coverage'")
             with self.assertRaisesRegex(sqlite3.IntegrityError, "REMEDIATION_COVERAGE_APPEND_ONLY"):
                 connection.execute("DELETE FROM evidence WHERE id='coverage'")
+
+    def test_assurance_v2_requires_recorded_remediation_and_never_rewrites_original(self):
+        with self.registry._connection() as connection:
+            with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
+                SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+        self.registry.record_remediation_coverage(
+            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        with self.registry._connection() as connection:
+            fact = SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+            self.assertEqual(connection.execute(
+                "SELECT state FROM review_outcomes WHERE id='original-verdict'"
+            ).fetchone()[0], "CHANGES_REQUESTED")
+        self.assertEqual(fact["id"], "remediation-verdict")
+        self.assertEqual(fact["source_implementation_commit"], self.original_reviewed)
+        self.assertEqual(fact["reviewed_commit"], self.reviewed)
+        self.assertEqual(fact["prior_review_outcome_ids"], ("original-verdict",))
+        self.assertEqual(set(fact["implementer_worker_ids"]), {"original-builder", "builder"})
+        self.assertEqual(fact["remediation_relation"]["merged_main_commit"], self.merged)
+
+    def test_assurance_rejects_later_remediation_failure(self):
+        self.registry.record_remediation_coverage(
+            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        self.registry.register_work_package(WorkPackage(
+            "TASK-428", "RF", "Later remediation review", "TEST", Lane.ASSURANCE,
+            ("independent-review",), 1, ("exact behavior",),
+            status=TaskStatus.DONE, kind=PackageKind.REVIEW,
+        ))
+        later = (self.now + timedelta(minutes=1)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("later-remediation-failure", "TASK-428", "TASK-426", "builder", "claude",
+                 later, later, "CHANGES_REQUESTED", '["regression"]', '["repair"]', "[]"),
+            )
+            with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REMEDIATION_REVIEW_HISTORY_INVALID"):
+                SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+
+    def test_assurance_preserves_earlier_remediation_findings_and_separation(self):
+        self.registry.register_worker(Worker(
+            "early-remediation-builder", "Earlier remediation builder", ("code",),
+            (Lane.FEATURE,),
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-425", "RF", "Earlier remediation review", "TEST", Lane.ASSURANCE,
+            ("independent-review",), 1, ("exact behavior",),
+            status=TaskStatus.DONE, kind=PackageKind.REVIEW,
+        ))
+        earlier = (self.now - timedelta(seconds=90)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("earlier-remediation-failure", "TASK-425", "TASK-426",
+                 "early-remediation-builder", "claude", earlier, earlier,
+                 "CHANGES_REQUESTED", '["missing behavior"]', '["implement behavior"]', "[]"),
+            )
+        self.registry.record_remediation_coverage(
+            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        with self.registry._connection() as connection:
+            fact = SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+        self.assertEqual(fact["remediation_prior_review_outcomes"][0]["findings"],
+                         ["missing behavior"])
+        self.assertEqual(set(fact["implementer_worker_ids"]),
+                         {"original-builder", "early-remediation-builder", "builder"})
+
+    def test_assurance_rejects_approval_reviewer_who_implemented_earlier_attempt(self):
+        self.registry.register_work_package(WorkPackage(
+            "TASK-425", "RF", "Earlier remediation review", "TEST", Lane.ASSURANCE,
+            ("independent-review",), 1, ("exact behavior",),
+            status=TaskStatus.DONE, kind=PackageKind.REVIEW,
+        ))
+        earlier = (self.now - timedelta(seconds=90)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("earlier-remediation-failure", "TASK-425", "TASK-426",
+                 "claude", "builder", earlier, earlier,
+                 "CHANGES_REQUESTED", '["missing behavior"]', '["repair"]', "[]"),
+            )
+        self.registry.record_remediation_coverage(
+            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        with self.registry._connection() as connection:
+            with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REVIEW_SEPARATION_INVALID"):
+                SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
 
     def test_existing_v6_database_without_triggers_installs_them_before_insert(self):
         with self.registry._connection() as connection:

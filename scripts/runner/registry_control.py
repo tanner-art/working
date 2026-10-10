@@ -677,6 +677,8 @@ class RunnerRegistryControl:
                 "ordered_parent_shas": list(assurance.ordered_parent_shas),
                 "acceptance_matrix": list(assurance.acceptance_matrix),
                 "included_packages": list(assurance.included_packages),
+                "review_histories": list(assurance.review_histories),
+                "shared_path_handoffs": list(assurance.shared_path_handoffs),
                 "ci": dict(assurance.ci),
             }, recorded_at=assurance.recorded_at,
         )
