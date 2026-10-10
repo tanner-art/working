@@ -8,6 +8,7 @@ import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
 import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
 import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
+import { canvasObjectSelection } from './canvasSelection'
 import { MobileCanvasToolbar } from './surfaces/canvas'
 
 function ColorControl({ label, value, colors, onChange }: { label: string; value: string; colors: readonly string[]; onChange: (value: string) => void }) {
@@ -84,6 +85,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const [lassoPreview, setLassoPreview] = useState<NonNullable<CanvasElement['rawPoints']> | null>(null)
   const [selectedStrokeIds, setSelectedStrokeIds] = useState<Set<string>>(() => new Set())
   const [refinementCandidateId, setRefinementCandidateId] = useState<string | null>(null)
+  const selectObject = (id: string) => {
+    const next = canvasObjectSelection(id)
+    setSelected(next.selectedId)
+    setSelectedStrokeIds(next.selectedStrokeIds)
+    setRefinementCandidateId(next.refinementCandidateId)
+  }
   const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
@@ -102,7 +109,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const base = newCanvasElement(shape === 'container' ? 'container' : 'text', worldX, worldY)
     const next = convertCanvasNode([base], base.id, shape)[0]
     onCommit([...elements, next])
-    setSelected(next.id)
+    selectObject(next.id)
   }
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
   const dismissRefinementPreview = () => setRefinementCandidateId(null)
@@ -114,8 +121,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     return { x: rect?.left ?? 0, y: rect?.top ?? 0 }
   }
   const applyGestureEffect = (effect: GestureEffect) => {
-    if (effect.type === 'select') { setSelected(effect.id); setEditMode(false); return }
-    if (effect.type === 'open-edit-menu') { setSelected(effect.id); setEditMode(true); return }
+    if (effect.type === 'select') { selectObject(effect.id); setEditMode(false); return }
+    if (effect.type === 'open-edit-menu') { selectObject(effect.id); setEditMode(true); return }
     if (effect.type === 'begin-move') {
       const item = elements.find(value => value.id === effect.id)
       if (item) drag.current = { pointerId: effect.start.pointerId, id: effect.id, startX: effect.start.x, startY: effect.start.y, originalX: item.x, originalY: item.y, dx: 0, dy: 0, moved: true }
@@ -163,7 +170,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       return
     }
     const target = resize ? { kind: 'resize' as const, id: item!.id } : item ? { kind: 'node' as const, id: item.id } : { kind: 'canvas' as const }
-    if (item) setSelected(item.id)
+    if (item) selectObject(item.id)
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
     if (resize) {
@@ -297,7 +304,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       setConnectFrom(null)
     } else {
       if (selected !== id) setEditMode(false)
-      setSelected(id)
+      selectObject(id)
     }
   }
   const arrows = elements.filter(item => item.type === 'arrow')
@@ -352,7 +359,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (!branch) return
     onCommit(branch.elements)
     setConnectFrom(null)
-    setSelected(branch.childId)
+    selectObject(branch.childId)
     setEditMode(true)
   }
   const removeSelected = () => {
@@ -447,7 +454,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
     <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
-    <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId); const to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); setSelected(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
+    <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId), to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); selectObject(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); selectObject(arrow.id) } }}/></g> })}<defs>
     {arrows.map((arrow, index) => <marker key={arrow.id} id={`head-${index}`} markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" style={connectionMarkerAppearance(renderedArrow(arrow))} /></marker>)}
     </defs>
     </svg>{elements.filter(item => item.type === 'text' || item.type === 'container').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown), '--canvas-node-fill': shown.fillColor } as CSSProperties} onClick={event => clickNode(event, item.id)}>
@@ -459,8 +466,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </span>
     <span>
     </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') setSelected(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select') down(event) }} />
-    {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') selectObject(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select') down(event) }} />
+    {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => selectObject(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
     </div> })}{arrows.filter(arrow => selected === arrow.id).map(arrow => {
       const positions = connectionHandlePositions(arrow)
       if (!positions) return null
