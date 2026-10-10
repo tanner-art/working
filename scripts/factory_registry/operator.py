@@ -3845,9 +3845,12 @@ def verify_remediation_coverage_source(
             "--json", "state,headRefOid,mergeCommit",
         ))
         remote_main = json.loads(github("api", f"repos/{repository_name}/git/ref/heads/main"))
-        if (pr.get("state") != "MERGED"
+        if (not isinstance(pr, Mapping) or not isinstance(remote_main, Mapping)
+                or not isinstance(remote_main.get("object"), Mapping)
+                or not isinstance(pr.get("mergeCommit"), Mapping)
+                or pr.get("state") != "MERGED"
                 or pr.get("headRefOid") != metadata["reviewed_commit"]
-                or (pr.get("mergeCommit") or {}).get("oid") != metadata["merged_main_commit"]):
+                or pr["mergeCommit"].get("oid") != metadata["merged_main_commit"]):
             return False
 
         def git(*args: str) -> subprocess.CompletedProcess[str]:
