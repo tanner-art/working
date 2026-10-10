@@ -93,7 +93,8 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
     required_fields = {"package_id", "implementation_commit", "pr_url", "review_package_id",
                        "review_outcome_id", "review_evidence_id", "integration_receipt_id"}
     if version == 2:
-        required_fields.update({"reviewed_commit", "pr_head_commit", "prior_review_outcome_ids"})
+        required_fields.update({"reviewed_commit", "reviewed_base_commit", "pr_head_commit",
+                                "prior_review_outcome_ids"})
     for item in included:
         if not isinstance(item, Mapping) or set(item) != required_fields:
             raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included package")
@@ -106,6 +107,7 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
                 or any(not isinstance(value, str) or not value for value in item["prior_review_outcome_ids"])
                 or len(item["prior_review_outcome_ids"]) != len(set(item["prior_review_outcome_ids"]))
                 or not SHA.fullmatch(item["reviewed_commit"])
+                or not SHA.fullmatch(item["reviewed_base_commit"])
                 or not SHA.fullmatch(item["pr_head_commit"])):
             raise RegistryConflict("ASSURANCE_INPUT_INVALID", "review lineage")
         package_id = item["package_id"]
@@ -120,6 +122,7 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
                 or review.get("review_pr_url") != item["pr_url"]
                 or (version == 2 and (
                     review.get("source_implementation_commit") != item["implementation_commit"]
+                    or review.get("reviewed_base_commit") != item["reviewed_base_commit"]
                     or review.get("prior_review_outcome_ids") != tuple(item["prior_review_outcome_ids"])))
                 or not isinstance(receipt, Mapping)
                 or receipt.get("id") != item["integration_receipt_id"]
@@ -135,6 +138,7 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
                 or receipt_meta.get("implementation_commit") != item["implementation_commit"]
                 or (version == 2 and (
                     receipt_meta.get("reviewed_commit") != item["reviewed_commit"]
+                    or receipt_meta.get("reviewed_base_commit") != item["reviewed_base_commit"]
                     or receipt_meta.get("pr_head_commit") != item["pr_head_commit"]))
                 or receipt_meta.get("pr_url") != item["pr_url"]
                 or receipt_meta.get("review_outcome_id") != item["review_outcome_id"]
@@ -176,7 +180,9 @@ def parse_assurance_input(evidence: Mapping[str, Any], *, package: Mapping[str, 
                 raise RegistryConflict("ASSURANCE_REMEDIATION_RECEIPT_MISMATCH", package_id)
         if version == 2:
             histories.append({"package_id": package_id,
-                              "prior_outcomes": list(review.get("prior_review_outcomes", ()))})
+                              "prior_outcomes": list(review.get("prior_review_outcomes", ())),
+                              "remediation_prior_outcomes": list(
+                                  review.get("remediation_prior_review_outcomes", ()))})
         receipt_metadata.append(receipt_meta)
     if (len(included_ids) != len(set(included_ids))
             or not set(dependencies).issubset(included_ids)
@@ -277,6 +283,7 @@ def verify_integrated_source(value: IntegratedAssuranceInput, *, repository: pat
             # a cumulative transfer. That requires separate reviewed transfer
             # proof; these fields alone must not assert patch equivalence.
             if (git("rev-parse", f"{merged}^1") != prior
+                    or item.get("reviewed_base_commit", prior) != prior
                     or not ancestor(prior, reviewed)
                     or not ancestor(prior, pr_head)
                     or git("rev-parse", f"{reviewed}^{{tree}}") != receipt["merged_main_tree"]

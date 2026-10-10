@@ -303,10 +303,12 @@ class IntegratedAssuranceTests(unittest.TestCase):
         self.commit("later main")
         main_head = self.git("rev-parse", "HEAD")
         first_item = {**self.meta["included_packages"][0],
-                      "reviewed_commit": first, "pr_head_commit": first,
+                      "reviewed_commit": first, "reviewed_base_commit": self.base,
+                      "pr_head_commit": first,
                       "prior_review_outcome_ids": []}
         second_item = {**first_item, "package_id": "TASK-4", "implementation_commit": second,
-                       "reviewed_commit": second, "pr_head_commit": second,
+                       "reviewed_commit": second, "reviewed_base_commit": first,
+                       "pr_head_commit": second,
                        "pr_url": "https://github.com/o/r/pull/4",
                        "review_package_id": "TASK-5", "review_outcome_id": "review-outcome-4",
                        "review_evidence_id": "review-evidence-4",
@@ -323,6 +325,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                          "implementer_worker_id": "builder", "reviewer_worker_id": "claude",
                          "approval_evidence_ids": [item["review_evidence_id"]],
                          "reviewed_commit": item["reviewed_commit"],
+                         "reviewed_base_commit": item["reviewed_base_commit"],
                          "review_pr_url": item["pr_url"],
                          "source_implementation_commit": item["implementation_commit"],
                          "implementer_worker_ids": ("builder",),
@@ -334,6 +337,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                          "package_id": package_id, "metadata": {
                              "implementation_commit": item["implementation_commit"],
                              "reviewed_commit": item["reviewed_commit"],
+                             "reviewed_base_commit": item["reviewed_base_commit"],
                              "pr_head_commit": item["pr_head_commit"],
                              "pr_url": item["pr_url"],
                              "review_outcome_id": item["review_outcome_id"],
@@ -412,7 +416,8 @@ class IntegratedAssuranceTests(unittest.TestCase):
             input="reviewed merge result", text=True,
         ).strip()
         item = {**self.meta["included_packages"][0], "implementation_commit": source,
-                "reviewed_commit": reviewed, "pr_head_commit": pr_head,
+                "reviewed_commit": reviewed, "reviewed_base_commit": self.base,
+                "pr_head_commit": pr_head,
                 "prior_review_outcome_ids": ["earlier-changes-requested"]}
         meta = {**self.meta, "schema_version": 2, "integrated_commit": merged,
                 "integrated_tree": tree, "ordered_parent_shas": [merged],
@@ -428,6 +433,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
                              "review_package_id": "TASK-2", "implementer_worker_id": "builder",
                              "reviewer_worker_id": "claude", "approval_evidence_ids": ["review-evidence"],
                              "reviewed_commit": reviewed, "review_pr_url": item["pr_url"],
+                             "reviewed_base_commit": self.base,
                              "source_implementation_commit": source,
                              "implementer_worker_ids": ("builder",),
                              "prior_review_outcome_ids": ("earlier-changes-requested",),
@@ -436,6 +442,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
         receipts = {"TASK-1": {"id": "integration-receipt", "package_id": "TASK-1",
                                "kind": "integration-acceptance", "metadata": {
                                    "implementation_commit": source, "reviewed_commit": reviewed,
+                                   "reviewed_base_commit": self.base,
                                    "pr_head_commit": pr_head, "pr_url": item["pr_url"],
                                    "review_outcome_id": "review-outcome",
                                    "review_evidence_id": "review-evidence",
@@ -457,6 +464,12 @@ class IntegratedAssuranceTests(unittest.TestCase):
                                "url": meta["ci"]["run_url"]})
         self.assertTrue(verify_integrated_source(
             value, repository=self.repo, github=github, repository_name="o/r"))
+        advanced_base = replace(value,
+            included_packages=({**item, "reviewed_base_commit": source},),
+            integration_receipts=({**value.integration_receipts[0],
+                                   "reviewed_base_commit": source},))
+        self.assertFalse(verify_integrated_source(
+            advanced_base, repository=self.repo, github=github, repository_name="o/r"))
         self.assertFalse(verify_integrated_source(
             replace(value, integrated_commit=reviewed),
             repository=self.repo, github=github, repository_name="o/r"))
@@ -509,6 +522,7 @@ class IntegratedAssuranceTests(unittest.TestCase):
     def test_v2_requires_nonempty_acceptance_matrix_and_all_implementers(self):
         item = {**self.meta["included_packages"][0],
                 "reviewed_commit": self.integrated,
+                "reviewed_base_commit": self.base,
                 "pr_head_commit": self.integrated,
                 "prior_review_outcome_ids": []}
         meta = {**self.meta, "schema_version": 2, "included_packages": [item],
@@ -524,12 +538,14 @@ class IntegratedAssuranceTests(unittest.TestCase):
                 "reviewer_worker_id": "claude", "implementer_worker_ids": ("original-builder", "builder"),
                 "approval_evidence_ids": ["review-evidence"],
                 "reviewed_commit": self.integrated, "review_pr_url": item["pr_url"],
+                "reviewed_base_commit": self.base,
                 "source_implementation_commit": self.integrated,
                 "prior_review_outcome_ids": (), "prior_review_outcomes": ()}
         receipt = {"id": "integration-receipt", "package_id": "TASK-1",
                    "kind": "integration-acceptance", "metadata": {
                        "implementation_commit": self.integrated,
                        "reviewed_commit": self.integrated,
+                       "reviewed_base_commit": self.base,
                        "pr_head_commit": self.integrated,
                        "pr_url": "https://github.com/o/r/pull/1",
                        "review_outcome_id": "review-outcome",
@@ -618,23 +634,84 @@ class IntegratedAssuranceTests(unittest.TestCase):
                                (json.dumps({**json.loads(connection.execute(
                                    "SELECT metadata_json FROM evidence WHERE id='integration-receipt'"
                                ).fetchone()[0]), "reviewed_commit": self.integrated,
+                                   "reviewed_base_commit": self.base,
                                    "pr_head_commit": self.integrated}),))
         item = {**self.meta["included_packages"][0], "reviewed_commit": self.integrated,
+                "reviewed_base_commit": self.base,
                 "pr_head_commit": self.integrated, "prior_review_outcome_ids": []}
         meta = {**self.meta, "schema_version": 2, "included_packages": [item],
                 "shared_path_handoffs": []}
         assurance = self.registry.validate_integrated_assurance_candidate(self.evidence(meta))
         self.assertEqual(assurance.schema_version, 2)
         self.assertEqual(assurance.review_histories[0]["prior_outcomes"], [])
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_MATRIX_INCOMPLETE"):
+            self.registry.validate_integrated_assurance_candidate(self.evidence({
+                **meta, "acceptance_matrix": [],
+            }))
         with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_MATRIX_EVIDENCE_INVALID"):
             self.registry.validate_integrated_assurance_candidate(self.evidence({
                 **meta, "acceptance_matrix": [{**meta["acceptance_matrix"][0],
                                                "evidence_id": "missing"}],
             }))
 
-    def begin_assurance_attempt(self):
+    def test_v2_claimed_assurance_reviewer_cannot_be_prior_implementer(self):
+        self.seed_v2_review_provenance()
+        self.registry.register_worker(Worker(
+            "original-builder", "Original builder", ("independent-review",),
+            (Lane.ASSURANCE,),
+        ))
+        self.registry.register_work_package(WorkPackage(
+            "TASK-0", "F", "Earlier review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("reviewed",), status=TaskStatus.DONE,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-1",),
+        ))
+        earlier = (self.now - timedelta(minutes=1)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("earlier-review-input", "TASK-0", "review-input",
+                 "https://github.com/o/r/pull/1", "Initial implementation", earlier,
+                 json.dumps({"target_package_id": "TASK-1",
+                             "implementation_commit": self.integrated})),
+            )
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("earlier-cr", "TASK-0", "TASK-1", "original-builder", "claude",
+                 earlier, earlier, "CHANGES_REQUESTED", '["gap"]', '["repair"]', "[]"),
+            )
+            receipt = json.loads(connection.execute(
+                "SELECT metadata_json FROM evidence WHERE id='integration-receipt'"
+            ).fetchone()[0])
+            connection.execute(
+                "UPDATE evidence SET metadata_json=? WHERE id='integration-receipt'",
+                (json.dumps({**receipt, "reviewed_commit": self.integrated,
+                             "reviewed_base_commit": self.base,
+                             "pr_head_commit": self.integrated}),),
+            )
+        item = {**self.meta["included_packages"][0], "reviewed_commit": self.integrated,
+                "reviewed_base_commit": self.base, "pr_head_commit": self.integrated,
+                "prior_review_outcome_ids": ["earlier-cr"]}
+        meta = {**self.meta, "schema_version": 2, "included_packages": [item],
+                "shared_path_handoffs": []}
+        assurance = self.registry.validate_integrated_assurance_candidate(self.evidence(meta))
+        self.assertIn("original-builder", assurance.implementer_workers)
+        self.begin_assurance_attempt(self.evidence(meta), reviewer="original-builder")
+        verdict = ReviewVerdict(ReviewOutcomeState.APPROVED, self.integrated,
+                                self.base, queue_contract_digest(self.contract))
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REVIEWER_IMPLEMENTED_INCLUDED_PACKAGE"):
+            self.registry.record_integrated_assurance_verdict(
+                "TASK-3", "assurance-attempt", "original-builder", "assurance-input", verdict,
+                expected_revision=self.registry.dispatch_control()["revision"],
+                decided_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+    def begin_assurance_attempt(self, evidence=None, reviewer="claude"):
         self.registry.record_integrated_assurance_input(
-            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+            evidence or self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
         )
         self.registry.transition_work_package(
             "TASK-3", expected_status=TaskStatus.ON_DECK,
@@ -650,12 +727,12 @@ class IntegratedAssuranceTests(unittest.TestCase):
                          "base_ref": "main", "parent_limit": 1},
         )
         lease = self.registry.acquire_lease(
-            "TASK-3", "claude", acquired_at=self.now.isoformat(),
+            "TASK-3", reviewer, acquired_at=self.now.isoformat(),
             expires_at=(self.now + timedelta(minutes=5)).isoformat(),
             expected_dispatch_revision=self.registry.dispatch_control()["revision"],
         )
         self.registry.begin_attempt_runtime(
-            "assurance-attempt", package_id="TASK-3", worker_id="claude",
+            "assurance-attempt", package_id="TASK-3", worker_id=reviewer,
             runner_pid=os.getpid(), started_at=self.now.isoformat(),
             expected_revision=self.registry.dispatch_control()["revision"],
         )

@@ -2144,6 +2144,30 @@ class SQLiteRegistry:
             raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
         if relation is None and any(row["state"] != "CHANGES_REQUESTED" for row in outcomes[:-1]):
             raise RegistryConflict("ASSURANCE_REVIEW_HISTORY_INVALID", target)
+        remediation_outcomes = []
+        if relation is not None:
+            remediation_outcomes = connection.execute(
+                "SELECT * FROM review_outcomes WHERE target_package_id=? ORDER BY decided_at,id",
+                (relation["remediation_package_id"],),
+            ).fetchall()
+            if (not remediation_outcomes or remediation_outcomes[-1]["id"] != approved["id"]
+                    or any(row["state"] != "CHANGES_REQUESTED"
+                           for row in remediation_outcomes[:-1])):
+                raise RegistryConflict("ASSURANCE_REMEDIATION_REVIEW_HISTORY_INVALID", target)
+        lineage_targets = (target, relation["remediation_package_id"]) if relation is not None else (target,)
+        attempt_implementers = connection.execute(
+            f"SELECT DISTINCT worker_id FROM attempts WHERE package_id IN "
+            f"({','.join('?' for _ in lineage_targets)}) AND worker_id IS NOT NULL",
+            lineage_targets,
+        ).fetchall()
+        all_implementers = tuple(dict.fromkeys(
+            [row["implementer_worker_id"] for row in [*outcomes, *remediation_outcomes]]
+            + [row["worker_id"] for row in attempt_implementers]
+        ))
+        if (not all_implementers or approved["reviewer_worker_id"] in all_implementers
+                or any(row["implementer_worker_id"] == row["reviewer_worker_id"]
+                       for row in [*outcomes, *remediation_outcomes])):
+            raise RegistryConflict("ASSURANCE_REVIEW_SEPARATION_INVALID", target)
         approval_ids = json.loads(approved["approval_evidence_ids_json"])
         if len(approval_ids) != 1:
             raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
@@ -2188,12 +2212,10 @@ class SQLiteRegistry:
             "reviewer_worker_id": approved["reviewer_worker_id"],
             "approval_evidence_ids": approval_ids,
             "reviewed_commit": approval_meta.get("reviewed_commit"),
+            "reviewed_base_commit": approval_meta.get("reviewed_base_commit"),
             "review_pr_url": approval["uri"],
             "source_implementation_commit": source_commit,
-            "implementer_worker_ids": tuple(dict.fromkeys(
-                [row["implementer_worker_id"] for row in outcomes]
-                + ([approved["implementer_worker_id"]] if relation is not None else [])
-            )),
+            "implementer_worker_ids": all_implementers,
             "remediation_relation": relation,
             "prior_review_outcome_ids": tuple(row["id"] for row in prior),
             "prior_review_outcomes": tuple({
@@ -2201,6 +2223,12 @@ class SQLiteRegistry:
                 "findings": json.loads(row["findings_json"]),
                 "changes_requested": json.loads(row["changes_requested_json"]),
             } for row in prior),
+            "remediation_prior_review_outcomes": tuple({
+                "id": row["id"], "state": row["state"],
+                "implementer_worker_id": row["implementer_worker_id"],
+                "findings": json.loads(row["findings_json"]),
+                "changes_requested": json.loads(row["changes_requested_json"]),
+            } for row in remediation_outcomes[:-1]),
         }
 
     @staticmethod
@@ -2244,6 +2272,10 @@ class SQLiteRegistry:
         matrix = raw.get("acceptance_matrix") if isinstance(raw, Mapping) else None
         if not isinstance(matrix, list):
             raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
+        # Matrix rows are operator-supplied evidence, not an automatic
+        # acceptance verdict. Their exact integrated SHA and criterion are
+        # pinned here; the independent ASSURANCE reviewer must inspect the
+        # underlying observations before recording a structured decision.
         for cell in matrix:
             if not isinstance(cell, Mapping) or not isinstance(cell.get("evidence_id"), str):
                 raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
