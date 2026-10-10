@@ -1,4 +1,4 @@
-import { buildMorningDigest } from './morningDigest'
+import { buildMorningDigest, confirmedSemanticObjects, localDateKey } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
 import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
@@ -17,15 +17,17 @@ import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
+import { buildCalendarTimeGrid } from './calendar'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
+import type { AppState, CanvasElement, ObjectKind, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
 import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, hasCreatedReminderInstruction, hasStagedActionResolution, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
-import { loadStateResult, makeObject, saveState, serializeState } from './store'
+import { loadStateResult, makeObject, reconcileCurrentSession, saveState, serializeState } from './store'
+import { activeTemporalDecisions, temporalFactIsCurrent } from './temporalConfirmation'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
@@ -446,7 +448,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
-      {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
+      {view === 'today' && <Today state={state} onCapture={() => setView('capture')} onOpen={setSelectedObjectId}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
@@ -575,16 +578,29 @@ function ClearLocalData({ onBackup }: { onBackup: () => void }) {
 }
 
 function Header({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) { return <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1></div>{action}</header> }
-function Today({ objects, relationships, onCapture, onOpen }: { objects: ThoughtObject[]; relationships: SemanticRelationship[]; onCapture: () => void; onOpen: (id: string) => void }) {
-  const commitments = fixedCommitments(objects)
-  const actions = confirmedActions(objects, relationships)
+export function Today({ state, onCapture, onOpen, readAccountModel, now = new Date() }: { state: AppState; onCapture: () => void; onOpen: (id: string) => void; readAccountModel?: (current: AppState) => PersistedState; now?: Date }) {
+  const { objects } = state
+  const actions = confirmedActions(objects, state.model?.relationships ?? [])
   const focus = actions[0]
   const recent = recentObjects(objects)
-  const date = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())
+  const date = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(now)
+  let commitments: { eventId: string; startsAt: string; eventTitle: string; id: string; summary: string }[] = []
+  let commitmentError = ''
+  try {
+    const model = reconcileCurrentSession(state, readAccountModel?.(state))
+    const confirmedIds = new Set(confirmedSemanticObjects(model).filter(item => item.kind === 'commitment').map(item => item.id))
+    const eventIds = new Set(activeTemporalDecisions(model).flatMap(entry =>
+      (entry.target.kind === 'event-scheduling' || entry.target.kind === 'direct-calendar-event') && temporalFactIsCurrent(model, entry)
+        ? [entry.target.eventId] : []))
+    const day = buildCalendarTimeGrid(model, localDateKey(now), 1, now, event => eventIds.has(event.id) && event.status === 'scheduled').days[0]
+    commitments = day.events.flatMap(({ event, linkedObjects }) => linkedObjects
+      .filter(item => item.kind === 'commitment' && confirmedIds.has(item.id))
+      .map(item => ({ eventId: event.id, startsAt: event.startsAt, eventTitle: event.title, id: item.id, summary: item.summary })))
+  } catch { commitmentError = 'Unable to verify fixed commitments. Retry saving or download a backup.' }
   return <div className="page"><Header eyebrow={date} title="Make space for the work that matters." action={<button className="primary" onClick={onCapture}>Capture a thought <span>↵</span></button>} />
     <section className="today-grid"><div className="focus-card"><p className="section-label">Recommended focus</p><h2>{focus?.originalContent ?? 'Start with a clean capture'}</h2><p>One meaningful action, selected from confirmed work—not an overflowing task list.</p><div className="focus-meta"><span>◒ {focus?.metadata.effort ?? 'small'} effort</span><span>◌ {focus?.metadata.attentionLoad ?? 'low'} attention</span></div><button className="quiet-button" disabled={!focus} onClick={() => focus && onOpen(focus.id)}>{focus ? `Open ${objectLabels[focus.kind].toLowerCase()}` : 'Capture first'} →</button></div>
       <div className="day-summary"><p className="section-label">Attention budget</p><div className="orb"><b>{Math.max(2, 5 - actions.length)}</b><span>open hours</span></div><p>Keep the plan spacious. It can move as your day changes.</p></div></section>
-    <section className="list-section"><div className="section-heading"><div><p className="section-label">Fixed commitments</p><h2>Today</h2></div><span>{commitments.length} scheduled</span></div>{commitments.length ? commitments.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No fixed commitments today. Your execution plan is free to adapt." />}</section>
+    <section className="list-section"><div className="section-heading"><div><p className="section-label">Fixed commitments</p><h2>Today</h2></div>{!commitmentError && <span>{commitments.length} scheduled</span>}</div>{commitmentError ? <p role="status">{commitmentError}</p> : commitments.length ? commitments.map(item => <button className="commitment-row clickable-row commitment-accent" key={`${item.eventId}:${item.id}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.summary}</strong><small><time dateTime={item.startsAt}>{new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(item.startsAt))}</time> · {item.eventTitle}</small></div><span className="kind-chip">Commitment</span></button>) : <Empty text="No fixed commitments today. Your execution plan is free to adapt." />}</section>
     <section className="list-section"><div className="section-heading"><div><p className="section-label">Object workbench</p><h2>Recent captures</h2></div><span>{recent.length} visible</span></div>{recent.length ? recent.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} />) : <Empty text="Capture something and it will appear here for shaping." />}</section>
   </div>
 }
