@@ -32,6 +32,21 @@ describe('mounted Review surface', () => {
     expect(focusPendingReviewChoice(disclosure, undefined)).toBe(false)
   })
 
+  it('retains a pending focus handoff until its Review card appears', () => {
+    const handled = vi.fn()
+    const focus = vi.fn()
+    const disclosure = { open: false } as HTMLDetailsElement
+    expect(focusPendingReviewChoice(disclosure, undefined, handled)).toBe(false)
+    expect(disclosure.open).toBe(false)
+    expect(handled).not.toHaveBeenCalled()
+
+    const card = { querySelector: vi.fn(() => ({ focus })) } as unknown as HTMLElement
+    expect(focusPendingReviewChoice(disclosure, card, handled)).toBe(true)
+    expect(disclosure.open).toBe(true)
+    expect(focus).toHaveBeenCalledOnce()
+    expect(handled).toHaveBeenCalledOnce()
+  })
+
   it('renders the one resolution control with exactly the four required choices', () => {
     const markup = renderToStaticMarkup(<Review objects={[thought()]} onResolve={() => undefined} onReject={() => undefined} onOpen={() => undefined} />)
     expect(markup).toContain('aria-label="Resolve capture"')

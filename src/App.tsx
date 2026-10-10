@@ -773,12 +773,13 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function focusPendingReviewChoice(disclosure: HTMLDetailsElement | null, card: HTMLElement | undefined): boolean {
+export function focusPendingReviewChoice(disclosure: HTMLDetailsElement | null, card: HTMLElement | undefined, onFocused?: () => void): boolean {
   if (!disclosure || !card) return false
   const choice = card.querySelector<HTMLButtonElement>('.review-actions button:not(:disabled)')
   if (!choice) return false
   disclosure.open = true
   choice.focus()
+  onFocused?.()
   return true
 }
 
@@ -792,8 +793,7 @@ export function Review({ registerSearchHandoffGuard, objects, targets = [], focu
   const folders = bankObjects(objects)
   useEffect(() => {
     if (!focusObjectId) return
-    focusPendingReviewChoice(disclosure.current, cards.current.get(focusObjectId))
-    onFocusHandled?.()
+    focusPendingReviewChoice(disclosure.current, cards.current.get(focusObjectId), onFocusHandled)
   }, [focusObjectId, objects, onFocusHandled])
   return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details ref={disclosure} className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id} ref={node => { if (node) cards.current.set(item.id, node); else cards.current.delete(item.id) }}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
