@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import type { AppState } from './domain'
+import type { AppState, PersistedState } from './domain'
 import type { WorkspaceNavigationOutcome, WorkspaceNavigationRequest } from './workspaceNavigation'
 
 /**
@@ -24,6 +24,8 @@ export type WorkspaceSurfaceProps = Readonly<{
   snapshotToken: string
   update: (updater: (current: AppState) => AppState) => void
   navigate: (request: WorkspaceNavigationRequest) => WorkspaceNavigationOutcome
+  /** The host's current validated local or account projection, shared with result navigation. */
+  readModel?: (current: AppState) => PersistedState
 }>
 
 export type SurfaceModule = Readonly<{ surface: AppSurfaceDefinition }>

@@ -1,7 +1,7 @@
-import type { AppState } from './domain'
+import type { AppState, PersistedState } from './domain'
 import { canvasBankForState } from './canvasBank'
-import { reconcileLegacyUi } from './migration'
-import { searchDocumentsFromAppState, type SearchDocument, type SearchField } from './universalSearch'
+import { reconcileCurrentSession } from './store'
+import { searchDocumentsFromModel, type SearchDocument, type SearchField } from './universalSearch'
 
 export type WorkspaceNavigationRequest =
   | Readonly<{ type: 'open-search-result'; document: SearchDocument; snapshotToken: string }>
@@ -25,6 +25,7 @@ export type WorkspaceNavigationContext = Readonly<{
   available: boolean
   accountUserId?: string
   authenticatedUserId?: string
+  readModel?: (current: AppState) => PersistedState
 }>
 
 export type WorkspaceNavigationHost = Readonly<{
@@ -103,11 +104,12 @@ function sameDocument(left: SearchDocument, right: SearchDocument): boolean {
 }
 
 /** Resolve against the current loaded workspace, never a result-list snapshot. */
-export function resolveSearchDestination(state: AppState, requested: SearchDocument): SearchDestination | undefined {
+export function resolveSearchDestination(state: AppState, requested: SearchDocument,
+  readModel: (current: AppState) => PersistedState = reconcileCurrentSession): SearchDestination | undefined {
   try {
-    const fresh = searchDocumentsFromAppState(state).find(document => document.kind === requested?.kind && document.id === requested.id)
+    const model = readModel(state)
+    const fresh = searchDocumentsFromModel(model).find(document => document.kind === requested?.kind && document.id === requested.id)
     if (!fresh || !sameDocument(fresh, requested)) return undefined
-    const model = reconcileLegacyUi(state)
     if (fresh.kind === 'capture') {
       if (!model.captures.some(capture => capture.id === fresh.id)) return undefined
       const object = state.objects.find(item => `capture:${item.id}` === fresh.id)
@@ -147,7 +149,8 @@ export function performWorkspaceNavigation(
   if (request.type === 'close-surface') { host.close(); return { ok: true } }
   if (!context.stateIsCurrent) return unavailableSearchResult()
   if (request.snapshotToken !== context.snapshotToken) return unavailableSearchResult()
-  const destination = resolveSearchDestination(context.state, request.document)
+  if (context.accountUserId !== undefined && !context.readModel) return unavailableSearchResult()
+  const destination = resolveSearchDestination(context.state, request.document, context.readModel)
   if (!destination) return unavailableSearchResult()
   if (host.canOpen && !host.canOpen(destination)) return { ok: false, message: 'Finish or save the work you were editing before opening this result.' }
   host.open(destination)

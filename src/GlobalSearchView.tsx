@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AppState } from './domain'
+import type { AppState, PersistedState } from './domain'
 import { createUniversalSearchIndex, searchProjectionFromAppState, type SearchField, type SearchKind, type SearchResult } from './universalSearch'
 import type { WorkspaceNavigationOutcome, WorkspaceNavigationRequest } from './workspaceNavigation'
 import './universalSearch.css'
@@ -34,10 +34,11 @@ export function openSearchResult(result: SearchResult, snapshotToken: string,
 }
 
 /** The sole global text-search surface. The source model remains the authority on every click. */
-export function GlobalSearchView({ state, snapshotToken, navigate, initialQuery = '' }: {
+export function GlobalSearchView({ state, snapshotToken, navigate, readModel, initialQuery = '' }: {
   state: AppState
   snapshotToken: string
   navigate: (request: WorkspaceNavigationRequest) => WorkspaceNavigationOutcome
+  readModel?: (current: AppState) => PersistedState
   initialQuery?: string
 }) {
   const [query, setQuery] = useState(initialQuery)
@@ -47,7 +48,7 @@ export function GlobalSearchView({ state, snapshotToken, navigate, initialQuery 
   navigateRef.current = navigate
   const queryRef = useRef(query)
   queryRef.current = query
-  const projection = useMemo(() => searchProjectionFromAppState(state), [state])
+  const projection = useMemo(() => searchProjectionFromAppState(state, readModel), [state, readModel])
   const index = useMemo(() => createUniversalSearchIndex(projection.documents), [projection])
   const incomplete = !projection.complete || index.omittedCount > 0
   const results = useMemo(() => index.query(query), [index, query])
