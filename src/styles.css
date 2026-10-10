@@ -51,7 +51,7 @@
 .canvas-bank-empty { max-width: 560px; padding: 38px; border: 1px dashed #bfc8bc; border-radius: 14px; background: #f1f3ec; }.canvas-bank-empty h2 { margin: 0 0 9px; font: 500 25px 'Playfair Display'; }.canvas-bank-empty p { margin: 0; color: #65746c; line-height: 1.6; }
 @media (max-width: 720px) { .app-shell { grid-template-columns: minmax(0, 1fr); }.sidebar { min-width: 0; width: 100%; position: sticky; top: 0; z-index: 5; flex-direction: row; padding: 10px; align-items: center; }.brand { padding: 0 9px; font-size: 14px; }.sidebar nav { min-width: 0; flex: 1; display: flex; overflow-x: auto; gap: 1px; }.nav-item { padding: 8px; font-size: 0; }.nav-item span { font-size: 16px; }.sidebar-bottom { display: none; }.page { padding: 42px 22px; }.page-header { margin-bottom: 25px; }.today-grid, .calendar-grid { grid-template-columns: 1fr; }.capture-footer { align-items: stretch; flex-direction: column; }.capture-footer input { width: 100%; }.review-actions { justify-content: stretch; flex-wrap: wrap; }.canvas-head { padding: 18px; align-items: flex-start; gap: 15px; flex-direction: column; }.canvas-tools { flex-wrap: wrap; }.canvas-note { padding: 8px 18px; } }
 @media (max-width: 720px) {
-  .content { touch-action: pan-y pinch-zoom; }
+  .content.swipe-navigation-surface { touch-action: pan-y pinch-zoom; }
   .sidebar .brand { width: auto; flex: 0 0 auto; padding: 0 9px; font-size: 14px; }
   .sidebar-more { flex: 0 0 44px; margin: 0; }
   .sidebar-more summary { justify-content: center; width: 44px; padding: 0; font-size: 22px; }

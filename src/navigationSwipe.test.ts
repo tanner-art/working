@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { canBeginSwipe, swipeDestination, swipeTargetIsBlocked, SWIPE_VIEWS } from './navigationSwipe'
+import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked, SWIPE_VIEWS } from './navigationSwipe'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -24,12 +24,20 @@ describe('mobile primary navigation gestures', () => {
 
   it('does not begin in desktop, editing, modal, horizontal-scroll, or focused Canvas contexts', () => {
     const eligible = { pointerType: 'touch', isPrimary: true, view: 'review', deepCanvas: false,
-      modalOpen: false, blockedTarget: false, mobile: true }
+      modalOpen: false, blockedTarget: false, mobile: true, viewportZoomed: false }
     expect(canBeginSwipe(eligible)).toBe(true)
     for (const patch of [
       { pointerType: 'mouse' }, { isPrimary: false }, { view: 'settings' }, { deepCanvas: true },
-      { modalOpen: true }, { blockedTarget: true }, { mobile: false },
+      { modalOpen: true }, { blockedTarget: true }, { mobile: false }, { viewportZoomed: true },
     ]) expect(canBeginSwipe({ ...eligible, ...patch })).toBe(false)
+  })
+
+  it('reserves zoomed-page horizontal gestures for native panning', () => {
+    expect(isViewportZoomed(undefined)).toBe(false)
+    expect(isViewportZoomed(1)).toBe(false)
+    expect(isViewportZoomed(1.25)).toBe(true)
+    expect(canBeginSwipe({ pointerType: 'touch', isPrimary: true, view: 'today', deepCanvas: false,
+      modalOpen: false, blockedTarget: false, mobile: true, viewportZoomed: isViewportZoomed(1.25) })).toBe(false)
   })
 
   it('rejects editable targets and nested horizontal scrollers but accepts ordinary content', () => {

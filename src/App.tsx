@@ -34,7 +34,7 @@ import { initialTutorialState, startTutorial, type TutorialState } from './onboa
 import { ReviewResolution } from './ReviewResolutionControl'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
-import { canBeginSwipe, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
+import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
 import { closeMoreMenu, dismissMoreMenuOutside } from './navigationMenu'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
@@ -182,6 +182,19 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [view, setView] = useState<View>(() => previewStartView(window.location.search,
     appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
   const swipeStart = useRef<{ pointerId: number; x: number; y: number; view: View } | null>(null)
+  const [viewportZoomed, setViewportZoomed] = useState(() => isViewportZoomed(window.visualViewport?.scale))
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const updateZoom = () => {
+      const zoomed = isViewportZoomed(viewport.scale)
+      setViewportZoomed(zoomed)
+      if (zoomed) swipeStart.current = null
+    }
+    viewport.addEventListener('resize', updateZoom)
+    updateZoom()
+    return () => viewport.removeEventListener('resize', updateZoom)
+  }, [])
   const moreMenu = useRef<HTMLDetailsElement>(null)
   useEffect(() => {
     const dismiss = (event: PointerEvent) => { dismissMoreMenuOutside(moreMenu.current, event.target) }
@@ -384,13 +397,14 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (!event.isPrimary) { swipeStart.current = null; return }
     const allowed = canBeginSwipe({ pointerType: event.pointerType, isPrimary: event.isPrimary, view,
       deepCanvas: !!openCanvasId, modalOpen: !!selectedObject, mobile: window.matchMedia('(max-width: 720px)').matches,
+      viewportZoomed: viewportZoomed || isViewportZoomed(window.visualViewport?.scale),
       blockedTarget: swipeTargetIsBlocked(event.target, event.currentTarget) })
     swipeStart.current = allowed ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, view } : null
   }
   const onContentPointerUp = (event: ReactPointerEvent<HTMLElement>) => {
     const start = swipeStart.current
     swipeStart.current = null
-    if (!start || start.pointerId !== event.pointerId || start.view !== view || selectedObject || openCanvasId) return
+    if (!start || start.pointerId !== event.pointerId || start.view !== view || selectedObject || openCanvasId || isViewportZoomed(window.visualViewport?.scale)) return
     const next = swipeDestination(start.view, event.clientX - start.x, event.clientY - start.y)
     if (next) navigate(next)
   }
@@ -400,7 +414,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
     <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape' && closeMoreMenu(event.currentTarget, true)) { event.preventDefault(); event.stopPropagation() } }}><summary aria-label={view === 'settings' ? 'More options, Settings current page' : 'More options'}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" aria-current={view === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}>Settings</button></div></details></aside>
-    <section className="content" onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
+    <section className={viewportZoomed ? 'content' : 'content swipe-navigation-surface'} onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
         <p>Capture a thought, then open Organize to review its meaning. You can use Threadline in this browser or add it to your home screen.</p>

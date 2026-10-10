@@ -9,11 +9,16 @@ export interface SwipeStartGate {
   modalOpen: boolean
   blockedTarget: boolean
   mobile: boolean
+  viewportZoomed: boolean
+}
+
+export function isViewportZoomed(scale: number | undefined): boolean {
+  return typeof scale === 'number' && scale > 1
 }
 
 /** Do not turn editing, nested scrolling, or a multi-touch gesture into navigation. */
 export function canBeginSwipe(gate: SwipeStartGate): boolean {
-  return gate.mobile && gate.pointerType === 'touch' && gate.isPrimary && !gate.deepCanvas &&
+  return gate.mobile && !gate.viewportZoomed && gate.pointerType === 'touch' && gate.isPrimary && !gate.deepCanvas &&
     !gate.modalOpen && !gate.blockedTarget && SWIPE_VIEWS.some(view => view === gate.view)
 }
 
