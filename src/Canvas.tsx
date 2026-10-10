@@ -10,6 +10,7 @@ import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
 import { canvasObjectSelection } from './canvasSelection'
 import { MobileCanvasToolbar } from './surfaces/canvas'
+import { CANVAS_INK_COLORS, CANVAS_INK_WIDTHS, DEFAULT_CANVAS_INK, canvasInkAppearance, createCanvasInkStroke, type CanvasInkAppearance } from './canvasInk'
 
 function ColorControl({ label, value, colors, onChange }: { label: string; value: string; colors: readonly string[]; onChange: (value: string) => void }) {
   return <fieldset className="canvas-color-control"><legend>{label}</legend><div className="canvas-swatches">
@@ -17,6 +18,16 @@ function ColorControl({ label, value, colors, onChange }: { label: string; value
       style={{ backgroundColor: color }} aria-label={`${label}: ${color}`} aria-pressed={value.toLowerCase() === color.toLowerCase()} onClick={() => onChange(color)} />)}
     <label className="canvas-custom-color">Custom<input aria-label={`Custom ${label.toLowerCase()}`} type="color" value={value} onChange={event => onChange(event.target.value)} /></label>
   </div></fieldset>
+}
+
+function InkControl({ appearance, onChange }: { appearance: CanvasInkAppearance; onChange: (appearance: CanvasInkAppearance) => void }) {
+  return <details className="canvas-ink-options"><summary>Ink</summary><div className="canvas-ink-panel">
+    <ColorControl label="Ink color" value={appearance.color} colors={CANVAS_INK_COLORS}
+      onChange={color => onChange({ ...appearance, color })} />
+    <fieldset className="canvas-ink-widths"><legend>Ink width</legend><div>{CANVAS_INK_WIDTHS.map(width =>
+      <button type="button" key={width} aria-label={`${width} pixel ink width`} aria-pressed={appearance.width === width}
+        onClick={() => onChange({ ...appearance, width })}>{width}</button>)}</div></fieldset>
+  </div></details>
 }
 
 export function CanvasExitControl({ onExit }: { onExit: () => void }) {
@@ -58,6 +69,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const canvasRef = useRef<HTMLDivElement>(null)
   const [editMode, setEditMode] = useState(false)
   const [tool, setTool] = useState<'select' | 'pen' | 'lasso'>('select')
+  const [ink, setInk] = useState<CanvasInkAppearance>(() => ({ ...DEFAULT_CANVAS_INK }))
   const gesture = useRef<GestureState>(idleGestureState())
   const holdTimer = useRef<number | null>(null)
   const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
@@ -79,8 +91,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
   const [connectionPreview, setConnectionPreview] = useState<{ id: string; patch: Pick<CanvasElement, 'sourceAnchor' | 'targetAnchor' | 'curveHandle'> } | null>(null)
   const connectionDrag = useRef<{ pointerId: number; id: string; kind: 'source' | 'target' | 'curve'; start: { x: number; y: number } } | null>(null)
-  const penStroke = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']> } | null>(null)
-  const [penPreview, setPenPreview] = useState<NonNullable<CanvasElement['rawPoints']> | null>(null)
+  const penStroke = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']>; appearance: CanvasInkAppearance } | null>(null)
+  const [penPreview, setPenPreview] = useState<{ points: NonNullable<CanvasElement['rawPoints']>; appearance: CanvasInkAppearance } | null>(null)
   const lassoPath = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']> } | null>(null)
   const [lassoPreview, setLassoPreview] = useState<NonNullable<CanvasElement['rawPoints']> | null>(null)
   const [selectedStrokeIds, setSelectedStrokeIds] = useState<Set<string>>(() => new Set())
@@ -188,7 +200,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       event.preventDefault()
       ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
       const start = { pointerId: event.pointerId, sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, points: [point] }
-      if (tool === 'pen') { penStroke.current = start; setPenPreview([point]) } else { lassoPath.current = start; setLassoPreview([point]) }
+      if (tool === 'pen') { const appearance = { ...ink }; penStroke.current = { ...start, appearance }; setPenPreview({ points: [point], appearance }) } else { lassoPath.current = start; setLassoPreview([point]) }
       return
     }
     const target = resize ? { kind: 'resize' as const, id: item!.id } : item ? { kind: 'node' as const, id: item.id } : { kind: 'canvas' as const }
@@ -207,7 +219,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (active?.pointerId === event.pointerId) {
       const points = [...active.points, worldPoint(event)]
       penStroke.current = { ...active, points }
-      setPenPreview(points)
+      setPenPreview({ points, appearance: active.appearance })
       return
     }
     const lasso = lassoPath.current
@@ -225,7 +237,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (active?.pointerId === event.pointerId) {
       const points = normalizeCanvasStrokePoints([...active.points, worldPoint(event)])
       penStroke.current = null; setPenPreview(null)
-      if (points) onCommit([...elements, { id: crypto.randomUUID(), type: 'freehand', x: points[0].x, y: points[0].y, rawPoints: points }])
+      if (points) onCommit([...elements, createCanvasInkStroke(crypto.randomUUID(), points, active.appearance)])
       return
     }
     const lasso = lassoPath.current
@@ -409,6 +421,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div className="canvas-tools">
     <button onClick={() => add('text')}>+ Text</button>
     <button className={tool === 'pen' ? 'selected-tool' : ''} aria-pressed={tool === 'pen'} onClick={() => { cancel(); setTool(current => current === 'pen' ? 'select' : 'pen'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Pen</button>
+    <InkControl appearance={ink} onChange={setInk} />
     <button className={tool === 'lasso' ? 'selected-tool' : ''} aria-pressed={tool === 'lasso'} onClick={() => { cancel(); setTool(current => current === 'lasso' ? 'select' : 'lasso'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Lasso</button>
     <button disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
     <button onClick={() => add('container')}>+ Group</button>
@@ -438,6 +451,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       </>}
       secondary={<>
         <button type="button" disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
+        <InkControl appearance={ink} onChange={setInk} />
         <button type="button" onClick={() => add('container')}>Add group</button>
         <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
           <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
@@ -473,7 +487,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size > 0 ? `${selectedStrokeIds.size} ${selectedStrokeIds.size === 1 ? 'stroke' : 'strokes'} selected · ${selectedStrokeIds.size === 1 ? 'preview refinement or Delete' : 'Delete selection'}` : 'Lasso active · circle strokes to select · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
+    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => {
+      const appearance = canvasInkAppearance(stroke), isSelected = selectedStrokeIds.has(stroke.id)
+      return <g key={stroke.id}><path className={`canvas-stroke${isSelected ? ' selected' : ''}`}
+        style={{ stroke: isSelected ? '#507737' : appearance.color, strokeWidth: isSelected ? Math.max(5, appearance.width + 2) : appearance.width }}
+        d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>
+    })}{penPreview && <path className="canvas-stroke canvas-stroke-preview" style={{ stroke: penPreview.appearance.color, strokeWidth: penPreview.appearance.width }} d={strokePath(penPreview.points)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
     <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId), to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); selectObject(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); selectObject(arrow.id) } }}/></g> })}<defs>
     {arrows.map((arrow, index) => <marker key={arrow.id} id={`head-${index}`} markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" style={connectionMarkerAppearance(renderedArrow(arrow))} /></marker>)}
     </defs>
