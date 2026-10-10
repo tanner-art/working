@@ -24,7 +24,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
-import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, hasStagedActionResolution, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
+import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, hasCreatedReminderInstruction, hasStagedActionResolution, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
@@ -460,7 +460,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
       {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} ideas={resolvedIdeas(state.objects)} connections={connectionProjection?.graph} connectionsUnavailable={connectionProjection?.unavailable} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} onOpenIdea={setSelectedObjectId} onConnect={(sourceId, targetId) => update(current => connectThoughts(current, sourceId, targetId))} onDisconnect={id => update(current => removeThoughtConnection(current, id))} onBackup={downloadBackup} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-  </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+  </main>{selectedObject && <ObjectPanel key={selectedObject.id} object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
       onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
@@ -637,16 +637,18 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
+export function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
   const [revision, setRevision] = useState(object.interpretation.summary)
   const [correction, setCorrection] = useState(history.currentText)
+  const [fieldError, setFieldError] = useState('')
   const closeButton = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   useEffect(() => setDraft(object), [object])
   useEffect(() => setRevision(object.interpretation.summary), [object.id, object.interpretation.summary])
   useEffect(() => setCorrection(history.currentText), [object.id, history.currentText])
   const stagedActionResolved = hasStagedActionResolution(object)
+  const reminderTypeLocked = object.kind === 'reminder' && hasCreatedReminderInstruction(object)
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !stagedActionResolved)
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
@@ -657,6 +659,10 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   const closePanel = () => { if (confirmDiscard(true)) onClose() }
   const saveAndClose = (updated: ThoughtObject) => {
     if (!confirmDiscard(false)) return
+    if (hasCreatedReminderInstruction(object) && updated.kind !== object.kind) {
+      setFieldError('This Reminder already has an instruction. Its type cannot be changed; your other edits were not saved.')
+      return
+    }
     onSave(updated)
     onClose()
   }
@@ -706,13 +712,14 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
         </section>
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
-          <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
+          <label>Type<select value={draft.kind} disabled={reminderTypeLocked} aria-describedby={reminderTypeLocked ? 'reminder-type-note' : undefined} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select>{reminderTypeLocked && <small id="reminder-type-note">Type is fixed after a Reminder is created. You can still edit its other details.</small>}</label>
           <label>Folder<select value={folderValue} onChange={event => field('context', event.target.value || undefined)}><option value="">Unfiled</option><option value="Personal">Personal</option><option value="Business">Business</option></select></label>
           <label>Proposed date<input type="date" value={draft.metadata.deadline ?? ''} onChange={event => metadata('deadline', event.target.value)} /></label>
           <label>Time<input type="time" value={proposedTime} onChange={event => setProposedTime(event.target.value)} /></label>
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
-          <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation || stagedActionResolved} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
+          <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation || stagedActionResolved} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status} disabled={reminderTypeLocked && (status === 'inbox' || status === 'review')}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
         </div>
+        {fieldError && <p role="alert">{fieldError}</p>}
         <details className="thought-progression" open><summary>Version history ({history.progression.length})</summary><ol>{history.progression.slice().reverse().map(entry => <li key={entry.id}><div><strong>{entry.label}</strong><time>{new Date(entry.at).toLocaleString()}</time></div><p>{entry.text}</p>{entry.previousText && <details><summary>Previous version</summary><p>{entry.previousText}</p></details>}</li>)}</ol></details>
         <details><summary>Decision history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
         {(hasConfirmation(object) || stagedActionResolved) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>{stagedActionResolved && !hasConfirmation(object) ? 'Withdraw staged Action' : 'Reverse confirmation'}</button></>}
