@@ -5,7 +5,7 @@ import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './mig
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
-import { leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
+import { enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
 const at = '2026-10-09T00:00:00.000Z'
@@ -77,6 +77,7 @@ describe('workspace search navigation contract', () => {
     expect(performWorkspaceNavigation(result, { ...context, stateIsCurrent: false }, host).ok).toBe(false)
     expect(performWorkspaceNavigation(result, { ...context, authenticatedUserId: 'account-b' }, host).ok).toBe(false)
     expect(performWorkspaceNavigation({ ...result, document: { ...result.document, id: 'missing' } }, context, host).ok).toBe(false)
+    expect(performWorkspaceNavigation(result, context, { ...host, canOpen: () => false }).ok).toBe(false)
     expect(calls).toEqual([])
     expect(performWorkspaceNavigation({ type: 'close-surface' }, context, host)).toEqual({ ok: true })
     expect(calls).toEqual(['close'])
@@ -104,9 +105,15 @@ describe('workspace search navigation contract', () => {
 
   it('returns from pushed Search without creating a duplicate root history entry', () => {
     const calls: string[] = []
-    const history = { back: () => calls.push('back'), replaceState: (_data: unknown, _unused: string, url: string) => calls.push(`replace:${url}`) }
-    leaveWorkspaceHistory(history, '/search', true)
-    leaveWorkspaceHistory(history, '/search', false)
-    expect(calls).toEqual(['back', 'replace:/'])
+    const history = { state: {} as Record<string, unknown>, back: () => calls.push('back'),
+      pushState(data: unknown, _unused: string, url: string) { this.state = data as Record<string, unknown>; calls.push(`push:${url}`) },
+      replaceState(data: unknown, _unused: string, url: string) { this.state = data as Record<string, unknown>; calls.push(`replace:${url}`) } }
+    enterWorkspaceHistory(history, 'https://threadline.test/', 'current-document')
+    leaveWorkspaceHistory(history, '/search', 'current-document')
+    expect(calls).toEqual(['replace:https://threadline.test/', 'push:/search', 'back'])
+    calls.length = 0
+    leaveWorkspaceHistory(history, '/search', 'new-document')
+    expect(calls).toEqual(['replace:/'])
+    expect(history.state).toEqual({})
   })
 })

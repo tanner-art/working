@@ -29,6 +29,7 @@ export type WorkspaceNavigationContext = Readonly<{
 
 export type WorkspaceNavigationHost = Readonly<{
   close: () => void
+  canOpen?: (destination: SearchDestination) => boolean
   open: (destination: SearchDestination) => void
 }>
 
@@ -54,11 +55,22 @@ export function performWorkspaceRouteTransition(
   return { ok: true }
 }
 
-export function leaveWorkspaceHistory(
-  history: Readonly<{ back: () => void; replaceState: (data: unknown, unused: string, url: string) => void }>,
-  path: string, searchWasPushed: boolean,
-): void {
-  if (searchWasPushed && path === '/search') history.back()
+type WorkspaceHistory = Readonly<{
+  state: unknown
+  back: () => void
+  pushState: (data: unknown, unused: string, url: string) => void
+  replaceState: (data: unknown, unused: string, url: string) => void
+}>
+const historyRecord = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+
+/** Mark both adjacent entries in this document so Back never crosses a page load. */
+export function enterWorkspaceHistory(history: WorkspaceHistory, currentUrl: string, session: string): void {
+  history.replaceState({ ...historyRecord(history.state), threadlineSearchOrigin: session }, '', currentUrl)
+  history.pushState({ threadlineSearchEntry: session }, '', '/search')
+}
+
+export function leaveWorkspaceHistory(history: WorkspaceHistory, path: string, session: string): void {
+  if (path === '/search' && historyRecord(history.state).threadlineSearchEntry === session) history.back()
   else history.replaceState({}, '', '/')
 }
 
@@ -116,6 +128,7 @@ export function performWorkspaceNavigation(
   if (request.snapshotToken !== context.snapshotToken) return unavailableSearchResult()
   const destination = resolveSearchDestination(context.state, request.document)
   if (!destination) return unavailableSearchResult()
+  if (host.canOpen && !host.canOpen(destination)) return { ok: false, message: 'Finish or save the work you were editing before opening this result.' }
   host.open(destination)
   return { ok: true }
 }
