@@ -108,7 +108,9 @@ describe('Canvas Bank search surface', () => {
     const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[]} connections={graph}
       focusTarget={null} onCreate={() => undefined} onOpen={() => undefined} onOpenIdea={() => undefined}
       onConnect={() => undefined} />)
-    expect(markup).toMatch(/<text[^>]*>[^<]*\(idea abcd\)<\/text>/)
-    expect(markup).toMatch(/<text[^>]*>[^<]*\(idea efgh\)<\/text>/)
+    const displayed = [...markup.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(match => match[1])
+    expect(displayed).toHaveLength(2)
+    expect(new Set(displayed).size).toBe(2)
+    expect(displayed.every(label => label.includes('·'))).toBe(true)
   })
 })

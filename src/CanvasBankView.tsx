@@ -4,22 +4,16 @@ import { filterCanvasesByTitle } from './canvasBankSearch'
 import type { CanvasBank as CanvasBankModel, ThoughtObject } from './domain'
 import type { ConnectionGraph } from './semanticLinks'
 import { connectionLayout } from './connectionLayout'
-
-function graphPreviewLabel(label: string): string {
-  if (label.length <= 24) return label
-  const suffixStart = label.lastIndexOf(' (')
-  if (suffixStart < 0 || !label.endsWith(')')) return `${label.slice(0, 23)}…`
-  const suffix = label.slice(suffixStart)
-  return `${label.slice(0, Math.max(4, 23 - suffix.length))}…${suffix}`
-}
+import { connectionDisplayLabels } from './connectionLabels'
 
 function GraphPreview({ graph }: { graph: ConnectionGraph }) {
   const layout = useMemo(() => connectionLayout(graph), [graph])
+  const labels = useMemo(() => connectionDisplayLabels(graph.nodes), [graph.nodes])
   return <div className="connection-graph-scroll" aria-hidden="true"><svg viewBox={`0 0 ${layout.size} ${layout.size}`} role="presentation">
     {layout.paths.map(path => <path key={path.id} d={path.d} />)}
     {graph.nodes.map(node => {
       const point = layout.positions.get(node.id)!
-      return <g key={node.id}><circle cx={point.x} cy={point.y} r="36" /><text x={point.x} y={point.y + 56} textAnchor="middle">{graphPreviewLabel(node.label)}</text></g>
+      return <g key={node.id}><circle cx={point.x} cy={point.y} r="36" /><text x={point.x} y={point.y + 56} textAnchor="middle">{labels.get(node.id)}</text></g>
     })}
   </svg></div>
 }
@@ -92,7 +86,7 @@ export function CanvasBank({ bank, ideas, connections, connectionsUnavailable, f
         </form>
       </details>
       {connectionMessage && <p role={connectionMessage.startsWith('Connection added') || connectionMessage.startsWith('Connection removed') ? 'status' : 'alert'}>{connectionMessage}</p>}
-      {connections.hiddenCount > 0 && <p>{connections.hiddenCount} confirmed {connections.hiddenCount === 1 ? 'connection is' : 'connections are'} hidden because a thought is archived or back in review. Restore that thought to see or remove its link.</p>}
+      {connections.hiddenCount > 0 && <p>{connections.hiddenCount} confirmed {connections.hiddenCount === 1 ? 'connection is' : 'connections are'} hidden because a thought is archived or back in review. Resolve or restore that thought to view and remove its link.</p>}
       {connections.links.length === 0 ? <p className="connection-empty">{connections.hiddenCount > 0 ? 'No confirmed connections are currently visible.' : 'No confirmed connections yet.'}</p> : <>
         <GraphPreview graph={connections} />
         <ul className="connection-list">{connections.links.map(link => {
