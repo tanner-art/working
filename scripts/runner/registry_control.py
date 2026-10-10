@@ -184,6 +184,10 @@ class RunnerRegistryControl:
                     "REVIEW_INDEPENDENCE_REQUIRED",
                     f"{worker_id} implemented the target package",
                 )
+        if package is not None and package.get("kind") == "EVALUATION":
+            assurance = self.registry.integrated_assurance_input(package_id)
+            if worker_id in assurance.implementer_workers:
+                raise RegistryConflict("ASSURANCE_REVIEWER_IMPLEMENTED_INCLUDED_PACKAGE", worker_id)
         decision = decide_shadow(snapshot)
         assignment = (package_id, worker_id)
         eligible = {
@@ -653,6 +657,38 @@ class RunnerRegistryControl:
 
     def review_input(self, review_package_id: str) -> ReviewInput:
         return ReviewInput(**self.registry.review_input(review_package_id))
+
+    def integrated_assurance_input(self, package_id: str, contract: dict):
+        """Adapt the separate assurance input to the strict read-only verdict protocol."""
+        assurance = self.registry.integrated_assurance_input(package_id)
+        if queue_contract_digest(contract) != assurance.contract_sha256:
+            raise RegistryConflict("ASSURANCE_CONTRACT_MISMATCH")
+        review_input = ReviewInput(
+            id=assurance.evidence_id, review_package_id=package_id,
+            target_package_id=package_id,
+            implementation_attempt_id=f"integrated:{assurance.integrated_commit}",
+            implementation_commit=assurance.integrated_commit,
+            base_commit=assurance.base_commit,
+            pr_url=assurance.ci["run_url"],
+            contract_sha256=assurance.contract_sha256, contract=contract,
+            validation_evidence={
+                "review_packet": dict(assurance.review_packet),
+                "integrated_tree": assurance.integrated_tree,
+                "ordered_parent_shas": list(assurance.ordered_parent_shas),
+                "acceptance_matrix": list(assurance.acceptance_matrix),
+                "included_packages": list(assurance.included_packages),
+                "ci": dict(assurance.ci),
+            }, recorded_at=assurance.recorded_at,
+        )
+        return assurance, review_input
+
+    def succeed_integrated_assurance(self, attempt_id, package_id, worker_id,
+                                     assurance, verdict):
+        return self.registry.record_integrated_assurance_verdict(
+            package_id, attempt_id, worker_id, assurance.evidence_id, verdict,
+            expected_revision=self.registry.dispatch_control()["revision"],
+            decided_at=utc_now(),
+        )
 
     def record_review_outcome(self, outcome: ReviewOutcome, evidence: Evidence, *, expected_revision: int) -> int:
         return self.registry.record_review_outcome(outcome, evidence=evidence, expected_revision=expected_revision, operation_id=f"review-outcome:{outcome.id}")

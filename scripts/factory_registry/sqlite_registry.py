@@ -31,6 +31,7 @@ from .models import (
     ReviewOutcome,
     ReviewOutcomeState,
     ReviewInput,
+    ReviewVerdict,
     TaskStatus,
     UsageLedgerEntry,
     UsageLedgerWrite,
@@ -47,6 +48,7 @@ from .lifecycle import (
     validate_package_transition,
 )
 from scripts.runner.task_readiness import ready_contract_reasons
+from scripts.runner.integrated_assurance import parse_assurance_input
 
 
 CURRENT_SCHEMA_VERSION = 6
@@ -2022,6 +2024,10 @@ class SQLiteRegistry:
     def register_work_package(self, package: WorkPackage) -> None:
         if package.status == TaskStatus.ACTIVE:
             raise RegistryConflict("ACTIVE_REQUIRES_LEASE")
+        if package.kind == PackageKind.EVALUATION and package.status == TaskStatus.READY:
+            # The immutable integrated artifact and approved ancestors cannot
+            # exist before this package is registered with exact dependencies.
+            raise RegistryConflict("ASSURANCE_REQUIRES_ON_DECK_REGISTRATION")
         now = _utc_now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2056,7 +2062,7 @@ class SQLiteRegistry:
     @staticmethod
     def _require_ready_row_contract(connection: sqlite3.Connection, package_id: str) -> str:
         row = connection.execute(
-            "SELECT feature_id, lane, acceptance_criteria_json, provider_diagnostics_json "
+            "SELECT feature_id, kind, lane, acceptance_criteria_json, provider_diagnostics_json "
             "FROM work_packages WHERE id=?", (package_id,),
         ).fetchone()
         if row is None:
@@ -2068,7 +2074,325 @@ class SQLiteRegistry:
         })
         if reasons:
             raise RegistryConflict("READY_CONTRACT_INCOMPLETE", f"{package_id}:{','.join(reasons)}")
+        if row["kind"] == "EVALUATION":
+            SQLiteRegistry._assurance_input_from_connection(connection, package_id)
         return str(row["feature_id"])
+
+    @staticmethod
+    def _assurance_input_from_connection(connection: sqlite3.Connection, package_id: str,
+                                         candidate: Evidence | None = None):
+        """Resolve exactly one pinned assurance input and all ancestor receipts."""
+        package_row = connection.execute(
+            "SELECT id, kind, lane, acceptance_criteria_json, provider_diagnostics_json "
+            "FROM work_packages WHERE id=?", (package_id,),
+        ).fetchone()
+        if package_row is None:
+            raise RegistryNotFound(f"work package {package_id}")
+        package = dict(package_row)
+        package["acceptance_criteria"] = json.loads(package.pop("acceptance_criteria_json"))
+        package["provider_diagnostics"] = json.loads(package.pop("provider_diagnostics_json"))
+        dependencies = tuple(row["dependency_id"] for row in connection.execute(
+            "SELECT dependency_id FROM task_dependencies WHERE package_id=? ORDER BY dependency_id",
+            (package_id,),
+        ))
+        if candidate is None:
+            rows = connection.execute(
+                "SELECT id, package_id, kind, recorded_at, metadata_json FROM evidence "
+                "WHERE package_id=? AND kind='integrated-assurance-input' ORDER BY recorded_at, id",
+                (package_id,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RegistryConflict("ASSURANCE_INPUT_REQUIRED", package_id)
+            row = rows[0]
+            evidence = {"id": row["id"], "package_id": row["package_id"],
+                        "kind": row["kind"], "recorded_at": row["recorded_at"],
+                        "metadata": json.loads(row["metadata_json"])}
+        else:
+            evidence = {"id": candidate.id, "package_id": candidate.package_id,
+                        "kind": candidate.kind, "recorded_at": candidate.recorded_at,
+                        "metadata": dict(candidate.metadata)}
+        raw = evidence["metadata"]
+        included = raw.get("included_packages") if isinstance(raw, Mapping) else None
+        if not isinstance(included, list):
+            raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included packages")
+        matrix = raw.get("acceptance_matrix") if isinstance(raw, Mapping) else None
+        if not isinstance(matrix, list):
+            raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
+        for cell in matrix:
+            if not isinstance(cell, Mapping) or not isinstance(cell.get("evidence_id"), str):
+                raise RegistryConflict("ASSURANCE_MATRIX_INCOMPLETE")
+            proof = connection.execute(
+                "SELECT package_id,kind,metadata_json FROM evidence WHERE id=?",
+                (cell["evidence_id"],),
+            ).fetchone()
+            proof_meta = json.loads(proof["metadata_json"]) if proof is not None else None
+            if (proof is None or proof["package_id"] != package_id
+                    or proof["kind"] != "assurance-matrix"
+                    or not isinstance(proof_meta, Mapping)
+                    or proof_meta.get("criterion") != cell.get("criterion")
+                    or proof_meta.get("integrated_commit") != raw.get("integrated_commit")
+                    or proof_meta.get("result") != "PASS"):
+                raise RegistryConflict("ASSURANCE_MATRIX_EVIDENCE_INVALID", cell["evidence_id"])
+        review_facts = {}
+        receipts = {}
+        for item in included:
+            if not isinstance(item, Mapping) or not isinstance(item.get("package_id"), str):
+                raise RegistryConflict("ASSURANCE_INPUT_INVALID", "included package")
+            target = item["package_id"]
+            outcomes = connection.execute(
+                "SELECT * FROM review_outcomes WHERE target_package_id=? "
+                "ORDER BY decided_at DESC, id DESC", (target,),
+            ).fetchall()
+            if len(outcomes) != 1 or outcomes[0]["state"] != "APPROVED":
+                raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+            outcome = outcomes[0]
+            approval_ids = json.loads(outcome["approval_evidence_ids_json"])
+            if len(approval_ids) != 1:
+                raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+            approval = connection.execute(
+                "SELECT package_id, kind, uri, metadata_json FROM evidence WHERE id=?", (approval_ids[0],),
+            ).fetchone()
+            if approval is None or approval["kind"] != "review" or approval["package_id"] != outcome["review_package_id"]:
+                raise RegistryConflict("ASSURANCE_REVIEW_EVIDENCE_INVALID", target)
+            approval_meta = json.loads(approval["metadata_json"])
+            terminal_rows = connection.execute(
+                "SELECT id,status FROM work_packages WHERE id IN (?,?)", (target, outcome["review_package_id"]),
+            ).fetchall()
+            if {row["id"] for row in terminal_rows if row["status"] == "DONE"} != {target, outcome["review_package_id"]}:
+                raise RegistryConflict("ASSURANCE_ANCESTOR_NOT_APPROVED", target)
+            review_facts[target] = {
+                "id": outcome["id"], "state": outcome["state"],
+                "review_package_id": outcome["review_package_id"],
+                "implementer_worker_id": outcome["implementer_worker_id"],
+                "reviewer_worker_id": outcome["reviewer_worker_id"],
+                "approval_evidence_ids": approval_ids,
+                "reviewed_commit": approval_meta.get("reviewed_commit"),
+                "review_pr_url": approval["uri"],
+            }
+            receipt = connection.execute(
+                "SELECT id, package_id, kind, metadata_json FROM evidence WHERE id=?",
+                (item.get("integration_receipt_id"),),
+            ).fetchone()
+            if receipt is not None:
+                receipts[target] = {"id": receipt["id"], "package_id": receipt["package_id"],
+                                    "kind": receipt["kind"], "metadata": json.loads(receipt["metadata_json"])}
+        return parse_assurance_input(
+            evidence, package=package, dependencies=dependencies,
+            review_facts=review_facts, receipts=receipts,
+        )
+
+    def integrated_assurance_input(self, package_id: str):
+        with self._connection() as connection:
+            return self._assurance_input_from_connection(connection, package_id)
+
+    def validate_integrated_assurance_candidate(self, evidence: Evidence):
+        """Read-only preflight of a prospective immutable assurance input."""
+        with self._connection() as connection:
+            return self._assurance_input_from_connection(connection, evidence.package_id, evidence)
+
+    def record_integrated_assurance_input(self, evidence: Evidence, *,
+                                          expected_revision: int) -> int:
+        """Pin one complete AG input while PAUSED; invalid rows never persist."""
+        recorded_at = _normalize_timestamp(evidence.recorded_at)
+        if evidence.kind != "integrated-assurance-input" or not evidence.id:
+            raise RegistryConflict("ASSURANCE_INPUT_INVALID")
+        request = {"id": evidence.id, "package_id": evidence.package_id,
+                   "kind": evidence.kind, "uri": evidence.uri,
+                   "summary": evidence.summary, "recorded_at": recorded_at,
+                   "metadata": dict(evidence.metadata), "expected_revision": expected_revision}
+        operation_id = f"integrated-assurance-input:{evidence.id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(connection, operation_id=operation_id,
+                    operation_kind="INTEGRATED_ASSURANCE_INPUT", request=request)
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode,kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("ASSURANCE_INPUT_REQUIRES_PAUSED")
+                package = connection.execute(
+                    "SELECT kind,status FROM work_packages WHERE id=?", (evidence.package_id,),
+                ).fetchone()
+                if package is None or package["kind"] != "EVALUATION" or package["status"] != "ON_DECK":
+                    raise RegistryConflict("ASSURANCE_PACKAGE_NOT_ON_DECK")
+                if connection.execute(
+                    "SELECT 1 FROM evidence WHERE package_id=? AND kind='integrated-assurance-input'",
+                    (evidence.package_id,),
+                ).fetchone():
+                    raise RegistryConflict("ASSURANCE_INPUT_ALREADY_RECORDED")
+                connection.execute(
+                    "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (evidence.id, evidence.package_id, evidence.kind, evidence.uri,
+                     evidence.summary, recorded_at, _json(evidence.metadata)),
+                )
+                self._assurance_input_from_connection(connection, evidence.package_id)
+                self._insert_event(connection, "INTEGRATED_ASSURANCE_INPUT_RECORDED",
+                    recorded_at, evidence.package_id, None, None,
+                    {"input_evidence_id": evidence.id,
+                     "integrated_commit": evidence.metadata["integrated_commit"]})
+                revision = self._bump_revision(connection)
+                self._record_operation(connection, operation_id=operation_id,
+                    operation_kind="INTEGRATED_ASSURANCE_INPUT", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at)
+                connection.commit()
+                return revision
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(operation_id=operation_id,
+                    operation_kind="INTEGRATED_ASSURANCE_INPUT", request=request,
+                    error=error, recorded_at=recorded_at)
+                raise
+
+    def record_integrated_assurance_verdict(
+        self, package_id: str, attempt_id: str, reviewer_worker_id: str,
+        input_evidence_id: str, verdict: ReviewVerdict, *,
+        expected_revision: int, decided_at: str,
+    ) -> int:
+        """Atomically close one read-only EVALUATION and append its exact verdict.
+
+        No file existence, process exit, or generic evidence attachment can
+        complete an assurance gate.  An invalid/blocked provider result leaves
+        the attempt active for the runner's ordinary failure reconciliation.
+        """
+        decided_at = _normalize_timestamp(decided_at)
+        if (not isinstance(verdict, ReviewVerdict)
+                or verdict.state not in {ReviewOutcomeState.APPROVED, ReviewOutcomeState.CHANGES_REQUESTED}
+                or (verdict.state is ReviewOutcomeState.APPROVED and verdict.changes_requested)
+                or (verdict.state is ReviewOutcomeState.CHANGES_REQUESTED and not verdict.changes_requested)):
+            raise RegistryConflict("ASSURANCE_VERDICT_INVALID")
+        request = {
+            "package_id": package_id, "attempt_id": attempt_id,
+            "reviewer_worker_id": reviewer_worker_id, "input_evidence_id": input_evidence_id,
+            "state": verdict.state.value, "reviewed_commit": verdict.reviewed_commit,
+            "reviewed_base_commit": verdict.reviewed_base_commit,
+            "contract_sha256": verdict.contract_sha256,
+            "findings": list(verdict.findings), "changes_requested": list(verdict.changes_requested),
+        }
+        operation_id = f"integrated-assurance-verdict:{attempt_id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="INTEGRATED_ASSURANCE_VERDICT", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode,kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "LIVE" or control["kill_switch_engaged"]:
+                    raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                self._assert_scope_membership(connection, package_id, decided_at)
+                self._assert_scope_membership(connection, package_id, _utc_now())
+                assurance = self._assurance_input_from_connection(connection, package_id)
+                if (assurance.evidence_id != input_evidence_id
+                        or verdict.reviewed_commit != assurance.integrated_commit
+                        or verdict.reviewed_base_commit != assurance.base_commit
+                        or verdict.contract_sha256 != assurance.contract_sha256):
+                    raise RegistryConflict("ASSURANCE_VERDICT_TARGET_MISMATCH")
+                if reviewer_worker_id in assurance.implementer_workers:
+                    raise RegistryConflict("ASSURANCE_REVIEWER_IMPLEMENTED_INCLUDED_PACKAGE")
+                reviewer = connection.execute(
+                    "SELECT role,capabilities_json,approved_lanes_json FROM workers WHERE id=?",
+                    (reviewer_worker_id,),
+                ).fetchone()
+                if (reviewer is None or reviewer["role"] != "WORKER"
+                        or "ASSURANCE" not in json.loads(reviewer["approved_lanes_json"])
+                        or not {"review", "independent-review"} &
+                        set(json.loads(reviewer["capabilities_json"]))):
+                    raise RegistryConflict("ASSURANCE_REVIEWER_INELIGIBLE")
+                row = connection.execute(
+                    "SELECT attempt.package_id,attempt.worker_id,attempt.lease_id,"
+                    "attempt.started_at,attempt.ended_at,runtime.released_at AS runtime_released_at,"
+                    "lease.released_at AS lease_released_at FROM attempts AS attempt "
+                    "JOIN attempt_runtime_ownership AS runtime ON runtime.attempt_id=attempt.id "
+                    "JOIN leases AS lease ON lease.id=attempt.lease_id WHERE attempt.id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if (row is None or row["package_id"] != package_id
+                        or row["worker_id"] != reviewer_worker_id or row["ended_at"] is not None
+                        or row["runtime_released_at"] is not None or row["lease_released_at"] is not None):
+                    raise RegistryConflict("ASSURANCE_ATTEMPT_NOT_ACTIVE")
+                if decided_at < row["started_at"]:
+                    raise RegistryConflict("INVALID_ATTEMPT_CHRONOLOGY")
+                existing = connection.execute(
+                    "SELECT id FROM evidence WHERE package_id=? AND kind='integrated-assurance-verdict'",
+                    (package_id,),
+                ).fetchone()
+                if existing is not None:
+                    raise RegistryConflict("ASSURANCE_ALREADY_DECIDED", existing["id"])
+                seconds = (datetime.fromisoformat(decided_at.replace("Z", "+00:00"))
+                           - datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))).total_seconds()
+                status = "DONE" if verdict.state is ReviewOutcomeState.APPROVED else "BLOCKED"
+                validate_package_transition(
+                    TaskStatus.ACTIVE, TaskStatus(status),
+                    authority=TransitionAuthority.INTEGRATED_ASSURANCE_VERDICT,
+                )
+                updated = connection.execute(
+                    "UPDATE work_packages SET status=?,updated_at=?,failure_code=?,failure_detail=?,"
+                    "runtime_seconds=runtime_seconds+? "
+                    "WHERE id=? AND status='ACTIVE' AND kind='EVALUATION'",
+                    (status, decided_at,
+                     None if status == "DONE" else "ASSURANCE_CHANGES_REQUESTED",
+                     None if status == "DONE" else "; ".join(verdict.changes_requested),
+                     seconds, package_id),
+                ).rowcount
+                if updated != 1:
+                    raise RegistryConflict("ASSURANCE_PACKAGE_NOT_ACTIVE")
+                connection.execute(
+                    "UPDATE attempts SET ended_at=?,outcome='SUCCEEDED',runtime_seconds=runtime_seconds+? WHERE id=?",
+                    (decided_at, seconds, attempt_id),
+                )
+                connection.execute(
+                    "UPDATE attempt_runtime_ownership SET released_at=?,release_reason='assurance verdict recorded',updated_at=? "
+                    "WHERE attempt_id=?", (decided_at, decided_at, attempt_id),
+                )
+                connection.execute(
+                    "UPDATE leases SET released_at=?,release_reason='assurance verdict recorded' WHERE id=?",
+                    (decided_at, row["lease_id"]),
+                )
+                connection.execute(
+                    "UPDATE workers SET availability='IDLE',updated_at=? WHERE id=?",
+                    (decided_at, reviewer_worker_id),
+                )
+                verdict_id = f"integrated-assurance-verdict:{attempt_id}"
+                connection.execute(
+                    "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (verdict_id, package_id, "integrated-assurance-verdict", None,
+                     "Structured independent integrated-feature assurance verdict.", decided_at,
+                     _json({**request, "integrated_tree": assurance.integrated_tree,
+                            "ordered_parent_shas": list(assurance.ordered_parent_shas)})),
+                )
+                self._insert_event(connection, "INTEGRATED_ASSURANCE_VERDICT_RECORDED",
+                                   decided_at, package_id, reviewer_worker_id, attempt_id,
+                                   {"state": verdict.state.value, "input_evidence_id": input_evidence_id,
+                                    "verdict_evidence_id": verdict_id, "integrated_commit": assurance.integrated_commit})
+                revision = self._bump_revision(connection)
+                self._record_operation(connection, operation_id=operation_id,
+                                       operation_kind="INTEGRATED_ASSURANCE_VERDICT", request=request,
+                                       result={"revision": revision, "verdict_evidence_id": verdict_id},
+                                       recorded_at=decided_at)
+                connection.commit()
+                return revision
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id, operation_kind="INTEGRATED_ASSURANCE_VERDICT",
+                    request=request, error=error, recorded_at=decided_at,
+                )
+                raise
 
     @staticmethod
     def _promote_feature_for_ready_package(
@@ -4173,6 +4497,8 @@ class SQLiteRegistry:
     def record_evidence(
         self, evidence: Evidence, *, operation_id: str | None = None
     ) -> None:
+        if evidence.kind in {"integrated-assurance-input", "integrated-assurance-verdict"}:
+            raise RegistryConflict("ASSURANCE_SPECIALIZED_OPERATION_REQUIRED")
         recorded_at = _normalize_timestamp(evidence.recorded_at)
         request = {
             "id": evidence.id,

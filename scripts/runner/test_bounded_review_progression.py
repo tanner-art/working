@@ -238,10 +238,18 @@ class BoundedReviewProgressionTests(unittest.TestCase):
         evaluation = self.contract(3, kind="EVALUATION", paths=["docs/REVIEW.md"],
                                    dependencies=[])
         evaluation["lane"] = "ASSURANCE"
-        self.register("TASK-3", evaluation, TaskStatus.READY, PackageKind.EVALUATION,
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_REQUIRES_ON_DECK_REGISTRATION"):
+            self.register("TASK-3", evaluation, TaskStatus.READY, PackageKind.EVALUATION,
+                          Lane.ASSURANCE, ("independent-review",), ())
+        self.register("TASK-3", evaluation, TaskStatus.ON_DECK, PackageKind.EVALUATION,
                       Lane.ASSURANCE, ("independent-review",), ())
         with self.assertRaisesRegex(RegistryConflict, "RUN_V2_PAIR_REQUIRED"):
             self.activate(("TASK-1", "TASK-2", "TASK-3"))
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_INPUT_REQUIRED"):
+            self.registry.transition_work_package(
+                "TASK-3", expected_status=TaskStatus.ON_DECK,
+                new_status=TaskStatus.READY, changed_at=self.now.isoformat(),
+            )
 
     def test_done_dependency_does_not_authorize_successor_parent(self):
         predecessor = self.contract(3, kind="PARENT", paths=["docs/REVIEW.md"],

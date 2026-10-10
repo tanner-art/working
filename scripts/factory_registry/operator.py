@@ -25,6 +25,9 @@ from contextlib import contextmanager
 from scripts.runner import install_launchd
 from scripts.runner.registry_control import RunnerRegistryControl, queue_contract_digest, scope_dispatch_snapshot
 from scripts.runner.task_readiness import contract_shape_reasons, ready_contract_reasons, registration_proof
+from scripts.runner.integrated_assurance import (
+    digest as assurance_digest, verify_assurance_review_packet, verify_integrated_source,
+)
 
 from .models import (
     DispatchSnapshot,
@@ -2179,12 +2182,54 @@ def bounded_run_worker_gate(
     review_input_lookup: Callable[[str], Mapping[str, Any]] | None = None,
     successful_attempt_worker: Callable[[str, str], str] | None = None,
     review_implementer_worker: Callable[[str], str] | None = None,
+    assurance_input_lookup: Callable[[str], Any] | None = None,
 ) -> Mapping[str, Any]:
     """Evaluate only the reviewed pilot allowlist, not historical READY work."""
     allowed = set(package_ids)
     run_packages = tuple(item for item in snapshot.work_packages if item.get("id") in allowed)
     if {str(item.get("id")) for item in run_packages} != allowed:
         raise OperatorError("bounded run package allowlist is not registered READY work")
+    if any(item.get("kind") == "EVALUATION" for item in run_packages):
+        if (len(run_packages) != len(allowed)
+                or any(item.get("kind") != "EVALUATION" or item.get("status") != "READY"
+                       for item in run_packages)
+                or assurance_input_lookup is None):
+            raise OperatorError("bounded assurance requires only READY EVALUATION packages")
+        workers = {str(item.get("id")): item for item in snapshot.workers}
+        candidate = scope_dispatch_snapshot(snapshot, allowed, snapshot.active_parent_limit)
+        decision = decide_shadow(candidate)
+        if decision.global_rejections:
+            raise OperatorError("global worker/capacity gate failed: " + ",".join(
+                value.code for value in decision.global_rejections
+            ))
+        assignments = {}
+        for package in run_packages:
+            package_id = str(package["id"])
+            diagnostics = package.get("provider_diagnostics") or {}
+            if (diagnostics.get("readiness_schema_version") != 2
+                    or ready_contract_reasons(package)
+                    or package.get("lane") != "ASSURANCE"
+                    or package.get("source_system") != "github_issue"
+                    or not str(package.get("source_ref") or "").isdigit()):
+                raise OperatorError(f"assurance requires pinned v2 source: {package_id}")
+            try:
+                assurance = assurance_input_lookup(package_id)
+            except RegistryError as error:
+                raise OperatorError(f"assurance input gate failed: {error}") from error
+            eligible = {item.worker_id for item in decision.pair_evaluations
+                        if item.package_id == package_id and item.eligible
+                        and item.worker_id not in assurance.implementer_workers
+                        and workers.get(item.worker_id, {}).get("role") == "WORKER"}
+            if not eligible:
+                raise OperatorError(f"no independent assurance reviewer: {package_id}")
+            assignments[package_id] = sorted(eligible)
+        return {"run_package_ids": sorted(allowed), "implementation_assignments": {},
+                "potential_implementation_assignments": {},
+                "eligible_reviewers": sorted({worker for values in assignments.values() for worker in values}),
+                "independent_pairs": [[package, worker] for package, values in assignments.items()
+                                      for worker in values],
+                "decision_id": decision.decision_id,
+                "assurance_assignments": assignments}
     waiting_reviews = tuple(item for item in run_packages if item.get("status") == "ON_DECK")
     if waiting_reviews:
         # Stage A authorizes only independently runnable, pre-pinned v2 roots
@@ -2408,6 +2453,7 @@ def preflight(
             review_input_lookup=registry.review_input,
             successful_attempt_worker=registry.successful_attempt_worker,
             review_implementer_worker=registry.review_implementer_worker,
+            assurance_input_lookup=registry.integrated_assurance_input,
         )
         if require_workers and run_package_ids is not None else
         _worker_gate(dispatch, canary_feature_id=canary_feature_id,
@@ -3726,6 +3772,64 @@ def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
         "deadline": deadline.isoformat(timespec="microseconds").replace("+00:00", "Z"),
         "base_ref": base_ref, "parent_limit": limit,
     }
+
+
+def record_integrated_assurance_input(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Prepare one exact integrated AG artifact, never a moving branch head."""
+    if (_sensitive_paths(spec) or set(spec) != {"repository", "contract", "evidence"}
+            or not isinstance(spec.get("contract"), Mapping)
+            or not isinstance(spec.get("evidence"), Mapping)):
+        raise OperatorError("integrated assurance spec is invalid")
+    repository = Path(spec["repository"])
+    if not repository.is_absolute() or not repository.is_dir() or repository.is_symlink():
+        raise OperatorError("integrated assurance repository is invalid")
+    config = _load_object(config_path, "runner config")
+    if repository.resolve() != Path(config["repo"]).resolve():
+        raise OperatorError("integrated assurance repository does not match runner")
+    raw = spec["evidence"]
+    if (set(raw) != {"id", "package_id", "recorded_at", "metadata"}
+            or not isinstance(raw["metadata"], Mapping)
+            or raw["metadata"].get("contract_sha256") != assurance_digest(spec["contract"])):
+        raise OperatorError("integrated assurance contract is not pinned")
+    _parse_time(raw["recorded_at"], "assurance input time")
+    evidence = Evidence(
+        id=str(raw["id"]), package_id=str(raw["package_id"]),
+        kind="integrated-assurance-input", uri=raw["metadata"].get("ci", {}).get("run_url"),
+        summary="Exact integrated feature assurance input.",
+        recorded_at=str(raw["recorded_at"]), metadata=dict(raw["metadata"]),
+    )
+    registry = SQLiteRegistry(database)
+    candidate = registry.validate_integrated_assurance_candidate(evidence)
+    try:
+        verify_assurance_review_packet(candidate, spec["contract"])
+    except RegistryConflict as error:
+        raise OperatorError("integrated assurance packet is unavailable or changed") from error
+
+    def github(*args: str) -> str:
+        result = subprocess.run(
+            [config["gh"], *args], cwd=repository, capture_output=True,
+            text=True, timeout=30, check=False,
+        )
+        if result.returncode != 0:
+            raise OperatorError("integrated assurance GitHub provenance is unavailable")
+        return result.stdout
+
+    if not verify_integrated_source(candidate, repository=repository, github=github,
+                                    repository_name=config["github"]):
+        raise OperatorError("integrated assurance source or CI is not exact and green")
+    preflight(database, config_path, release, preservation_path,
+              expected_commit, expected_revision, require_workers=False)
+    revision = registry.record_integrated_assurance_input(
+        evidence, expected_revision=expected_revision,
+    )
+    return {"kind": "threadline-factory-record-integrated-assurance-input",
+            "passed": True, "package_id": evidence.package_id,
+            "input_evidence_id": evidence.id,
+            "integrated_commit": candidate.integrated_commit,
+            "previous_revision": expected_revision, "revision": revision}
 
 
 def stop(database: Path, reason: str, *, expected_run_id: str | None = None) -> Mapping[str, Any]:

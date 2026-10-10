@@ -33,6 +33,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     parse_bounded_pilot_spec,
     parse_followup_review_spec,
     record_external_integration_review_input,
+    record_integrated_assurance_input,
     record_native_review_ci,
     parse_review_input_spec,
     parse_bounded_run_scope,
@@ -237,6 +238,13 @@ def _parser() -> argparse.ArgumentParser:
     command = subparsers.add_parser(
         "record-external-integration-review-input",
         help="Bind an exact externally merged implementation to a pending Registry review",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+
+    command = subparsers.add_parser(
+        "record-integrated-assurance-input",
+        help="Pin one exact integrated main artifact for independent feature assurance",
     )
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
@@ -529,6 +537,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.database, args.config, args.release, args.preservation,
             args.release_commit, args.expect_revision,
             _load_object(args.spec, "external integration review spec"),
+        ))
+    if args.command == "record-integrated-assurance-input":
+        return dict(record_integrated_assurance_input(
+            args.database, args.config, args.release, args.preservation,
+            args.release_commit, args.expect_revision,
+            _load_object(args.spec, "integrated assurance spec"),
         ))
     if args.command == "bind-legacy-source":
         observed_at = args.observed_at or utc_now()
