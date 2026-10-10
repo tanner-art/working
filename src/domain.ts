@@ -57,6 +57,8 @@ export interface HistoryEvent {
   actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
   actionPriority?: { priority: ActionPriority; source: 'schedule-priority-selection' }
   actionSchedule?: { eventId: string; startsAt: string; temporalContext: string }
+  /** A dedicated user gesture; staging alone never grants plan eligibility. */
+  planEligibility?: { objectId: string; eligible: boolean; source: 'schedule-plan-eligibility' }
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
   reviewRevision?: { from: string; to: string }
   sourceCorrection?: { correctionId: string; from: string; to: string }

@@ -61,18 +61,30 @@ function materializeReminderInstructions(model: PersistedState) {
 }
 
 const copy = <T>(value: T): T => structuredClone(value)
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+// UI projections can insert the same persisted fields in a different order. A
+// key-order-only difference is not a new interpretation or confirmation event.
+const canonicalJson = (value: unknown): string | undefined => JSON.stringify(value, (_key, current: unknown) => {
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current
+  return Object.fromEntries(Object.entries(current).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+})
+const equal = (a: unknown, b: unknown): boolean => canonicalJson(a) === canonicalJson(b)
 const unique = (ids: string[]) => ids.every(id => id.length > 0) && new Set(ids).size === ids.length
 const fail = (): never => { throw new Error('Saved model is invalid or ambiguous; stored data must remain untouched.') }
 const actionPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
-/** Action-only history is meaningful only while the current interpretation is an Action. */
+/** Preserve and validate historical Action audit after reclassification; only current Actions project a stage. */
 function stagedAction(item: ThoughtObject, captureId: string): StagedAction | undefined {
-  if (item.kind !== 'action') return undefined
+  const hasPlanAudit = item.history.some(entry => entry.planEligibility !== undefined)
+  // A reclassified Action retains valid historical plan gestures, but an
+  // unrelated object cannot carry a free-standing eligibility assertion.
+  if (item.kind !== 'action' && !hasPlanAudit) return undefined
   const stages = item.history.map((entry, index) => ({ entry, index })).filter(value => value.entry.actionStage !== undefined)
   if (stages.length > 1 || stages.some(value => value.entry.actionStage?.source !== 'review-action-staging')) fail()
   const stageIndex = stages[0]?.index ?? -1
-  if (stageIndex < 0) return undefined
+  if (stageIndex < 0) {
+    if (hasPlanAudit) fail()
+    return undefined
+  }
   const stage = item.history[stageIndex]
   const initial = stage.actionStage?.priority
   if (!initial || !actionPriorities.includes(initial) || !Number.isFinite(Date.parse(stage.at))) fail()
@@ -85,6 +97,19 @@ function stagedAction(item: ThoughtObject, captureId: string): StagedAction | un
   if (schedules.length > 1) fail()
   const schedule = schedules[0]?.actionSchedule
   if (schedule && (!schedule.eventId || !Number.isFinite(Date.parse(schedule.startsAt)) || !schedule.temporalContext.trim())) fail()
+  if (item.history.slice(0, stageIndex + 1).some(entry => entry.planEligibility !== undefined)) fail()
+  const terminalIndex = later.findIndex(entry => entry.actionSchedule !== undefined ||
+    entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
+  let planEligible = false
+  for (const [index, entry] of later.entries()) {
+    if (entry.planEligibility === undefined) continue
+    const audit = entry.planEligibility!
+    if ((terminalIndex >= 0 && index >= terminalIndex) || audit.objectId !== item.id || audit.source !== 'schedule-plan-eligibility' ||
+      !Number.isFinite(Date.parse(entry.at)) || audit.eligible === planEligible ||
+      entry.event !== (audit.eligible ? 'Added Action to Adaptive Plan' : 'Removed Action from Adaptive Plan')) fail()
+    planEligible = audit.eligible
+  }
+  if (item.kind !== 'action') return undefined
   const reversed = later.some(entry => entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
   const selectedPriority = priorities.at(-1)?.actionPriority?.priority
   if (!selectedPriority) return { id: `staged-action:${item.id}`, objectId: item.id, captureId, priority: initialPriority,

@@ -130,6 +130,8 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
     (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&
+    (item.planEligibility === undefined || (typeof item.planEligibility.objectId === 'string' && !!item.planEligibility.objectId &&
+      typeof item.planEligibility.eligible === 'boolean' && item.planEligibility.source === 'schedule-plan-eligibility')) &&
     (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction)) &&
     (item.commitmentSetup === undefined || isCommitmentSetupAudit(item.commitmentSetup)) &&
     (item.commitmentSchedule === undefined || isCommitmentScheduleAudit(item.commitmentSchedule))
