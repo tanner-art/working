@@ -40,6 +40,23 @@ describe('canvas interaction bridge', () => {
     expect(committed).toEqual({ x: 10, y: -5, scale: 1 })
   })
 
+  it('uses the same pan-to-pinch transition when the second finger lands on a resize handle', () => {
+    const committed = { x: 10, y: -5, scale: 1.25 }
+    let gesture = reduceCanvasGesture(idleGestureState(), { type: 'pointer-down', sample: first, target: { kind: 'canvas' } }).state
+    gesture = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: { ...first, x: first.x + 20 } }).state
+    const pan = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: { ...first, x: first.x + 35, y: first.y - 20 } })
+    expect(pan.effects).toEqual([{ type: 'preview-pan', delta: { x: 35, y: -20 } }])
+
+    const handleDown = reduceResizePointerDown(pan.state, second, 'selected-node', true)
+    expect(handleDown.state.mode).toBe('pinch-zooming')
+    expect(handleDown.effects.map(effect => effect.type)).toEqual(['cancel', 'begin-pinch'])
+    const start = viewportAtPinchStart(committed, { x: committed.x + 35, y: committed.y - 20 }, null)
+    const interaction = createPinchInteraction()
+    beginPinchInteraction(interaction, start, { ...first, x: first.x + 35, y: first.y - 20 }, second, { x: 80, y: 120 }, true)
+    expect(interaction.preview).toEqual({ x: 45, y: -25, scale: 1.25 })
+    expect(commitPinchInteraction(interaction)).toEqual(start)
+  })
+
   it('does not carry a node resize or stale pan into a fresh pinch', () => {
     const committed = { x: 10, y: -5, scale: 1 }
     const resize = reduceResizePointerDown(idleGestureState(), first, 'thought', true)

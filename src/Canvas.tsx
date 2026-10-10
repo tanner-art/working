@@ -5,7 +5,7 @@ import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_COLORS, CANVAS_SIZE, CONNECTION_COLORS, DEFAULT_CANVAS_COLOR, DEFAULT_CONNECTION_COLOR, DEFAULT_CONTAINER_COLOR, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionMarkerAppearance, connectionEndpoints, didMoveCanvasConnectionHandle, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, updateCanvasNodeAppearance, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
-import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
+import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureResult, type GestureState, type PointerSample } from './canvasGestures'
 import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown, viewportAtPinchStart } from './canvasInteraction'
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
 import { canvasObjectSelection } from './canvasSelection'
@@ -149,9 +149,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     // it with idle before begin-pinch and preview-pinch can run.
     if (effect.type === 'cancel') { clearTransientInteraction() }
   }
-  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => {
-    const previousMode = gesture.current.mode
-    const result = reduceCanvasGesture(gesture.current, action)
+  const applyGestureResult = (result: GestureResult, previousMode: GestureState['mode']) => {
     // A second pointer emits cancel before begin-pinch. Snapshot the mutable pan
     // delta now; React's panPreview may not have rendered its latest value yet.
     const panDrag = previousMode === 'panning' ? drag.current : null
@@ -165,6 +163,9 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       : undefined
     gesture.current = result.state
     result.effects.forEach(effect => applyGestureEffect(effect, pinchStart, preservePinchPreview))
+  }
+  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => {
+    applyGestureResult(reduceCanvasGesture(gesture.current, action), gesture.current.mode)
   }
   const worldPoint = (event: React.PointerEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect()
@@ -195,9 +196,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
     if (resize) {
-      const result = reduceResizePointerDown(gesture.current, sample, item!.id, editMode)
-      gesture.current = result.state
-      result.effects.forEach(effect => applyGestureEffect(effect))
+      applyGestureResult(reduceResizePointerDown(gesture.current, sample, item!.id, editMode), gesture.current.mode)
     } else dispatchGesture({ type: 'pointer-down', sample, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
