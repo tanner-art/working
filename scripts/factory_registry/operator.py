@@ -2479,6 +2479,64 @@ def prepare_ready_package(
     return replace(package, provider_diagnostics=diagnostics)
 
 
+def parse_on_deck_pair_spec(
+    value: Mapping[str, Any],
+) -> tuple[str, WorkPackage, WorkPackage, Mapping[str, Any], Mapping[str, Any]]:
+    """Validate an existing pair's complete v2 contract without making it READY."""
+    if _sensitive_paths(value):
+        raise OperatorError("on-deck pair spec contains secret-shaped fields")
+    if set(value) != {"feature_id", "implementation", "review"}:
+        raise OperatorError("on-deck pair spec requires feature_id, implementation, review")
+    feature_id = value["feature_id"]
+    if not isinstance(feature_id, str) or not feature_id:
+        raise OperatorError("on-deck feature id is invalid")
+    packages: list[WorkPackage] = []
+    contracts: list[Mapping[str, Any]] = []
+    for role in ("implementation", "review"):
+        raw = value[role]
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("queue_contract"), Mapping):
+            raise OperatorError(f"{role} requires a normalized queue_contract")
+        contract = raw["queue_contract"]
+        if contract.get("schema_version") != 2:
+            raise OperatorError(f"{role} requires a version-2 queue contract")
+        reasons = contract_shape_reasons(contract)
+        if reasons:
+            raise OperatorError(f"{role} contract invalid: {','.join(reasons)}")
+        package = replace(_package(raw, queue_contract=contract), status=TaskStatus.ON_DECK)
+        source_ref = package.provider_diagnostics.get("github_source_ref")
+        if (package.feature_id != feature_id or not re.fullmatch(r"TASK-\d+", package.id)
+                or not isinstance(source_ref, str)
+                or not re.fullmatch(r"[1-9]\d*", source_ref)
+                or not package.acceptance_criteria
+                or any(not item.strip() for item in package.acceptance_criteria)
+                or not package.required_capabilities):
+            raise OperatorError(f"{role} package identity or acceptance is invalid")
+        expected = {
+            "task": package.id, "lane": package.lane.value, "kind": package.kind.value,
+            "capacity_size": package.capacity_size.value,
+            "capacity_risk": package.capacity_risk.value,
+        }
+        if any(contract.get(key) != item for key, item in expected.items()):
+            raise OperatorError(f"{role} contract/package metadata mismatch")
+        declared = contract.get("depends_on")
+        dependency_ids = [f"TASK-{item}" if str(item).isdigit() else str(item) for item in declared]
+        if dependency_ids != list(package.dependency_ids) or len(set(dependency_ids)) != len(dependency_ids):
+            raise OperatorError(f"{role} dependency contract mismatch")
+        packages.append(package)
+        contracts.append(contract)
+    implementation, review = packages
+    if (implementation.kind != PackageKind.PARENT
+            or implementation.lane not in {Lane.FEATURE, Lane.PLATFORM}
+            or review.kind != PackageKind.REVIEW or review.lane != Lane.ASSURANCE
+            or review.dependency_ids != (implementation.id,)
+            or implementation.id in implementation.dependency_ids
+            or review.id in implementation.dependency_ids
+            or not {cap.lower() for cap in review.required_capabilities}
+            & {"review", "independent-review"}):
+        raise OperatorError("on-deck pair does not preserve independent review")
+    return feature_id, implementation, review, contracts[0], contracts[1]
+
+
 def parse_canary_spec(value: Mapping[str, Any]) -> tuple[Feature, WorkPackage, WorkPackage]:
     sensitive = _sensitive_paths(value)
     if sensitive:

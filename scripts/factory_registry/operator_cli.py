@@ -30,6 +30,7 @@ from scripts.factory_registry.operator import (  # noqa: E402
     migrate_registry_v5_to_v6,
     parse_canary_spec,
     parse_bounded_pilot_spec,
+    parse_on_deck_pair_spec,
     parse_followup_review_spec,
     record_external_integration_review_input,
     record_native_review_ci,
@@ -205,6 +206,16 @@ def _parser() -> argparse.ArgumentParser:
     command = subparsers.add_parser("register-bounded-pilot", help="Atomically register one or two reviewed Registry pairs")
     _context(command)
     command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--observed-at")
+
+    command = subparsers.add_parser(
+        "recontract-on-deck-pair",
+        help="Bind verified v2 contracts to an existing pair while PAUSED; never publish READY",
+    )
+    _context(command)
+    command.add_argument("--spec", required=True, type=pathlib.Path)
+    command.add_argument("--operation-id", required=True)
+    command.add_argument("--target-ref", choices=("main", "origin/main"), default="main")
     command.add_argument("--observed-at")
 
     command = subparsers.add_parser(
@@ -452,6 +463,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "kind": "threadline-factory-register-bounded-pilot", "passed": True,
             "package_ids": [package.id for pair in pairs for package in pair[1:]],
             "previous_revision": args.expect_revision, "revision": revision,
+        }
+    if args.command == "recontract-on-deck-pair":
+        observed_at = args.observed_at or utc_now()
+        preflight(**_preflight_args(args, observed_at=observed_at))
+        spec = _load_object(args.spec, "on-deck pair spec")
+        feature_id, implementation, review, impl_contract, review_contract = parse_on_deck_pair_spec(spec)
+        repository = pathlib.Path(_load_object(args.config, "runner config")["repo"])
+        implementation = prepare_ready_package(
+            implementation, impl_contract, repository=repository, target_ref=args.target_ref,
+        )
+        review = prepare_ready_package(
+            review, review_contract, repository=repository, target_ref=args.target_ref,
+        )
+        result = SQLiteRegistry(args.database).recontract_on_deck_pair(
+            implementation, review, expected_revision=args.expect_revision,
+            recorded_at=observed_at, operation_id=args.operation_id,
+            repository=repository, target_ref=args.target_ref,
+            contracts=(impl_contract, review_contract),
+        )
+        return {
+            "kind": "threadline-factory-recontract-on-deck-pair", "passed": True,
+            "feature_id": feature_id, "previous_revision": args.expect_revision,
+            **result,
         }
     if args.command == "enable-live":
         bounded_run = (
