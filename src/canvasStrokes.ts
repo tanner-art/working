@@ -1,3 +1,5 @@
+import type { CanvasElement } from './domain'
+
 /**
  * A canvas-space point captured from a pen or lasso gesture. It deliberately
  * contains only JSON numbers: pressure, screen coordinates, and timestamps are
@@ -232,4 +234,11 @@ export function canvasStrokeIntersectsLasso(rawPoints: unknown, rawLasso: unknow
     if (segmentsIntersect(stroke[strokeIndex - 1], stroke[strokeIndex], lasso[lassoIndex], lasso[(lassoIndex + 1) % lasso.length])) return true
   }
   return false
+}
+
+/** Erases only explicitly selected marks; nodes and connectors keep their own delete path. */
+export function removeSelectedCanvasStrokes(elements: CanvasElement[], selectedIds: ReadonlySet<string>): CanvasElement[] {
+  if (selectedIds.size === 0) return elements
+  const remaining = elements.filter(item => item.type !== 'freehand' || !selectedIds.has(item.id))
+  return remaining.length === elements.length ? elements : remaining
 }
