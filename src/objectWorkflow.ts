@@ -53,7 +53,18 @@ export function confirmObject(object: ThoughtObject, kind: ObjectKind = object.k
   }] }
 }
 
+/** A created Reminder instruction is append-only, including after handling or dismissal. */
+export const hasCreatedReminderInstruction = (object: ThoughtObject): boolean =>
+  object.history.some(entry => entry.reminderInstruction?.action === 'created')
+
+function requireCompatibleReminderKind(object: ThoughtObject, kind: ObjectKind) {
+  if (kind !== object.kind && hasCreatedReminderInstruction(object)) {
+    throw new Error('This Reminder has an instruction history. Its type cannot be changed; edit its details instead.')
+  }
+}
+
 export function updateObject(original: ThoughtObject, draft: ThoughtObject): ThoughtObject {
+  requireCompatibleReminderKind(original, draft.kind)
   const status = draft.kind !== original.kind ? 'review' : compatibleStatus(original, draft.status)
   const changes = describeChanges(original, { ...draft, status })
   // A generic save accepts editable fields only. It cannot import a draft's gesture/history or source evidence.
@@ -77,6 +88,7 @@ function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectSt
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
+  requireCompatibleReminderKind(object, kind)
   return { ...object, kind, status: 'review', history: [...object.history, {
     at: new Date().toISOString(), event: `Changed type to ${kind}`, reviewDecision: 'superseded'
   }] }

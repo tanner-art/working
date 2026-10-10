@@ -4,8 +4,10 @@ import { legacyUiProjection, migrateLegacyState } from './migration'
 import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
 import { reminderDeliveryFailureMessage } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
-import { updateObject } from './objectWorkflow'
+import { hasCreatedReminderInstruction, setObjectKind, updateObject } from './objectWorkflow'
 import { loadStateResult, saveState } from './store'
+import { accountData, validateData } from './accountStorage'
+import { defaultSettings } from './settings'
 
 const target = (): ThoughtObject => ({ id: 'idea:target', kind: 'idea', originalContent: 'Launch concept', source: 'text', createdAt: '2026-09-27T08:00:00Z', confidence: .9, status: 'confirmed', interpretation: { summary: 'Launch concept', suggestedKind: 'idea', rationale: 'Confirmed idea' }, metadata: {}, relationships: [], history: [] })
 const reminder = (): ThoughtObject => ({ id: 'capture:reminder', kind: 'reminder', originalContent: 'Remind me about launch', source: 'text', createdAt: '2026-09-27T08:01:00Z', confidence: .5, status: 'review', interpretation: { summary: 'Launch reminder', suggestedKind: 'reminder', rationale: 'Timing needs review' }, metadata: {}, relationships: [], history: [] })
@@ -13,6 +15,40 @@ const state = () => legacyUiProjection(migrateLegacyState({ objects: [target(), 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Reminder workflow', () => {
+  it.each(['active', 'handled', 'dismissed'] as const)('rejects %s Reminder reclassification without changing append-only evidence', deliveryState => {
+    let current = resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    if (deliveryState !== 'active') current = setReminderDeliveryState(current, current.model!.reminderInstructions![0].id, deliveryState, '2026-09-27T08:03:00.000Z')
+    const original = current.objects.find(item => item.id === 'capture:reminder')!
+    const before = structuredClone(original)
+    expect(hasCreatedReminderInstruction(original)).toBe(true)
+    for (const kind of ['idea', 'action'] as const) {
+      expect(() => updateObject(original, { ...original, kind })).toThrow('Its type cannot be changed')
+      expect(() => setObjectKind(original, kind)).toThrow('Its type cannot be changed')
+    }
+    expect(original).toEqual(before)
+    expect(current.model!.reminderInstructions![0].deliveryState).toBe(deliveryState)
+  })
+
+  it('keeps unresolved Reminder classification editable, but permits detail edits after resolution through local and account validation', () => {
+    const pending = reminder()
+    expect(hasCreatedReminderInstruction(pending)).toBe(false)
+    expect(setObjectKind(pending, 'idea')).toMatchObject({ kind: 'idea', status: 'review' })
+    expect(updateObject(pending, { ...pending, kind: 'action' })).toMatchObject({ kind: 'action', status: 'review' })
+
+    let raw = JSON.stringify(state().model)
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult().state
+    const resolved = resolveReminderInState(loaded, 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    const edited = { ...resolved, objects: resolved.objects.map(item => item.id === 'capture:reminder'
+      ? updateObject(item, { ...item, context: 'Work' }) : item) }
+    expect(saveState(edited)).toBeUndefined()
+    const reloaded = loadStateResult().state
+    expect(reloaded.objects.find(item => item.id === 'capture:reminder')?.context).toBe('Work')
+    expect(reloaded.model!.reminderInstructions).toEqual(resolved.model!.reminderInstructions)
+    const account = accountData(reloaded, defaultSettings, { enabled: false })
+    expect(validateData(structuredClone(account)).model.reminderInstructions).toEqual(resolved.model!.reminderInstructions)
+  })
+
   it('records Specific from Review with source/target evidence and makes it visibly due after reload', () => {
     const resolved = resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'specific', dueAt: '2026-09-27T09:00:00.000Z' }, '2026-09-27T08:02:00.000Z')
     expect(resolved.objects.find(item => item.id === 'capture:reminder')?.status).toBe('confirmed')
