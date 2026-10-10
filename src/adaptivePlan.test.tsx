@@ -3,13 +3,12 @@ import { describe, expect, it } from 'vitest'
 import type { AppState, ThoughtObject } from './domain'
 import { stageAction, scheduleStagedAction } from './actionStaging'
 import { calculateAdaptivePlan, setActionPlanEligibility } from './adaptivePlan'
-import { AdaptivePlanView } from './AdaptivePlanView'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { reverseObject } from './objectWorkflow'
+import { reverseObject, setObjectKind } from './objectWorkflow'
 import { accountData } from './accountStorage'
 import { defaultSettings } from './settings'
 import { disabledDelivery } from './digestDelivery'
-import { surface } from './surfaces/adaptivePlan'
+import { ScheduleView } from './ScheduleView'
 
 const action = (id = 'a', priority = 3 as const): AppState => {
   const review: ThoughtObject = { id, kind: 'action', status: 'review', originalContent: 'Prepare launch', source: 'text',
@@ -27,7 +26,7 @@ describe('WP-08 Adaptive Plan behavior', () => {
     expect(eligible.objects[0].history.at(-1)?.planEligibility).toEqual({ objectId: 'a', eligible: true, source: 'schedule-plan-eligibility' })
     expect(calculateAdaptivePlan(eligible).recommendations).toMatchObject([{ objectId: 'a', title: 'Prepare launch', priority: 3 }])
     expect(reconcileLegacyUi(eligible).calendarEvents).toEqual([])
-    expect(renderToStaticMarkup(<AdaptivePlanView state={eligible} />)).toContain('Recommended next: Prepare launch')
+    expect(renderToStaticMarkup(<ScheduleView state={eligible} update={() => undefined} />)).toContain('Adaptive Plan recommends next: Prepare launch')
     const reversed = setActionPlanEligibility(eligible, 'a', false)
     expect(calculateAdaptivePlan(reversed).recommendations).toEqual([])
     expect(reversed.objects[0].history.map(entry => entry.planEligibility?.eligible).filter(value => value !== undefined)).toEqual([true, false])
@@ -43,6 +42,10 @@ describe('WP-08 Adaptive Plan behavior', () => {
     const account = accountData(eligible, defaultSettings, disabledDelivery)
     expect(isPersistedState(account.model)).toBe(true)
     expect(calculateAdaptivePlan(legacyUiProjection(account.model)).recommendations).toHaveLength(1)
+    const accountMarkup = renderToStaticMarkup(<ScheduleView state={legacyUiProjection(account.model)} update={() => undefined} />)
+    expect(accountMarkup).toContain('Adaptive Plan recommends next: Prepare launch')
+    expect(accountMarkup).toContain('Remove from plan')
+    expect(accountMarkup).not.toContain('href="/adaptive-plan"')
     expect('adaptivePlan' in model).toBe(false)
   })
 
@@ -74,10 +77,21 @@ describe('WP-08 Adaptive Plan behavior', () => {
     scheduled.objects[0].history.push({ at: '2026-10-11T00:00:00.000Z', event: 'Removed Action from Adaptive Plan',
       planEligibility: { objectId: 'a', eligible: false, source: 'schedule-plan-eligibility' } })
     expect(() => reconcileLegacyUi(scheduled)).toThrow()
+    const raw: ThoughtObject = { ...action().objects[0], kind: 'idea', history: [{ at: '2026-10-11T00:00:00.000Z', event: 'Added Action to Adaptive Plan',
+      planEligibility: { objectId: 'a', eligible: true, source: 'schedule-plan-eligibility' } }] }
+    expect(() => migrateLegacyState({ objects: [raw], canvas: [] })).toThrow()
+    const idea = structuredClone(eligible)
+    idea.objects[0] = setObjectKind(idea.objects[0], 'idea')
+    expect(reconcileLegacyUi(idea).stagedActions).toEqual([])
+    expect(idea.objects[0].history.some(entry => entry.planEligibility)).toBe(true)
   })
 
-  it('publishes the plan as a registered workspace surface', () => {
-    expect(surface).toEqual({ id: 'adaptive-plan', path: '/adaptive-plan', persistence: 'workspace' })
-    expect(renderToStaticMarkup(<AdaptivePlanView state={action()} />)).toContain('No Actions are eligible for the plan yet')
+  it('keeps the plan inside the active Schedule workspace with no full-page navigation', () => {
+    const before = renderToStaticMarkup(<ScheduleView state={action()} update={() => undefined} />)
+    const after = renderToStaticMarkup(<ScheduleView state={setActionPlanEligibility(action(), 'a', true)} update={() => undefined} />)
+    expect(before).toContain('<summary>Adaptive Plan (0)</summary>')
+    expect(after).toContain('<summary>Adaptive Plan (1)</summary>')
+    expect(after).toContain('Recommended next: Prepare launch')
+    expect(after).not.toContain('href="/adaptive-plan"')
   })
 })

@@ -14,5 +14,6 @@ it('renders an accessible five-value priority control and an explicit CalendarEv
   expect(markup).toContain('Confirm CalendarEvent')
   expect(markup).toContain('out of Today, notifications, and the Adaptive Plan until you explicitly add them')
   expect(markup).toContain('Add to plan')
-  expect(markup).toContain('href="/adaptive-plan"')
+  expect(markup).toContain('<summary>Adaptive Plan (0)</summary>')
+  expect(markup).not.toContain('href="/adaptive-plan"')
 })

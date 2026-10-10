@@ -72,13 +72,19 @@ const unique = (ids: string[]) => ids.every(id => id.length > 0) && new Set(ids)
 const fail = (): never => { throw new Error('Saved model is invalid or ambiguous; stored data must remain untouched.') }
 const actionPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
-/** Action-only history is meaningful only while the current interpretation is an Action. */
+/** Preserve and validate historical Action audit after reclassification; only current Actions project a stage. */
 function stagedAction(item: ThoughtObject, captureId: string): StagedAction | undefined {
-  if (item.kind !== 'action') return undefined
+  const hasPlanAudit = item.history.some(entry => entry.planEligibility !== undefined)
+  // A reclassified Action retains valid historical plan gestures, but an
+  // unrelated object cannot carry a free-standing eligibility assertion.
+  if (item.kind !== 'action' && !hasPlanAudit) return undefined
   const stages = item.history.map((entry, index) => ({ entry, index })).filter(value => value.entry.actionStage !== undefined)
   if (stages.length > 1 || stages.some(value => value.entry.actionStage?.source !== 'review-action-staging')) fail()
   const stageIndex = stages[0]?.index ?? -1
-  if (stageIndex < 0) return undefined
+  if (stageIndex < 0) {
+    if (hasPlanAudit) fail()
+    return undefined
+  }
   const stage = item.history[stageIndex]
   const initial = stage.actionStage?.priority
   if (!initial || !actionPriorities.includes(initial) || !Number.isFinite(Date.parse(stage.at))) fail()
@@ -103,6 +109,7 @@ function stagedAction(item: ThoughtObject, captureId: string): StagedAction | un
       entry.event !== (audit.eligible ? 'Added Action to Adaptive Plan' : 'Removed Action from Adaptive Plan')) fail()
     planEligible = audit.eligible
   }
+  if (item.kind !== 'action') return undefined
   const reversed = later.some(entry => entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
   const selectedPriority = priorities.at(-1)?.actionPriority?.priority
   if (!selectedPriority) return { id: `staged-action:${item.id}`, objectId: item.id, captureId, priority: initialPriority,

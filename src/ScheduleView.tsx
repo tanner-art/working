@@ -45,7 +45,11 @@ export function ScheduleView({ state, update }: { state: AppState; update: (next
   return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header>
     <p className="lede">Staged Actions stay out of Today, notifications, and the Adaptive Plan until you explicitly add them. Scheduling creates a separate CalendarEvent only after confirmation.</p>
     {plan.recommendations[0] && <p role="status">Adaptive Plan recommends next: {plan.recommendations[0].title}. No time has been booked.</p>}
-    <p><a href="/adaptive-plan">View Adaptive Plan</a></p>
+    <details><summary>Adaptive Plan ({plan.recommendations.length})</summary>
+      {plan.recommendations.length ? <ol className="detail-list">{plan.recommendations.map((item, index) => <li key={item.objectId}><article><h3>{index === 0 ? 'Recommended next: ' : 'Also ready: '}{item.title}</h3><p>{item.explanation}</p></article></li>)}</ol>
+        : <p>No Actions are eligible yet. Add a staged Action when you are ready.</p>}
+      {plan.blockedCount > 0 && <p role="status">{plan.blockedCount} eligible {plan.blockedCount === 1 ? 'Action is' : 'Actions are'} waiting on dependencies.</p>}
+    </details>
     {actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow key={action.id} action={action} state={state} update={update} />)}</ul> : <p className="empty">No staged Actions yet.</p>}
   </main>
 }
