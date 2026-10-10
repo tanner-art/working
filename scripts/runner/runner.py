@@ -6,6 +6,7 @@ from usage_policy import UsagePolicyError, agent_settings, dispatch_decision, va
 from queue_snapshot import write_queue_snapshot
 from registry_control import RunnerRegistryControl
 from review_protocol import REVIEW_VERDICT_SCHEMA, ReviewProtocolError, parse_review_verdict, review_handoff
+from integrated_assurance import verify_integrated_source
 from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome
 from scripts.factory_registry.repository import RegistryConflict
 
@@ -56,6 +57,16 @@ class RegistryAttemptLifecycle:
         # The Registry method commits the attempt and verdict together. On a
         # rejected transaction the attempt remains active for the failure path.
         self.control.succeed_review(self.attempt_id, outcome, evidence)
+        self.finish_attempted = True
+        self.finish_completed = True
+        return True
+
+    def succeed_assurance(self, package_id, worker_id, assurance, verdict):
+        if self.finish_attempted:
+            return False
+        self.control.succeed_integrated_assurance(
+            self.attempt_id, package_id, worker_id, assurance, verdict,
+        )
         self.finish_attempted = True
         self.finish_completed = True
         return True
@@ -918,6 +929,24 @@ or CHANGES_REQUESTED.
 '''
 
 
+def build_integrated_assurance_prompt(review_input, assurance, *, reviewer_worker_id,
+                                      review_attempt_id):
+    """Inspect one integrated artifact; never ask the reviewer to author code."""
+    return (build_review_prompt(
+        review_input, reviewer_worker_id=reviewer_worker_id,
+        review_attempt_id=review_attempt_id, provider='anthropic',
+    ) + "\nThis is an integrated feature ASSURANCE gate, not implementation review. "
+         "Review the one exact integrated commit and tree, its base-to-integration diff, "
+         "every included package/receipt, and every acceptance-matrix row. "
+         "The protocol's pr_url field is the integrated CI run link for this gate; "
+         "the actual included implementation PRs are in validation_evidence. "
+         "Attempt to falsify the claimed end-to-end behavior and provenance. "
+         "Do not propose or make code edits. A missing result, uncertain provenance, "
+         "or unexercised criterion requires CHANGES_REQUESTED.\n"
+         f"Integrated tree: {assurance.integrated_tree}\n"
+         f"Ordered merge commits: {json.dumps(assurance.ordered_parent_shas)}\n")
+
+
 def review_command(config, *, review_packet_path=None):
     """Adapt a configured provider invocation to one read-only review call."""
     if config.get('provider') == 'openai':
@@ -1420,7 +1449,15 @@ def main():
             registry_review = (
                 registry_control is not None and body.get('kind') == 'REVIEW'
             )
-            blocked = [] if (registry_review or bounded_registry_mode) else [
+            registry_assurance = (
+                registry_control is not None and body.get('kind') == 'EVALUATION'
+            )
+            read_only_review = registry_review or registry_assurance
+            if registry_assurance and not bounded_registry_mode:
+                raise ValueError('Integrated assurance requires a Registry bounded run')
+            if registry_assurance and c['agents'][agent].get('provider') != 'anthropic':
+                raise ValueError('Integrated assurance requires independent Claude reviewer')
+            blocked = [] if (read_only_review or bounded_registry_mode) else [
                 dep for dep in body.get('depends_on', [])
                 if json.loads(github(
                     'issue', 'view', str(dep), '--repo', c['github'],
@@ -1458,16 +1495,31 @@ def main():
                                   'usage_state': usage_decision['state']}))
                 continue
             try:
-                review_input = (
-                    registry_control.review_input(body['task'])
-                    if registry_review and bounded_registry_mode else None
-                )
+                assurance = None
+                review_input = None
+                if registry_review and bounded_registry_mode:
+                    review_input = registry_control.review_input(body['task'])
+                elif registry_assurance and bounded_registry_mode:
+                    assurance, review_input = registry_control.integrated_assurance_input(
+                        body['task'], body,
+                    )
                 if registry_review and bounded_registry_mode:
                     if not isinstance(review_input, ReviewInput):
                         raise RegistryConflict('REVIEW_INPUT_REQUIRED')
                     if bounded_registry_mode and not review_source_is_green(github, c['github'], review_input):
                         print(json.dumps({'issue': n, 'status': 'defer',
                                           'reason': 'REVIEW_SOURCE_OR_CI_NOT_GREEN'}))
+                        continue
+                if registry_assurance and bounded_registry_mode:
+                    with file_lock(state / 'git.lock'):
+                        g('fetch', 'origin', 'main')
+                        for included in assurance.included_packages:
+                            g('fetch', 'origin', included['implementation_commit'])
+                    if not verify_integrated_source(
+                        assurance, repository=repo, github=github, repository_name=c['github'],
+                    ):
+                        print(json.dumps({'issue': n, 'status': 'defer',
+                                          'reason': 'ASSURANCE_SOURCE_OR_CI_NOT_GREEN'}))
                         continue
                 registry_revision = (
                     registry_control.pre_claim(
@@ -1479,10 +1531,10 @@ def main():
                 )
                 if registry_review and review_input is None:
                     review_input = registry_control.review_input(body['task'])
-                if registry_review:
+                if read_only_review:
                     verify_review_packet(review_input)
             except RegistryConflict as error:
-                if registry_review and error.code in {
+                if read_only_review and error.code in {
                     'REVIEW_INPUT_REQUIRED', 'REVIEW_PACKET_REQUIRED',
                 }:
                     print(json.dumps({'issue': n, 'status': 'defer',
@@ -1569,7 +1621,7 @@ def main():
                 save_record(record, data)
             with file_lock(state / 'git.lock'):
                 g('worktree','add','-b',branch,str(wt),review_input.implementation_commit if review_input is not None else base)
-            if not registry_review:
+            if not read_only_review:
                 monitored_run([pnpm,'install','--frozen-lockfile','--ignore-scripts'],cwd=wt,env=env,log=log)
             config=c['agents'][agent]
             agentenv=build_agent_environment(env, config.get('env', {}), c['path'])
@@ -1578,6 +1630,10 @@ def main():
                 if review_input is None else ('', None)
             )
             prompt = (
+                build_integrated_assurance_prompt(
+                    review_input, assurance, reviewer_worker_id=lane,
+                    review_attempt_id=attempt,
+                ) if registry_assurance else
                 build_review_prompt(
                     review_input, reviewer_worker_id=lane,
                     review_attempt_id=attempt, provider=config.get('provider', 'anthropic'),
@@ -1621,31 +1677,31 @@ def main():
                 (review_command(
                     config,
                     review_packet_path=review_input.validation_evidence['review_packet']['path'],
-                ) if registry_review
+                ) if read_only_review
                  else usage_decision['command']), cwd=wt, env=agentenv,
                 timeout=c.get('agent_timeout',1800), log=log, input=prompt,
                 on_start=record_agent_process_group, launch_barrier=True,
-                separate_stderr=registry_review,
+                separate_stderr=read_only_review,
             )
             provider_output, provider_stderr = (
-                provider_result if registry_review else (provider_result, '')
+                provider_result if read_only_review else (provider_result, '')
             )
             if provider_stderr:
                 data['review_provider_stderr'] = provider_stderr[-2000:]
                 save_record(record, data)
             def verify_changes():
-                expected_head = review_input.implementation_commit if registry_review else base
+                expected_head = review_input.implementation_commit if read_only_review else base
                 if g('branch','--show-current',cwd=wt)!=branch or g('rev-parse','HEAD',cwd=wt)!=expected_head:
                     raise ValueError('Agent changed branch or committed unexpectedly; preserved for inspection')
                 names=g('diff','--name-only',cwd=wt).splitlines()+g('diff','--cached','--name-only',cwd=wt).splitlines()+g('ls-files','--others','--exclude-standard',cwd=wt).splitlines()
-                if registry_review:
+                if read_only_review:
                     if names: raise ValueError('Reviewer mutated the exact review target')
                     return
                 if not names: raise ValueError('Agent produced no change')
                 if any(p not in body['paths'] for p in names): raise ValueError('Change outside allowed paths; preserved for inspection')
                 if any((wt/p).is_symlink() for p in names): raise ValueError('Symlink change requires manual review')
             verify_changes()
-            if registry_review:
+            if read_only_review:
                 try:
                     verdict = parse_review_verdict(
                         provider_output, review_input,
@@ -1662,12 +1718,12 @@ def main():
                          base=base, worktree_path=str(wt),
                          validation_result='pending',
                          elapsed_seconds=time.time() - started_at)
-            if not registry_review:
+            if not read_only_review:
                 run_repository_validation(
                     state, pnpm, wt, env, log, run_command=monitored_run
                 )
             verify_changes()
-            if not registry_review:
+            if not read_only_review:
                 g('diff','--check',cwd=wt)
                 # Stage the verified changed paths only.  -A records tracked
                 # deletions, while avoiding absent optional allowlist entries.
@@ -1676,27 +1732,27 @@ def main():
                 data['commit']=g('rev-parse','HEAD',cwd=wt)
             else:
                 data['commit'] = review_input.implementation_commit
-            if not registry_review and (g('rev-parse','HEAD^',cwd=wt)!=base or g('branch','--show-current',cwd=wt)!=branch):
+            if not read_only_review and (g('rev-parse','HEAD^',cwd=wt)!=base or g('branch','--show-current',cwd=wt)!=branch):
                 raise ValueError('Unexpected commit ancestry or branch')
             committed=g('diff-tree','--no-commit-id','--name-only','-r','HEAD',cwd=wt).splitlines()
-            if (not registry_review and (not committed or any(p not in body['paths'] for p in committed))) or g('status','--porcelain',cwd=wt):
+            if (not read_only_review and (not committed or any(p not in body['paths'] for p in committed))) or g('status','--porcelain',cwd=wt):
                 raise ValueError('Unexpected committed paths or dirty state; not pushed')
-            if not registry_review:
+            if not read_only_review:
                 g('show','--format=','--check','HEAD',cwd=wt)
             stats = aggregate_numstat(g('diff-tree','--no-commit-id','--numstat','-r',
-                                        'HEAD',cwd=wt)) if not registry_review else {}
+                                        'HEAD',cwd=wt)) if not read_only_review else {}
             save_record(record, data)
-            if not registry_review:
+            if not read_only_review:
                 g('push','origin',f'HEAD:refs/heads/{branch}',cwd=wt)
             prbody=f"Addresses #{n}.\n\nTask: {body['task']}\nAgent: {agent}\nBase: {base}\nCommit: {data['commit']}\n\nValidation: pnpm check and git diff --check passed.\n\nIndependent review and user merge approval required. Runner never merges."
-            if not registry_review:
+            if not read_only_review:
                 data['pr']=github('pr','create','--repo',c['github'],'--base',integration_base,'--head',branch,'--draft','--title',f'{body["task"]}: {issue["title"]}','--body',prbody)
             else:
                 data['pr'] = review_input.pr_url
             if registry_lifecycle is not None:
                 completed_at = datetime.now(timezone.utc).isoformat()
                 implementation_review_inputs = ()
-                if not registry_review:
+                if not read_only_review:
                     validation_evidence = {
                         'repository_validation': 'pnpm check passed',
                         'diff_check': 'passed',
@@ -1716,7 +1772,14 @@ def main():
                         validation_evidence=validation_evidence,
                         recorded_at=completed_at,
                     )
-                if registry_review:
+                if registry_assurance:
+                    if not verify_integrated_source(
+                        assurance, repository=repo, github=github,
+                        repository_name=c['github'],
+                    ):
+                        raise RuntimeError('integrated assurance source or CI changed during review')
+                    registry_lifecycle.succeed_assurance(body['task'], lane, assurance, verdict)
+                elif registry_review:
                     decided_at = completed_at
                     evidence = Evidence(id=f'review-verdict:{attempt}', package_id=body['task'], kind='review', uri=data['pr'], summary='Structured independent review verdict.', recorded_at=decided_at, metadata={'attempt_id': attempt, 'reviewed_commit': verdict.reviewed_commit, 'reviewed_base_commit': verdict.reviewed_base_commit, 'contract_sha256': verdict.contract_sha256, 'review_input_evidence_id': review_input.id})
                     registry_lifecycle.succeed_review(ReviewOutcome(id=f'review-outcome:{attempt}', review_package_id=body['task'], target_package_id=review_input.target_package_id, implementer_worker_id=registry_control.registry.review_implementer_worker(body['task']), reviewer_worker_id=lane, requested_at=review_input.recorded_at, decided_at=decided_at, state=verdict.state, findings=verdict.findings, changes_requested=verdict.changes_requested, approval_evidence_ids=(evidence.id,) if verdict.state.value == 'APPROVED' else (), reviewed_commit=verdict.reviewed_commit, reviewed_base_commit=verdict.reviewed_base_commit, contract_sha256=verdict.contract_sha256, review_input_evidence_id=review_input.id, reviewer_attempt_id=attempt), evidence)
@@ -1748,14 +1811,14 @@ def main():
             # Registry ownership before allowing the original exit status to escape.
             if data is not None and started_at is not None:
                 review_interrupted_before_verdict = (
-                    registry_review and registry_lifecycle is not None
+                    read_only_review and registry_lifecycle is not None
                     and not registry_lifecycle.finish_completed
                 )
                 if registry_lifecycle is not None:
                     try:
                         if registry_lifecycle.finish_completed:
                             finished = True
-                        elif registry_review:
+                        elif read_only_review:
                             # The PR URL predates the atomic review verdict.
                             finished = registry_lifecycle.fail(str(exc))
                         elif data.get('pr'):
