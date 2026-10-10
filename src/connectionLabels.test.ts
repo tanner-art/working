@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { connectionDisplayLabels } from './connectionLabels'
+import { connectionDisplayLabels, connectionFullLabels } from './connectionLabels'
 import type { ConnectionNode } from './semanticLinks'
 
 const node = (id: string, label: string): ConnectionNode => ({ id, label, kind: 'idea' })
@@ -26,10 +26,25 @@ describe('connection graph display labels', () => {
   })
 
   it('collapses whitespace and resolves a literal title that resembles an identity suffix', () => {
-    const labels = connectionDisplayLabels([
+    const nodes = [
       node('thought:abcd', 'Plan'), node('thought:efgh', 'Plan  '),
       node('thought:ijkl', 'Plan ·abcd'),
-    ])
-    expect(new Set(labels.values()).size).toBe(3)
+    ]
+    for (const labels of [connectionFullLabels(nodes), connectionDisplayLabels(nodes)]) {
+      expect(new Set(labels.values()).size).toBe(3)
+      expect(labels.get('thought:ijkl')).toBe('Plan ·abcd')
+      expect(labels.get('thought:abcd')).not.toBe('Plan ·abcd')
+      expect([...labels.values()].every(label => label === label.trim() && !/\s{2}/.test(label))).toBe(true)
+    }
+  })
+
+  it('does not let same-suffix IDs or whitespace-only variants collide', () => {
+    const nodes = [node('thought:one-abcd', 'Plan'), node('thought:two-abcd', 'Plan\n'),
+      node('thought:three', 'Plan ·abcd'), node('thought:four', 'Plan ·abcd-2')]
+    for (const labels of [connectionFullLabels(nodes), connectionDisplayLabels(nodes)]) {
+      expect(new Set(labels.values()).size).toBe(nodes.length)
+      expect(labels.get('thought:three')).toBe('Plan ·abcd')
+      expect(labels.get('thought:four')).toBe('Plan ·abcd-2')
+    }
   })
 })

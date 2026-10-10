@@ -1,5 +1,6 @@
 import type { AppState, SemanticRelationship, ThoughtObject } from './domain'
 import { serializeState } from './store'
+import { connectionFullLabels } from './connectionLabels'
 
 export interface ConnectionNode { id: string; label: string; kind: string }
 export interface ConnectionGraph { candidates: ConnectionNode[]; nodes: ConnectionNode[]; links: { id: string; sourceId: string; targetId: string }[]; hiddenCount: number }
@@ -25,15 +26,8 @@ export function confirmedConnectionGraph(state: AppState): ConnectionGraph {
   const visible = new Set(links.flatMap(link => [link.sourceId, link.targetId]))
   const rawCandidates = state.objects.filter(item => accepted.has(item.id)).map(item => ({ id: item.id,
     label: item.interpretation.summary || item.currentContent || item.originalContent, kind: item.kind }))
-  const labelCounts = new Map<string, number>()
-  for (const node of rawCandidates) labelCounts.set(node.label, (labelCounts.get(node.label) ?? 0) + 1)
-  const candidates = rawCandidates.map(node => {
-    if (labelCounts.get(node.label) === 1) return node
-    const peers = rawCandidates.filter(other => other.label === node.label && other.id !== node.id)
-    let length = 4
-    while (length < node.id.length && peers.some(other => other.id.slice(-length) === node.id.slice(-length))) length++
-    return { ...node, label: `${node.label} (${node.kind} ${node.id.slice(-length)})` }
-  })
+  const fullLabels = connectionFullLabels(rawCandidates)
+  const candidates = rawCandidates.map(node => ({ ...node, label: fullLabels.get(node.id)! }))
   const nodes = candidates.filter(item => visible.has(item.id))
   return { candidates, nodes, links, hiddenCount: confirmed.length - links.length }
 }

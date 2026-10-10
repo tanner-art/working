@@ -39,12 +39,17 @@ describe('explicit semantic connections', () => {
 
   it('disambiguates duplicate thought labels only when needed', () => {
     const { first, second } = thoughts()
-    second.interpretation.summary = first.interpretation.summary
-    const state = legacyUiProjection(migrateLegacyState({ objects: [first, second], canvas: [] }))
+    second.interpretation.summary = 'Garden  \n'
+    const third = confirmObject(makeObject({ kind: 'idea', source: 'text', originalContent: 'A literal suffix', confidence: .9,
+      interpretation: { summary: 'Garden ·irst', suggestedKind: 'idea', rationale: 'Idea' } }))
+    third.id = 'thought:third'
+    const state = legacyUiProjection(migrateLegacyState({ objects: [first, second, third], canvas: [] }))
     const labels = confirmedConnectionGraph(state).candidates.map(node => node.label)
-    expect(labels).toHaveLength(2)
-    expect(new Set(labels).size).toBe(2)
-    expect(labels.every(label => label.startsWith('Garden (idea '))).toBe(true)
+    expect(labels).toHaveLength(3)
+    expect(new Set(labels).size).toBe(3)
+    expect(labels[2]).toBe('Garden ·irst')
+    expect(labels.every(label => label.startsWith('Garden'))).toBe(true)
+    expect(labels.every(label => !/\s{2}/.test(label))).toBe(true)
   })
 
   it('never promotes old relationship hints or Canvas arrows into confirmed links', () => {
