@@ -235,6 +235,8 @@ export interface CalendarEvent {
   objectIds: string[]
   captureIds: string[]
   status: 'scheduled' | 'cancelled'
+  /** Only an explicit Calendar gesture may create an unlinked event. */
+  origin?: 'calendar-direct-entry'
 }
 /** Retains endpoints without choosing OD-007 membership cardinality. */
 export interface SemanticRelationship extends Relationship {
@@ -275,10 +277,11 @@ export interface SourceCorrection {
 export type TemporalTarget =
   | { kind: 'fixed-deadline'; objectId: string; interpretationId: string; date: string }
   | { kind: 'event-scheduling'; eventId: string; interpretationId: string; startsAt: string; temporalContext: string; title: string; objectIds: string[]; captureIds: string[] }
+  | { kind: 'direct-calendar-event'; eventId: string; startsAt: string; temporalContext: string; title: string }
 export interface TemporalDecision {
   id: string
   at: string
-  source: 'review-temporal-confirmation'
+  source: 'review-temporal-confirmation' | 'calendar-direct-confirmation'
   decision: 'confirmed' | 'reversed'
   target: TemporalTarget
   /** Reversal names the exact confirmation it withdraws. */

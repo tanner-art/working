@@ -1,4 +1,4 @@
-import { validTemporalHistory } from './temporalConfirmation'
+import { directCalendarEventsFromHistory, validTemporalHistory } from './temporalConfirmation'
 import { isGroupingReviewState } from './groupingProposal'
 import type { ActionPriority, AppState, CommitmentScheduleAudit, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
@@ -385,6 +385,10 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       model.temporalHistory = [...(model.temporalHistory ?? []), { id: `action-reversal:${event.id}`, at: reversalAt, source: 'review-temporal-confirmation', decision: 'reversed', target: copy(confirmed.target), reverses: confirmed.id }]
     }
   }
+  const directEvents = directCalendarEventsFromHistory(model.temporalHistory ?? [])
+  const otherEvents = model.calendarEvents.filter(event => event.origin !== 'calendar-direct-entry')
+  if (directEvents.some(event => otherEvents.some(other => other.id === event.id))) return fail()
+  model.calendarEvents = [...otherEvents, ...directEvents]
   materializeReminderInstructions(model)
   if (!isPersistedState(model)) return fail()
   return model
@@ -485,7 +489,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
     // Events have their own scheduling identity; the legacy UI neither authors nor projects them.
     if (!m.calendarEvents.every(e => typeof e.title === 'string' && typeof e.startsAt === 'string' &&
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(e.startsAt) && Number.isFinite(Date.parse(e.startsAt)) && typeof e.temporalContext === 'string' && e.temporalContext.length > 0 &&
-      ['scheduled', 'cancelled'].includes(e.status) && Array.isArray(e.objectIds) &&
+      ['scheduled', 'cancelled'].includes(e.status) && (e.origin === undefined || e.origin === 'calendar-direct-entry') && Array.isArray(e.objectIds) &&
       e.objectIds.every(id => m.semanticObjects.some(o => o.id === id)) && Array.isArray(e.captureIds) &&
       e.captureIds.every(id => m.captures.some(c => c.id === id)))) return false
     return validTemporalHistory(m) && (m.groupingReview === undefined || isGroupingReviewState(m.groupingReview, m.captures)) && isAppState(projectModel(m))
