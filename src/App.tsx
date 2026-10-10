@@ -19,7 +19,7 @@ import { CalendarView } from './CalendarView'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
@@ -34,10 +34,11 @@ import { initialTutorialState, startTutorial, type TutorialState } from './onboa
 import { ReviewResolution } from './ReviewResolutionControl'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
+import { canBeginSwipe, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -176,9 +177,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (focusInstallHelp) installOpener.current?.focus()
     setFocusInstallHelp(false)
   }
-// The secondary home is reviewable by URL without changing anyone's saved/default start page.
+  // Keep existing saved start-page choices; the brand provides a Home path from every tab.
   const [view, setView] = useState<View>(() => previewStartView(window.location.search,
     appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
+  const swipeStart = useRef<{ pointerId: number; x: number; y: number; view: View } | null>(null)
+  const moreMenu = useRef<HTMLDetailsElement>(null)
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
@@ -365,17 +368,33 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     setOpenCanvasId(null)
   }
   const navigate = (next: View) => {
+    swipeStart.current = null
+    if (moreMenu.current) moreMenu.current.open = false
     if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
     setView(next)
+  }
+  const onContentPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!event.isPrimary) { swipeStart.current = null; return }
+    const allowed = canBeginSwipe({ pointerType: event.pointerType, isPrimary: event.isPrimary, view,
+      deepCanvas: !!openCanvasId, modalOpen: !!selectedObject, mobile: window.matchMedia('(max-width: 720px)').matches,
+      blockedTarget: swipeTargetIsBlocked(event.target, event.currentTarget) })
+    swipeStart.current = allowed ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, view } : null
+  }
+  const onContentPointerUp = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = swipeStart.current
+    swipeStart.current = null
+    if (!start || start.pointerId !== event.pointerId || start.view !== view || selectedObject || openCanvasId) return
+    const next = swipeDestination(start.view, event.clientX - start.x, event.clientY - start.y)
+    if (next) navigate(next)
   }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
-    <section className="content">
+    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape') event.currentTarget.open = false }}><summary aria-label="More options"><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" onClick={() => navigate('settings')}>Settings</button></div></details></aside>
+    <section className="content" onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
         <p>Capture a thought, then open Organize to review its meaning. You can use Threadline in this browser or add it to your home screen.</p>
