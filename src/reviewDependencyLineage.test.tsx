@@ -78,6 +78,61 @@ describe('Review target choices and Commitment validation', () => {
     expect(reloaded.state.model!.calendarEvents).toEqual([])
   })
 
+  it.each([
+    ['setup date', (item: ThoughtObject) => { item.history.find(entry => entry.commitmentSetup)!.commitmentSetup!.date = '2026-10-12' }],
+    ['setup dependencies', (item: ThoughtObject) => { item.history.find(entry => entry.commitmentSetup)!.commitmentSetup!.dependencyIds = [] }],
+    ['confirmation object', (item: ThoughtObject) => { item.history.at(-1)!.confirmation!.objectId = 'other' }],
+    ['confirmation transition', (item: ThoughtObject) => { item.history.at(-1)!.confirmation!.transition = 'action' }],
+    ['confirmation summary', (item: ThoughtObject) => { item.history.at(-1)!.confirmation!.summary = 'Different meaning' }],
+  ] as const)('rejects proposed-date retirement with altered %s evidence', (_label, alter) => {
+    let raw: string | null = null
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    let state = loadStateResult().state
+    state = { ...state, objects: state.objects.map(item => item.id === 'welcome-action' ? stageAction(item) : item) }
+    expect(saveState(state)).toBeUndefined()
+    const saved = raw
+    const resolved = resolveCommitmentInState(state, 'welcome-commitment',
+      { title: 'Product planning block', dependencyIds: ['welcome-action'] }, reconcileCurrentSession, at)
+    const changed = structuredClone(resolved.objects.find(item => item.id === 'welcome-commitment')!)
+    alter(changed)
+    const tampered = { ...state, objects: state.objects.map(item => item.id === changed.id ? changed : item) }
+    expect(() => reconcileCurrentSession(tampered))
+      .toThrow('invalid or ambiguous')
+    expect(saveState(tampered)).toBeDefined()
+    expect(raw).toBe(saved)
+  })
+
+  it('round-trips the seeded proposed-date Commitment through the account session', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => undefined })
+    const local = loadStateResult().state
+    let row: AccountRow | null = null
+    const adapter: AccountAdapter = {
+      read: async () => row,
+      write: async (userId, data, revision) => {
+        if (row ? row.revision !== revision : revision !== null) throw Error('conflict')
+        row = { user_id: userId, revision: crypto.randomUUID(), data: structuredClone(data) }
+        return structuredClone(row)
+      },
+    }
+    const session = createAccountSession(adapter, 'owner', () => 'owner')
+    let state = (await session.open(accountData(local, defaultSettings, digest))).state
+    const readModel = (current: AppState) => session.snapshot(current, defaultSettings, digest).model
+    const save = (current: AppState) => session.save(session.snapshot(current, defaultSettings, digest))
+    const proposedDate = state.objects.find(item => item.id === 'welcome-commitment')!.interpretation.suggestedDate
+    state = { ...state, objects: state.objects.map(item => item.id === 'welcome-action' ? stageAction(item) : item) }
+    await save(state)
+    state = resolveCommitmentInState(state, 'welcome-commitment',
+      { title: 'Product planning block', dependencyIds: ['welcome-action'] }, readModel, at)
+    await save(state)
+
+    const reloaded = (await createAccountSession(adapter, 'owner', () => 'owner').open()).state.model!
+    const readings = reloaded.interpretations.filter(item => item.legacy.id === 'welcome-commitment')
+    expect(readings[0].legacy.interpretation.suggestedDate).toBe(proposedDate)
+    expect(readings.at(-1)!.legacy.interpretation.suggestedDate).toBeUndefined()
+    expect(reloaded.relationships).toMatchObject([{ sourceId: 'welcome-commitment', targetId: 'welcome-action', type: 'depends_on' }])
+    expect(reloaded.calendarEvents).toEqual([])
+  })
+
   it('uses the current account session for both choices and their decisions without reloading', async () => {
     let row: AccountRow | null = null
     const adapter: AccountAdapter = {
