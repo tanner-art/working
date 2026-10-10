@@ -9,7 +9,12 @@ export interface PinchInteraction {
   preview: CanvasViewport | null
 }
 
-const midpoint = (a: PointerSample, b: PointerSample): CanvasPoint => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+// Pointer events use viewport coordinates; canvas transforms use coordinates local
+// to the rendered canvas. Account for the toolbar/sidebar offset at each sample.
+const midpoint = (a: PointerSample, b: PointerSample, canvasOrigin: CanvasPoint): CanvasPoint => ({
+  x: (a.x + b.x) / 2 - canvasOrigin.x,
+  y: (a.y + b.y) / 2 - canvasOrigin.y,
+})
 const distance = (a: PointerSample, b: PointerSample) => Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
 
 /** Keeps the latest pinch preview synchronously available until it is committed. */
@@ -17,15 +22,15 @@ export function createPinchInteraction(): PinchInteraction {
   return { start: null, preview: null }
 }
 
-export function beginPinchInteraction(interaction: PinchInteraction, viewport: CanvasViewport, first: PointerSample, second: PointerSample) {
+export function beginPinchInteraction(interaction: PinchInteraction, viewport: CanvasViewport, first: PointerSample, second: PointerSample, canvasOrigin: CanvasPoint) {
   interaction.preview = null
-  interaction.start = { viewport, midpoint: midpoint(first, second), distance: distance(first, second) }
+  interaction.start = { viewport, midpoint: midpoint(first, second, canvasOrigin), distance: distance(first, second) }
 }
 
-export function previewPinchInteraction(interaction: PinchInteraction, first: PointerSample, second: PointerSample) {
+export function previewPinchInteraction(interaction: PinchInteraction, first: PointerSample, second: PointerSample, canvasOrigin: CanvasPoint) {
   const start = interaction.start
   if (!start) return null
-  const currentMidpoint = midpoint(first, second)
+  const currentMidpoint = midpoint(first, second, canvasOrigin)
   const anchored = zoomCanvasViewport(start.viewport, start.midpoint, start.viewport.scale * distance(first, second) / start.distance)
   const preview = { ...anchored, x: anchored.x + currentMidpoint.x - start.midpoint.x, y: anchored.y + currentMidpoint.y - start.midpoint.y }
   interaction.preview = preview

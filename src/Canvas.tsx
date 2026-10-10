@@ -109,6 +109,10 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; clearPinchInteraction(pinchInteraction.current); setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
   const clearInteraction = () => { clearTransientInteraction(); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
+  const canvasOrigin = () => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    return { x: rect?.left ?? 0, y: rect?.top ?? 0 }
+  }
   const applyGestureEffect = (effect: GestureEffect) => {
     if (effect.type === 'select') { setSelected(effect.id); setEditMode(false); return }
     if (effect.type === 'open-edit-menu') { setSelected(effect.id); setEditMode(true); return }
@@ -125,8 +129,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
-    if (effect.type === 'begin-pinch') { beginPinchInteraction(pinchInteraction.current, viewport, effect.first, effect.second); return }
-    if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second); if (preview) setPinchPreview(preview); return }
+    if (effect.type === 'begin-pinch') { beginPinchInteraction(pinchInteraction.current, viewport, effect.first, effect.second, canvasOrigin()); return }
+    if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second, canvasOrigin()); if (preview) setPinchPreview(preview); return }
     if (effect.type === 'commit-pinch') { const preview = commitPinchInteraction(pinchInteraction.current); if (preview) onViewport(preview); setPinchPreview(null); return }
     // The reducer has already installed its next state before effects run. In the
     // second-pointer path that state is pinch-zooming, so cleanup must not replace
