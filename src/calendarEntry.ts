@@ -4,7 +4,7 @@ import { advanceModelProjection, makeObject, reconcileCurrentSession } from './s
 import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision, validTemporalDate } from './temporalConfirmation'
 
 /** One explicit Calendar save confirms an unlinked event, never an obligation. */
-export function createDirectCalendarEvent(state: AppState, input: { title: string; date: string; time: string }): AppState {
+export function createDirectCalendarEvent(state: AppState, input: { title: string; date: string; time: string }, accountModel?: PersistedState): AppState {
   const title = input.title.trim()
   const temporalContext = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
   if (!title || !validTemporalDate(input.date) || !/^\d{2}:\d{2}$/.test(input.time) ||
@@ -16,12 +16,12 @@ export function createDirectCalendarEvent(state: AppState, input: { title: strin
   const local = new Date(year, month - 1, day, hour, minute)
   if (local.getFullYear() !== year || local.getMonth() !== month - 1 || local.getDate() !== day ||
       local.getHours() !== hour || local.getMinutes() !== minute) throw new Error('That local time does not exist. Choose another start time.')
-  const model = reconcileCurrentSession(state)
+  const model = reconcileCurrentSession(state, accountModel)
   const eventId = crypto.randomUUID()
   const entry: TemporalDecision = { id: crypto.randomUUID(), at: new Date().toISOString(), source: 'calendar-direct-confirmation',
     decision: 'confirmed', target: { kind: 'direct-calendar-event', eventId, title, startsAt: local.toISOString(), temporalContext } }
   const next = { ...state, temporalHistory: [...(model.temporalHistory ?? []), entry] }
-  reconcileCurrentSession(next) // fail closed before a caller can publish or save the event
+  reconcileCurrentSession(next, accountModel) // fail closed against the same authoritative base before publishing
   return next
 }
 

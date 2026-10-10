@@ -69,7 +69,7 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
     if (!eventDraft) return
     setEventMessage('')
     try {
-      onUpdate(current => createDirectCalendarEvent(current, { title: eventTitle, ...eventDraft }))
+      onUpdate(current => createDirectCalendarEvent(current, { title: eventTitle, ...eventDraft }, readAccountModel?.(current)))
       closeEvent()
       setEventTitle('')
     } catch (error) { setEventMessage(error instanceof Error ? error.message : 'Unable to add this event. Refresh Calendar and try again.') }

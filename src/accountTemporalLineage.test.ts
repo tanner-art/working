@@ -1,13 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { accountData, createAccountSession, type AccountAdapter, type AccountRow } from './accountStorage'
 import { scheduleStagedAction, stageAction } from './actionStaging'
-import { confirmCommitmentDeadline, scheduleCommitment } from './calendarEntry'
+import { confirmCommitmentDeadline, createDirectCalendarEvent, scheduleCommitment } from './calendarEntry'
 import { resolveCommitment } from './commitmentWorkflow'
 import type { AppState, ThoughtObject } from './domain'
-import { updateObject } from './objectWorkflow'
+import { reverseObject, updateObject } from './objectWorkflow'
 import { defaultSettings } from './settings'
 
 const digest = { enabled: false }
+afterEach(() => vi.useRealTimers())
 const commitment: ThoughtObject = {
   id: 'commitment', kind: 'commitment', status: 'review', originalContent: 'Send contract', source: 'text',
   createdAt: '2026-10-01T08:00:00.000Z', confidence: .7,
@@ -87,5 +88,42 @@ describe('account-mode Schedule and Calendar temporal lineage', () => {
     expect(reloaded.calendarEvents).toMatchObject([{ objectIds: ['action'], status: 'scheduled' }])
     expect(reloaded.temporalHistory?.[0].target).toMatchObject({ interpretationId: reloaded.interpretations.at(-1)!.id })
     expect(reloaded.captures).toEqual(fixture.initial.model.captures)
+  })
+
+  it('keeps the saved Action reversal journal when a later direct event is created without reloading', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-10T10:00:00.000Z'))
+    const fixture = accountFixture(action)
+    let state = (await fixture.session.open(fixture.initial)).state
+    state = { ...state, objects: [stageAction(state.objects[0])] }
+    await fixture.save(state)
+    state = scheduleStagedAction(state, 'action', '2026-10-12T09:30:00.000Z', 'UTC', fixture.readModel(state))
+    await fixture.save(state)
+
+    vi.setSystemTime(new Date('2026-10-10T10:01:00.000Z'))
+    state = { ...state, objects: [reverseObject(state.objects[0])] }
+    await fixture.save(state)
+    const savedReversal = structuredClone(fixture.current().temporalHistory?.at(-1))
+    expect(savedReversal).toMatchObject({ decision: 'reversed', at: '2026-10-10T10:01:00.000Z' })
+
+    vi.setSystemTime(new Date('2026-10-10T10:02:00.000Z'))
+    state = { ...state, objects: [updateObject(state.objects[0], { ...state.objects[0], context: 'Archived after withdrawal' })] }
+    await fixture.save(state)
+    const priorInterpretations = structuredClone(fixture.current().interpretations)
+    expect(state.model?.temporalHistory?.map(item => item.decision)).toEqual(['confirmed']) // loaded projection predates the saved reversal
+    vi.setSystemTime(new Date('2026-10-10T10:03:00.000Z'))
+    state = createDirectCalendarEvent(state, { title: 'Independent meeting', date: '2026-10-14', time: '09:30' }, fixture.readModel(state))
+    await fixture.save(state)
+    vi.setSystemTime(new Date('2026-10-10T10:04:00.000Z'))
+    state = createDirectCalendarEvent(state, { title: 'Second meeting', date: '2026-10-15', time: '10:30' }, fixture.readModel(state))
+    await fixture.save(state)
+
+    const reloaded = await fixture.reopen()
+    expect(reloaded.interpretations).toEqual(priorInterpretations)
+    expect(reloaded.temporalHistory?.[1]).toEqual(savedReversal)
+    expect(reloaded.temporalHistory?.map(item => item.target.kind)).toEqual(['event-scheduling', 'event-scheduling', 'direct-calendar-event', 'direct-calendar-event'])
+    expect(reloaded.calendarEvents).toMatchObject([{ status: 'cancelled' },
+      { title: 'Independent meeting', origin: 'calendar-direct-entry', status: 'scheduled' },
+      { title: 'Second meeting', origin: 'calendar-direct-entry', status: 'scheduled' }])
   })
 })
