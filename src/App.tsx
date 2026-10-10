@@ -548,7 +548,7 @@ function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: A
 function AccountSection({ registerSearchHandoffGuard, state, onRetry, active }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
-  useSearchHandoffGuard(registerSearchHandoffGuard, 'account-login', () => !email && !code)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'account-login', () => state.status !== 'signed-out' || (!email && !code))
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
