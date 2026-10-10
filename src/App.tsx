@@ -388,7 +388,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     resolveCommitmentInState(current, id, details, readSearchModel))
   const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice,
     new Date().toISOString(), cloud ? readSearchModel(current) : undefined))
-  const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState))
+  const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState,
+    new Date().toISOString(), cloud ? readSearchModel(current) : undefined))
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
   const saveObject = (updated: ThoughtObject) => update(current => ({ ...current, objects: current.objects.map(item => item.id === updated.id ? updateObject(item, updated) : item) }))
   const captureCanvasObject = (element: CanvasElement) => {
@@ -573,7 +574,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
       {view === 'capture' && <Capture registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={reviewTargets.targets} targetsError={reviewTargets.error} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveCommitment={resolveCommitment} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
-      {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
+      {view === 'review' && <ReminderProjections state={state} readAccountModel={cloud ? readSearchModel : undefined} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update}
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
         readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
