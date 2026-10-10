@@ -31,6 +31,7 @@ import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './su
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
 import { useSearchHandoffGuard } from './useSearchHandoffGuard'
 import { createSearchHandoffGuards, type RegisterSearchHandoffGuard } from './searchHandoffGuards'
+import { findWorkspaceReturnFocusTarget } from './workspaceFocus'
 import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
@@ -411,9 +412,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     else setWorkspaceRouteError('')
   }
   const focusAfterSearch = () => requestAnimationFrame(() => {
-    const target = document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]') ??
-      document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"], .sidebar .nav-item')
-    if (target?.isConnected) target.focus()
+    findWorkspaceReturnFocusTarget(document)?.focus()
   })
   const exitWorkspaceRoute = () => {
     leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
@@ -759,6 +758,7 @@ function ObjectPanel({ registerSearchHandoffGuard, object, history, suspended, o
     const opener = returnFocus.current
     return () => { requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus()) }
   }, [])
+  useEffect(() => { if (!suspended) closeButton.current?.focus() }, [suspended])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
