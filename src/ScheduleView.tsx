@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { AppState, StagedAction } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { scheduleStagedAction, setStagedActionPriority } from './actionStaging'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 const localDateTimeValue = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
-function StagedActionRow({ action, state, update, focus, onFocusHandled }: { action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void; focus: boolean; onFocusHandled?: () => void }) {
+function StagedActionRow({ registerSearchHandoffGuard, action, state, update, focus, onFocusHandled }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void; focus: boolean; onFocusHandled?: () => void }) {
   const [when, setWhen] = useState(() => localDateTimeValue(new Date(Date.now() + 60 * 60_000)))
+  const initialWhen = useRef(when)
+  useSearchHandoffGuard(registerSearchHandoffGuard, `schedule:${action.id}`, () => action.status !== 'staged' || when === initialWhen.current)
   const [message, setMessage] = useState('')
   const row = useRef<HTMLLIElement>(null)
   useEffect(() => { if (focus && row.current) { row.current.focus(); onFocusHandled?.() } }, [focus])
@@ -14,8 +18,8 @@ function StagedActionRow({ action, state, update, focus, onFocusHandled }: { act
   const submit = (event: FormEvent) => { event.preventDefault(); try { update(current => scheduleStagedAction(current, action.objectId, new Date(when).toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time')); setMessage('CalendarEvent confirmed.') } catch (error) { setMessage((error as Error).message) } }
   return <li ref={row} tabIndex={focus ? -1 : undefined}><article><h2>{object.interpretation.summary}</h2><label>Priority <select aria-label={`Priority for ${object.interpretation.summary}`} value={action.priority} disabled={action.status !== 'staged'} onChange={event => { try { update(current => setStagedActionPriority(current, action.objectId, Number(event.target.value) as StagedAction['priority'])); setMessage('Priority saved.') } catch (error) { setMessage((error as Error).message) } }}>{[1, 2, 3, 4, 5].map(priority => <option key={priority} value={priority}>{priority} of 5</option>)}</select></label><p>{action.status === 'scheduled' ? 'CalendarEvent confirmed' : 'Unscheduled staged Action'}</p>{action.status === 'staged' && <form onSubmit={submit}><label>Schedule as CalendarEvent <input aria-label={`Schedule ${object.interpretation.summary}`} type="datetime-local" required value={when} onChange={event => setWhen(event.target.value)} /></label><button className="primary" type="submit">Confirm CalendarEvent</button></form>}{message && <p role="status">{message}</p>}</article></li>
 }
-export function ScheduleView({ state, update, focusActionId = null, onFocusHandled }: { state: AppState; update: (next: (state: AppState) => AppState) => void; focusActionId?: string | null; onFocusHandled?: () => void }) {
+export function ScheduleView({ registerSearchHandoffGuard, state, update, focusActionId = null, onFocusHandled }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AppState; update: (next: (state: AppState) => AppState) => void; focusActionId?: string | null; onFocusHandled?: () => void }) {
   const model = useMemo(() => reconcileLegacyUi(state), [state])
   const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed').sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
-  return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header><p className="lede">Staged Actions remain out of Today, notifications, and the Adaptive Plan. Scheduling creates a separate CalendarEvent only after confirmation.</p>{actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow key={action.id} action={action} state={state} update={update} focus={action.objectId === focusActionId} onFocusHandled={onFocusHandled} />)}</ul> : <p className="empty">No staged Actions yet.</p>}</main>
+  return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header><p className="lede">Staged Actions remain out of Today, notifications, and the Adaptive Plan. Scheduling creates a separate CalendarEvent only after confirmation.</p>{actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow registerSearchHandoffGuard={registerSearchHandoffGuard} key={action.id} action={action} state={state} update={update} focus={action.objectId === focusActionId} onFocusHandled={onFocusHandled} />)}</ul> : <p className="empty">No staged Actions yet.</p>}</main>
 }

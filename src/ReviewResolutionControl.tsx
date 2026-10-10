@@ -4,13 +4,16 @@ import { reviewResolutionKinds, resolveReviewCapture, type ReviewContinuations, 
 import { ReminderResolution } from './ReminderResolution'
 import type { ReminderChoice } from './reminderWorkflow'
 import { CommitmentResolution } from './CommitmentResolution'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 const labels: Record<ReviewResolutionKind, string> = {
   action: 'Action', commitment: 'Commitment', reminder: 'Reminder', idea: 'Idea',
 }
 
 /** The four-choice Review control; it owns no non-Idea persistence. */
-export function ReviewResolution({ object, onComplete, continuations, onEdit, reminderTargets = [], onResolveReminder }: {
+export function ReviewResolution({ registerSearchHandoffGuard, object, onComplete, continuations, onEdit, reminderTargets = [], onResolveReminder }: {
+  registerSearchHandoffGuard?: RegisterSearchHandoffGuard
   object: ThoughtObject
   onComplete: (object: ThoughtObject) => void
   continuations?: ReviewContinuations
@@ -22,6 +25,7 @@ export function ReviewResolution({ object, onComplete, continuations, onEdit, re
   const [resolving, setResolving] = useState<ReviewResolutionKind>()
   const [reminderSetup, setReminderSetup] = useState(false)
   const [commitmentSetup, setCommitmentSetup] = useState(false)
+  useSearchHandoffGuard(registerSearchHandoffGuard, `review:${object.id}`, () => !resolving && !reminderSetup && !commitmentSetup)
   const resolve = async (kind: ReviewResolutionKind) => {
     setMessage('')
     setResolving(kind)

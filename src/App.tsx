@@ -29,7 +29,9 @@ import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revision
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
-import { canOpenSearchResultFromView, enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import { createSearchHandoffGuards, type RegisterSearchHandoffGuard } from './searchHandoffGuards'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -196,10 +198,13 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
   const [workspaceRouteError, setWorkspaceRouteError] = useState('')
   const searchSession = useRef(crypto.randomUUID())
-  const recoveringHistory = useRef(false)
+  const recoveringHistory = useRef<WorkspaceHistoryLocation | null>(null)
+  const acceptedHistory = useRef(workspaceHistoryLocation(window.location.href, window.history.state))
   const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
   const [focusCanvasEntry, setFocusCanvasEntry] = useState(false)
   const canvasCommitTitle = useRef<(() => void) | null>(null)
+  const [searchHandoffGuards] = useState(createSearchHandoffGuards)
+  const registerSearchHandoffGuard = searchHandoffGuards.register
   const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
   const update = (fn: (current: AppState) => AppState) => {
     if (mergePlan) onCancelMerge()
@@ -399,6 +404,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (!searchSurface) return
     const outcome = performWorkspaceRouteTransition('workspace', routeContext(), { enterSurface: () => {
       enterWorkspaceHistory(window.history, window.location.href, searchSession.current)
+      acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
       setActiveWorkspaceSurface(searchSurface)
     }, leaveSurface: () => undefined })
     if (!outcome.ok) setWorkspaceRouteError(outcome.message)
@@ -406,6 +412,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   }
   const exitWorkspaceRoute = () => {
     leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
+    if (window.location.pathname !== '/search') acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
     setActiveWorkspaceSurface(undefined)
   }
   const navigateWorkspace = (request: WorkspaceNavigationRequest): WorkspaceNavigationOutcome => {
@@ -416,7 +423,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       accountUserId: cloud?.session.userId,
       authenticatedUserId: liveAccount.status === 'signed-in' ? liveAccount.session.user.id : undefined,
     }, {
-      canOpen: () => canOpenSearchResultFromView(view, !!selectedObjectId, !!selectedCaptureId),
+      canOpen: () => canOpenSearchResultFromView(view, !searchHandoffGuards.canLeave()),
       close: () => {
         exitWorkspaceRoute()
         requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]')?.focus())
@@ -441,7 +448,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   }
   useEffect(() => {
     const onPopState = () => {
-      if (recoveringHistory.current) { recoveringHistory.current = false; return }
+      if (recoveringHistory.current) {
+        const expected = recoveringHistory.current
+        recoveringHistory.current = null
+        if (isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation(window.location.href, window.history.state))) return
+      }
       const target = workspaceSurfaceModuleForPath(window.location.pathname)
       const outcome = performWorkspaceRouteTransition(target ? 'workspace' : 'app', routeContext(), {
         enterSurface: () => setActiveWorkspaceSurface(target),
@@ -449,10 +460,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       })
       if (!outcome.ok) {
         // Undo Back/Forward without overwriting either history entry.
-        recoveringHistory.current = true
+        recoveringHistory.current = acceptedHistory.current
         recoverRejectedWorkspacePopstate(window.history, !!activeWorkspaceSurface)
         setWorkspaceRouteError(outcome.message)
       } else {
+        acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
         setWorkspaceRouteError('')
       }
     }
@@ -486,23 +498,23 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
           <MorningDigest state={state} visible inline onShow={() => setView('digest')} />
         </details> : <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />}
       </>
-      {view === 'settings' && <SettingsPage accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+      {view === 'settings' && <SettingsPage registerSearchHandoffGuard={registerSearchHandoffGuard} accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
         onCancelMerge()
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
-      {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'capture' && <Capture registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
+      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
-      {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
-      {view === 'schedule' && <ScheduleView state={state} update={update} focusActionId={focusedActionId} onFocusHandled={() => setFocusedActionId(null)} />}
+      {view === 'calendar' && <CalendarView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
+      {view === 'schedule' && <ScheduleView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} update={update} focusActionId={focusedActionId} onFocusHandled={() => setFocusedActionId(null)} />}
       {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} autoFocusCanvas={focusCanvasEntry} onRegisterCommitTitle={commit => { canvasCommitTitle.current = commit }} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-  </main>{selectedCaptureId && <SourceCapturePanel state={state} captureId={selectedCaptureId} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedCaptureId(null)} />}{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+  </main>{selectedCaptureId && <SourceCapturePanel state={state} captureId={selectedCaptureId} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedCaptureId(null)} />}{selectedObject && <ObjectPanel registerSearchHandoffGuard={registerSearchHandoffGuard} object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
       onReverse={() => withdraw(selectedObject.id, 'reversed')} />}</div>
@@ -533,9 +545,10 @@ function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: A
   </div>
 }
 
-function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
+function AccountSection({ registerSearchHandoffGuard, state, onRetry, active }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'account-login', () => !email && !code)
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
@@ -587,7 +600,8 @@ function DigestSection({ onOpen }: { onOpen: () => void }) {
   </section>
 }
 
-function SettingsPage({ accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+function SettingsPage({ registerSearchHandoffGuard, accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+  registerSearchHandoffGuard?: RegisterSearchHandoffGuard
   accountActive: boolean; dataControls: React.ReactNode
   installOpener: React.RefObject<HTMLButtonElement | null>; onInstallHelp: () => void
   settings: LocalSettings; error: string; authState: AuthState; onRetryAccount: () => void
@@ -599,8 +613,9 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
   const [failure, setFailure] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [confirmation, setConfirmation] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'settings', () => JSON.stringify(draft) === JSON.stringify(settings) && !confirming)
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
-    <AccountSection active={accountActive} state={authState} onRetry={onRetryAccount} />
+    <AccountSection registerSearchHandoffGuard={registerSearchHandoffGuard} active={accountActive} state={authState} onRetry={onRetryAccount} />
     <section className="settings-card"><h2>Profile</h2><p>{dataOwnershipLabel(authState, accountActive)}</p>
       {error && <p role="alert">{error}</p>}
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
@@ -655,10 +670,11 @@ function applyCaptureDetails(item: ThoughtObject, details = emptyCaptureDetails)
   const suggestedDate = details.date ? [details.date, details.time].filter(Boolean).join(' ') : item.interpretation.suggestedDate
   return { ...item, context, metadata: { ...item.metadata, deadline: details.date || item.metadata.deadline }, interpretation: { ...item.interpretation, suggestedDate } }
 }
-function Capture({ draft, busy, success, onDraft, onCapture }: { draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
+function Capture({ registerSearchHandoffGuard, draft, busy, success, onDraft, onCapture }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
   const input = useRef<HTMLTextAreaElement>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [details, setDetails] = useState<CaptureDetails>(emptyCaptureDetails)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'capture', () => !busy && !details.folder && !details.date && !details.time)
   useEffect(() => { if (success) { input.current?.focus(); setDetails(emptyCaptureDetails); setDetailsOpen(false) } }, [success])
   return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" />
     <div className="capture-box"><textarea ref={input} autoFocus aria-label="Raw thought" value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); onCapture(details) } }} />
@@ -675,8 +691,9 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function Review({ registerSearchHandoffGuard, objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'review', () => !rejecting)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
   const folders = bankObjects(objects)
@@ -684,7 +701,7 @@ export function Review({ objects, targets = [], onResolve, onResolveReminder, on
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution registerSearchHandoffGuard={registerSearchHandoffGuard} object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
       {ideas.length ? ideas.map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No resolved ideas yet." />}
@@ -703,7 +720,7 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, history, suspended, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; suspended: boolean; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
+function ObjectPanel({ registerSearchHandoffGuard, object, history, suspended, onClose, onSave, onRevise, onCorrect, onReverse }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; suspended: boolean; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
   const [revision, setRevision] = useState(object.interpretation.summary)
   const [correction, setCorrection] = useState(history.currentText)
@@ -715,6 +732,7 @@ function ObjectPanel({ object, history, suspended, onClose, onSave, onRevise, on
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'object-panel', () => !hasUnsavedFieldEdits && !hasUnsavedThoughtDrafts)
   const confirmDiscard = (includeFields: boolean) => {
     if (!(hasUnsavedThoughtDrafts || (includeFields && hasUnsavedFieldEdits))) return true
     return window.confirm('Discard the unsaved changes in this panel? Saved versions and the original capture will stay available.')

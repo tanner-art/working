@@ -5,7 +5,7 @@ import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './mig
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
-import { canOpenSearchResultFromView, enterWorkspaceHistory, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, workspaceHistoryLocation, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
 const at = '2026-10-09T00:00:00.000Z'
@@ -117,17 +117,22 @@ describe('workspace search navigation contract', () => {
     expect(history.state).toEqual({})
   })
 
-  it('compensates rejected Back or Forward without overwriting history and blocks editor handoff', () => {
+  it('compensates rejected Back or Forward without overwriting history and blocks only unsaved handoff', () => {
     const steps: number[] = []
     recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, true)
     recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, false)
     expect(steps).toEqual([1, -1])
-    for (const view of ['settings', 'review', 'schedule', 'calendar', 'canvas']) {
-      expect(canOpenSearchResultFromView(view, false, false)).toBe(false)
+    for (const view of ['today', 'capture', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home']) {
+      expect(canOpenSearchResultFromView(view, false)).toBe(true)
+      expect(canOpenSearchResultFromView(view, true)).toBe(false)
     }
-    expect(canOpenSearchResultFromView('today', true, false)).toBe(false)
-    expect(canOpenSearchResultFromView('today', false, true)).toBe(false)
-    expect(canOpenSearchResultFromView('today', false, false)).toBe(true)
-    expect(canOpenSearchResultFromView('capture', false, false)).toBe(true)
+    expect(canOpenSearchResultFromView('unknown', false)).toBe(false)
+  })
+
+  it('only consumes the exact compensation entry, not an unrelated rapid history event', () => {
+    const expected = workspaceHistoryLocation('https://threadline.test/search', { threadlineSearchEntry: 'this-document' })
+    expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/search', { threadlineSearchEntry: 'this-document' }))).toBe(true)
+    expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/search', { threadlineSearchEntry: 'other-document' }))).toBe(false)
+    expect(isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation('https://threadline.test/', { threadlineSearchOrigin: 'this-document' }))).toBe(false)
   })
 })

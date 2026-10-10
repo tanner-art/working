@@ -63,6 +63,15 @@ type WorkspaceHistory = Readonly<{
 }>
 const historyRecord = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 
+export type WorkspaceHistoryLocation = Readonly<{ href: string; entry: unknown; origin: unknown }>
+export function workspaceHistoryLocation(href: string, state: unknown): WorkspaceHistoryLocation {
+  const record = historyRecord(state)
+  return { href, entry: record.threadlineSearchEntry, origin: record.threadlineSearchOrigin }
+}
+export function isRecoveredWorkspaceLocation(expected: WorkspaceHistoryLocation, current: WorkspaceHistoryLocation): boolean {
+  return expected.href === current.href && expected.entry === current.entry && expected.origin === current.origin
+}
+
 /** Mark both adjacent entries in this document so Back never crosses a page load. */
 export function enterWorkspaceHistory(history: WorkspaceHistory, currentUrl: string, session: string): void {
   history.replaceState({ ...historyRecord(history.state), threadlineSearchOrigin: session }, '', currentUrl)
@@ -78,9 +87,9 @@ export function recoverRejectedWorkspacePopstate(history: Readonly<{ go: (steps:
   history.go(currentSurfaceIsOpen ? 1 : -1)
 }
 
-/** Only views without child-owned edit drafts may hand off directly to a result. */
-export function canOpenSearchResultFromView(view: string, objectPanelOpen: boolean, capturePanelOpen: boolean): boolean {
-  return !objectPanelOpen && !capturePanelOpen && ['today', 'capture', 'commitments', 'digest', 'beta-home'].includes(view)
+/** A clean source view must never prevent a valid Search result handoff. */
+export function canOpenSearchResultFromView(view: string, unsavedChildWork: boolean): boolean {
+  return !unsavedChildWork && ['today', 'capture', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home'].includes(view)
 }
 
 const unavailable = 'This result has changed or is no longer available. Refresh Search and try again.'
