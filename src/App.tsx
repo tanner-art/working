@@ -35,6 +35,7 @@ import { ReviewResolution } from './ReviewResolutionControl'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
 import { canBeginSwipe, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
+import { closeMoreMenu, dismissMoreMenuOutside } from './navigationMenu'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -182,6 +183,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
   const swipeStart = useRef<{ pointerId: number; x: number; y: number; view: View } | null>(null)
   const moreMenu = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => { dismissMoreMenuOutside(moreMenu.current, event.target) }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [])
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
@@ -369,7 +375,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   }
   const navigate = (next: View) => {
     swipeStart.current = null
-    if (moreMenu.current) moreMenu.current.open = false
+    closeMoreMenu(moreMenu.current)
     if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
     setView(next)
@@ -393,7 +399,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape') event.currentTarget.open = false }}><summary aria-label="More options"><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" onClick={() => navigate('settings')}>Settings</button></div></details></aside>
+    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape' && closeMoreMenu(event.currentTarget, true)) { event.preventDefault(); event.stopPropagation() } }}><summary aria-label={view === 'settings' ? 'More options, Settings current page' : 'More options'}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" aria-current={view === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}>Settings</button></div></details></aside>
     <section className="content" onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -421,7 +427,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         setPreferences({ value, error: '' })
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
-      {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
+      {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
       {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
