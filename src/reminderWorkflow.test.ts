@@ -3,11 +3,13 @@ import type { ThoughtObject } from './domain'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
 import { reminderDeliveryFailureMessage } from './ReminderResolution'
-import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
-import { hasCreatedReminderInstruction, setObjectKind, updateObject } from './objectWorkflow'
+import { resolveReminder, resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
+import { hasCreatedReminderInstruction, reviewObjects, reverseObject, setObjectKind, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, saveState } from './store'
 import { accountData, validateData } from './accountStorage'
 import { defaultSettings } from './settings'
+import { resolveReviewCapture } from './reviewResolution'
+import { resolveCommitment } from './commitmentWorkflow'
 
 const target = (): ThoughtObject => ({ id: 'idea:target', kind: 'idea', originalContent: 'Launch concept', source: 'text', createdAt: '2026-09-27T08:00:00Z', confidence: .9, status: 'confirmed', interpretation: { summary: 'Launch concept', suggestedKind: 'idea', rationale: 'Confirmed idea' }, metadata: {}, relationships: [], history: [] })
 const reminder = (): ThoughtObject => ({ id: 'capture:reminder', kind: 'reminder', originalContent: 'Remind me about launch', source: 'text', createdAt: '2026-09-27T08:01:00Z', confidence: .5, status: 'review', interpretation: { summary: 'Launch reminder', suggestedKind: 'reminder', rationale: 'Timing needs review' }, metadata: {}, relationships: [], history: [] })
@@ -27,6 +29,46 @@ describe('Reminder workflow', () => {
     }
     expect(original).toEqual(before)
     expect(current.model!.reminderInstructions![0].deliveryState).toBe(deliveryState)
+  })
+
+  it.each(['active', 'handled', 'dismissed'] as const)('keeps %s Reminder out of Review after Advanced Status edits', async deliveryState => {
+    let current = resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    if (deliveryState !== 'active') current = setReminderDeliveryState(current, current.model!.reminderInstructions![0].id, deliveryState, '2026-09-27T08:03:00.000Z')
+    const original = current.objects.find(item => item.id === 'capture:reminder')!
+    const before = structuredClone(original)
+    for (const status of ['review', 'inbox'] as const) {
+      expect(setObjectStatus(original, status).status).toBe(original.status)
+      const saved = updateObject(original, { ...original, status })
+      expect(saved.status).toBe(original.status)
+      expect(reviewObjects([saved])).toEqual([])
+    }
+    expect(() => reverseObject(original)).toThrow('cannot return to Review')
+    expect(setObjectKind(original, 'reminder')).toBe(original)
+    // Even an already-corrupt historical projection must not show a Review card or resolve again.
+    const stale = { ...original, status: 'review' as const }
+    expect(reviewObjects([stale])).toEqual([])
+    for (const kind of ['idea', 'action', 'commitment', 'reminder'] as const) {
+      await expect(resolveReviewCapture(stale, kind)).resolves.toMatchObject({ status: 'recoverable-error' })
+    }
+    expect(() => resolveReminder(stale, current.model!.semanticObjects, { targetId: 'idea:target', mode: 'daily-log' })).toThrow('already has a created instruction')
+    expect(() => resolveReminderInState({ ...current, objects: current.objects.map(item => item.id === stale.id ? stale : item) }, stale.id,
+      { targetId: 'idea:target', mode: 'daily-log' })).toThrow('already has a created instruction')
+    expect(() => resolveCommitment(stale, { title: 'Launch', dependencyIds: [] })).toThrow('cannot be reclassified')
+    expect(original).toEqual(before)
+    expect(current.model!.reminderInstructions).toHaveLength(1)
+  })
+
+  it('rejects a stale cross-kind save before local data changes', () => {
+    let raw = JSON.stringify(state().model)
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const current = resolveReminderInState(loadStateResult().state, 'capture:reminder',
+      { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    expect(saveState(current)).toBeUndefined()
+    const stored = raw
+    const object = current.objects.find(item => item.id === 'capture:reminder')!
+    expect(() => updateObject(object, { ...object, kind: 'idea' })).toThrow('Its type cannot be changed')
+    expect(raw).toBe(stored)
+    expect(loadStateResult().state.model!.reminderInstructions).toHaveLength(1)
   })
 
   it('keeps unresolved Reminder classification editable, but permits detail edits after resolution through local and account validation', () => {

@@ -25,6 +25,8 @@ describe('Reminder object detail Type affordance', () => {
     expect(markup).toMatch(created ? /Type<select[^>]*disabled=""[^>]*aria-describedby="reminder-type-note"/
       : /Type<select[^>]*><option/)
     expect(markup.includes('Type is fixed after a Reminder is created.')).toBe(created)
+    expect(markup.includes('<option value="review" disabled=""')).toBe(created)
+    expect(markup.includes('<option value="inbox" disabled=""')).toBe(created)
     expect(markup).toContain('>Folder<select')
   })
 })

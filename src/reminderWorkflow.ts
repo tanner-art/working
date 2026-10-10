@@ -1,5 +1,5 @@
 import type { AppState, ReminderInstructionAudit, ResolvedReminderInstruction, SemanticObject, ThoughtObject } from './domain'
-import { setObjectKind } from './objectWorkflow'
+import { hasCreatedReminderInstruction, setObjectKind } from './objectWorkflow'
 import { advanceModelProjection, reconcileCurrentSession } from './store'
 
 export type ReminderMode = 'specific' | 'daily-log'
@@ -17,6 +17,7 @@ function requireChoice(object: ThoughtObject, targets: readonly SemanticObject[]
 
 /** Records the user's explicit Reminder choice on the preserved capture. */
 export function resolveReminder(object: ThoughtObject, targets: readonly SemanticObject[], choice: ReminderChoice, at = new Date().toISOString()): ThoughtObject {
+  if (hasCreatedReminderInstruction(object)) throw new Error('This Reminder already has a created instruction. Its history was left unchanged.')
   requireChoice(object, targets, choice)
   const audit: ReminderInstructionAudit = { instructionId: `reminder:${object.id}`, action: 'created', targetId: choice.targetId, mode: choice.mode,
     ...(choice.mode === 'specific' ? { dueAt: choice.dueAt } : {}) }
@@ -45,9 +46,10 @@ export function setReminderDeliveryState(state: AppState, instructionId: string,
 
 /** Mounted Review boundary: records explicit input, then returns a fresh persisted projection. */
 export function resolveReminderInState(state: AppState, objectId: string, choice: ReminderChoice, at = new Date().toISOString()): AppState {
-  const model = reconcileCurrentSession(state)
   const object = state.objects.find(value => value.id === objectId)
   if (!object) throw new Error('This capture is no longer available. Refresh Review and try again.')
+  if (hasCreatedReminderInstruction(object)) throw new Error('This Reminder already has a created instruction. Its history was left unchanged.')
+  const model = reconcileCurrentSession(state)
   const resolved = resolveReminder(object.kind === 'reminder' ? object : setObjectKind(object, 'reminder'), model.semanticObjects, choice, at)
   return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId ? resolved : value) })
 }
