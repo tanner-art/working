@@ -22,8 +22,13 @@ export function createPinchInteraction(): PinchInteraction {
   return { start: null, preview: null }
 }
 
-export function beginPinchInteraction(interaction: PinchInteraction, viewport: CanvasViewport, first: PointerSample, second: PointerSample, canvasOrigin: CanvasPoint) {
-  interaction.preview = null
+/** Capture the visible transform before a reducer cancel clears transient gesture state. */
+export function viewportAtPinchStart(viewport: CanvasViewport, panPreview: CanvasPoint | null, pinchPreview: CanvasViewport | null): CanvasViewport {
+  return pinchPreview ?? (panPreview ? { ...viewport, ...panPreview } : viewport)
+}
+
+export function beginPinchInteraction(interaction: PinchInteraction, viewport: CanvasViewport, first: PointerSample, second: PointerSample, canvasOrigin: CanvasPoint, preservePreview = false) {
+  interaction.preview = preservePreview ? viewport : null
   interaction.start = { viewport, midpoint: midpoint(first, second, canvasOrigin), distance: distance(first, second) }
 }
 
