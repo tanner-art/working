@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { reviseInterpretation } from './reviewRevision'
+import { resolveReminderInState } from './reminderWorkflow'
 import type { AppState, PersistedState } from './domain'
 import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, type SearchDocument } from './universalSearch'
 
@@ -19,12 +20,17 @@ const semantic = (id: string, kind: 'action' | 'commitment' | 'idea', captureId:
 const canvas = { ...createCanvasRecord(at, 'canvas:orchid'), title: 'Orchid board',
   elements: [{ id: 'element:orchid', type: 'text' as const, x: 0, y: 0, text: 'Orchid sketch' }] }
 const model = (): PersistedState => ({
-  schemaVersion: 2, captures: structuredClone(captures), sourceCorrections: [{ id: 'correction:a', captureId: 'capture:a', correctedAt: at, correctedContent: 'Corrected teal source' }],
+  schemaVersion: 2, captures: structuredClone(captures), sourceCorrections: [
+    { id: 'correction:a', captureId: 'capture:a', correctedAt: at, correctedContent: 'Corrected teal source' },
+    { id: 'correction:r', captureId: 'capture:r', correctedAt: at, correctedContent: 'Corrected teal orchid reminder' },
+  ],
   interpretations: ['a', 'c', 'i', 'r'].map(id => ({ id: `interpretation:${id}`, version: 1,
     captureIds: [`capture:${id}`], recordedAt: at, summary: 'Orchid', rationale: '', confidence: 1,
     proposedKind: id === 'r' ? 'unresolved' as const : 'idea' as const, reviewState: 'accepted' as const,
     legacy: { id, kind: id === 'r' ? 'reminder' as const : 'idea' as const, interpretation: { summary: 'Orchid', suggestedKind: 'idea' as const, rationale: '' },
-      confidence: 1, relationships: [], history: [], status: 'confirmed' as const, metadata: {} },
+      confidence: 1, relationships: [], history: id === 'r' ? [{ at, event: 'Created Daily log reminder', reminderInstruction: {
+        instructionId: 'reminder:r', action: 'created' as const, targetId: 'a', mode: 'daily-log' as const,
+      } }] : [], status: 'confirmed' as const, metadata: {} },
   })),
   semanticObjects: [semantic('a', 'action', 'capture:a', 'Orchid execution'), semantic('c', 'commitment', 'capture:c', 'Orchid obligation'),
     semantic('i', 'idea', 'capture:i', 'Orchid concept')],
@@ -44,6 +50,9 @@ describe('universal search source adapters', () => {
     expect(matches.find(result => result.document.id === 'capture:a')?.matchedFields).toEqual(['original'])
     expect(index.query('teal')[0]).toMatchObject({ document: { id: 'capture:a' }, matchedFields: ['corrected-source'] })
     expect(index.query('orchid teal')[0]).toMatchObject({ document: { id: 'capture:a' }, matchedFields: ['original', 'corrected-source'] })
+    expect(index.query('teal').find(result => result.document.kind === 'reminder')).toMatchObject({
+      document: { id: 'reminder:r' }, matchedFields: ['reminder-source'],
+    })
     expect(index.query('execution')).toMatchObject([{ document: { kind: 'action', id: 'a', captureIds: ['capture:a'],
       interpretationIds: ['interpretation:a'] }, matchedFields: ['current-meaning'] }])
     expect(index.query('sketch')[0]).toMatchObject({ document: { kind: 'canvas', id: 'canvas:orchid' }, matchedFields: ['canvas-element'] })
@@ -86,32 +95,73 @@ describe('universal search source adapters', () => {
     expect(createUniversalSearchIndex([duplicate, duplicate]).query('orchid')).toEqual([])
   })
 
-  it('keeps a model-less legacy projection searchable without inventing semantic provenance', () => {
+  it('canonicalizes model-less state and does not promote unconfirmed work or corrections without audit', () => {
     const legacy: AppState = { canvas: [], objects: [{ id: 'old', kind: 'idea', originalContent: 'Orchid original', currentContent: 'Teal correction',
       source: 'text', createdAt: at, interpretation: { summary: 'Cobalt idea', suggestedKind: 'idea', rationale: '' },
-      confidence: 1, relationships: [], history: [], status: 'confirmed', metadata: {} }] }
+      confidence: 1, relationships: [], history: [], status: 'confirmed', metadata: {} },
+      { id: 'unconfirmed-action', kind: 'action', originalContent: 'Do risky work', source: 'text', createdAt: at,
+        interpretation: { summary: 'Risky action', suggestedKind: 'action', rationale: '' },
+        confidence: 1, relationships: [], history: [], status: 'confirmed', metadata: {} },
+      { id: 'unconfirmed-commitment', kind: 'commitment', originalContent: 'Promise risky work', source: 'text', createdAt: at,
+        interpretation: { summary: 'Risky commitment', suggestedKind: 'commitment', rationale: '' },
+        confidence: 1, relationships: [], history: [], status: 'confirmed', metadata: {} }] }
     const index = createUniversalSearchIndex(searchDocumentsFromAppState(legacy))
     expect(index.query('orchid')[0].document.kind).toBe('capture')
-    expect(index.query('teal')[0].matchedFields).toEqual(['corrected-source'])
+    expect(index.query('teal')).toEqual([])
     expect(index.query('cobalt')[0].document.kind).toBe('idea')
+    expect(index.query('risky').every(result => result.document.kind === 'capture')).toBe(true)
+  })
+
+  it('indexes only resolved reminder instructions from real migration evidence', () => {
+    const source: AppState = { canvas: [], objects: [
+      { id: 'idea:target', kind: 'idea', originalContent: 'Launch concept', source: 'text', createdAt: at,
+        interpretation: { summary: 'Launch concept', suggestedKind: 'idea', rationale: '' }, confidence: 1,
+        relationships: [], history: [], status: 'confirmed', metadata: {} },
+      { id: 'reminder:source', kind: 'reminder', originalContent: 'Remind me about launch', source: 'text', createdAt: at,
+        interpretation: { summary: 'Launch reminder', suggestedKind: 'reminder', rationale: '' }, confidence: .5,
+        relationships: [], history: [], status: 'review', metadata: {} },
+    ] }
+    const pending = legacyUiProjection(migrateLegacyState(source))
+    expect(searchDocumentsFromAppState(pending).some(document => document.kind === 'reminder')).toBe(false)
+    const rejected = legacyUiProjection(migrateLegacyState({ ...source, objects: [source.objects[0], {
+      ...source.objects[1], history: [{ at, event: 'Rejected interpretation', reviewDecision: 'rejected' }],
+    }] }))
+    expect(searchDocumentsFromAppState(rejected).some(document => document.kind === 'reminder')).toBe(false)
+    const resolved = resolveReminderInState(pending, 'reminder:source', { targetId: 'idea:target', mode: 'daily-log' })
+    expect(searchDocumentsFromAppState(resolved).filter(document => document.kind === 'reminder')).toMatchObject([{
+      id: 'reminder:reminder:source', targetId: 'idea:target', captureIds: ['capture:reminder:source'],
+    }])
+    const rejectedInstruction = model()
+    rejectedInstruction.interpretations[3] = { ...rejectedInstruction.interpretations[3], reviewState: 'rejected' }
+    expect(searchDocumentsFromModel(rejectedInstruction).some(document => document.kind === 'reminder')).toBe(false)
+    const unauditedInstruction = model()
+    unauditedInstruction.interpretations[3].legacy.history = []
+    expect(searchDocumentsFromModel(unauditedInstruction).some(document => document.kind === 'reminder')).toBe(false)
   })
 })
 
 describe('universal search performance', () => {
-  it('meets cold and warm query thresholds over 10,000 deterministic documents', () => {
-    const documents: SearchDocument[] = Array.from({ length: 10_000 }, (_, index) => ({ kind: 'capture', id: `capture:${index}`,
-      captureIds: [`capture:${index}`], interpretationIds: [], fields: { original: `Notebook entry ${index} amber signal` } }))
-    const index = createUniversalSearchIndex(documents)
+  it('meets cold construction+query and warm query thresholds over 10,000 mixed documents', () => {
+    const kinds = ['capture', 'action', 'commitment', 'reminder', 'idea', 'canvas'] as const
+    const fields = ['original', 'current-meaning', 'current-meaning', 'reminder-source', 'current-meaning', 'canvas-title'] as const
+    const documents: SearchDocument[] = Array.from({ length: 10_000 }, (_, position) => {
+      const kind = kinds[position % kinds.length]
+      const text = position % 100 === 0 ? `Amber signal notebook ${position}` : `Blue violet notebook ${position}`
+      return { kind, id: `${kind}:${position}`, captureIds: kind === 'canvas' ? [] : [`capture:${position}`],
+        interpretationIds: kind === 'capture' || kind === 'canvas' ? [] : [`interpretation:${position}`],
+        fields: { [fields[position % fields.length]]: text } }
+    })
     const coldAt = performance.now()
+    const index = createUniversalSearchIndex(documents)
     const cold = index.query('amber signal', 10_000)
     const coldMs = performance.now() - coldAt
     const warmAt = performance.now()
     const warm = index.query('amber signal', 10_000)
     const warmMs = performance.now() - warmAt
     const runtime = (globalThis as { process?: { version: string; platform: string; arch: string } }).process
-    console.info(`Universal Search benchmark: 10000 documents, Node ${runtime?.version ?? 'unknown'}, ${runtime?.platform ?? 'unknown'}/${runtime?.arch ?? 'unknown'}; cold ${coldMs.toFixed(2)} ms, warm ${warmMs.toFixed(2)} ms`)
-    expect(cold).toHaveLength(10_000)
-    expect(warm).toHaveLength(10_000)
+    console.info(`Universal Search benchmark: 10000 mixed six-type documents, 100 matches, Node ${runtime?.version ?? 'unknown'}, ${runtime?.platform ?? 'unknown'}/${runtime?.arch ?? 'unknown'}; cold build+query ${coldMs.toFixed(2)} ms, warm query ${warmMs.toFixed(2)} ms`)
+    expect(cold).toHaveLength(100)
+    expect(warm).toHaveLength(100)
     expect(coldMs).toBeLessThanOrEqual(100)
     expect(warmMs).toBeLessThanOrEqual(50)
   })

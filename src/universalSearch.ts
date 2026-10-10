@@ -1,4 +1,4 @@
-import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, SemanticObject, SourceCorrection, ThoughtObject } from './domain'
+import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, SemanticObject, SourceCorrection } from './domain'
 import { bankFromLegacy, isCanvasRecord } from './canvasBank'
 import { reconcileLegacyUi } from './migration'
 
@@ -94,27 +94,25 @@ function semanticDocuments(objects: readonly SemanticObject[], captures: Set<str
   })
 }
 
-function reminderDocuments(model: PersistedState, captures: Map<string, CaptureRecord>, interpretations: Set<string>): SearchDocument[] {
+function reminderDocuments(model: PersistedState, captures: Map<string, CaptureRecord>, interpretations: Set<string>, corrections: readonly SourceCorrection[]): SearchDocument[] {
   const targets = new Set(model.semanticObjects.filter(value => value && validId(value.id)).map(value => value.id))
-  const resolved: SearchDocument[] = (Array.isArray(model.reminderInstructions) ? model.reminderInstructions : []).flatMap(instruction => {
+  const latestCorrection = new Map<string, string>()
+  for (const correction of corrections) if (validId(correction?.captureId) && validText(correction?.correctedContent)) latestCorrection.set(correction.captureId, correction.correctedContent)
+  return (Array.isArray(model.reminderInstructions) ? model.reminderInstructions : []).flatMap(instruction => {
+    const source = model.interpretations.find(reading => reading?.id === instruction?.sourceInterpretationId)
+    const current = source && model.interpretations.filter(reading => reading?.legacy?.id === source.legacy?.id).at(-1)
+    const creation = source?.legacy?.history?.find(entry => entry.reminderInstruction?.instructionId === instruction?.id && entry.reminderInstruction.action === 'created')?.reminderInstruction
     if (!instruction || !validId(instruction.id) || !validId(instruction.targetId) || !targets.has(instruction.targetId) ||
         !stableIds(instruction.captureIds) || !instruction.captureIds.length || !instruction.captureIds.every(id => captures.has(id)) ||
-        !validId(instruction.sourceInterpretationId) || !interpretations.has(instruction.sourceInterpretationId)) return []
+        !validId(instruction.sourceInterpretationId) || !interpretations.has(instruction.sourceInterpretationId) ||
+        !source || !instruction.captureIds.every(id => source.captureIds?.includes(id)) ||
+        creation?.targetId !== instruction.targetId || creation.mode !== instruction.mode ||
+        !current || current.reviewState === 'rejected' || current.legacy.kind !== 'reminder' || current.legacy.status !== 'confirmed' ||
+        !current.legacy.history?.some(entry => entry.reminderInstruction?.instructionId === instruction.id && entry.reminderInstruction.action === 'created')) return []
     return [{ kind: 'reminder' as const, id: instruction.id, captureIds: [...instruction.captureIds],
       interpretationIds: [instruction.sourceInterpretationId], targetId: instruction.targetId,
-      fields: { 'reminder-source': instruction.captureIds.map(id => captures.get(id)!.originalContent).join(' ') } }]
+      fields: { 'reminder-source': instruction.captureIds.map(id => latestCorrection.get(id) ?? captures.get(id)!.originalContent).join(' ') } }]
   })
-  const resolvedIds = new Set(resolved.map(value => value.id))
-  const latest = new Map<string, PersistedState['interpretations'][number]>()
-  for (const reading of model.interpretations) if (reading?.legacy && validId(reading.legacy.id) && validId(reading.id)) latest.set(reading.legacy.id, reading)
-  for (const reading of latest.values()) {
-    const id = `reminder:${reading.legacy.id}`
-    if (resolvedIds.has(id) || reading.legacy.kind !== 'reminder' || !stableIds(reading.captureIds) || !reading.captureIds.length ||
-        !reading.captureIds.every(captureId => captures.has(captureId))) continue
-    resolved.push({ kind: 'reminder', id, captureIds: [...reading.captureIds], interpretationIds: [reading.id],
-      fields: { 'reminder-source': reading.captureIds.map(captureId => captures.get(captureId)!.originalContent).join(' ') } })
-  }
-  return resolved
 }
 
 function canvasText(elements: readonly CanvasElement[]): string {
@@ -130,33 +128,16 @@ export function searchDocumentsFromModel(model: PersistedState): SearchDocument[
   if (!model || !Array.isArray(model.captures) || !Array.isArray(model.semanticObjects) || !Array.isArray(model.interpretations)) return []
   const captures = new Map(model.captures.filter(value => value && validId(value.id) && validText(value.originalContent)).map(value => [value.id, value]))
   const interpretations = new Set(model.interpretations.filter(value => value && validId(value.id)).map(value => value.id))
+  const corrections = Array.isArray(model.sourceCorrections) ? model.sourceCorrections : []
   const bank = model.canvasBank?.canvases ?? bankFromLegacy(Array.isArray(model.canvas) ? model.canvas : [], model.canvasViewport).canvases
-  return [...captureDocuments(model.captures, Array.isArray(model.sourceCorrections) ? model.sourceCorrections : []),
-    ...semanticDocuments(model.semanticObjects, new Set(captures.keys()), interpretations), ...reminderDocuments(model, captures, interpretations),
+  return [...captureDocuments(model.captures, corrections),
+    ...semanticDocuments(model.semanticObjects, new Set(captures.keys()), interpretations), ...reminderDocuments(model, captures, interpretations, corrections),
     ...canvasDocuments(Array.isArray(bank) ? bank : [])]
 }
 
 /** A loaded local or account AppState uses its canonical model, avoiding duplicate UI projections. */
 export function searchDocumentsFromAppState(state: AppState): SearchDocument[] {
   if (!state) return []
-  if (state.model) {
-    try { return searchDocumentsFromModel(reconcileLegacyUi(state)) }
-    catch { return [] }
-  }
-  const objects = Array.isArray(state.objects) ? state.objects : []
-  const captures: SearchDocument[] = objects.flatMap((object: ThoughtObject) => validId(object?.id) && validText(object?.originalContent) ? [{
-    kind: 'capture' as const, id: `capture:${object.id}`, captureIds: [`capture:${object.id}`], interpretationIds: [],
-    fields: { original: object.originalContent, ...(validText(object.currentContent) ? { 'corrected-source': object.currentContent } : {}) },
-  }] : [])
-  const semantic: SearchDocument[] = objects.flatMap(object => validId(object?.id) && ['action', 'commitment', 'idea'].includes(object.kind) &&
-    validText(object.interpretation?.summary) && ['confirmed', 'complete', 'archived'].includes(object.status) ? [{
-      kind: object.kind as SearchKind, id: object.id, captureIds: [`capture:${object.id}`], interpretationIds: [],
-      fields: { 'current-meaning': object.interpretation.summary },
-    }] : [])
-  const reminders: SearchDocument[] = objects.flatMap(object => validId(object?.id) && object.kind === 'reminder' && validText(object.originalContent) ? [{
-    kind: 'reminder' as const, id: `reminder:${object.id}`, captureIds: [`capture:${object.id}`], interpretationIds: [],
-    fields: { 'reminder-source': object.originalContent },
-  }] : [])
-  const bank = state.canvasBank?.canvases ?? bankFromLegacy(Array.isArray(state.canvas) ? state.canvas : [], state.canvasViewport).canvases
-  return [...captures, ...semantic, ...reminders, ...canvasDocuments(Array.isArray(bank) ? bank : [])]
+  try { return searchDocumentsFromModel(reconcileLegacyUi(state)) }
+  catch { return [] }
 }
