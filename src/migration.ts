@@ -211,11 +211,26 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
   model.relationships = model.relationships.filter(r => r.sourceId !== item.id)
   item.relationships.forEach((r, index) => model.relationships.push({ ...copy(r), id: `relationship:${item.id}:${index}`,
     sourceId: item.id, scope: 'semantic', provenance: { interpretationId: interpretation.id, evidence: 'legacy-unverified' } }))
-  const confirmations = item.history.filter(entry => entry.relationshipConfirmation)
-  if (!unique(confirmations.map(entry => entry.relationshipConfirmation!.id)) ||
-    !unique(confirmations.map(entry => entry.relationshipConfirmation!.targetId)) || confirmations.some(entry =>
-    entry.relationshipConfirmation!.targetId === item.id || !Number.isFinite(Date.parse(entry.at)))) fail()
-  for (const entry of confirmations) {
+  const decisions = item.history.filter(entry => entry.relationshipConfirmation || entry.relationshipReversal)
+  if (!unique(decisions.map(entry => entry.relationshipConfirmation?.id ?? entry.relationshipReversal?.id ?? ''))) fail()
+  const active = new Map<string, HistoryEvent>()
+  const activeTargets = new Set<string>()
+  for (const entry of decisions) {
+    if (entry.relationshipConfirmation) {
+      const gesture = entry.relationshipConfirmation
+      if (gesture.targetId === item.id || activeTargets.has(gesture.targetId) || !Number.isFinite(Date.parse(entry.at))) fail()
+      active.set(gesture.id, entry)
+      activeTargets.add(gesture.targetId)
+      continue
+    }
+    const reversal = entry.relationshipReversal!
+    const confirmed = active.get(reversal.reverses)
+    if (!confirmed || confirmed.relationshipConfirmation?.targetId !== reversal.targetId ||
+      Date.parse(entry.at) < Date.parse(confirmed.at)) fail()
+    active.delete(reversal.reverses)
+    activeTargets.delete(reversal.targetId)
+  }
+  for (const entry of active.values()) {
     const gesture = entry.relationshipConfirmation!
     model.relationships.push({ id: `relationship:confirmed:${gesture.id}`, sourceId: item.id, targetId: gesture.targetId,
       type: gesture.type, scope: 'semantic', provenance: { interpretationId: interpretation.id,
@@ -428,6 +443,9 @@ export function isPersistedState(value: unknown): value is PersistedState {
       link.sourceId === link.targetId || link.type !== 'relates_to' || !link.provenance.confirmedAt ||
       !Number.isFinite(Date.parse(link.provenance.confirmedAt)))) return false
     const latestReadings = m.legacyUiIds.map(id => m.interpretations.filter(reading => reading.legacy.id === id).at(-1)!).filter(Boolean)
+    const relationshipDecisionIds = latestReadings.flatMap(reading => reading.legacy.history.flatMap(entry =>
+      entry.relationshipConfirmation ? [entry.relationshipConfirmation.id] : entry.relationshipReversal ? [entry.relationshipReversal.id] : []))
+    if (!unique(relationshipDecisionIds)) return false
     const activeActionSchedules = new Map((m.stagedActions ?? []).filter(stage => stage.status === 'scheduled' && stage.schedule).map(stage => [stage.schedule!.eventId, stage]))
     for (const reading of latestReadings) {
       for (const entry of reading.legacy.history) if (entry.actionSchedule && !activeActionSchedules.has(entry.actionSchedule.eventId) &&

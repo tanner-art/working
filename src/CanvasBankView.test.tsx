@@ -77,12 +77,23 @@ describe('Canvas Bank search surface', () => {
     const linked = connectThoughts(baseline, first.id, second.id, 'gesture:ui', '2026-10-10T12:00:00.000Z')
     const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[first, second]}
       connections={confirmedConnectionGraph(linked)} focusTarget={null} onCreate={() => undefined}
-      onOpen={() => undefined} onOpenIdea={() => undefined} onConnect={() => undefined} />)
+      onOpen={() => undefined} onOpenIdea={() => undefined} onConnect={() => undefined} onDisconnect={() => undefined} />)
     expect(markup).toContain('Connections <span>1</span>')
     expect(markup).toContain('<summary>＋ Connect thoughts</summary>')
     expect(markup).toContain('Canvas arrows and older unverified links stay separate.')
     expect(markup).toContain('aria-label="Open Garden"')
     expect(markup).toContain('aria-label="Open Sunlight"')
-    expect(markup).toContain('<line')
+    expect(markup).toContain('<path')
+    expect(markup).toContain('aria-label="Remove connection between Garden and Sunlight"')
+  })
+
+  it('keeps the Bank and backup available when canonical connection projection cannot be verified', () => {
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [canvas('canvas:one', 'Product map', '2026-09-26T10:00:00.000Z')] }}
+      ideas={[]} connectionsUnavailable focusTarget={null} onCreate={() => undefined} onOpen={() => undefined}
+      onOpenIdea={() => undefined} onBackup={() => undefined} />)
+    expect(markup).toContain('aria-label="Open Product map"')
+    expect(markup).toContain('Connections unavailable')
+    expect(markup).toContain('Download backup')
+    expect(markup).not.toContain('No confirmed connections yet.')
   })
 })

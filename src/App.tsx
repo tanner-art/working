@@ -8,7 +8,7 @@ import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_I
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { Canvas } from './Canvas'
 import { CanvasBank } from './CanvasBankView'
-import { confirmedConnectionGraph, connectThoughts } from './semanticLinks'
+import { connectThoughts, removeThoughtConnection, safeConnectionGraph } from './semanticLinks'
 import { useCanvasWorkspace } from './useCanvasWorkspace'
 import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
@@ -20,7 +20,7 @@ import { CalendarView } from './CalendarView'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
@@ -315,7 +315,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     {accountMessage && <p role="alert">{accountMessage}</p>}
   </section>
   const downloadBackup = () => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify({ ...state, model: cloud ? cloud.session.snapshot(state, preferences.value, digest!).model : serializeState(state) }, null, 2)], { type: 'application/json' }))
+    let payload: unknown
+    try { payload = { ...state, model: cloud ? cloud.session.snapshot(state, preferences.value, digest!).model : serializeState(state) } }
+    catch { payload = { ...state, backupWarning: 'Canonical validation failed; this is the unverified in-tab state, preserved without modification.' } }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
     link.href = url; link.download = 'threadline-backup.json'; link.click()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
@@ -370,6 +373,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
   const canvasBank = canvasBankForState(state)
   const openCanvas = openCanvasId ? canvasBank.canvases.find(item => item.id === openCanvasId) : undefined
+  const connectionProjection = useMemo(() => view === 'canvas' && !openCanvasId ? safeConnectionGraph(state) : undefined,
+    [state, view, openCanvasId])
   const createCanvas = () => {
     const record = createCanvasRecord()
     update(current => addCanvas(current, record))
@@ -450,7 +455,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
       {view === 'schedule' && <ScheduleView state={state} update={update} />}
-      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} ideas={resolvedIdeas(state.objects)} connections={confirmedConnectionGraph(state)} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} onOpenIdea={setSelectedObjectId} onConnect={(sourceId, targetId) => update(current => connectThoughts(current, sourceId, targetId))} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
+      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} ideas={resolvedIdeas(state.objects)} connections={connectionProjection?.graph} connectionsUnavailable={connectionProjection?.unavailable} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} onOpenIdea={setSelectedObjectId} onConnect={(sourceId, targetId) => update(current => connectThoughts(current, sourceId, targetId))} onDisconnect={id => update(current => removeThoughtConnection(current, id))} onBackup={downloadBackup} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
   </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}

@@ -67,12 +67,13 @@
 .connection-add button { min-height: 44px; }
 .connection-graph-scroll { overflow-x: auto; border: 1px solid #d9ddd5; border-radius: 12px; background: #fbfcf7; }
 .connection-graph-scroll svg { display: block; width: max(100%, 760px); height: auto; }
-.connection-graph-scroll line { stroke: #9bb787; stroke-width: 2; }
+.connection-graph-scroll path { fill: none; stroke: #9bb787; stroke-width: 2; }
 .connection-graph-scroll circle { fill: #e8f0dc; stroke: #748f60; stroke-width: 2; }
 .connection-graph-scroll text { fill: #26352e; font-size: 11px; }
 .connection-list { display: grid; gap: 7px; margin: 16px 0 0; padding: 0; list-style: none; }
 .connection-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .connection-list button { border: 0; padding: 4px 0; background: transparent; color: #315c31; text-decoration: underline; text-align: left; }
+.connection-list .connection-remove { margin-left: auto; min-width: 44px; min-height: 44px; text-align: center; text-decoration: none; font-size: 20px; }
 .connection-empty { margin-top: 18px; }
 .canvas-card-visual { position: relative; height: 82px; border: 1px solid #dce2d8; border-radius: 8px; overflow: hidden; background-color: #f8f8f3; background-image: radial-gradient(#dfe4db 1px, transparent 1px); background-size: 12px 12px; }
 .canvas-card-visual i { position: absolute; display: block; width: 30px; height: 17px; border: 1px solid #aec09f; border-radius: 4px; background: #e8f0dc; }

@@ -55,6 +55,8 @@ export interface HistoryEvent {
   event: string
   /** A user-authored semantic link; Canvas arrows never create this audit. */
   relationshipConfirmation?: { id: string; targetId: string; type: 'relates_to'; source: 'user-confirmed-link' }
+  /** Withdraws one exact manual link without deleting its original evidence. */
+  relationshipReversal?: { id: string; reverses: string; targetId: string; source: 'user-reversed-link' }
   confirmation?: ConfirmationGesture
   actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
   actionPriority?: { priority: ActionPriority; source: 'schedule-priority-selection' }

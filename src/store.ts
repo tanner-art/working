@@ -132,6 +132,12 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
       typeof item.relationshipConfirmation.targetId === 'string' && !!item.relationshipConfirmation.targetId &&
       item.relationshipConfirmation.type === 'relates_to' && item.relationshipConfirmation.source === 'user-confirmed-link' &&
       Number.isFinite(Date.parse(item.at)))) &&
+    (item.relationshipReversal === undefined || (!!item.relationshipReversal && typeof item.relationshipReversal === 'object' &&
+      typeof item.relationshipReversal.id === 'string' && !!item.relationshipReversal.id &&
+      typeof item.relationshipReversal.reverses === 'string' && !!item.relationshipReversal.reverses &&
+      typeof item.relationshipReversal.targetId === 'string' && !!item.relationshipReversal.targetId &&
+      item.relationshipReversal.source === 'user-reversed-link' && Number.isFinite(Date.parse(item.at)))) &&
+    !(item.relationshipConfirmation && item.relationshipReversal) &&
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
     (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&

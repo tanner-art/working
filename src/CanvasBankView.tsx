@@ -1,38 +1,33 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { listCanvases } from './canvasBank'
 import { filterCanvasesByTitle } from './canvasBankSearch'
 import type { CanvasBank as CanvasBankModel, ThoughtObject } from './domain'
 import type { ConnectionGraph } from './semanticLinks'
+import { connectionLayout } from './connectionLayout'
 
 function GraphPreview({ graph }: { graph: ConnectionGraph }) {
-  const columns = 4
-  const rows = Math.ceil(graph.nodes.length / columns)
-  const height = Math.max(170, rows * 120 + 30)
-  const position = new Map(graph.nodes.map((node, index) => [node.id, {
-    x: 120 + (index % columns) * 190, y: 85 + Math.floor(index / columns) * 120,
-  }]))
-  return <div className="connection-graph-scroll" aria-hidden="true"><svg viewBox={`0 0 800 ${height}`} role="presentation">
-    {graph.links.map(link => {
-      const source = position.get(link.sourceId)
-      const target = position.get(link.targetId)
-      return source && target ? <line key={link.id} x1={source.x} y1={source.y} x2={target.x} y2={target.y} /> : null
-    })}
+  const layout = useMemo(() => connectionLayout(graph), [graph])
+  return <div className="connection-graph-scroll" aria-hidden="true"><svg viewBox={`0 0 ${layout.size} ${layout.size}`} role="presentation">
+    {layout.paths.map(path => <path key={path.id} d={path.d} />)}
     {graph.nodes.map(node => {
-      const point = position.get(node.id)!
+      const point = layout.positions.get(node.id)!
       return <g key={node.id}><circle cx={point.x} cy={point.y} r="36" /><text x={point.x} y={point.y + 56} textAnchor="middle">{node.label.slice(0, 24)}</text></g>
     })}
   </svg></div>
 }
 
-export function CanvasBank({ bank, ideas, connections, focusTarget, onCreate, onOpen, onOpenIdea, onConnect }: {
+export function CanvasBank({ bank, ideas, connections, connectionsUnavailable, focusTarget, onCreate, onOpen, onOpenIdea, onConnect, onDisconnect, onBackup }: {
   bank: CanvasBankModel
   ideas: ThoughtObject[]
   connections?: ConnectionGraph
+  connectionsUnavailable?: boolean
   focusTarget: 'create' | string | null
   onCreate: () => void
   onOpen: (id: string) => void
   onOpenIdea: (id: string) => void
   onConnect?: (sourceId: string, targetId: string) => void
+  onDisconnect?: (relationshipId: string) => void
+  onBackup?: () => void
 }) {
   const createRef = useRef<HTMLButtonElement>(null)
   const cardRefs = useRef(new Map<string, HTMLButtonElement>())
@@ -78,7 +73,7 @@ export function CanvasBank({ bank, ideas, connections, focusTarget, onCreate, on
           <strong>{item.currentContent ?? item.originalContent}</strong><small>{item.interpretation.summary}</small><span aria-hidden="true">→</span>
         </button>)}</div>}
     </section>
-    {connections && onConnect && <section className="connection-section" aria-labelledby="connections-heading">
+    {connectionsUnavailable ? <section className="connection-section" aria-labelledby="connections-heading"><h2 id="connections-heading">Connections unavailable</h2><p role="alert">Your saved thoughts and canvases are still available. Connection data could not be verified, so it is hidden until this is resolved.</p>{onBackup && <button type="button" onClick={onBackup}>Download backup</button>}</section> : connections && onConnect && <section className="connection-section" aria-labelledby="connections-heading">
       <h2 id="connections-heading">Connections <span>{connections.links.length}</span></h2>
       <p>Only links you confirm appear here. Canvas arrows and older unverified links stay separate.</p>
       <details className="connection-add"><summary>＋ Connect thoughts</summary>
@@ -87,14 +82,15 @@ export function CanvasBank({ bank, ideas, connections, focusTarget, onCreate, on
           <label>To<select required value={targetId} onChange={event => setTargetId(event.target.value)}><option value="">Choose thought</option>{connections.candidates.filter(node => node.id !== sourceId).map(node => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
           <button type="submit" disabled={connections.candidates.length < 2}>Connect</button>
         </form>
-        {connectionMessage && <p role={connectionMessage.startsWith('Connection added') ? 'status' : 'alert'}>{connectionMessage}</p>}
       </details>
-      {connections.links.length === 0 ? <p className="connection-empty">No confirmed connections yet.</p> : <>
+      {connectionMessage && <p role={connectionMessage.startsWith('Connection added') || connectionMessage.startsWith('Connection removed') ? 'status' : 'alert'}>{connectionMessage}</p>}
+      {connections.hiddenCount > 0 && <p>{connections.hiddenCount} confirmed {connections.hiddenCount === 1 ? 'connection is' : 'connections are'} hidden because a thought is archived or back in review.</p>}
+      {connections.links.length === 0 ? <p className="connection-empty">{connections.hiddenCount > 0 ? 'No confirmed connections are currently visible.' : 'No confirmed connections yet.'}</p> : <>
         <GraphPreview graph={connections} />
         <ul className="connection-list">{connections.links.map(link => {
           const source = connections.nodes.find(node => node.id === link.sourceId)
           const target = connections.nodes.find(node => node.id === link.targetId)
-          return source && target ? <li key={link.id}><button onClick={() => onOpenIdea(source.id)} aria-label={`Open ${source.label}`}>{source.label}</button><span aria-hidden="true">↔</span><button onClick={() => onOpenIdea(target.id)} aria-label={`Open ${target.label}`}>{target.label}</button></li> : null
+          return source && target ? <li key={link.id}><button onClick={() => onOpenIdea(source.id)} aria-label={`Open ${source.label}`}>{source.label}</button><span aria-hidden="true">↔</span><button onClick={() => onOpenIdea(target.id)} aria-label={`Open ${target.label}`}>{target.label}</button>{onDisconnect && <button type="button" className="connection-remove" aria-label={`Remove connection between ${source.label} and ${target.label}`} onClick={() => { try { onDisconnect(link.id); setConnectionMessage('Connection removed. Its earlier confirmation remains in your history.') } catch (error) { setConnectionMessage(error instanceof Error ? error.message : 'Connection was not removed.') } }}>×</button>}</li> : null
         })}</ul>
       </>}
     </section>}
