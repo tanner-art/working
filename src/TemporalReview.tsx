@@ -8,7 +8,7 @@ export function TemporalReview({ state, onUpdate }: { state: AppState; onUpdate:
   const proposals = [
     ...model.semanticObjects.map(o => deadlineProposal(model, o.id)),
     ...model.calendarEvents.map(e => eventProposal(model, e.id))
-  ].filter((p): p is TemporalTarget => !!p)
+  ].filter((p): p is Exclude<TemporalTarget, { kind: 'direct-calendar-event' }> => !!p)
   return <section className="page" aria-label="Timing review">
     <h2>Confirm timing separately</h2>
     <p>Each confirmation fixes only the date or event shown. It does not confirm work or an obligation. Dates without a time remain date-only deadlines.</p>

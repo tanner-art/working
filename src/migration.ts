@@ -1,4 +1,4 @@
-import { validTemporalHistory } from './temporalConfirmation'
+import { directCalendarEventsFromHistory, validTemporalHistory } from './temporalConfirmation'
 import { isGroupingReviewState } from './groupingProposal'
 import type { ActionPriority, AppState, CommitmentScheduleAudit, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
@@ -61,18 +61,30 @@ function materializeReminderInstructions(model: PersistedState) {
 }
 
 const copy = <T>(value: T): T => structuredClone(value)
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+// UI projections can insert the same persisted fields in a different order. A
+// key-order-only difference is not a new interpretation or confirmation event.
+const canonicalJson = (value: unknown): string | undefined => JSON.stringify(value, (_key, current: unknown) => {
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current
+  return Object.fromEntries(Object.entries(current).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+})
+const equal = (a: unknown, b: unknown): boolean => canonicalJson(a) === canonicalJson(b)
 const unique = (ids: string[]) => ids.every(id => id.length > 0) && new Set(ids).size === ids.length
 const fail = (): never => { throw new Error('Saved model is invalid or ambiguous; stored data must remain untouched.') }
 const actionPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
-/** Action-only history is meaningful only while the current interpretation is an Action. */
+/** Preserve and validate historical Action audit after reclassification; only current Actions project a stage. */
 function stagedAction(item: ThoughtObject, captureId: string): StagedAction | undefined {
-  if (item.kind !== 'action') return undefined
+  const hasPlanAudit = item.history.some(entry => entry.planEligibility !== undefined)
+  // A reclassified Action retains valid historical plan gestures, but an
+  // unrelated object cannot carry a free-standing eligibility assertion.
+  if (item.kind !== 'action' && !hasPlanAudit) return undefined
   const stages = item.history.map((entry, index) => ({ entry, index })).filter(value => value.entry.actionStage !== undefined)
   if (stages.length > 1 || stages.some(value => value.entry.actionStage?.source !== 'review-action-staging')) fail()
   const stageIndex = stages[0]?.index ?? -1
-  if (stageIndex < 0) return undefined
+  if (stageIndex < 0) {
+    if (hasPlanAudit) fail()
+    return undefined
+  }
   const stage = item.history[stageIndex]
   const initial = stage.actionStage?.priority
   if (!initial || !actionPriorities.includes(initial) || !Number.isFinite(Date.parse(stage.at))) fail()
@@ -85,6 +97,19 @@ function stagedAction(item: ThoughtObject, captureId: string): StagedAction | un
   if (schedules.length > 1) fail()
   const schedule = schedules[0]?.actionSchedule
   if (schedule && (!schedule.eventId || !Number.isFinite(Date.parse(schedule.startsAt)) || !schedule.temporalContext.trim())) fail()
+  if (item.history.slice(0, stageIndex + 1).some(entry => entry.planEligibility !== undefined)) fail()
+  const terminalIndex = later.findIndex(entry => entry.actionSchedule !== undefined ||
+    entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
+  let planEligible = false
+  for (const [index, entry] of later.entries()) {
+    if (entry.planEligibility === undefined) continue
+    const audit = entry.planEligibility!
+    if ((terminalIndex >= 0 && index >= terminalIndex) || audit.objectId !== item.id || audit.source !== 'schedule-plan-eligibility' ||
+      !Number.isFinite(Date.parse(entry.at)) || audit.eligible === planEligible ||
+      entry.event !== (audit.eligible ? 'Added Action to Adaptive Plan' : 'Removed Action from Adaptive Plan')) fail()
+    planEligible = audit.eligible
+  }
+  if (item.kind !== 'action') return undefined
   const reversed = later.some(entry => entry.reviewDecision === 'reversed' || entry.reviewDecision === 'rejected' || entry.reviewDecision === 'superseded')
   const selectedPriority = priorities.at(-1)?.actionPriority?.priority
   if (!selectedPriority) return { id: `staged-action:${item.id}`, objectId: item.id, captureId, priority: initialPriority,
@@ -199,7 +224,7 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
     delete metadata.deadline
     const object: SemanticObject = { id: item.id, kind: item.kind, captureIds: interpretation.captureIds,
       interpretationIds: model.interpretations.filter(i => i.legacy.id === item.id).map(i => i.id),
-      summary: interpretation.summary, status: actionStage ? 'confirmed' : accepted ? item.status : 'review', metadata,
+      summary: interpretation.summary, status: actionStage && !['complete', 'archived'].includes(item.status) ? 'confirmed' : accepted ? item.status : 'review', metadata,
       reminders: interpretation.proposedReminder ? [copy(interpretation.proposedReminder)] : [] }
     model.semanticObjects.push(object)
   }
@@ -211,6 +236,31 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
   model.relationships = model.relationships.filter(r => r.sourceId !== item.id)
   item.relationships.forEach((r, index) => model.relationships.push({ ...copy(r), id: `relationship:${item.id}:${index}`,
     sourceId: item.id, scope: 'semantic', provenance: { interpretationId: interpretation.id, evidence: 'legacy-unverified' } }))
+  const decisions = item.history.filter(entry => entry.relationshipConfirmation || entry.relationshipReversal)
+  if (!unique(decisions.map(entry => entry.relationshipConfirmation?.id ?? entry.relationshipReversal?.id ?? ''))) fail()
+  const active = new Map<string, HistoryEvent>()
+  const activeTargets = new Set<string>()
+  for (const entry of decisions) {
+    if (entry.relationshipConfirmation) {
+      const gesture = entry.relationshipConfirmation
+      if (gesture.targetId === item.id || activeTargets.has(gesture.targetId) || !Number.isFinite(Date.parse(entry.at))) fail()
+      active.set(gesture.id, entry)
+      activeTargets.add(gesture.targetId)
+      continue
+    }
+    const reversal = entry.relationshipReversal!
+    const confirmed = active.get(reversal.reverses)
+    if (!confirmed || confirmed.relationshipConfirmation?.targetId !== reversal.targetId ||
+      Date.parse(entry.at) < Date.parse(confirmed.at)) fail()
+    active.delete(reversal.reverses)
+    activeTargets.delete(reversal.targetId)
+  }
+  for (const entry of active.values()) {
+    const gesture = entry.relationshipConfirmation!
+    model.relationships.push({ id: `relationship:confirmed:${gesture.id}`, sourceId: item.id, targetId: gesture.targetId,
+      type: gesture.type, scope: 'semantic', provenance: { interpretationId: interpretation.id,
+        evidence: 'user-confirmed', gestureId: gesture.id, confirmedAt: entry.at } })
+  }
 }
 
 /** Pure conversion: never writes storage, guesses reminder targets, or schedules events. */
@@ -335,6 +385,10 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       model.temporalHistory = [...(model.temporalHistory ?? []), { id: `action-reversal:${event.id}`, at: reversalAt, source: 'review-temporal-confirmation', decision: 'reversed', target: copy(confirmed.target), reverses: confirmed.id }]
     }
   }
+  const directEvents = directCalendarEventsFromHistory(model.temporalHistory ?? [])
+  const otherEvents = model.calendarEvents.filter(event => event.origin !== 'calendar-direct-entry')
+  if (directEvents.some(event => otherEvents.some(other => other.id === event.id))) return fail()
+  model.calendarEvents = [...otherEvents, ...directEvents]
   materializeReminderInstructions(model)
   if (!isPersistedState(model)) return fail()
   return model
@@ -411,7 +465,16 @@ export function isPersistedState(value: unknown): value is PersistedState {
     }
     materializeReminderInstructions(rebuilt)
     if (!equal(rebuilt.semanticObjects, m.semanticObjects) || !equal(rebuilt.reminderInstructions ?? [], m.reminderInstructions ?? []) || !equal(rebuilt.relationships, m.relationships) || !equal(rebuilt.stagedActions ?? [], m.stagedActions ?? [])) return false
+    const confirmed = m.relationships.filter(link => link.provenance.evidence === 'user-confirmed')
+    if (!unique(confirmed.map(link => link.provenance.gestureId ?? '')) ||
+      !unique(confirmed.map(link => [link.sourceId, link.targetId].sort().join('\0'))) || confirmed.some(link =>
+      !m.legacyUiIds.includes(link.sourceId) || !m.legacyUiIds.includes(link.targetId) ||
+      link.sourceId === link.targetId || link.type !== 'relates_to' || !link.provenance.confirmedAt ||
+      !Number.isFinite(Date.parse(link.provenance.confirmedAt)))) return false
     const latestReadings = m.legacyUiIds.map(id => m.interpretations.filter(reading => reading.legacy.id === id).at(-1)!).filter(Boolean)
+    const relationshipDecisionIds = latestReadings.flatMap(reading => reading.legacy.history.flatMap(entry =>
+      entry.relationshipConfirmation ? [entry.relationshipConfirmation.id] : entry.relationshipReversal ? [entry.relationshipReversal.id] : []))
+    if (!unique(relationshipDecisionIds)) return false
     const activeActionSchedules = new Map((m.stagedActions ?? []).filter(stage => stage.status === 'scheduled' && stage.schedule).map(stage => [stage.schedule!.eventId, stage]))
     for (const reading of latestReadings) {
       for (const entry of reading.legacy.history) if (entry.actionSchedule && !activeActionSchedules.has(entry.actionSchedule.eventId) &&
@@ -426,7 +489,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
     // Events have their own scheduling identity; the legacy UI neither authors nor projects them.
     if (!m.calendarEvents.every(e => typeof e.title === 'string' && typeof e.startsAt === 'string' &&
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(e.startsAt) && Number.isFinite(Date.parse(e.startsAt)) && typeof e.temporalContext === 'string' && e.temporalContext.length > 0 &&
-      ['scheduled', 'cancelled'].includes(e.status) && Array.isArray(e.objectIds) &&
+      ['scheduled', 'cancelled'].includes(e.status) && (e.origin === undefined || e.origin === 'calendar-direct-entry') && Array.isArray(e.objectIds) &&
       e.objectIds.every(id => m.semanticObjects.some(o => o.id === id)) && Array.isArray(e.captureIds) &&
       e.captureIds.every(id => m.captures.some(c => c.id === id)))) return false
     return validTemporalHistory(m) && (m.groupingReview === undefined || isGroupingReviewState(m.groupingReview, m.captures)) && isAppState(projectModel(m))

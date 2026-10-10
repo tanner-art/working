@@ -7,7 +7,7 @@ import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { moveCanvasNode } from './canvasGroups'
-import { createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
+import { canvasStrokeIntersectsLasso, createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement, removeSelectedCanvasStrokes } from './canvasStrokes'
 
 const elements: CanvasElement[] = [
   { id: 'group', type: 'container', x: 0, y: 0, text: 'Original group' },
@@ -95,6 +95,27 @@ describe('Canvas Bank repository and editing lifecycle', () => {
     expect(workspace.repository.read().elements).toEqual(elements)
     workspace.session.redo()
     expect(workspace.repository.read().elements.at(-1)).toEqual(stroke)
+  })
+
+  it('persists lasso deletion of selected marks as one undoable edit without changing other canvas content', () => {
+    const first: CanvasElement = { id: 'first-mark', type: 'freehand', x: 10, y: 10, rawPoints: [{ x: 10, y: 10 }, { x: 20, y: 20 }] }
+    const second: CanvasElement = { id: 'second-mark', type: 'freehand', x: 100, y: 100, rawPoints: [{ x: 100, y: 100 }, { x: 120, y: 120 }] }
+    const original = [...elements, first, second]
+    storage({ objects: [], canvas: original })
+    const workspace = open()
+    const lasso = [{ x: 5, y: 5 }, { x: 30, y: 5 }, { x: 30, y: 30 }, { x: 5, y: 30 }]
+    const selected = new Set(workspace.repository.read().elements.filter(item => item.type === 'freehand' && canvasStrokeIntersectsLasso(item.rawPoints, lasso)).map(item => item.id))
+    expect([...selected]).toEqual(['first-mark'])
+
+    workspace.session.commit(removeSelectedCanvasStrokes(workspace.repository.read().elements, selected))
+    expect(open().repository.read().elements).toEqual([...elements, second])
+    expect(workspace.session.canUndo).toBe(true)
+    workspace.session.undo()
+    expect(workspace.repository.read().elements).toEqual(original)
+    expect(open().repository.read().elements).toEqual(original)
+    expect(workspace.session.canUndo).toBe(false)
+    workspace.session.redo()
+    expect(open().repository.read().elements).toEqual([...elements, second])
   })
 
   it('persists accepted smoothing as one reversible projection edit without dropping raw points', () => {

@@ -53,10 +53,16 @@ export interface ConfirmationGesture {
 export interface HistoryEvent {
   at: string
   event: string
+  /** A user-authored semantic link; Canvas arrows never create this audit. */
+  relationshipConfirmation?: { id: string; targetId: string; type: 'relates_to'; source: 'user-confirmed-link' }
+  /** Withdraws one exact manual link without deleting its original evidence. */
+  relationshipReversal?: { id: string; reverses: string; targetId: string; source: 'user-reversed-link' }
   confirmation?: ConfirmationGesture
   actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
   actionPriority?: { priority: ActionPriority; source: 'schedule-priority-selection' }
   actionSchedule?: { eventId: string; startsAt: string; temporalContext: string }
+  /** A dedicated user gesture; staging alone never grants plan eligibility. */
+  planEligibility?: { objectId: string; eligible: boolean; source: 'schedule-plan-eligibility' }
   reviewDecision?: 'rejected' | 'reversed' | 'superseded'
   reviewRevision?: { from: string; to: string }
   sourceCorrection?: { correctionId: string; from: string; to: string }
@@ -116,6 +122,9 @@ export interface CanvasElement {
   curveHandle?: CanvasCurveHandle
   /** Present only on a freehand mark. These are the authoritative raw samples. */
   rawPoints?: CanvasStrokePoint[]
+  /** Canvas-only appearance; older strokes retain their original default when omitted. */
+  strokeColor?: string
+  strokeWidth?: number
   /** Active local presentation; omitted means the preserved raw stroke is shown. */
   projection?: CanvasStrokeProjection
   /** Accepted local refinements; rawPoints remain authoritative and unchanged. */
@@ -226,13 +235,15 @@ export interface CalendarEvent {
   objectIds: string[]
   captureIds: string[]
   status: 'scheduled' | 'cancelled'
+  /** Only an explicit Calendar gesture may create an unlinked event. */
+  origin?: 'calendar-direct-entry'
 }
 /** Retains endpoints without choosing OD-007 membership cardinality. */
 export interface SemanticRelationship extends Relationship {
   id: string
   sourceId: string
   scope: 'semantic'
-  provenance: { interpretationId: string; evidence: 'legacy-unverified' }
+  provenance: { interpretationId: string; evidence: 'legacy-unverified' | 'user-confirmed'; gestureId?: string; confirmedAt?: string }
 }
 export interface PersistedState {
   temporalHistory?: TemporalDecision[]
@@ -266,10 +277,11 @@ export interface SourceCorrection {
 export type TemporalTarget =
   | { kind: 'fixed-deadline'; objectId: string; interpretationId: string; date: string }
   | { kind: 'event-scheduling'; eventId: string; interpretationId: string; startsAt: string; temporalContext: string; title: string; objectIds: string[]; captureIds: string[] }
+  | { kind: 'direct-calendar-event'; eventId: string; startsAt: string; temporalContext: string; title: string }
 export interface TemporalDecision {
   id: string
   at: string
-  source: 'review-temporal-confirmation'
+  source: 'review-temporal-confirmation' | 'calendar-direct-confirmation'
   decision: 'confirmed' | 'reversed'
   target: TemporalTarget
   /** Reversal names the exact confirmation it withdraws. */

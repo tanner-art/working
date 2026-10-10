@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
+import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown, viewportAtPinchStart } from './canvasInteraction'
 import { idleGestureState, reduceCanvasGesture } from './canvasGestures'
 import { moveCanvasNode } from './canvasGroups'
 import { commitCanvas, emptyCanvasHistory } from './canvasHistory'
@@ -9,16 +9,91 @@ const first = { pointerId: 1, x: 20, y: 30 }
 const second = { pointerId: 2, x: 100, y: 30 }
 
 describe('canvas interaction bridge', () => {
+  it('continues an uncommitted one-finger pan into pinch without a jump or double-applied delta', () => {
+    const committed = { x: 10, y: -5, scale: 1.25 }
+    const origin = { x: 80, y: 120 }
+    const movedFirst = { ...first, x: first.x + 35, y: first.y - 20 }
+    let gesture = reduceCanvasGesture(idleGestureState(), { type: 'pointer-down', sample: first, target: { kind: 'canvas' } }).state
+    gesture = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: { ...first, x: first.x + 20 } }).state
+    const pan = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: movedFirst })
+    expect(pan.effects).toEqual([{ type: 'preview-pan', delta: { x: 35, y: -20 } }])
+
+    const secondDown = reduceCanvasGesture(pan.state, { type: 'pointer-down', sample: second, target: { kind: 'canvas' } })
+    expect(secondDown.effects.map(effect => effect.type)).toEqual(['cancel', 'begin-pinch'])
+    const visiblePan = { x: committed.x + 35, y: committed.y - 20 }
+    const start = viewportAtPinchStart(committed, visiblePan, null)
+    const interaction = createPinchInteraction()
+    beginPinchInteraction(interaction, start, movedFirst, second, origin, true)
+    expect(interaction.preview).toEqual({ x: 45, y: -25, scale: 1.25 })
+    // First pinch sample has not moved: the visible transform must remain exact.
+    expect(previewPinchInteraction(interaction, movedFirst, second, origin)).toEqual(start)
+    expect(commitPinchInteraction(interaction)).toEqual(start)
+  })
+
+  it('discards the carried pan if pinch is canceled instead of released', () => {
+    const interaction = createPinchInteraction()
+    const committed = { x: 10, y: -5, scale: 1 }
+    const start = viewportAtPinchStart(committed, { x: 45, y: -25 }, null)
+    beginPinchInteraction(interaction, start, first, second, { x: 0, y: 0 }, true)
+    clearPinchInteraction(interaction)
+    expect(commitPinchInteraction(interaction)).toBeNull()
+    expect(committed).toEqual({ x: 10, y: -5, scale: 1 })
+  })
+
+  it('uses the same pan-to-pinch transition when the second finger lands on a resize handle', () => {
+    const committed = { x: 10, y: -5, scale: 1.25 }
+    let gesture = reduceCanvasGesture(idleGestureState(), { type: 'pointer-down', sample: first, target: { kind: 'canvas' } }).state
+    gesture = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: { ...first, x: first.x + 20 } }).state
+    const pan = reduceCanvasGesture(gesture, { type: 'pointer-move', sample: { ...first, x: first.x + 35, y: first.y - 20 } })
+    expect(pan.effects).toEqual([{ type: 'preview-pan', delta: { x: 35, y: -20 } }])
+
+    const handleDown = reduceResizePointerDown(pan.state, second, 'selected-node', true)
+    expect(handleDown.state.mode).toBe('pinch-zooming')
+    expect(handleDown.effects.map(effect => effect.type)).toEqual(['cancel', 'begin-pinch'])
+    const start = viewportAtPinchStart(committed, { x: committed.x + 35, y: committed.y - 20 }, null)
+    const interaction = createPinchInteraction()
+    beginPinchInteraction(interaction, start, { ...first, x: first.x + 35, y: first.y - 20 }, second, { x: 80, y: 120 }, true)
+    expect(interaction.preview).toEqual({ x: 45, y: -25, scale: 1.25 })
+    expect(commitPinchInteraction(interaction)).toEqual(start)
+  })
+
+  it('does not carry a node resize or stale pan into a fresh pinch', () => {
+    const committed = { x: 10, y: -5, scale: 1 }
+    const resize = reduceResizePointerDown(idleGestureState(), first, 'thought', true)
+    const secondDown = reduceCanvasGesture(resize.state, { type: 'pointer-down', sample: second, target: { kind: 'canvas' } })
+    expect(secondDown.effects.map(effect => effect.type)).toEqual(['cancel', 'begin-pinch'])
+    expect(viewportAtPinchStart(committed, null, null)).toBe(committed)
+  })
+
   it('commits the latest pinch preview synchronously without waiting for a render', () => {
     const interaction = createPinchInteraction()
-    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second)
+    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second, { x: 0, y: 0 })
 
-    const renderedPreview = previewPinchInteraction(interaction, first, { ...second, x: 180, y: 50 })
-    const latestPreview = previewPinchInteraction(interaction, first, { ...second, x: 220, y: 70 })
+    const renderedPreview = previewPinchInteraction(interaction, first, { ...second, x: 180, y: 50 }, { x: 0, y: 0 })
+    const latestPreview = previewPinchInteraction(interaction, first, { ...second, x: 220, y: 70 }, { x: 0, y: 0 })
 
     expect(latestPreview).not.toEqual(renderedPreview)
     expect(commitPinchInteraction(interaction)).toEqual(latestPreview)
     expect(interaction).toEqual({ start: null, preview: null })
+  })
+
+  it('keeps the world point under fingers stable when the canvas is offset by its toolbar', () => {
+    const interaction = createPinchInteraction()
+    const viewport = { x: 12, y: -8, scale: 1 }
+    const origin = { x: 100, y: 200 }
+    const firstFinger = { pointerId: 1, x: 220, y: 330 }
+    const secondFinger = { pointerId: 2, x: 320, y: 330 }
+    beginPinchInteraction(interaction, viewport, firstFinger, secondFinger, origin)
+
+    const preview = previewPinchInteraction(interaction,
+      { ...firstFinger, x: 195, y: 340 }, { ...secondFinger, x: 365, y: 340 }, origin)!
+    const originalLocalMidpoint = { x: 170, y: 130 }
+    const world = { x: (originalLocalMidpoint.x - viewport.x) / viewport.scale, y: (originalLocalMidpoint.y - viewport.y) / viewport.scale }
+
+    expect(preview.scale).toBeCloseTo(1.6)
+    expect(preview.x + world.x * preview.scale).toBeCloseTo(180)
+    expect(preview.y + world.y * preview.scale).toBeCloseTo(140)
+    expect(commitPinchInteraction(interaction)).toEqual(preview)
   })
 
   it('starts resize from visible edit mode even when it was not opened by hold', () => {

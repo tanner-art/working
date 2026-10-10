@@ -1,4 +1,4 @@
-import type { AppState, PersistedState, TemporalDecision, TemporalTarget } from './domain'
+import type { AppState, CalendarEvent, PersistedState, TemporalDecision, TemporalTarget } from './domain'
 
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export function validTemporalDate(value: string): boolean {
@@ -17,6 +17,7 @@ export function deadlineProposal(model: PersistedState, objectId: string): Tempo
 }
 export function eventProposal(model: PersistedState, eventId: string): TemporalTarget | undefined {
   const event = model.calendarEvents.find(e => e.id === eventId)
+  if (event?.origin === 'calendar-direct-entry') return
   // Existing events need actual captured interpretation provenance; do not invent it.
   const superseded = new Set(model.interpretations.map(i => i.previousId))
   const candidates = model.interpretations.filter(i => !superseded.has(i.id) && event?.captureIds.length && event.captureIds.every(id => i.captureIds.includes(id)))
@@ -26,6 +27,13 @@ export function eventProposal(model: PersistedState, eventId: string): TemporalT
     temporalContext: event.temporalContext, title: event.title, objectIds: [...event.objectIds], captureIds: [...event.captureIds] }
 }
 function supportedTarget(model: PersistedState, target: TemporalTarget): boolean {
+  if (target.kind === 'direct-calendar-event') {
+    const event = model.calendarEvents.find(e => e.id === target.eventId)
+    return !!event && event.origin === 'calendar-direct-entry' && event.objectIds.length === 0 && event.captureIds.length === 0 &&
+      typeof target.title === 'string' && !!target.title.trim() && typeof target.temporalContext === 'string' && !!target.temporalContext.trim() &&
+      instant(target.startsAt) && Object.keys(target).length === 5 && target.eventId === event.id &&
+      target.startsAt === event.startsAt && target.temporalContext === event.temporalContext && target.title === event.title
+  }
   const reading = model.interpretations.find(i => i.id === target.interpretationId)
   if (!reading) return false
   if (target.kind === 'fixed-deadline') {
@@ -42,10 +50,28 @@ function supportedTarget(model: PersistedState, target: TemporalTarget): boolean
     })
 }
 const key = (target: TemporalTarget) => target.kind === 'fixed-deadline' ? `deadline:${target.objectId}` : `event:${target.eventId}`
+/** The direct-entry decision is the append-only source for an unlinked event. */
+export function directCalendarEventsFromHistory(history: readonly TemporalDecision[]): CalendarEvent[] {
+  const events = new Map<string, CalendarEvent>()
+  for (const entry of history) {
+    const target = entry.target
+    if (target.kind !== 'direct-calendar-event') continue
+    if (entry.decision === 'confirmed') {
+      if (events.has(target.eventId)) throw new Error('A direct CalendarEvent may be created only once.')
+      events.set(target.eventId, { id: target.eventId, title: target.title, startsAt: target.startsAt,
+        temporalContext: target.temporalContext, objectIds: [], captureIds: [], status: 'scheduled', origin: 'calendar-direct-entry' })
+    } else {
+      const prior = events.get(target.eventId)
+      if (!prior || prior.status !== 'scheduled') throw new Error('A direct CalendarEvent cannot be reversed twice.')
+      events.set(target.eventId, { ...prior, status: 'cancelled' })
+    }
+  }
+  return [...events.values()]
+}
 /** Strict journal validation. Persisted evidence is auditable local data, not cryptographic proof of a click. */
 export function validTemporalHistory(model: PersistedState): boolean {
   try {
-    if (model.temporalHistory === undefined) return true
+    if (model.temporalHistory === undefined) return !model.calendarEvents.some(event => event.origin === 'calendar-direct-entry')
     if (!Array.isArray(model.temporalHistory)) return false
     const ids = new Set<string>()
     const active = new Map<string, TemporalDecision>()
@@ -53,9 +79,13 @@ export function validTemporalHistory(model: PersistedState): boolean {
     for (const entry of model.temporalHistory) {
       if (!entry || Object.keys(entry).some(k => !['id', 'at', 'source', 'decision', 'target', 'reverses'].includes(k)) ||
         typeof entry.id !== 'string' || !entry.id || ids.has(entry.id) || !instant(entry.at) || Date.parse(entry.at) < last ||
-        entry.source !== 'review-temporal-confirmation' || !supportedTarget(model, entry.target)) return false
-      const reading = model.interpretations.find(i => i.id === entry.target.interpretationId)!
-      if (!Number.isFinite(Date.parse(reading.recordedAt)) || Date.parse(entry.at) < Date.parse(reading.recordedAt)) return false
+        entry.source !== (entry.target.kind === 'direct-calendar-event' ? 'calendar-direct-confirmation' : 'review-temporal-confirmation') ||
+        !supportedTarget(model, entry.target)) return false
+      if (entry.target.kind !== 'direct-calendar-event') {
+        const interpretationId = entry.target.interpretationId
+        const reading = model.interpretations.find(i => i.id === interpretationId)!
+        if (!Number.isFinite(Date.parse(reading.recordedAt)) || Date.parse(entry.at) < Date.parse(reading.recordedAt)) return false
+      }
       ids.add(entry.id); last = Date.parse(entry.at)
       const targetKey = key(entry.target)
       if (entry.decision === 'confirmed') {
@@ -67,7 +97,14 @@ export function validTemporalHistory(model: PersistedState): boolean {
         active.delete(targetKey)
       } else return false
     }
-    return true
+    const direct = directCalendarEventsFromHistory(model.temporalHistory)
+    const stored = model.calendarEvents.filter(event => event.origin === 'calendar-direct-entry')
+    return direct.length === stored.length && direct.every(expected => {
+      const event = stored.find(candidate => candidate.id === expected.id)
+      return !!event && Object.keys(event).length === 8 && event.title === expected.title &&
+        event.startsAt === expected.startsAt && event.temporalContext === expected.temporalContext &&
+        event.status === expected.status && event.objectIds.length === 0 && event.captureIds.length === 0
+    })
   } catch { return false }
 }
 export function activeTemporalDecisions(model: PersistedState): TemporalDecision[] {
@@ -81,17 +118,20 @@ export function activeTemporalDecisions(model: PersistedState): TemporalDecision
 }
 export function temporalFactIsCurrent(model: PersistedState, entry: TemporalDecision): boolean {
   const target = entry.target
-  if (target.kind === 'event-scheduling') return model.calendarEvents.some(e => e.id === target.eventId && e.status === 'scheduled')
+  if (target.kind === 'event-scheduling' || target.kind === 'direct-calendar-event') return model.calendarEvents.some(e => e.id === target.eventId && e.status === 'scheduled')
   const reading = model.interpretations.find(i => i.id === target.interpretationId)!
   return model.interpretations.filter(i => i.legacy.id === target.objectId && i.version >= reading.version).every(i =>
     (i.legacy.metadata.deadline ?? i.legacy.interpretation.suggestedDate) === target.date)
 }
 /** Dedicated Review handler. The caller supplies the reconciled current model, never a status dropdown. */
 export function recordTemporalDecision(state: AppState, model: PersistedState, target: TemporalTarget, reverse?: TemporalDecision): AppState {
-  if (!reverse && !equal(target, target.kind === 'fixed-deadline' ? deadlineProposal(model, target.objectId) : eventProposal(model, target.eventId))) throw new Error('Temporal proposal changed.')
-  const entry: TemporalDecision = { id: crypto.randomUUID(), at: new Date().toISOString(), source: 'review-temporal-confirmation',
+  if (!reverse && (target.kind === 'direct-calendar-event' || !equal(target, target.kind === 'fixed-deadline' ? deadlineProposal(model, target.objectId) : eventProposal(model, target.eventId)))) throw new Error('Temporal proposal changed.')
+  const entry: TemporalDecision = { id: crypto.randomUUID(), at: new Date().toISOString(), source: target.kind === 'direct-calendar-event' ? 'calendar-direct-confirmation' : 'review-temporal-confirmation',
     decision: reverse ? 'reversed' : 'confirmed', target: structuredClone(target), ...(reverse ? { reverses: reverse.id } : {}) }
   const temporalHistory = [...(model.temporalHistory ?? []), entry]
-  if (!validTemporalHistory({ ...model, temporalHistory })) throw new Error('Temporal proposal changed or confirmation is invalid.')
+  const calendarEvents = target.kind === 'direct-calendar-event' && reverse
+    ? model.calendarEvents.map(event => event.id === target.eventId ? { ...event, status: 'cancelled' as const } : event)
+    : model.calendarEvents
+  if (!validTemporalHistory({ ...model, calendarEvents, temporalHistory })) throw new Error('Temporal proposal changed or confirmation is invalid.')
   return { ...state, temporalHistory }
 }

@@ -47,10 +47,24 @@ export function loadStateResult(): { state: AppState; error?: string } {
     return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
-/** Serialize against the last saved evidence, including revisions added in this session. */
-export function serializeState(state: AppState): PersistedState {
+/** Reconcile against this tab's latest validated save, not the model object
+ * originally loaded before one or more autosaves. */
+export function reconcileCurrentSession(state: AppState): PersistedState {
   const session = state.model && sessions.get(state.model)
   return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+}
+/** Serialize against the last saved evidence, including revisions added in this session. */
+export function serializeState(state: AppState): PersistedState {
+  return reconcileCurrentSession(state)
+}
+/** Advance a validated in-tab projection while retaining the local storage
+ * revision it was loaded from. Replacing model without this lineage loses the
+ * compare-and-swap guard and can collapse later audit versions. */
+export function advanceModelProjection(state: AppState): AppState {
+  const projection = reconcileCurrentSession(state)
+  const session = state.model && sessions.get(state.model)
+  if (session) sessions.set(projection, { model: projection, raw: session.raw })
+  return { ...state, model: projection }
 }
 export function saveState(state: AppState): string | undefined {
   if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
@@ -127,9 +141,22 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
   const item = value as Partial<HistoryEvent>
   const priority = (value: unknown): value is 1 | 2 | 3 | 4 | 5 => [1, 2, 3, 4, 5].includes(value as 1 | 2 | 3 | 4 | 5)
   return typeof item.at === 'string' && typeof item.event === 'string' &&
+    (item.relationshipConfirmation === undefined || (!!item.relationshipConfirmation && typeof item.relationshipConfirmation === 'object' &&
+      typeof item.relationshipConfirmation.id === 'string' && !!item.relationshipConfirmation.id &&
+      typeof item.relationshipConfirmation.targetId === 'string' && !!item.relationshipConfirmation.targetId &&
+      item.relationshipConfirmation.type === 'relates_to' && item.relationshipConfirmation.source === 'user-confirmed-link' &&
+      Number.isFinite(Date.parse(item.at)))) &&
+    (item.relationshipReversal === undefined || (!!item.relationshipReversal && typeof item.relationshipReversal === 'object' &&
+      typeof item.relationshipReversal.id === 'string' && !!item.relationshipReversal.id &&
+      typeof item.relationshipReversal.reverses === 'string' && !!item.relationshipReversal.reverses &&
+      typeof item.relationshipReversal.targetId === 'string' && !!item.relationshipReversal.targetId &&
+      item.relationshipReversal.source === 'user-reversed-link' && Number.isFinite(Date.parse(item.at)))) &&
+    !(item.relationshipConfirmation && item.relationshipReversal) &&
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
     (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&
+    (item.planEligibility === undefined || (typeof item.planEligibility.objectId === 'string' && !!item.planEligibility.objectId &&
+      typeof item.planEligibility.eligible === 'boolean' && item.planEligibility.source === 'schedule-plan-eligibility')) &&
     (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction)) &&
     (item.commitmentSetup === undefined || isCommitmentSetupAudit(item.commitmentSetup)) &&
     (item.commitmentSchedule === undefined || isCommitmentScheduleAudit(item.commitmentSchedule))

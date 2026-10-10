@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, canvasStrokeLength, createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement, isCanvasPointInLasso, isCanvasStrokeRefinement, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, smoothCanvasStrokePoints } from './canvasStrokes'
+import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, canvasStrokeLength, createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement, isCanvasPointInLasso, isCanvasStrokeRefinement, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes, smoothCanvasStrokePoints } from './canvasStrokes'
+import type { CanvasElement } from './domain'
 
 describe('canvas stroke foundation', () => {
   it('copies finite, ordered canvas-space samples without resampling them', () => {
@@ -106,5 +107,18 @@ describe('canvas stroke foundation', () => {
     expect(normalizeCanvasLassoPoints([{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 8, y: 0 }])).toBeNull()
     expect(normalizeCanvasLassoPoints([{ x: 0, y: 0 }, { x: Infinity, y: 1 }, { x: 1, y: 2 }])).toBeNull()
     expect(canvasStrokeIntersectsLasso([{ x: 1, y: 1 }, { x: 2, y: 2 }], [{ x: 0, y: 0 }, { x: 1, y: 0 }])).toBe(false)
+  })
+
+  it('removes only selected freehand marks, preserving nodes, connectors, and other marks', () => {
+    const elements: CanvasElement[] = [
+      { id: 'node', type: 'text', x: 0, y: 0, text: 'Keep node' },
+      { id: 'edge', type: 'arrow', x: 0, y: 0, fromId: 'node', toId: 'node' },
+      { id: 'erase', type: 'freehand', x: 10, y: 10, rawPoints: [{ x: 10, y: 10 }, { x: 20, y: 20 }] },
+      { id: 'keep', type: 'freehand', x: 100, y: 100, rawPoints: [{ x: 100, y: 100 }, { x: 120, y: 120 }] },
+    ]
+    expect(removeSelectedCanvasStrokes(elements, new Set(['erase', 'node']))).toEqual([elements[0], elements[1], elements[3]])
+    expect(removeSelectedCanvasStrokes(elements, new Set(['node']))).toBe(elements)
+    expect(removeSelectedCanvasStrokes(elements, new Set())).toBe(elements)
+    expect(elements).toHaveLength(4)
   })
 })
