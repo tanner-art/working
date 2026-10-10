@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react'
 import type { AppState } from './domain'
+import type { WorkspaceNavigationOutcome, WorkspaceNavigationRequest } from './workspaceNavigation'
 
 /**
  * Validated composition contract for URL-addressable application surfaces.
@@ -19,7 +20,10 @@ export type AppSurfaceDefinition = Readonly<{
 
 export type WorkspaceSurfaceProps = Readonly<{
   state: AppState
+  /** Opaque identity of the loaded snapshot; a result must retain the token from when it was shown. */
+  snapshotToken: string
   update: (updater: (current: AppState) => AppState) => void
+  navigate: (request: WorkspaceNavigationRequest) => WorkspaceNavigationOutcome
 }>
 
 export type SurfaceModule = Readonly<{ surface: AppSurfaceDefinition }>

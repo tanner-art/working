@@ -7,6 +7,8 @@ import { activeTemporalDecisions, deadlineProposal, temporalFactIsCurrent } from
 import { confirmCommitmentDeadline, createCalendarCommitment, scheduleCommitment } from './calendarEntry'
 import { buildCalendarMonth, buildCalendarTimeGrid, dayAriaLabel, dayNumber, monthLabel, navigateCalendarDate, parseLocalDateKey, weekStart, WEEKDAY_LABELS } from './calendar'
 import type { CalendarDayCell } from './calendar'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 type CalendarMode = 'month' | 'week' | 'day'
 const hours = Array.from({ length: 24 }, (_, hour) => hour)
@@ -14,12 +16,13 @@ const dayHeading = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 
 const time = (iso: string) => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
 const dateLabel = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(parseLocalDateKey(key))
 
-export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void }) {
+export function CalendarView({ registerSearchHandoffGuard, state, onOpen, onUpdate }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void }) {
   const model = useMemo(() => reconcileLegacyUi(state), [state])
   const todayKey = localDateKey(new Date())
   const [mode, setMode] = useState<CalendarMode>('month')
   const [selected, setSelected] = useState(todayKey)
   const [commitment, setCommitment] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'calendar', () => !commitment.trim())
   const [scheduleMessage, setScheduleMessage] = useState('')
   const confirmedEventIds = useMemo(() => new Set(activeTemporalDecisions(model)
     .filter(entry => entry.target.kind === 'event-scheduling' && temporalFactIsCurrent(model, entry))

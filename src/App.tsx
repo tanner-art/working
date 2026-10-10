@@ -19,7 +19,7 @@ import { CalendarView } from './CalendarView'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
@@ -29,6 +29,9 @@ import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revision
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import { createSearchHandoffGuards, type RegisterSearchHandoffGuard } from './searchHandoffGuards'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -140,6 +143,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
+  const snapshotToken = useMemo(() => crypto.randomUUID(), [state])
   const latestState = useRef(state)
   latestState.current = state
   const [saveError, setSaveError] = useState<string | undefined>()
@@ -187,8 +191,20 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null)
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
+  const [focusedActionId, setFocusedActionId] = useState<string | null>(null)
+  const [focusedReminderId, setFocusedReminderId] = useState<string | null>(null)
+  const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
+  const [workspaceRouteError, setWorkspaceRouteError] = useState('')
+  const searchSession = useRef(crypto.randomUUID())
+  const recoveringHistory = useRef<WorkspaceHistoryLocation | null>(null)
+  const acceptedHistory = useRef(workspaceHistoryLocation(window.location.href, window.history.state))
   const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
+  const [focusCanvasEntry, setFocusCanvasEntry] = useState(false)
+  const canvasCommitTitle = useRef<(() => void) | null>(null)
+  const [searchHandoffGuards] = useState(createSearchHandoffGuards)
+  const registerSearchHandoffGuard = searchHandoffGuards.register
   const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
   const update = (fn: (current: AppState) => AppState) => {
     if (mergePlan) onCancelMerge()
@@ -196,7 +212,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     latestState.current = next
     setState(next)
   }
-  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null)
+  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null, !activeWorkspaceSurface)
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
   const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)
@@ -360,21 +376,113 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     setOpenCanvasId(id)
   }
   const exitCanvas = () => {
+    canvasCommitTitle.current?.()
     canvas?.finishText()
     canvasTextSaveQueue.flush()
     setOpenCanvasId(null)
+    setFocusCanvasEntry(false)
   }
   const navigate = (next: View) => {
-    if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+    if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
+    setFocusCanvasEntry(false)
+    setFocusedActionId(null); setFocusedReminderId(null); setSelectedCaptureId(null)
     setView(next)
   }
+  const routeContext = () => {
+    const currentAccount = auth.getState()
+    return {
+      available: !accountBusy && accountValid && !initial.error && !clearing.current,
+      accountUserId: cloud?.session.userId,
+      authenticatedUserId: currentAccount.status === 'signed-in' ? currentAccount.session.user.id : undefined,
+      // Commit current input synchronously; the editor remains mounted while Search is shown.
+      prepareCanvasExit: () => { if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush() } return true },
+    }
+  }
+  const openSearch = () => {
+    const searchSurface = workspaceSurfaceModuleForPath('/search')
+    if (!searchSurface) return
+    const outcome = performWorkspaceRouteTransition('workspace', routeContext(), { enterSurface: () => {
+      enterWorkspaceHistory(window.history, window.location.href, searchSession.current)
+      acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+      setActiveWorkspaceSurface(searchSurface)
+    }, leaveSurface: () => undefined })
+    if (!outcome.ok) setWorkspaceRouteError(outcome.message)
+    else setWorkspaceRouteError('')
+  }
+  const focusAfterSearch = () => requestAnimationFrame(() => {
+    const target = document.querySelector<HTMLElement>('.sidebar [aria-label="Search"]') ??
+      document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"], .sidebar .nav-item')
+    if (target?.isConnected) target.focus()
+  })
+  const exitWorkspaceRoute = () => {
+    leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
+    if (window.location.pathname !== '/search') acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+    setActiveWorkspaceSurface(undefined)
+  }
+  const navigateWorkspace = (request: WorkspaceNavigationRequest): WorkspaceNavigationOutcome => {
+    const liveAccount = auth.getState()
+    return performWorkspaceNavigation(request, {
+      state: latestState.current, snapshotToken, stateIsCurrent: latestState.current === state,
+      available: !!activeWorkspaceSurface && !accountBusy && accountValid && !initial.error && !clearing.current,
+      accountUserId: cloud?.session.userId,
+      authenticatedUserId: liveAccount.status === 'signed-in' ? liveAccount.session.user.id : undefined,
+    }, {
+      canOpen: () => canOpenSearchResultFromView(view, !searchHandoffGuards.canLeave()),
+      close: () => {
+        exitWorkspaceRoute()
+        focusAfterSearch()
+      },
+      open: destination => {
+        exitWorkspaceRoute()
+        setSelectedObjectId(null); setSelectedCaptureId(null); setFocusedActionId(null); setFocusedReminderId(null)
+        if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+        if (destination.view === 'canvas') {
+          setView('canvas'); setBankFocusTarget(destination.canvasId); setFocusCanvasTitle(false); setFocusCanvasEntry(true); setOpenCanvasId(destination.canvasId)
+        } else if ('reminderId' in destination) {
+          setView('review'); setFocusedReminderId(destination.reminderId)
+        } else if ('captureId' in destination) {
+          setView('review'); setSelectedCaptureId(destination.captureId)
+        } else if ('actionId' in destination) {
+          setView('schedule'); setFocusedActionId(destination.actionId)
+        } else {
+          setView(destination.view); setSelectedObjectId(destination.objectId)
+        }
+      },
+    })
+  }
+  useEffect(() => {
+    const onPopState = () => {
+      if (recoveringHistory.current) {
+        const expected = recoveringHistory.current
+        recoveringHistory.current = null
+        if (isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation(window.location.href, window.history.state))) return
+      }
+      const target = workspaceSurfaceModuleForPath(window.location.pathname)
+      const outcome = performWorkspaceRouteTransition(target ? 'workspace' : 'app', routeContext(), {
+        enterSurface: () => setActiveWorkspaceSurface(target),
+        leaveSurface: () => setActiveWorkspaceSurface(undefined),
+      })
+      if (!outcome.ok) {
+        // Undo Back/Forward without overwriting either history entry.
+        recoveringHistory.current = acceptedHistory.current
+        recoverRejectedWorkspacePopstate(window.history, !!activeWorkspaceSurface)
+        setWorkspaceRouteError(outcome.message)
+      } else {
+        acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+        setWorkspaceRouteError('')
+        if (!target && activeWorkspaceSurface) focusAfterSearch()
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  })
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
-  if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
-  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
+  return <>{workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} />}
+  <div hidden={!!activeWorkspaceSurface} inert={!!activeWorkspaceSurface}><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || 'Personal space'}</span></button></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -396,32 +504,57 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
           <MorningDigest state={state} visible inline onShow={() => setView('digest')} />
         </details> : <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />}
       </>
-      {view === 'settings' && <SettingsPage accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+      {view === 'settings' && <SettingsPage registerSearchHandoffGuard={registerSearchHandoffGuard} accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
         onCancelMerge()
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
-      {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
-      {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
+      {view === 'capture' && <Capture registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
+      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'review' && <ReminderProjections state={state} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
-      {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
-      {view === 'schedule' && <ScheduleView state={state} update={update} />}
-      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
+      {view === 'calendar' && <CalendarView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
+      {view === 'schedule' && <ScheduleView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} update={update} focusActionId={focusedActionId} onFocusHandled={() => setFocusedActionId(null)} />}
+      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} autoFocusCanvas={focusCanvasEntry} onRegisterCommitTitle={commit => { canvasCommitTitle.current = commit }} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-  </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+  </main>{selectedCaptureId && <SourceCapturePanel state={state} captureId={selectedCaptureId} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedCaptureId(null)} />}{selectedObject && <ObjectPanel registerSearchHandoffGuard={registerSearchHandoffGuard} object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
-      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
+      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}</div>
   </>
 }
 
-function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
+function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: AppState; captureId: string; suspended: boolean; onClose: () => void }) {
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const source = (() => {
+    try {
+      const model = reconcileLegacyUi(state)
+      return { capture: model.captures.find(item => item.id === captureId), correction: model.sourceCorrections?.filter(item => item.captureId === captureId).at(-1) }
+    } catch { return undefined }
+  })()
+  useEffect(() => {
+    if (!suspended) closeButton.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current() } }
+    if (!suspended) document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [suspended])
+  return <div className="panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="source-capture-title">
+      <header><div><p className="eyebrow">Preserved source</p><h2 id="source-capture-title">Original capture</h2></div><button ref={closeButton} className="close-button" type="button" onClick={onClose} aria-label="Close original capture">×</button></header>
+      <div className="panel-scroll">{source?.capture ? <><p>{source.capture.originalContent}</p>{source.correction && <p>Current corrected wording: {source.correction.correctedContent}</p>}<small>Captured {new Date(source.capture.createdAt).toLocaleString()}</small></> : <p role="alert">This capture is no longer available. Refresh Search and try again.</p>}</div>
+    </aside>
+  </div>
+}
+
+function AccountSection({ registerSearchHandoffGuard, state, onRetry, active }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'account-login', () => state.status !== 'signed-out' || (!email && !code))
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
@@ -473,7 +606,8 @@ function DigestSection({ onOpen }: { onOpen: () => void }) {
   </section>
 }
 
-function SettingsPage({ accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+function SettingsPage({ registerSearchHandoffGuard, accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+  registerSearchHandoffGuard?: RegisterSearchHandoffGuard
   accountActive: boolean; dataControls: React.ReactNode
   installOpener: React.RefObject<HTMLButtonElement | null>; onInstallHelp: () => void
   settings: LocalSettings; error: string; authState: AuthState; onRetryAccount: () => void
@@ -485,8 +619,9 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
   const [failure, setFailure] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [confirmation, setConfirmation] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'settings', () => JSON.stringify(draft) === JSON.stringify(settings) && !confirming)
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
-    <AccountSection active={accountActive} state={authState} onRetry={onRetryAccount} />
+    <AccountSection registerSearchHandoffGuard={registerSearchHandoffGuard} active={accountActive} state={authState} onRetry={onRetryAccount} />
     <section className="settings-card"><h2>Profile</h2><p>{dataOwnershipLabel(authState, accountActive)}</p>
       {error && <p role="alert">{error}</p>}
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
@@ -541,10 +676,11 @@ function applyCaptureDetails(item: ThoughtObject, details = emptyCaptureDetails)
   const suggestedDate = details.date ? [details.date, details.time].filter(Boolean).join(' ') : item.interpretation.suggestedDate
   return { ...item, context, metadata: { ...item.metadata, deadline: details.date || item.metadata.deadline }, interpretation: { ...item.interpretation, suggestedDate } }
 }
-function Capture({ draft, busy, success, onDraft, onCapture }: { draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
+function Capture({ registerSearchHandoffGuard, draft, busy, success, onDraft, onCapture }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
   const input = useRef<HTMLTextAreaElement>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [details, setDetails] = useState<CaptureDetails>(emptyCaptureDetails)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'capture', () => !busy && !details.folder && !details.date && !details.time)
   useEffect(() => { if (success) { input.current?.focus(); setDetails(emptyCaptureDetails); setDetailsOpen(false) } }, [success])
   return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" />
     <div className="capture-box"><textarea ref={input} autoFocus aria-label="Raw thought" value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); onCapture(details) } }} />
@@ -561,8 +697,9 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function Review({ registerSearchHandoffGuard, objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'review', () => !rejecting)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
   const folders = bankObjects(objects)
@@ -570,7 +707,7 @@ export function Review({ objects, targets = [], onResolve, onResolveReminder, on
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution registerSearchHandoffGuard={registerSearchHandoffGuard} object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
       {ideas.length ? ideas.map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No resolved ideas yet." />}
@@ -589,7 +726,7 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
+function ObjectPanel({ registerSearchHandoffGuard, object, history, suspended, onClose, onSave, onRevise, onCorrect, onReverse }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; suspended: boolean; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
   const [revision, setRevision] = useState(object.interpretation.summary)
   const [correction, setCorrection] = useState(history.currentText)
@@ -601,6 +738,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'object-panel', () => !hasUnsavedFieldEdits && !hasUnsavedThoughtDrafts)
   const confirmDiscard = (includeFields: boolean) => {
     if (!(hasUnsavedThoughtDrafts || (includeFields && hasUnsavedFieldEdits))) return true
     return window.confirm('Discard the unsaved changes in this panel? Saved versions and the original capture will stay available.')
@@ -619,7 +757,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   useEffect(() => {
     closeButton.current?.focus()
     const opener = returnFocus.current
-    return () => opener?.focus()
+    return () => { requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus()) }
   }, [])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -627,7 +765,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
       event.preventDefault()
       closePanel()
     }
-    document.addEventListener('keydown', onKeyDown)
+    if (!suspended) document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   })
   const field = (key: keyof ThoughtObject, value: unknown) => setDraft(current => ({ ...current, [key]: value }))
