@@ -11,14 +11,33 @@ const second = { pointerId: 2, x: 100, y: 30 }
 describe('canvas interaction bridge', () => {
   it('commits the latest pinch preview synchronously without waiting for a render', () => {
     const interaction = createPinchInteraction()
-    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second)
+    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second, { x: 0, y: 0 })
 
-    const renderedPreview = previewPinchInteraction(interaction, first, { ...second, x: 180, y: 50 })
-    const latestPreview = previewPinchInteraction(interaction, first, { ...second, x: 220, y: 70 })
+    const renderedPreview = previewPinchInteraction(interaction, first, { ...second, x: 180, y: 50 }, { x: 0, y: 0 })
+    const latestPreview = previewPinchInteraction(interaction, first, { ...second, x: 220, y: 70 }, { x: 0, y: 0 })
 
     expect(latestPreview).not.toEqual(renderedPreview)
     expect(commitPinchInteraction(interaction)).toEqual(latestPreview)
     expect(interaction).toEqual({ start: null, preview: null })
+  })
+
+  it('keeps the world point under fingers stable when the canvas is offset by its toolbar', () => {
+    const interaction = createPinchInteraction()
+    const viewport = { x: 12, y: -8, scale: 1 }
+    const origin = { x: 100, y: 200 }
+    const firstFinger = { pointerId: 1, x: 220, y: 330 }
+    const secondFinger = { pointerId: 2, x: 320, y: 330 }
+    beginPinchInteraction(interaction, viewport, firstFinger, secondFinger, origin)
+
+    const preview = previewPinchInteraction(interaction,
+      { ...firstFinger, x: 195, y: 340 }, { ...secondFinger, x: 365, y: 340 }, origin)!
+    const originalLocalMidpoint = { x: 170, y: 130 }
+    const world = { x: (originalLocalMidpoint.x - viewport.x) / viewport.scale, y: (originalLocalMidpoint.y - viewport.y) / viewport.scale }
+
+    expect(preview.scale).toBeCloseTo(1.6)
+    expect(preview.x + world.x * preview.scale).toBeCloseTo(180)
+    expect(preview.y + world.y * preview.scale).toBeCloseTo(140)
+    expect(commitPinchInteraction(interaction)).toEqual(preview)
   })
 
   it('starts resize from visible edit mode even when it was not opened by hold', () => {
