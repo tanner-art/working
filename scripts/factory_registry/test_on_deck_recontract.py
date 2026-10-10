@@ -6,6 +6,8 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from scripts.factory_registry import Feature, Lane, PackageKind, SQLiteRegistry, TaskStatus, Worker, WorkPackage
 from scripts.factory_registry.operator import (
@@ -167,6 +169,73 @@ class OnDeckRecontractTests(unittest.TestCase):
         with self.assertRaisesRegex(RegistryConflict, "ON_DECK_PAIR_ALREADY_RECONTRACTED"):
             self.apply(operation_id="recontract-3")
         self.assertEqual([row[1] for row in self.rows()], ["ON_DECK", "ON_DECK"])
+
+    def test_replay_binds_full_authoritative_package_identity(self):
+        implementation, review, contracts = self.prepared()
+        revision = self.registry.dispatch_control()["revision"]
+        self.registry.recontract_on_deck_pair(
+            implementation, review, expected_revision=revision,
+            recorded_at="2026-10-10T12:00:00Z", operation_id="identity-bound",
+            repository=self.repo, target_ref="main", contracts=contracts,
+        )
+        variants = (
+            (replace(implementation, title="Changed title"), contracts),
+            (replace(implementation, category="OTHER"), contracts),
+            (replace(implementation, priority=9), contracts),
+            (replace(implementation, required_capabilities=("other",)), contracts),
+            (replace(implementation, lane=Lane.PLATFORM),
+             ({**contracts[0], "lane": "PLATFORM"}, contracts[1])),
+        )
+        for variant, input_contracts in variants:
+            with self.subTest(variant=variant):
+                with self.assertRaisesRegex(RegistryConflict, "OPERATION_ID_REUSED"):
+                    self.registry.recontract_on_deck_pair(
+                        variant, review, expected_revision=revision,
+                        recorded_at="2026-10-10T12:00:00Z", operation_id="identity-bound",
+                        repository=self.repo, target_ref="main", contracts=input_contracts,
+                    )
+
+    def test_direct_registry_api_rejects_contract_path_and_dependency_mismatch(self):
+        implementation, review, contracts = self.prepared()
+        revision = self.registry.dispatch_control()["revision"]
+        forged_paths = replace(implementation, provider_diagnostics={
+            **implementation.provider_diagnostics,
+            "exclusive_paths": ["docs/review.md"],
+        })
+        forged_dependency = replace(implementation, dependency_ids=("TASK-900",))
+        forged_contract = {**contracts[0], "task": "TASK-900"}
+        for candidate, input_contracts in (
+            (forged_paths, contracts),
+            (forged_dependency, contracts),
+            (implementation, (forged_contract, contracts[1])),
+        ):
+            with self.subTest(candidate=candidate.id, contract=input_contracts[0].get("task")):
+                with self.assertRaisesRegex(RegistryConflict, "ON_DECK_CONTRACT_BINDING_MISMATCH"):
+                    self.registry.recontract_on_deck_pair(
+                        candidate, review, expected_revision=revision,
+                        recorded_at="2026-10-10T12:00:00Z", operation_id="forged-contract",
+                        repository=self.repo, target_ref="main", contracts=input_contracts,
+                    )
+        self.assertIsNone(self.rows()[0][3])
+
+    def test_timeout_at_mutable_ref_recheck_fails_closed(self):
+        implementation, review, contracts = self.prepared()
+        with patch(
+            "scripts.factory_registry.sqlite_registry.registration_proof",
+            side_effect=[implementation.provider_diagnostics["readiness_proof"],
+                         review.provider_diagnostics["readiness_proof"]],
+        ), patch(
+            "scripts.factory_registry.sqlite_registry.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git rev-parse", timeout=5),
+        ):
+            with self.assertRaisesRegex(RegistryConflict, "ON_DECK_TARGET_REF_CHANGED"):
+                self.registry.recontract_on_deck_pair(
+                    implementation, review,
+                    expected_revision=self.registry.dispatch_control()["revision"],
+                    recorded_at="2026-10-10T12:00:00Z", operation_id="ref-timeout",
+                    repository=self.repo, target_ref="main", contracts=contracts,
+                )
+        self.assertIsNone(self.rows()[0][3])
 
     def test_explicit_origin_main_is_pinned_for_planning_only(self):
         subprocess.run([

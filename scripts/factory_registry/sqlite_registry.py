@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import tempfile
 import re
 import uuid
@@ -2553,9 +2554,28 @@ class SQLiteRegistry:
                 & {"review", "independent-review"}):
             raise RegistryConflict("ON_DECK_PAIR_INVALID")
         packages = (implementation, review)
-        for package in packages:
+        for package, contract in zip(packages, contracts):
             diagnostics = package.provider_diagnostics
             source_ref = diagnostics.get("github_source_ref")
+            declared_dependencies = contract.get("depends_on") if isinstance(contract, Mapping) else None
+            contract_dependencies = (
+                [f"TASK-{value}" if str(value).isdigit() else str(value)
+                 for value in declared_dependencies]
+                if isinstance(declared_dependencies, list) else None
+            )
+            identity = {
+                "task": package.id,
+                "lane": package.lane.value if package.lane else None,
+                "kind": package.kind.value,
+                "capacity_size": package.capacity_size.value,
+                "capacity_risk": package.capacity_risk.value,
+            }
+            if (not isinstance(contract, Mapping)
+                    or contract.get("schema_version") != 2
+                    or any(contract.get(key) != value for key, value in identity.items())
+                    or contract.get("paths") != diagnostics.get("exclusive_paths")
+                    or contract_dependencies != list(package.dependency_ids)):
+                raise RegistryConflict("ON_DECK_CONTRACT_BINDING_MISMATCH", package.id)
             if (not isinstance(source_ref, str) or not re.fullmatch(r"[1-9]\d*", source_ref)
                     or diagnostics.get("readiness_schema_version") != 2
                     or not isinstance(diagnostics.get("exclusive_paths"), list)
@@ -2573,12 +2593,41 @@ class SQLiteRegistry:
             "target_ref": target_ref,
             "packages": [{
                 "id": package.id,
+                "title": package.title,
+                "category": package.category,
+                "lane": package.lane.value if package.lane else None,
+                "kind": package.kind.value,
+                "capacity_size": package.capacity_size.value,
+                "capacity_risk": package.capacity_risk.value,
+                "required_capabilities": list(package.required_capabilities),
+                "priority": package.priority,
+                "status": package.status.value,
                 "source_ref": package.provider_diagnostics["github_source_ref"],
                 "dependency_ids": list(package.dependency_ids),
                 "acceptance_criteria": list(package.acceptance_criteria),
                 "provider_diagnostics": dict(package.provider_diagnostics),
             } for package in packages],
         }
+        # The full planning/content proof may traverse many immutable Git blobs.
+        # Check it before the SQLite write lock; only the mutable ref needs a
+        # bounded recheck inside the CAS transaction.
+        with self._connection() as connection:
+            replay = self._operation_replay(
+                connection, operation_id=operation_id,
+                operation_kind="RECONTRACT_ON_DECK_PAIR", request=request,
+            )
+            if replay is not None:
+                return replay
+        for package, contract in zip(packages, contracts):
+            try:
+                current_proof = registration_proof(
+                    contract, repository=repository, target_ref=target_ref,
+                    acceptance_criteria=package.acceptance_criteria,
+                )
+            except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+                raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id) from error
+            if current_proof != package.provider_diagnostics["readiness_proof"]:
+                raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2591,16 +2640,17 @@ class SQLiteRegistry:
                     return replay
                 self._require_control_schema(connection)
                 self._require_revision(connection, expected_revision)
-                for package, contract in zip(packages, contracts):
-                    try:
-                        current_proof = registration_proof(
-                            contract, repository=repository, target_ref=target_ref,
-                            acceptance_criteria=package.acceptance_criteria,
-                        )
-                    except (ValueError, OSError) as error:
-                        raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id) from error
-                    if current_proof != package.provider_diagnostics["readiness_proof"]:
-                        raise RegistryConflict("ON_DECK_PROOF_CHANGED", package.id)
+                try:
+                    target = subprocess.run(
+                        ["git", "-C", str(repository), "rev-parse", "--verify", f"{target_ref}^{{commit}}"],
+                        capture_output=True, text=True, check=False, timeout=5,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise RegistryConflict("ON_DECK_TARGET_REF_CHANGED") from error
+                if (target.returncode != 0
+                        or target.stdout.strip() != implementation.provider_diagnostics["readiness_proof"]["base_commit"]
+                        or target.stdout.strip() != review.provider_diagnostics["readiness_proof"]["base_commit"]):
+                    raise RegistryConflict("ON_DECK_TARGET_REF_CHANGED")
                 control = connection.execute(
                     "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
                 ).fetchone()
