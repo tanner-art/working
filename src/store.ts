@@ -52,6 +52,15 @@ export function serializeState(state: AppState): PersistedState {
   const session = state.model && sessions.get(state.model)
   return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
 }
+/** Advance a validated in-tab projection while retaining the local storage
+ * revision it was loaded from. Replacing model without this lineage loses the
+ * compare-and-swap guard and can collapse later audit versions. */
+export function advanceModelProjection(state: AppState): AppState {
+  const projection = reconcileLegacyUi(state)
+  const session = state.model && sessions.get(state.model)
+  if (session) sessions.set(projection, { model: projection, raw: session.raw })
+  return { ...state, model: projection }
+}
 export function saveState(state: AppState): string | undefined {
   if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
   try {

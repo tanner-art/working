@@ -4,6 +4,18 @@ import { hasConfirmation } from './migration'
 
 export { hasConfirmation } from './migration'
 
+/** Review's explicit Action-staging gesture resolves classification without
+ * granting execution eligibility. It also permits later user lifecycle edits. */
+export function hasStagedActionResolution(object: ThoughtObject): boolean {
+  if (object.kind !== 'action' || object.status === 'review' || object.status === 'inbox') return false
+  const stageIndex = object.history.findIndex(entry => entry.event === 'Staged as Action' &&
+    entry.actionStage?.source === 'review-action-staging' && Number.isFinite(Date.parse(entry.at)))
+  return stageIndex >= 0 && !object.history.slice(stageIndex + 1).some(entry =>
+    entry.reviewDecision || entry.reviewRevision || entry.event.startsWith('Changed type') ||
+    entry.event === 'Marked review' || entry.event === 'Marked inbox' ||
+    entry.event.includes('status to review') || entry.event.includes('status to inbox'))
+}
+
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
@@ -57,7 +69,7 @@ export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): Th
 
 function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
   return (['complete', 'archived'].includes(object.status) && status === 'confirmed') || object.status === 'review' || object.status === 'inbox' ||
-    ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object)) ? 'review' : status
+    ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !hasStagedActionResolution(object)) ? 'review' : status
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {

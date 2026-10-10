@@ -18,6 +18,36 @@ const prepared = () => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Commitment calendar confirmations', () => {
+  const loadedCommitment = () => {
+    let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [review], canvas: [] }))
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult().state
+    expect(saveState({ ...loaded, objects: [resolveCommitment(loaded.objects[0], { title: 'Send contract', date: '2026-10-02', time: '09:30', dependencyIds: [] })] })).toBeUndefined()
+    return loadStateResult().state
+  }
+
+  it('loads, confirms a deadline, saves and reloads its exact temporal evidence', () => {
+    const loaded = loadedCommitment()
+    const confirmed = confirmCommitmentDeadline(loaded, 'commitment')
+    expect(isPersistedState(confirmed.model)).toBe(true)
+    expect(saveState(confirmed)).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.model?.temporalHistory).toMatchObject([{ target: { kind: 'fixed-deadline', objectId: 'commitment' } }])
+    expect(reloaded.state.model?.calendarEvents).toEqual([])
+  })
+
+  it('loads, schedules a Commitment, saves and reloads its CalendarEvent', () => {
+    const loaded = loadedCommitment()
+    const scheduled = scheduleCommitment(loaded, 'commitment', 'UTC')
+    expect(isPersistedState(scheduled.model)).toBe(true)
+    expect(saveState(scheduled)).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.model?.calendarEvents).toMatchObject([{ objectIds: ['commitment'], status: 'scheduled' }])
+    expect(reloaded.state.model?.temporalHistory).toMatchObject([{ target: { kind: 'event-scheduling' } }])
+  })
+
   it('keeps deadline and CalendarEvent confirmations distinct and rejects invalid or repeated paths', () => {
     vi.stubGlobal('crypto', { randomUUID: vi.fn().mockReturnValueOnce('deadline').mockReturnValueOnce('event').mockReturnValueOnce('event-confirmation') })
     const state = prepared()
@@ -26,7 +56,7 @@ describe('Commitment calendar confirmations', () => {
     expect(deadline.model?.calendarEvents).toEqual([])
     expect(() => confirmCommitmentDeadline(deadline, 'commitment')).toThrow('already confirmed')
     const scheduled = scheduleCommitment(deadline, 'commitment', 'America/Kentucky/Louisville')
-    expect(scheduled.model?.calendarEvents).toMatchObject([{ id: 'event', objectIds: ['commitment'], status: 'scheduled' }])
+    expect(reconcileLegacyUi(scheduled).calendarEvents).toMatchObject([{ id: 'event', objectIds: ['commitment'], status: 'scheduled' }])
     expect(scheduled.temporalHistory?.map(entry => entry.target.kind)).toEqual(['fixed-deadline', 'event-scheduling'])
     expect(() => scheduleCommitment(scheduled, 'commitment')).toThrow('already has a CalendarEvent')
     vi.unstubAllGlobals()

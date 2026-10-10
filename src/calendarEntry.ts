@@ -1,6 +1,6 @@
 import type { AppState, TemporalDecision, ThoughtObject } from './domain'
 import { confirmObject } from './objectWorkflow'
-import { makeObject } from './store'
+import { advanceModelProjection, makeObject } from './store'
 import { reconcileLegacyUi } from './migration'
 import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision, validTemporalDate } from './temporalConfirmation'
 
@@ -57,7 +57,7 @@ export function scheduleCommitment(state: AppState, objectId: string, temporalCo
   const candidate: AppState = { ...state, objects: state.objects.map(item => item.id !== objectId ? item : { ...item, history: [...item.history, { at: new Date().toISOString(), event: 'Scheduled Commitment CalendarEvent', commitmentSchedule: { eventId, startsAt, temporalContext, source: 'commitment-calendar-scheduling' } }] }) }
   const model = reconcileLegacyUi(candidate), target = eventProposal(model, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This commitment remains unscheduled.')
-  return { ...recordTemporalDecision(candidate, model, target), model }
+  return advanceModelProjection(recordTemporalDecision(candidate, model, target))
 }
 
 /** A fixed deadline is explicit temporal evidence, distinct from event scheduling. */
@@ -67,5 +67,5 @@ export function confirmCommitmentDeadline(state: AppState, objectId: string): Ap
   const target = deadlineProposal(model, objectId)
   if (!target) throw new Error('This commitment has no valid proposed deadline to confirm.')
   if (activeTemporalDecisions(model).some(entry => entry.target.kind === 'fixed-deadline' && entry.target.objectId === objectId)) throw new Error('This commitment deadline is already confirmed.')
-  return { ...recordTemporalDecision(state, model, target), model }
+  return advanceModelProjection(recordTemporalDecision(state, model, target))
 }

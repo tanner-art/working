@@ -1,6 +1,7 @@
 import type { ActionPriority, AppState, ThoughtObject } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { eventProposal, recordTemporalDecision } from './temporalConfirmation'
+import { advanceModelProjection } from './store'
 
 const validPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
@@ -30,5 +31,5 @@ export function scheduleStagedAction(state: AppState, objectId: string, startsAt
   const scheduled = reconcileLegacyUi(candidate)
   const target = eventProposal(scheduled, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This Action remains staged.')
-  return { ...recordTemporalDecision(candidate, scheduled, target), model: scheduled }
+  return advanceModelProjection(recordTemporalDecision(candidate, scheduled, target))
 }

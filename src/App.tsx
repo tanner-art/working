@@ -24,7 +24,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
-import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
+import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, hasStagedActionResolution, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
@@ -643,7 +643,8 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   useEffect(() => setDraft(object), [object])
   useEffect(() => setRevision(object.interpretation.summary), [object.id, object.interpretation.summary])
   useEffect(() => setCorrection(history.currentText), [object.id, history.currentText])
-  const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
+  const stagedActionResolved = hasStagedActionResolution(object)
+  const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !stagedActionResolved)
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
   const confirmDiscard = (includeFields: boolean) => {
@@ -711,7 +712,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
         </div>
         <details className="thought-progression" open><summary>Version history ({history.progression.length})</summary><ol>{history.progression.slice().reverse().map(entry => <li key={entry.id}><div><strong>{entry.label}</strong><time>{new Date(entry.at).toLocaleString()}</time></div><p>{entry.text}</p>{entry.previousText && <details><summary>Previous version</summary><p>{entry.previousText}</p></details>}</li>)}</ol></details>
         <details><summary>Decision history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
-        {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>Reverse confirmation</button></>}
+        {(hasConfirmation(object) || stagedActionResolved) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>{stagedActionResolved && !hasConfirmation(object) ? 'Withdraw staged Action' : 'Reverse confirmation'}</button></>}
       </div>
       <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>
     </aside>

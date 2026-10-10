@@ -41,7 +41,8 @@ function StagedActionRow({ action, state, update }: { action: StagedAction; stat
 export function ScheduleView({ state, update }: { state: AppState; update: (next: (state: AppState) => AppState) => void }) {
   const model = useMemo(() => reconcileLegacyUi(state), [state])
   const plan = useMemo(() => calculateAdaptivePlan(state), [state])
-  const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed').sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
+  const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed' &&
+    state.objects.some(object => object.id === action.objectId && object.status === 'confirmed')).sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
   return <main className="page schedule-page"><header className="page-header"><div><p className="eyebrow">Confirmed for staging, not execution</p><h1>Schedule</h1></div></header>
     <p className="lede">Staged Actions stay out of Today and notifications. Adding one to the Adaptive Plan does not book calendar time. Scheduling creates a separate CalendarEvent only after confirmation.</p>
     {plan.recommendations[0] && <p role="status">Adaptive Plan recommends next: {plan.recommendations[0].title}. No time has been booked.</p>}

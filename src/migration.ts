@@ -224,7 +224,7 @@ function append(model: PersistedState, item: ThoughtObject, previous?: Interpret
     delete metadata.deadline
     const object: SemanticObject = { id: item.id, kind: item.kind, captureIds: interpretation.captureIds,
       interpretationIds: model.interpretations.filter(i => i.legacy.id === item.id).map(i => i.id),
-      summary: interpretation.summary, status: actionStage ? 'confirmed' : accepted ? item.status : 'review', metadata,
+      summary: interpretation.summary, status: actionStage && !['complete', 'archived'].includes(item.status) ? 'confirmed' : accepted ? item.status : 'review', metadata,
       reminders: interpretation.proposedReminder ? [copy(interpretation.proposedReminder)] : [] }
     model.semanticObjects.push(object)
   }
