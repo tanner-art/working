@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
 import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject } from './objectWorkflow'
+import { confirmObject, reverseObject } from './objectWorkflow'
 import { resolveReminderInState } from './reminderWorkflow'
 import { GlobalSearchView, nextVisibleSearchCount, openSearchResult, searchEscapeAction, searchResultPreview } from './GlobalSearchView'
 import { appSurfaceForPath, workspaceSurfaceModuleForPath } from './surfaces'
@@ -52,6 +52,11 @@ describe('global Search surface', () => {
     const markup = renderToStaticMarkup(<GlobalSearchView state={state} snapshotToken="current" navigate={() => ({ ok: true })} initialQuery="orchid" />)
     expect(markup).not.toContain('Some items could not be indexed')
     expect(markup).not.toContain('results may be incomplete')
+    const reversed = legacyUiProjection(reconcileLegacyUi({ ...state, objects: state.objects.map(item =>
+      item.id === 'r' ? reverseObject(item) : item) }))
+    const reversedMarkup = renderToStaticMarkup(<GlobalSearchView state={reversed} snapshotToken="current" navigate={() => ({ ok: true })} initialQuery="orchid" />)
+    expect(reversedMarkup).not.toContain('Some items could not be indexed')
+    expect(reversedMarkup).not.toContain('results may be incomplete')
   })
 
   it('distinguishes the empty prompt from a genuine no-match result', () => {
