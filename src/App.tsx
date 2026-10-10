@@ -452,12 +452,18 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
       {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update}
-        readAccountModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined} /></details>}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
       {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update}
-        readAccountModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined} />}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} />}
       {view === 'schedule' && <ScheduleView state={state} update={update}
-        readAccountModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined} />}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} />}
       {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} ideas={resolvedIdeas(state.objects)} connections={connectionProjection?.graph} connectionsUnavailable={connectionProjection?.unavailable} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} onOpenIdea={setSelectedObjectId} onConnect={(sourceId, targetId) => update(current => connectThoughts(current, sourceId, targetId))} onDisconnect={id => update(current => removeThoughtConnection(current, id))} onBackup={downloadBackup} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
   </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { accountData, createAccountSession, type AccountAdapter, type AccountRow } from './accountStorage'
 import { CalendarView } from './CalendarView'
+import { stageAction } from './actionStaging'
 import { confirmCommitmentDeadline } from './calendarEntry'
 import { resolveCommitment } from './commitmentWorkflow'
 import type { ThoughtObject } from './domain'
 import { updateObject } from './objectWorkflow'
+import { legacyUiProjection, migrateLegacyState } from './migration'
 import { ScheduleView } from './ScheduleView'
 import { defaultSettings } from './settings'
 import { TemporalReview } from './TemporalReview'
@@ -19,6 +21,23 @@ const review = (id: string): ThoughtObject => ({
 })
 
 describe('account temporal decisions during in-flight saves', () => {
+  it('keeps a staged Action row and its scheduling input visible while confirmation is blocked', () => {
+    const action: ThoughtObject = { ...review('action'), kind: 'action', originalContent: 'Prepare launch',
+      interpretation: { summary: 'Prepare launch', suggestedKind: 'action', rationale: 'Work' } }
+    const state = legacyUiProjection(migrateLegacyState({ objects: [stageAction(action)], canvas: [] }))
+    const html = renderToStaticMarkup(<ScheduleView state={state} update={() => undefined}
+      decisionBlocked="Account changes are saving. Wait before confirming time." />)
+    expect(html).toContain('Priority for Prepare launch')
+    expect(html).toContain('aria-label="Schedule Prepare launch"')
+    expect(html).toContain('Account changes are saving')
+    expect(html).toContain('type="submit" disabled=""')
+    const failedProjection = renderToStaticMarkup(<ScheduleView state={state} update={() => undefined}
+      readAccountModel={() => { throw Error('stale snapshot') }} />)
+    expect(failedProjection).toContain('Priority for Prepare launch')
+    expect(failedProjection).toContain('Showing the last loaded Schedule')
+    expect(failedProjection).toContain('type="submit" disabled=""')
+  })
+
   it('blocks decisions until an overlapping edit is saved, then confirms against its exact interpretation', async () => {
     let row: AccountRow | null = null
     let writes = 0
@@ -53,15 +72,24 @@ describe('account temporal decisions during in-flight saves', () => {
     expect(() => readModel(state)).toThrow('Account changes are saving')
     expect(() => confirmCommitmentDeadline(state, 'c1', readModel(state))).toThrow('Account changes are saving')
     expect(() => confirmCommitmentDeadline(state, 'c2', readModel(state))).toThrow('Account changes are saving')
+    const preview = (current: typeof state) => session.snapshot(current, defaultSettings, digest).model
     for (const view of [
-      <CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined} readAccountModel={readModel} />,
-      <ScheduleView state={state} update={() => undefined} readAccountModel={readModel} />,
-      <TemporalReview state={state} onUpdate={() => undefined} readAccountModel={readModel} />,
+      <CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined} readAccountModel={preview} readDecisionModel={readModel} decisionBlocked={session.decisionBlockReason()} />,
+      <ScheduleView state={state} update={() => undefined} readAccountModel={preview} readDecisionModel={readModel} decisionBlocked={session.decisionBlockReason()} />,
+      <TemporalReview state={state} onUpdate={() => undefined} readAccountModel={preview} readDecisionModel={readModel} decisionBlocked={session.decisionBlockReason()} />,
     ]) {
       const html = renderToStaticMarkup(view)
       expect(html).toContain('Account changes are saving')
-      expect(html).toContain('Your edits remain in this tab')
+      expect(html).toContain('Your edits')
     }
+    const calendar = renderToStaticMarkup(<CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined} readAccountModel={preview} decisionBlocked={session.decisionBlockReason()} />)
+    expect(calendar).toContain('Add event')
+    expect(calendar).toContain('Unscheduled commitments')
+    expect(calendar).toContain('disabled=""')
+    const fallbackCalendar = renderToStaticMarkup(<CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined}
+      readAccountModel={() => { throw Error('stale snapshot') }} />)
+    expect(fallbackCalendar).toContain('Add event')
+    expect(fallbackCalendar).toContain('Showing the last loaded Calendar')
     // The ordinary edit is still saved; only the temporal decisions wait.
     const secondSave = save(state)
     release()
@@ -106,7 +134,9 @@ describe('account temporal decisions during in-flight saves', () => {
     await expect(session.save(snapshot())).rejects.toThrow('Account changes could not be saved')
     expect(state.objects[0].status).toBe('confirmed')
     expect(() => readModel()).toThrow('Account changes are not saved')
-    expect(renderToStaticMarkup(<CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined} readAccountModel={readModel} />)).toContain('Retry saving or download a backup')
+    expect(renderToStaticMarkup(<CalendarView state={state} onOpen={() => undefined} onUpdate={() => undefined}
+      readAccountModel={current => session.snapshot(current, defaultSettings, digest).model}
+      readDecisionModel={readModel} decisionBlocked={session.decisionBlockReason()} />)).toContain('Retry saving or download a backup')
     await session.save(snapshot(), true)
     state = confirmCommitmentDeadline(state, 'c1', readModel())
     await session.save(snapshot())

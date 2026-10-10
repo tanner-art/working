@@ -15,12 +15,13 @@ const dayHeading = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 
 const time = (iso: string) => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
 const dateLabel = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(parseLocalDateKey(key))
 
-export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
+export function CalendarView({ state, onOpen, onUpdate, readAccountModel, readDecisionModel, decisionBlocked }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string }) {
   const projection = useMemo(() => {
     try { return { model: reconcileCurrentSession(state, readAccountModel?.(state)), error: '' } }
-    catch (error) { return { model: undefined, error: error instanceof Error ? error.message : 'Calendar is temporarily unavailable. Retry saving or download a backup.' } }
+    catch { return { model: state.model, error: 'Showing the last loaded Calendar while account changes are unsaved. Retry saving or download a backup.' } }
   }, [state, readAccountModel])
   const model = projection.model
+  const decisionIssue = [decisionBlocked, projection.error].filter(Boolean).join(' ')
   const todayKey = localDateKey(new Date())
   const [mode, setMode] = useState<CalendarMode>('month')
   const [selected, setSelected] = useState(todayKey)
@@ -72,7 +73,7 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
     if (!eventDraft) return
     setEventMessage('')
     try {
-      onUpdate(current => createDirectCalendarEvent(current, { title: eventTitle, ...eventDraft }, readAccountModel?.(current)))
+      onUpdate(current => createDirectCalendarEvent(current, { title: eventTitle, ...eventDraft }, readDecisionModel?.(current)))
       closeEvent()
       setEventTitle('')
     } catch (error) { setEventMessage(error instanceof Error ? error.message : 'Unable to add this event. Refresh Calendar and try again.') }
@@ -84,8 +85,8 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
     onUpdate(current => ({ ...current, objects: [item, ...current.objects] }))
     setCommitment('')
   }
-  const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId, undefined, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
-  const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
+  const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId, undefined, readDecisionModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
+  const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId, readDecisionModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
 
   if (!model || !month || !timeGrid) return <div className="page calendar-page"><header className="page-header"><h1>Calendar</h1></header><p role="status">{projection.error}</p><p>Your edits remain in this tab. Wait for saving to finish, or use Retry saving or Download backup above.</p></div>
   const unscheduled = mode === 'month' ? month.unscheduledCommitments : timeGrid.unscheduledCommitments
@@ -94,6 +95,7 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
   return <div className="page calendar-page">
     <header className="page-header"><div><p className="eyebrow">Time, scheduled and proposed</p><h1>Calendar</h1></div></header>
     <p className="lede">CalendarEvents, Commitments, and proposed dates stay distinct. An obligation has no time until you explicitly schedule a separate CalendarEvent.</p>
+    {decisionIssue && <p role="status">{decisionIssue} Your edits and event draft remain in this tab.</p>}
     <form className="calendar-commitment-form" onSubmit={submitCommitment}><label>New commitment<input aria-label="New commitment" value={commitment} onChange={event => setCommitment(event.target.value)} placeholder="I’ll send the draft" /></label><button className="primary">Add commitment</button><small>This confirms the obligation only. It remains unscheduled.</small></form>
     <div className="month-calendar">
       <div className="calendar-toolbar"><button type="button" className="secondary" aria-label={`Previous ${mode}`} onClick={() => go(-1)}>‹</button><h2 id="calendar-view-label">{mode === 'month' ? monthLabel(selectedDate.getFullYear(), selectedDate.getMonth()) : mode === 'week' ? `${dateLabel(timeGrid.days[0].date)} – ${dateLabel(timeGrid.days.at(-1)!.date)}` : dayHeading(selected)}</h2><button type="button" className="secondary" aria-label={`Next ${mode}`} onClick={() => go(1)}>›</button><button type="button" className="secondary" onClick={() => setSelected(localDateKey(new Date()))}>Today</button><button ref={addEventRef} type="button" className="secondary" onClick={event => startEvent(selected, '', event.currentTarget)}>Add event</button><div className="calendar-modes" role="group" aria-label="Calendar view">{(['month', 'week', 'day'] as const).map(value => <button type="button" key={value} className={mode === value ? 'active' : 'secondary'} aria-pressed={mode === value} onClick={() => setMode(value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div></div>
@@ -102,12 +104,12 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { st
         <label>Date<input required type="date" value={eventDraft.date} onChange={event => setEventDraft({ ...eventDraft, date: event.target.value })} /></label>
         <label>Time<input required type="time" value={eventDraft.time} onChange={event => setEventDraft({ ...eventDraft, time: event.target.value })} /></label>
         {eventMessage && <p role="alert">{eventMessage}</p>}
-        <div className="calendar-event-actions"><button type="button" className="secondary" onClick={closeEvent}>Cancel</button><button type="submit" className="primary">Save event</button></div>
+        <div className="calendar-event-actions"><button type="button" className="secondary" onClick={closeEvent}>Cancel</button><button type="submit" className="primary" disabled={!!decisionIssue}>Save event</button></div>
       </form>}
       {mode === 'month' ? <MonthGrid calendar={month} selected={selected} onSelect={setSelected} onStartEvent={startEvent} /> : <TimeGrid days={timeGrid.days} onOpen={onOpen} onStartEvent={startEvent} />}
     </div>
     {mode === 'month' && selectedCell && <SelectedDayDetail day={selectedCell} onOpen={onOpen} />}
-    <section className="list-section"><div className="section-heading"><div><p className="section-label">Not tied to a time</p><h2>Unscheduled commitments</h2></div><span>{unscheduled.length} shown</span></div>{scheduleMessage && <p role="alert">{scheduleMessage}</p>}{unscheduled.length ? <ul className="detail-list">{unscheduled.map(o => { const setup = state.objects.find(item => item.id === o.id)?.history.find(entry => entry.commitmentSetup)?.commitmentSetup; return <li key={o.id}><div className="commitment-row"><button type="button" className="clickable-row" onClick={() => onOpen(o.id)}><span className="time-dot" /><div><strong>{o.summary}</strong><small>No CalendarEvent time chosen yet.</small></div><span className="kind-chip">{objectLabels[o.kind]}</span></button>{deadlineProposal(model, o.id) && !confirmedDeadlineIds.has(o.id) && <button type="button" className="secondary" onClick={() => confirmDeadline(o.id)}>Confirm deadline</button>}{setup?.date && setup.time && <button type="button" className="secondary" onClick={() => schedule(o.id)}>Confirm CalendarEvent</button>}</div></li> })}</ul> : <div className="empty">No unscheduled commitments. Confirmed obligations without an event appear here.</div>}</section>
+    <section className="list-section"><div className="section-heading"><div><p className="section-label">Not tied to a time</p><h2>Unscheduled commitments</h2></div><span>{unscheduled.length} shown</span></div>{scheduleMessage && <p role="alert">{scheduleMessage}</p>}{unscheduled.length ? <ul className="detail-list">{unscheduled.map(o => { const setup = state.objects.find(item => item.id === o.id)?.history.find(entry => entry.commitmentSetup)?.commitmentSetup; return <li key={o.id}><div className="commitment-row"><button type="button" className="clickable-row" onClick={() => onOpen(o.id)}><span className="time-dot" /><div><strong>{o.summary}</strong><small>No CalendarEvent time chosen yet.</small></div><span className="kind-chip">{objectLabels[o.kind]}</span></button>{deadlineProposal(model, o.id) && !confirmedDeadlineIds.has(o.id) && <button type="button" className="secondary" disabled={!!decisionIssue} onClick={() => confirmDeadline(o.id)}>Confirm deadline</button>}{setup?.date && setup.time && <button type="button" className="secondary" disabled={!!decisionIssue} onClick={() => schedule(o.id)}>Confirm CalendarEvent</button>}</div></li> })}</ul> : <div className="empty">No unscheduled commitments. Confirmed obligations without an event appear here.</div>}</section>
   </div>
 }
 
