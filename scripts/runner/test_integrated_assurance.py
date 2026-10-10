@@ -173,6 +173,25 @@ class IntegratedAssuranceTests(unittest.TestCase):
                         self.meta["ci"]["run_url"], "Exact integrated input",
                         self.now.isoformat(), meta or self.meta)
 
+    def seed_v2_review_provenance(self):
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("initial-review-input", "TASK-2", "review-input",
+                 "https://github.com/o/r/pull/1", "Initial review input",
+                 self.now.isoformat(), json.dumps({"target_package_id": "TASK-1",
+                    "implementation_commit": self.integrated, "base_commit": self.base,
+                    "contract_sha256": "e" * 64})),
+            )
+            connection.execute(
+                "UPDATE evidence SET metadata_json=? WHERE id='review-evidence'",
+                (json.dumps({"reviewed_commit": self.integrated,
+                             "reviewed_base_commit": self.base,
+                             "contract_sha256": "e" * 64,
+                             "review_input_evidence_id": "initial-review-input"}),),
+            )
+
     def test_input_requires_pinned_approved_ancestors_and_matrix(self):
         before = self.registry.dispatch_control()["revision"]
         self.assertEqual(self.registry.record_integrated_assurance_input(
@@ -272,6 +291,239 @@ class IntegratedAssuranceTests(unittest.TestCase):
             github=lambda *args: json.dumps({"object": {"sha": self.base}}),
             repository_name="o/r",
         ))
+
+    def test_v2_ordered_shared_path_and_historical_main_are_valid(self):
+        first = self.integrated
+        first_tree = self.tree
+        self.write("src/feature.py", "second writer")
+        self.commit("ordered second writer")
+        second = self.git("rev-parse", "HEAD")
+        second_tree = self.git("rev-parse", "HEAD^{tree}")
+        self.write("docs/later.md", "unrelated later main")
+        self.commit("later main")
+        main_head = self.git("rev-parse", "HEAD")
+        first_item = {**self.meta["included_packages"][0],
+                      "reviewed_commit": first, "pr_head_commit": first,
+                      "prior_review_outcome_ids": []}
+        second_item = {**first_item, "package_id": "TASK-4", "implementation_commit": second,
+                       "reviewed_commit": second, "pr_head_commit": second,
+                       "pr_url": "https://github.com/o/r/pull/4",
+                       "review_package_id": "TASK-5", "review_outcome_id": "review-outcome-4",
+                       "review_evidence_id": "review-evidence-4",
+                       "integration_receipt_id": "integration-receipt-4"}
+        meta = {**self.meta, "schema_version": 2, "integrated_commit": second,
+                "integrated_tree": second_tree, "ordered_parent_shas": [first, second],
+                "included_packages": [first_item, second_item],
+                "shared_path_handoffs": [{"path": "src/feature.py",
+                                          "ordered_writers": ["TASK-1", "TASK-4"]}],
+                "ci": {**self.meta["ci"], "commit": second}}
+        facts = {
+            package_id: {"id": item["review_outcome_id"], "state": "APPROVED",
+                         "review_package_id": item["review_package_id"],
+                         "implementer_worker_id": "builder", "reviewer_worker_id": "claude",
+                         "approval_evidence_ids": [item["review_evidence_id"]],
+                         "reviewed_commit": item["reviewed_commit"],
+                         "review_pr_url": item["pr_url"],
+                         "source_implementation_commit": item["implementation_commit"],
+                         "prior_review_outcome_ids": (), "prior_review_outcomes": ()}
+            for package_id, item in (("TASK-1", first_item), ("TASK-4", second_item))
+        }
+        receipts = {
+            package_id: {"id": item["integration_receipt_id"], "kind": "integration-acceptance",
+                         "package_id": package_id, "metadata": {
+                             "implementation_commit": item["implementation_commit"],
+                             "reviewed_commit": item["reviewed_commit"],
+                             "pr_head_commit": item["pr_head_commit"],
+                             "pr_url": item["pr_url"],
+                             "review_outcome_id": item["review_outcome_id"],
+                             "review_evidence_id": item["review_evidence_id"],
+                             "merged_main_commit": commit, "merged_main_tree": tree,
+                             "inclusion_mode": "ancestry", "changed_paths": ["src/feature.py"],
+                         }}
+            for package_id, item, commit, tree in (
+                ("TASK-1", first_item, first, first_tree),
+                ("TASK-4", second_item, second, second_tree),
+            )
+        }
+        package = {"id": "TASK-3", "kind": "EVALUATION", "lane": "ASSURANCE",
+                   "acceptance_criteria": ["visible feature works"],
+                   "provider_diagnostics": {"queue_contract_sha256": queue_contract_digest(self.contract)}}
+        evidence = {"id": "v2-input", "package_id": "TASK-3",
+                    "kind": "integrated-assurance-input", "recorded_at": self.now.isoformat(),
+                    "metadata": meta}
+        value = parse_assurance_input(evidence, package=package,
+                                      dependencies=("TASK-1", "TASK-4"),
+                                      review_facts=facts, receipts=receipts)
+        def github(*args):
+            if args[0] == "api":
+                return json.dumps({"object": {"sha": main_head}})
+            if args[0] == "pr":
+                item = first_item if args[2] == first_item["pr_url"] else second_item
+                return json.dumps({"state": "MERGED", "headRefOid": item["pr_head_commit"],
+                                   "mergeCommit": {"oid": first if item is first_item else second}})
+            return json.dumps({"headSha": second, "status": "completed",
+                               "conclusion": "success", "workflowName": "Validate app",
+                               "url": meta["ci"]["run_url"]})
+        self.assertTrue(verify_integrated_source(
+            value, repository=self.repo, github=github, repository_name="o/r"))
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_SHARED_PATH_HANDOFF_INVALID"):
+            parse_assurance_input({**evidence, "metadata": {**meta, "shared_path_handoffs": []}},
+                                  package=package, dependencies=("TASK-1", "TASK-4"),
+                                  review_facts=facts, receipts=receipts)
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_SHARED_PATH_HANDOFF_INVALID"):
+            parse_assurance_input({**evidence, "metadata": {**meta, "shared_path_handoffs": [
+                {"path": "src/feature.py", "ordered_writers": ["TASK-4", "TASK-1"]}]}},
+                package=package, dependencies=("TASK-1", "TASK-4"),
+                review_facts=facts, receipts=receipts)
+        self.assertFalse(verify_integrated_source(
+            value, repository=self.repo,
+            github=lambda *args: json.dumps({"object": {"sha": self.base}}),
+            repository_name="o/r"))
+
+    def test_v2_distinct_source_reviewed_pr_head_merge_and_prior_review(self):
+        source = self.integrated
+        self.write("src/feature.py", "PR head")
+        self.commit("PR head")
+        pr_head = self.git("rev-parse", "HEAD")
+        self.write("src/feature.py", "independently reviewed integration")
+        self.commit("reviewed integration")
+        reviewed = self.git("rev-parse", "HEAD")
+        self.write("docs/merge.md", "merge envelope")
+        self.commit("merge envelope")
+        merged = self.git("rev-parse", "HEAD")
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        item = {**self.meta["included_packages"][0], "implementation_commit": source,
+                "reviewed_commit": reviewed, "pr_head_commit": pr_head,
+                "prior_review_outcome_ids": ["earlier-changes-requested"]}
+        meta = {**self.meta, "schema_version": 2, "integrated_commit": merged,
+                "integrated_tree": tree, "ordered_parent_shas": [merged],
+                "included_packages": [item], "shared_path_handoffs": [],
+                "ci": {**self.meta["ci"], "commit": merged}}
+        package = {"id": "TASK-3", "kind": "EVALUATION", "lane": "ASSURANCE",
+                   "acceptance_criteria": ["visible feature works"],
+                   "provider_diagnostics": {"queue_contract_sha256": queue_contract_digest(self.contract)}}
+        evidence = {"id": "v2-input", "package_id": "TASK-3",
+                    "kind": "integrated-assurance-input", "recorded_at": self.now.isoformat(),
+                    "metadata": meta}
+        review = {"TASK-1": {"id": "review-outcome", "state": "APPROVED",
+                             "review_package_id": "TASK-2", "implementer_worker_id": "builder",
+                             "reviewer_worker_id": "claude", "approval_evidence_ids": ["review-evidence"],
+                             "reviewed_commit": reviewed, "review_pr_url": item["pr_url"],
+                             "source_implementation_commit": source,
+                             "prior_review_outcome_ids": ("earlier-changes-requested",),
+                             "prior_review_outcomes": ({"id": "earlier-changes-requested",
+                                                        "state": "CHANGES_REQUESTED"},)}}
+        receipts = {"TASK-1": {"id": "integration-receipt", "package_id": "TASK-1",
+                               "kind": "integration-acceptance", "metadata": {
+                                   "implementation_commit": source, "reviewed_commit": reviewed,
+                                   "pr_head_commit": pr_head, "pr_url": item["pr_url"],
+                                   "review_outcome_id": "review-outcome",
+                                   "review_evidence_id": "review-evidence",
+                                   "merged_main_commit": merged, "merged_main_tree": tree,
+                                   "inclusion_mode": "ancestry",
+                                   "changed_paths": ["src/feature.py", "docs/merge.md"]}}}
+        value = parse_assurance_input(evidence, package=package, dependencies=("TASK-1",),
+                                      review_facts=review, receipts=receipts)
+        self.assertEqual(value.review_histories[0]["prior_outcomes"][0]["id"],
+                         "earlier-changes-requested")
+        def github(*args):
+            if args[0] == "api":
+                return json.dumps({"object": {"sha": merged}})
+            if args[0] == "pr":
+                return json.dumps({"state": "MERGED", "headRefOid": pr_head,
+                                   "mergeCommit": {"oid": merged}})
+            return json.dumps({"headSha": merged, "status": "completed",
+                               "conclusion": "success", "workflowName": "Validate app",
+                               "url": meta["ci"]["run_url"]})
+        self.assertTrue(verify_integrated_source(
+            value, repository=self.repo, github=github, repository_name="o/r"))
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
+            parse_assurance_input({**evidence, "metadata": {**meta, "included_packages": [
+                {**item, "prior_review_outcome_ids": []}]}}, package=package,
+                dependencies=("TASK-1",), review_facts=review, receipts=receipts)
+        self.assertFalse(verify_integrated_source(
+            replace(value, included_packages=({**item, "pr_head_commit": merged},)),
+            repository=self.repo, github=github, repository_name="o/r"))
+        sibling = subprocess.check_output(
+            ["git", "-C", str(self.repo), "-c", "user.name=Test",
+             "-c", "user.email=test@example.invalid", "commit-tree",
+             self.git("rev-parse", f"{source}^{{tree}}"), "-p", self.base],
+            input="non-ancestral source", text=True,
+        ).strip()
+        self.assertFalse(verify_integrated_source(
+            replace(value, included_packages=({**item, "implementation_commit": sibling},)),
+            repository=self.repo, github=github, repository_name="o/r"))
+
+    def test_v2_registry_terminal_approval_preserves_earlier_change_request(self):
+        self.seed_v2_review_provenance()
+        self.registry.register_work_package(WorkPackage(
+            "TASK-0", "F", "Earlier review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("reviewed",), status=TaskStatus.DONE,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-1",),
+        ))
+        earlier = (self.now - timedelta(minutes=1)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("earlier-review-input", "TASK-0", "review-input",
+                 "https://github.com/o/r/pull/1", "Initial implementation", earlier,
+                 json.dumps({"target_package_id": "TASK-1",
+                             "implementation_commit": self.integrated})),
+            )
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("earlier-cr", "TASK-0", "TASK-1", "builder", "claude", earlier, earlier,
+                 "CHANGES_REQUESTED", '["UI unreachable"]', '["Wire the UI"]', "[]"),
+            )
+        with self.registry._connection() as connection:
+            fact = SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-1")
+        self.assertEqual(fact["id"], "review-outcome")
+        self.assertEqual(fact["prior_review_outcome_ids"], ("earlier-cr",))
+        self.assertEqual(fact["prior_review_outcomes"][0]["changes_requested"], ["Wire the UI"])
+        self.assertEqual(fact["source_implementation_commit"], self.integrated)
+        self.registry.register_work_package(WorkPackage(
+            "TASK-4", "F", "Later failed review", "ASSURANCE", Lane.ASSURANCE,
+            ("independent-review",), 1, ("reviewed",), status=TaskStatus.DONE,
+            kind=PackageKind.REVIEW, dependency_ids=("TASK-1",),
+        ))
+        later = (self.now + timedelta(minutes=1)).isoformat()
+        with self.registry._connection() as connection:
+            connection.execute(
+                "INSERT INTO review_outcomes(id,review_package_id,target_package_id,"
+                "implementer_worker_id,reviewer_worker_id,requested_at,decided_at,state,"
+                "findings_json,changes_requested_json,approval_evidence_ids_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ("later-cr", "TASK-4", "TASK-1", "builder", "claude", later, later,
+                 "CHANGES_REQUESTED", '["regressed"]', '["repair"]', "[]"),
+            )
+        with self.registry._connection() as connection:
+            with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
+                SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-1")
+
+    def test_v2_registry_candidate_requires_exact_lineage_and_existing_matrix(self):
+        self.seed_v2_review_provenance()
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE evidence SET metadata_json=? WHERE id='integration-receipt'",
+                               (json.dumps({**json.loads(connection.execute(
+                                   "SELECT metadata_json FROM evidence WHERE id='integration-receipt'"
+                               ).fetchone()[0]), "reviewed_commit": self.integrated,
+                                   "pr_head_commit": self.integrated}),))
+        item = {**self.meta["included_packages"][0], "reviewed_commit": self.integrated,
+                "pr_head_commit": self.integrated, "prior_review_outcome_ids": []}
+        meta = {**self.meta, "schema_version": 2, "included_packages": [item],
+                "shared_path_handoffs": []}
+        assurance = self.registry.validate_integrated_assurance_candidate(self.evidence(meta))
+        self.assertEqual(assurance.schema_version, 2)
+        self.assertEqual(assurance.review_histories[0]["prior_outcomes"], [])
+        with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_MATRIX_EVIDENCE_INVALID"):
+            self.registry.validate_integrated_assurance_candidate(self.evidence({
+                **meta, "acceptance_matrix": [{**meta["acceptance_matrix"][0],
+                                               "evidence_id": "missing"}],
+            }))
 
     def begin_assurance_attempt(self):
         self.registry.record_integrated_assurance_input(

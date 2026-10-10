@@ -182,6 +182,23 @@ class RemediationCoverageTests(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.IntegrityError, "REMEDIATION_COVERAGE_APPEND_ONLY"):
                 connection.execute("DELETE FROM evidence WHERE id='coverage'")
 
+    def test_assurance_v2_requires_recorded_remediation_and_never_rewrites_original(self):
+        with self.registry._connection() as connection:
+            with self.assertRaisesRegex(RegistryConflict, "ASSURANCE_ANCESTOR_NOT_APPROVED"):
+                SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+        self.registry.record_remediation_coverage(
+            self.evidence(), expected_revision=self.registry.dispatch_control()["revision"],
+        )
+        with self.registry._connection() as connection:
+            fact = SQLiteRegistry._assurance_review_fact_v2(connection, "TASK-177")
+            self.assertEqual(connection.execute(
+                "SELECT state FROM review_outcomes WHERE id='original-verdict'"
+            ).fetchone()[0], "CHANGES_REQUESTED")
+        self.assertEqual(fact["id"], "remediation-verdict")
+        self.assertEqual(fact["source_implementation_commit"], self.original_reviewed)
+        self.assertEqual(fact["reviewed_commit"], self.reviewed)
+        self.assertEqual(fact["prior_review_outcome_ids"], ("original-verdict",))
+
     def test_existing_v6_database_without_triggers_installs_them_before_insert(self):
         with self.registry._connection() as connection:
             connection.execute("DROP TRIGGER remediation_coverage_is_append_only_update")
