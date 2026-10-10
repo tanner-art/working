@@ -75,4 +75,13 @@ describe('beta home preview', () => {
     expect(projectHtml).toContain('project summary')
     expect(eventHtml).toContain('Obligation: commitment summary')
   })
+
+  it('is a real Home surface without a primary Settings card or preview label', () => {
+    const html = renderToStaticMarkup(createElement(BetaHome, { state: { objects: [], canvas: [] }, displayName: '',
+      now: new Date('2026-09-23T10:00:00Z'), onNavigate: () => undefined }))
+    expect(html).toContain('>Home</p>')
+    expect(html).not.toContain('Secondary home · Preview')
+    expect(html).not.toContain('Make it yours')
+    expect(html).not.toContain('Manage your account, data, install, and recovery controls.')
+  })
 })
