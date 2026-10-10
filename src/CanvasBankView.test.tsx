@@ -5,6 +5,8 @@ import { CanvasBank } from './CanvasBankView'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { confirmObject, resolvedIdeas, setObjectStatus } from './objectWorkflow'
 import { makeObject } from './store'
+import { confirmedConnectionGraph, connectThoughts } from './semanticLinks'
+import { connectionFullLabels } from './connectionLabels'
 
 const canvas = (id: string, title: string, updatedAt: string) => ({
   ...createCanvasRecord('2026-09-26T08:00:00.000Z', id),
@@ -65,5 +67,79 @@ describe('Canvas Bank search surface', () => {
 
     expect(markup).toContain('aria-label="Open Product map"')
     expect(markup).toContain('aria-label="Open idea: Build a garden"')
+  })
+
+  it('shows only confirmed semantic links with a navigable list and a tucked-away authoring control', () => {
+    const first = confirmObject(makeObject({ kind: 'idea', source: 'text', originalContent: 'Garden', confidence: .9,
+      interpretation: { summary: 'Garden', suggestedKind: 'idea', rationale: 'Idea' } }))
+    const second = confirmObject(makeObject({ kind: 'idea', source: 'text', originalContent: 'Sunlight', confidence: .9,
+      interpretation: { summary: 'Sunlight', suggestedKind: 'idea', rationale: 'Idea' } }))
+    const baseline = legacyUiProjection(migrateLegacyState({ objects: [first, second], canvas: [] }))
+    const linked = connectThoughts(baseline, first.id, second.id, 'gesture:ui', '2026-10-10T12:00:00.000Z')
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[first, second]}
+      connections={confirmedConnectionGraph(linked)} focusTarget={null} onCreate={() => undefined}
+      onOpen={() => undefined} onOpenIdea={() => undefined} onConnect={() => undefined} onDisconnect={() => undefined} />)
+    expect(markup).toContain('Connections <span>1</span>')
+    expect(markup).toContain('<summary>＋ Connect thoughts</summary>')
+    expect(markup).toContain('Canvas arrows and older unverified links stay separate.')
+    expect(markup).toContain('aria-label="Open Garden"')
+    expect(markup).toContain('aria-label="Open Sunlight"')
+    expect(markup).toContain('<path')
+    expect(markup).toContain('aria-label="Remove connection between Garden and Sunlight"')
+  })
+
+  it('keeps the Bank and backup available when canonical connection projection cannot be verified', () => {
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [canvas('canvas:one', 'Product map', '2026-09-26T10:00:00.000Z')] }}
+      ideas={[]} connectionsUnavailable focusTarget={null} onCreate={() => undefined} onOpen={() => undefined}
+      onOpenIdea={() => undefined} onBackup={() => undefined} />)
+    expect(markup).toContain('aria-label="Open Product map"')
+    expect(markup).toContain('Connections unavailable')
+    expect(markup).toContain('Download backup')
+    expect(markup).not.toContain('No confirmed connections yet.')
+  })
+
+  it('keeps unique suffixes visible in graph labels with long matching summaries', () => {
+    const graph = { candidates: [], hiddenCount: 0,
+      nodes: [
+        { id: 'first', label: 'A very long matching thought summary (idea abcd)', kind: 'idea' },
+        { id: 'second', label: 'A very long matching thought summary (idea efgh)', kind: 'idea' },
+      ],
+      links: [{ id: 'link', sourceId: 'first', targetId: 'second' }],
+    }
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[]} connections={graph}
+      focusTarget={null} onCreate={() => undefined} onOpen={() => undefined} onOpenIdea={() => undefined}
+      onConnect={() => undefined} />)
+    const displayed = [...markup.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(match => match[1])
+    expect(displayed).toHaveLength(2)
+    expect(new Set(displayed).size).toBe(2)
+    expect(displayed.every(label => label.includes('·'))).toBe(true)
+  })
+
+  it('uses distinct normalized labels in connection choices, navigation, removal, and graph', () => {
+    const raw = [
+      { id: 'thought:abcd', label: 'Plan', kind: 'idea' },
+      { id: 'thought:efgh', label: 'Plan  ', kind: 'idea' },
+      { id: 'thought:ijkl', label: 'Plan ·abcd', kind: 'idea' },
+    ]
+    const full = connectionFullLabels(raw)
+    const candidates = raw.map(node => ({ ...node, label: full.get(node.id)! }))
+    const graph = { candidates, nodes: candidates, hiddenCount: 0, links: [
+      { id: 'link:one', sourceId: raw[0].id, targetId: raw[2].id },
+      { id: 'link:two', sourceId: raw[1].id, targetId: raw[2].id },
+    ] }
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[]} connections={graph}
+      focusTarget={null} onCreate={() => undefined} onOpen={() => undefined} onOpenIdea={() => undefined}
+      onConnect={() => undefined} onDisconnect={() => undefined} />)
+    const choices = [...markup.matchAll(/<option value="thought:[^"]+">([^<]+)<\/option>/g)]
+      .slice(0, 3).map(match => match[1])
+    expect(new Set(choices).size).toBe(3)
+    for (const label of choices) {
+      expect(markup).toContain(`aria-label="Open ${label}"`)
+    }
+    expect(markup).toContain(`aria-label="Remove connection between ${choices[0]} and ${choices[2]}"`)
+    expect(markup).toContain(`aria-label="Remove connection between ${choices[1]} and ${choices[2]}"`)
+    const graphLabels = [...markup.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map(match => match[1])
+    expect(new Set(graphLabels).size).toBe(3)
+    expect([...markup.matchAll(/aria-label="Remove connection between ([^"]+)"/g)]).toHaveLength(2)
   })
 })
