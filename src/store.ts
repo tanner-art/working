@@ -47,23 +47,24 @@ export function loadStateResult(): { state: AppState; error?: string } {
     return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
-/** Reconcile against this tab's latest validated save, not the model object
- * originally loaded before one or more autosaves. */
-export function reconcileCurrentSession(state: AppState): PersistedState {
+/** Reconcile against the latest validated save for the active storage mode,
+ * never the model object originally loaded before one or more autosaves. */
+export function reconcileCurrentSession(state: AppState, accountModel?: PersistedState): PersistedState {
   const session = state.model && sessions.get(state.model)
-  return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+  if (accountModel && session) throw new Error('An account snapshot cannot replace a local storage session.')
+  return reconcileLegacyUi({ ...state, model: accountModel ?? session?.model ?? state.model })
 }
 /** Serialize against the last saved evidence, including revisions added in this session. */
 export function serializeState(state: AppState): PersistedState {
   return reconcileCurrentSession(state)
 }
-/** Advance a validated in-tab projection while retaining the local storage
- * revision it was loaded from. Replacing model without this lineage loses the
- * compare-and-swap guard and can collapse later audit versions. */
-export function advanceModelProjection(state: AppState): AppState {
-  const projection = reconcileCurrentSession(state)
+/** Advance a validated projection. Local projections retain their CAS revision;
+ * account projections carry the supplied account-session base without being
+ * registered as local storage. */
+export function advanceModelProjection(state: AppState, accountModel?: PersistedState): AppState {
+  const projection = reconcileCurrentSession(state, accountModel)
   const session = state.model && sessions.get(state.model)
-  if (session) sessions.set(projection, { model: projection, raw: session.raw })
+  if (session && !accountModel) sessions.set(projection, { model: projection, raw: session.raw })
   return { ...state, model: projection }
 }
 export function saveState(state: AppState): string | undefined {

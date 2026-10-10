@@ -1,4 +1,4 @@
-import type { ActionPriority, AppState, ThoughtObject } from './domain'
+import type { ActionPriority, AppState, PersistedState, ThoughtObject } from './domain'
 import { eventProposal, recordTemporalDecision } from './temporalConfirmation'
 import { advanceModelProjection, reconcileCurrentSession } from './store'
 
@@ -19,16 +19,16 @@ export function setStagedActionPriority(state: AppState, objectId: string, prior
   return { ...state, objects: state.objects.map(object => object.id !== objectId ? object : { ...object, history: [...object.history, { at: new Date().toISOString(), event: `Set staged Action priority to ${priority}`, actionPriority: { priority, source: 'schedule-priority-selection' } }] }) }
 }
 
-export function scheduleStagedAction(state: AppState, objectId: string, startsAt: string, temporalContext: string): AppState {
+export function scheduleStagedAction(state: AppState, objectId: string, startsAt: string, temporalContext: string, accountModel?: PersistedState): AppState {
   if (!Number.isFinite(Date.parse(startsAt)) || !temporalContext.trim()) throw new Error('Choose a valid date, time, and temporal context.')
   const current = state.objects.find(object => object.id === objectId)
-  const model = reconcileCurrentSession(state)
+  const model = reconcileCurrentSession(state, accountModel)
   const stage = model.stagedActions?.find(value => value.objectId === objectId)
   if (!current || current.kind !== 'action' || current.status !== 'confirmed' || !stage || stage.status !== 'staged') throw new Error('This Action is no longer awaiting scheduling. Refresh Schedule and try again.')
   const eventId = crypto.randomUUID()
   const candidate: AppState = { ...state, objects: state.objects.map(object => object.id !== objectId ? object : { ...object, history: [...object.history, { at: new Date().toISOString(), event: 'Scheduled staged Action', actionSchedule: { eventId, startsAt, temporalContext } }] }) }
-  const scheduled = reconcileCurrentSession(candidate)
+  const scheduled = reconcileCurrentSession(candidate, accountModel)
   const target = eventProposal(scheduled, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This Action remains staged.')
-  return advanceModelProjection(recordTemporalDecision(candidate, scheduled, target))
+  return advanceModelProjection(recordTemporalDecision(candidate, scheduled, target), accountModel)
 }

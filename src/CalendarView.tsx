@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent } from 'react'
-import type { AppState } from './domain'
+import type { AppState, PersistedState } from './domain'
 import { objectLabels } from './domain'
-import { reconcileLegacyUi } from './migration'
+import { reconcileCurrentSession } from './store'
 import { localDateKey } from './morningDigest'
 import { activeTemporalDecisions, deadlineProposal, temporalFactIsCurrent } from './temporalConfirmation'
 import { confirmCommitmentDeadline, createCalendarCommitment, createDirectCalendarEvent, scheduleCommitment } from './calendarEntry'
@@ -15,8 +15,8 @@ const dayHeading = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 
 const time = (iso: string) => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
 const dateLabel = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(parseLocalDateKey(key))
 
-export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void }) {
-  const model = useMemo(() => reconcileLegacyUi(state), [state])
+export function CalendarView({ state, onOpen, onUpdate, readAccountModel }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
+  const model = useMemo(() => reconcileCurrentSession(state, readAccountModel?.(state)), [state, readAccountModel])
   const todayKey = localDateKey(new Date())
   const [mode, setMode] = useState<CalendarMode>('month')
   const [selected, setSelected] = useState(todayKey)
@@ -81,8 +81,8 @@ export function CalendarView({ state, onOpen, onUpdate }: { state: AppState; onO
     onUpdate(current => ({ ...current, objects: [item, ...current.objects] }))
     setCommitment('')
   }
-  const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId)) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
-  const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId)) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
+  const schedule = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => scheduleCommitment(current, objectId, undefined, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to schedule this commitment. Refresh Calendar and try again.') } }
+  const confirmDeadline = (objectId: string) => { setScheduleMessage(''); try { onUpdate(current => confirmCommitmentDeadline(current, objectId, readAccountModel?.(current))) } catch (error) { setScheduleMessage(error instanceof Error ? error.message : 'Unable to confirm this deadline. Refresh Calendar and try again.') } }
 
   return <div className="page calendar-page">
     <header className="page-header"><div><p className="eyebrow">Time, scheduled and proposed</p><h1>Calendar</h1></div></header>

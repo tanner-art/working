@@ -1,4 +1,4 @@
-import type { AppState, TemporalDecision, ThoughtObject } from './domain'
+import type { AppState, PersistedState, TemporalDecision, ThoughtObject } from './domain'
 import { confirmObject } from './objectWorkflow'
 import { advanceModelProjection, makeObject, reconcileCurrentSession } from './store'
 import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision, validTemporalDate } from './temporalConfirmation'
@@ -44,7 +44,7 @@ export function createCalendarCommitment(content: string): ThoughtObject {
 }
 
 /** Scheduling is an explicit second gesture; Review time never creates an event by itself. */
-export function scheduleCommitment(state: AppState, objectId: string, temporalContext = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'): AppState {
+export function scheduleCommitment(state: AppState, objectId: string, temporalContext = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local', accountModel?: PersistedState): AppState {
   const object = state.objects.find(item => item.id === objectId)
   if (!object || object.kind !== 'commitment' || object.status !== 'confirmed') throw new Error('This commitment is no longer available for scheduling. Refresh Calendar and try again.')
   const setup = object.history.find(entry => entry.commitmentSetup)?.commitmentSetup
@@ -54,17 +54,17 @@ export function scheduleCommitment(state: AppState, objectId: string, temporalCo
   if (!Number.isFinite(Date.parse(startsAt))) throw new Error('The selected commitment date and time are invalid.')
   const eventId = crypto.randomUUID()
   const candidate: AppState = { ...state, objects: state.objects.map(item => item.id !== objectId ? item : { ...item, history: [...item.history, { at: new Date().toISOString(), event: 'Scheduled Commitment CalendarEvent', commitmentSchedule: { eventId, startsAt, temporalContext, source: 'commitment-calendar-scheduling' } }] }) }
-  const model = reconcileCurrentSession(candidate), target = eventProposal(model, eventId)
+  const model = reconcileCurrentSession(candidate, accountModel), target = eventProposal(model, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This commitment remains unscheduled.')
-  return advanceModelProjection(recordTemporalDecision(candidate, model, target))
+  return advanceModelProjection(recordTemporalDecision(candidate, model, target), accountModel)
 }
 
 /** A fixed deadline is explicit temporal evidence, distinct from event scheduling. */
-export function confirmCommitmentDeadline(state: AppState, objectId: string): AppState {
-  const model = reconcileCurrentSession(state), object = model.semanticObjects.find(item => item.id === objectId && item.kind === 'commitment')
+export function confirmCommitmentDeadline(state: AppState, objectId: string, accountModel?: PersistedState): AppState {
+  const model = reconcileCurrentSession(state, accountModel), object = model.semanticObjects.find(item => item.id === objectId && item.kind === 'commitment')
   if (!object) throw new Error('This commitment is no longer available. Refresh Calendar and try again.')
   const target = deadlineProposal(model, objectId)
   if (!target) throw new Error('This commitment has no valid proposed deadline to confirm.')
   if (activeTemporalDecisions(model).some(entry => entry.target.kind === 'fixed-deadline' && entry.target.objectId === objectId)) throw new Error('This commitment deadline is already confirmed.')
-  return advanceModelProjection(recordTemporalDecision(state, model, target))
+  return advanceModelProjection(recordTemporalDecision(state, model, target), accountModel)
 }

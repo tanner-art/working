@@ -1,12 +1,12 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import type { AppState, StagedAction } from './domain'
-import { reconcileLegacyUi } from './migration'
+import type { AppState, PersistedState, StagedAction } from './domain'
+import { reconcileCurrentSession } from './store'
 import { scheduleStagedAction, setStagedActionPriority } from './actionStaging'
 import { calculateAdaptivePlan, isPlanEligible, setActionPlanEligibility } from './adaptivePlan'
 
 const localDateTimeValue = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 
-function StagedActionRow({ action, state, update }: { action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void }) {
+function StagedActionRow({ action, state, update, readAccountModel }: { action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
   const [when, setWhen] = useState(() => localDateTimeValue(new Date(Date.now() + 60 * 60_000)))
   const [message, setMessage] = useState('')
   const object = state.objects.find(item => item.id === action.objectId)
@@ -14,7 +14,7 @@ function StagedActionRow({ action, state, update }: { action: StagedAction; stat
   const submit = (event: FormEvent) => {
     event.preventDefault()
     try {
-      update(current => scheduleStagedAction(current, action.objectId, new Date(when).toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'))
+      update(current => scheduleStagedAction(current, action.objectId, new Date(when).toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time', readAccountModel?.(current)))
       setMessage('CalendarEvent confirmed.')
     } catch (error) { setMessage((error as Error).message) }
   }
@@ -38,8 +38,8 @@ function StagedActionRow({ action, state, update }: { action: StagedAction; stat
   </article></li>
 }
 
-export function ScheduleView({ state, update }: { state: AppState; update: (next: (state: AppState) => AppState) => void }) {
-  const model = useMemo(() => reconcileLegacyUi(state), [state])
+export function ScheduleView({ state, update, readAccountModel }: { state: AppState; update: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
+  const model = useMemo(() => reconcileCurrentSession(state, readAccountModel?.(state)), [state, readAccountModel])
   const plan = useMemo(() => calculateAdaptivePlan(state), [state])
   const actions = (model.stagedActions ?? []).filter(action => action.status !== 'reversed' &&
     state.objects.some(object => object.id === action.objectId && object.status === 'confirmed')).sort((left, right) => right.priority - left.priority || left.stagedAt.localeCompare(right.stagedAt))
@@ -51,6 +51,6 @@ export function ScheduleView({ state, update }: { state: AppState; update: (next
         : <p>No Actions are eligible yet. Add a staged Action when you are ready.</p>}
       {plan.blockedCount > 0 && <p role="status">{plan.blockedCount} eligible {plan.blockedCount === 1 ? 'Action is' : 'Actions are'} waiting on dependencies.</p>}
     </details>
-    {actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow key={action.id} action={action} state={state} update={update} />)}</ul> : <p className="empty">No staged Actions yet.</p>}
+    {actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow key={action.id} action={action} state={state} update={update} readAccountModel={readAccountModel} />)}</ul> : <p className="empty">No staged Actions yet.</p>}
   </main>
 }
