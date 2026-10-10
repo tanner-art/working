@@ -2185,6 +2185,240 @@ class SQLiteRegistry:
         with self._connection() as connection:
             return self._assurance_input_from_connection(connection, package_id)
 
+    @staticmethod
+    def _validate_remediation_coverage(connection: sqlite3.Connection, evidence: Evidence) -> Mapping[str, Any]:
+        """Bind one failed review to a distinct, approved and merged remediation.
+
+        This record does not change either historical review verdict or promote
+        the original package.  Its per-finding assertions are explicit inputs
+        for an independent assurance reviewer, not inferred from titles.
+        """
+        metadata = evidence.metadata
+        fields = {"schema_version", "original_review_outcome_id", "remediation_package_id",
+                  "remediation_review_outcome_id", "remediation_review_evidence_id",
+                  "pr_url", "reviewed_commit", "merged_main_commit", "merged_main_tree",
+                  "finding_coverage"}
+        if (evidence.kind != "remediation-coverage" or not evidence.id
+                or not isinstance(metadata, Mapping) or set(metadata) != fields
+                or type(metadata.get("schema_version")) is not int
+                or metadata["schema_version"] != 1
+                or evidence.uri != metadata.get("pr_url")):
+            raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "schema")
+        if any(not isinstance(metadata[key], str) or not metadata[key] for key in (
+            "original_review_outcome_id", "remediation_package_id",
+            "remediation_review_outcome_id", "remediation_review_evidence_id",
+        )):
+            raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "identity")
+        for key in ("reviewed_commit", "merged_main_commit", "merged_main_tree"):
+            if not isinstance(metadata[key], str) or not re.fullmatch(r"[0-9a-f]{40}", metadata[key]):
+                raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", key)
+        if (not isinstance(metadata["pr_url"], str)
+                or not re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/[1-9]\d*", metadata["pr_url"])):
+            raise RegistryConflict("REMEDIATION_COVERAGE_INVALID", "pr_url")
+        original = connection.execute(
+            "SELECT * FROM review_outcomes WHERE id=?",
+            (metadata["original_review_outcome_id"],),
+        ).fetchone()
+        remediation = connection.execute(
+            "SELECT * FROM review_outcomes WHERE id=?",
+            (metadata["remediation_review_outcome_id"],),
+        ).fetchone()
+        if (original is None or original["target_package_id"] != evidence.package_id
+                or original["state"] != "CHANGES_REQUESTED"):
+            raise RegistryConflict("REMEDIATION_ORIGINAL_REVIEW_INVALID")
+        if (remediation is None or remediation["target_package_id"] != metadata["remediation_package_id"]
+                or remediation["state"] != "APPROVED"
+                or remediation["implementer_worker_id"] == remediation["reviewer_worker_id"]
+                or remediation["target_package_id"] == evidence.package_id):
+            raise RegistryConflict("REMEDIATION_APPROVAL_INVALID")
+        rows = connection.execute(
+            "SELECT id,feature_id,status,kind FROM work_packages WHERE id IN (?,?,?,?)",
+            (evidence.package_id, original["review_package_id"],
+             remediation["target_package_id"], remediation["review_package_id"]),
+        ).fetchall()
+        packages = {row["id"]: row for row in rows}
+        if (len(packages) != 4
+                or packages[evidence.package_id]["kind"] != "PARENT"
+                or packages[evidence.package_id]["feature_id"] !=
+                    packages[remediation["target_package_id"]]["feature_id"]
+                or packages[original["review_package_id"]]["kind"] != "REVIEW"
+                or packages[original["review_package_id"]]["status"] != "DONE"
+                or packages[remediation["target_package_id"]]["kind"] != "PARENT"
+                or packages[remediation["target_package_id"]]["status"] != "DONE"
+                or packages[remediation["review_package_id"]]["kind"] != "REVIEW"
+                or packages[remediation["review_package_id"]]["status"] != "DONE"):
+            raise RegistryConflict("REMEDIATION_PACKAGE_STATE_INVALID")
+        approval_ids = json.loads(remediation["approval_evidence_ids_json"])
+        if (len(approval_ids) != 1
+                or approval_ids[0] != metadata["remediation_review_evidence_id"]):
+            raise RegistryConflict("REMEDIATION_REVIEW_EVIDENCE_INVALID")
+        approval = connection.execute(
+            "SELECT package_id,kind,uri,metadata_json FROM evidence WHERE id=?",
+            (approval_ids[0],),
+        ).fetchone()
+        inputs = connection.execute(
+            "SELECT id,uri,metadata_json FROM evidence WHERE package_id=? AND kind='review-input'",
+            (remediation["review_package_id"],),
+        ).fetchall()
+        if len(inputs) != 1:
+            raise RegistryConflict("REMEDIATION_REVIEW_INPUT_INVALID")
+        input_meta = json.loads(inputs[0]["metadata_json"])
+        if (not isinstance(input_meta, Mapping)
+                or inputs[0]["uri"] != metadata["pr_url"]
+                or input_meta.get("target_package_id") != remediation["target_package_id"]
+                or input_meta.get("implementation_commit") != metadata["reviewed_commit"]
+                or not isinstance(input_meta.get("base_commit"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", input_meta["base_commit"])
+                or not isinstance(input_meta.get("contract_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", input_meta["contract_sha256"])):
+            raise RegistryConflict("REMEDIATION_REVIEW_INPUT_INVALID")
+        approval_meta = json.loads(approval["metadata_json"]) if approval is not None else None
+        if (approval is None or approval["package_id"] != remediation["review_package_id"]
+                or approval["kind"] != "review" or approval["uri"] != metadata["pr_url"]
+                or not isinstance(approval_meta, Mapping)
+                or approval_meta.get("reviewed_commit") != metadata["reviewed_commit"]
+                or approval_meta.get("review_input_evidence_id") != inputs[0]["id"]
+                or approval_meta.get("reviewed_base_commit") != input_meta.get("base_commit")
+                or approval_meta.get("contract_sha256") != input_meta.get("contract_sha256")):
+            raise RegistryConflict("REMEDIATION_REVIEW_EVIDENCE_INVALID")
+        original_findings = json.loads(original["findings_json"])
+        original_requests = json.loads(original["changes_requested_json"])
+        reviewer_findings = json.loads(remediation["findings_json"])
+        coverage = metadata["finding_coverage"]
+        if (not isinstance(original_findings, list) or not original_findings
+                or not isinstance(original_requests, list) or not original_requests
+                or not isinstance(reviewer_findings, list) or not reviewer_findings
+                or not isinstance(coverage, list)):
+            raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+        expected = {(source, index) for source, values in (
+            ("finding", original_findings), ("change_request", original_requests)
+        ) for index in range(len(values))}
+        observed: set[tuple[str, int]] = set()
+        for item in coverage:
+            if not isinstance(item, Mapping) or set(item) != {
+                "source", "index", "source_sha256", "reviewer_findings", "rationale",
+            }:
+                raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+            source, index = item["source"], item["index"]
+            if (not isinstance(index, int) or isinstance(index, bool)
+                    or (source, index) not in expected or (source, index) in observed
+                    or not isinstance(item["rationale"], str) or not item["rationale"].strip()):
+                raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+            source_text = (original_findings if source == "finding" else original_requests)[index]
+            if (not isinstance(source_text, str) or not source_text
+                    or hashlib.sha256(source_text.encode("utf-8")).hexdigest() != item["source_sha256"]):
+                raise RegistryConflict("REMEDIATION_FINDING_PROVENANCE_MISMATCH")
+            reviewer_refs = item["reviewer_findings"]
+            if (not isinstance(reviewer_refs, list) or not reviewer_refs
+                    or any(not isinstance(ref, Mapping) or set(ref) != {"index", "sha256"}
+                           for ref in reviewer_refs)):
+                raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+            reviewer_indices: set[int] = set()
+            for ref in reviewer_refs:
+                reviewer_index = ref["index"]
+                if (not isinstance(reviewer_index, int) or isinstance(reviewer_index, bool)
+                        or not 0 <= reviewer_index < len(reviewer_findings)
+                        or reviewer_index in reviewer_indices):
+                    raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+                reviewer_text = reviewer_findings[reviewer_index]
+                if (not isinstance(reviewer_text, str) or not reviewer_text
+                        or hashlib.sha256(reviewer_text.encode("utf-8")).hexdigest() != ref["sha256"]):
+                    raise RegistryConflict("REMEDIATION_FINDING_PROVENANCE_MISMATCH")
+                reviewer_indices.add(reviewer_index)
+            observed.add((source, index))
+        if observed != expected:
+            raise RegistryConflict("REMEDIATION_FINDING_COVERAGE_INCOMPLETE")
+        if _normalize_timestamp(evidence.recorded_at) <= remediation["decided_at"]:
+            raise RegistryConflict("REMEDIATION_COVERAGE_CHRONOLOGY_INVALID")
+        return {
+            "original_package_id": evidence.package_id,
+            "original_review_package_id": original["review_package_id"],
+            "remediation_package_id": remediation["target_package_id"],
+            "remediation_review_package_id": remediation["review_package_id"],
+            "reviewed_commit": metadata["reviewed_commit"],
+            "merged_main_commit": metadata["merged_main_commit"],
+            "merged_main_tree": metadata["merged_main_tree"],
+            "pr_url": metadata["pr_url"],
+            "covered_findings": len(original_findings),
+            "covered_change_requests": len(original_requests),
+        }
+
+    def validate_remediation_coverage_candidate(self, evidence: Evidence) -> Mapping[str, Any]:
+        """Read-only Registry half of the operator's exact-source preflight."""
+        with self._connection() as connection:
+            return self._validate_remediation_coverage(connection, evidence)
+
+    def remediation_coverage(self, original_package_id: str) -> Mapping[str, Any]:
+        """Return one validated append-only relation for later assurance inputs."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM evidence WHERE package_id=? AND kind='remediation-coverage'",
+                (original_package_id,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise RegistryConflict("REMEDIATION_COVERAGE_REQUIRED", original_package_id)
+            row = rows[0]
+            evidence = Evidence(
+                row["id"], row["package_id"], row["kind"], row["uri"],
+                row["summary"], row["recorded_at"], json.loads(row["metadata_json"]),
+            )
+            return {"evidence_id": row["id"], "metadata": dict(evidence.metadata),
+                    **self._validate_remediation_coverage(connection, evidence)}
+
+    def record_remediation_coverage(self, evidence: Evidence, *, expected_revision: int) -> int:
+        """Append one CAS-bound relation; never rewrite the original verdict."""
+        recorded_at = _normalize_timestamp(evidence.recorded_at)
+        request = {"id": evidence.id, "package_id": evidence.package_id,
+                   "kind": evidence.kind, "uri": evidence.uri,
+                   "summary": evidence.summary, "recorded_at": recorded_at,
+                   "metadata": dict(evidence.metadata), "expected_revision": expected_revision}
+        operation_id = f"remediation-coverage:{evidence.id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(connection, operation_id=operation_id,
+                    operation_kind="REMEDIATION_COVERAGE", request=request)
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode,kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("REMEDIATION_COVERAGE_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                if connection.execute(
+                    "SELECT id FROM evidence WHERE package_id=? AND kind='remediation-coverage'",
+                    (evidence.package_id,),
+                ).fetchone():
+                    raise RegistryConflict("REMEDIATION_COVERAGE_ALREADY_RECORDED")
+                facts = self._validate_remediation_coverage(connection, evidence)
+                connection.execute(
+                    "INSERT INTO evidence(id,package_id,kind,uri,summary,recorded_at,metadata_json) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (evidence.id, evidence.package_id, evidence.kind, evidence.uri,
+                     evidence.summary, recorded_at, _json(evidence.metadata)),
+                )
+                self._insert_event(connection, "REMEDIATION_COVERAGE_RECORDED", recorded_at,
+                    evidence.package_id, None, None, {"evidence_id": evidence.id, **facts})
+                revision = self._bump_revision(connection)
+                self._record_operation(connection, operation_id=operation_id,
+                    operation_kind="REMEDIATION_COVERAGE", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at)
+                connection.commit()
+                return revision
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(operation_id=operation_id,
+                    operation_kind="REMEDIATION_COVERAGE", request=request,
+                    error=error, recorded_at=recorded_at)
+                raise
+
     def validate_integrated_assurance_candidate(self, evidence: Evidence):
         """Read-only preflight of a prospective immutable assurance input."""
         with self._connection() as connection:
@@ -4497,7 +4731,8 @@ class SQLiteRegistry:
     def record_evidence(
         self, evidence: Evidence, *, operation_id: str | None = None
     ) -> None:
-        if evidence.kind in {"integrated-assurance-input", "integrated-assurance-verdict"}:
+        if evidence.kind in {"integrated-assurance-input", "integrated-assurance-verdict",
+                             "remediation-coverage"}:
             raise RegistryConflict("ASSURANCE_SPECIALIZED_OPERATION_REQUIRED")
         recorded_at = _normalize_timestamp(evidence.recorded_at)
         request = {
