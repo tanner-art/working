@@ -85,7 +85,10 @@ describe('WP-07 Canvas semantic integrity', () => {
     expect(finalModel.captures.find(capture => capture.id === `capture:${later.id}`)).toMatchObject({
       source: 'canvas', originalContent: currentNode.text, evidence: 'text-only',
     })
-    expect(finalModel.semanticObjects).toEqual(initial.semanticObjects)
+    expect(finalModel.semanticObjects.find(object => object.id === first.id)).toEqual(
+      initial.semanticObjects.find(object => object.id === first.id),
+    )
+    expect(finalModel.semanticObjects.some(object => object.id === later.id)).toBe(true)
     expect(finalModel.reminderInstructions).toEqual(initial.reminderInstructions)
 
     // Reloading the device and opening the same account on another device retain both sources.

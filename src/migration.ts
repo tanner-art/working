@@ -61,7 +61,13 @@ function materializeReminderInstructions(model: PersistedState) {
 }
 
 const copy = <T>(value: T): T => structuredClone(value)
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+// UI projections can insert the same persisted fields in a different order. A
+// key-order-only difference is not a new interpretation or confirmation event.
+const canonicalJson = (value: unknown): string | undefined => JSON.stringify(value, (_key, current: unknown) => {
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current
+  return Object.fromEntries(Object.entries(current).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+})
+const equal = (a: unknown, b: unknown): boolean => canonicalJson(a) === canonicalJson(b)
 const unique = (ids: string[]) => ids.every(id => id.length > 0) && new Set(ids).size === ids.length
 const fail = (): never => { throw new Error('Saved model is invalid or ambiguous; stored data must remain untouched.') }
 const actionPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
