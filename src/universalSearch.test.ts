@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject } from './objectWorkflow'
+import { confirmObject, reverseObject, setObjectStatus, updateObject } from './objectWorkflow'
 import { correctOriginal, reviseInterpretation } from './reviewRevision'
 import { resolveReminderInState } from './reminderWorkflow'
 import type { AppState, ThoughtObject } from './domain'
-import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, type SearchDocument } from './universalSearch'
+import { createUniversalSearchIndex, searchDocumentsFromAppState, searchDocumentsFromModel, searchProjectionFromAppState, type SearchDocument } from './universalSearch'
 
 const at = '2026-10-09T00:00:00.000Z'
 const thought = (id: string, kind: ThoughtObject['kind'], originalContent: string, summary: string): ThoughtObject => ({
@@ -139,6 +139,57 @@ describe('universal search source adapters', () => {
     const unauditedInstruction = model()
     unauditedInstruction.interpretations.at(-1)!.legacy.history = []
     expect(searchDocumentsFromModel(unauditedInstruction).some(document => document.kind === 'reminder')).toBe(false)
+  })
+
+  it('keeps a resolved Reminder searchable after a rejected reversal and valid status changes', () => {
+    const resolved = legacyUiProjection(model())
+    const before = searchProjectionFromAppState(resolved)
+    expect(before.complete).toBe(true)
+    expect(before.documents.some(document => document.kind === 'reminder')).toBe(true)
+    expect(() => reverseObject(resolved.objects.find(object => object.id === 'r')!)).toThrow('cannot return to Review')
+    expect(searchProjectionFromAppState(resolved)).toEqual(before)
+    const edited = legacyUiProjection(reconcileLegacyUi({ ...resolved, objects: resolved.objects.map(object =>
+      object.id === 'r' ? updateObject(object, { ...object, context: 'Personal' }) : object) }))
+    expect(searchProjectionFromAppState(edited).complete).toBe(true)
+    const statusSaved = legacyUiProjection(reconcileLegacyUi({ ...edited, objects: edited.objects.map(object =>
+      object.id === 'r' ? setObjectStatus(object, 'complete') : object) }))
+    expect(searchProjectionFromAppState(statusSaved).complete).toBe(true)
+  })
+
+  it('fails closed when a resolved Reminder is changed to Idea or Action without a valid migration transition', () => {
+    for (const kind of ['idea', 'action'] as const) {
+      const resolved = legacyUiProjection(model())
+      const reminder = resolved.objects.find(object => object.id === 'r')!
+      expect(() => updateObject(reminder, { ...reminder, kind })).toThrow('instruction history')
+      const changed = { ...resolved, objects: resolved.objects.map(object =>
+        object.id === 'r' ? { ...object, kind } : object) }
+      expect(() => reconcileLegacyUi(changed)).toThrow('Saved model is invalid or ambiguous')
+      const projection = searchProjectionFromAppState(changed)
+      expect(projection.complete).toBe(false)
+      expect(searchProjectionFromAppState(resolved).complete).toBe(true)
+    }
+  })
+
+  it('does not report a completed or archived Reminder as missing without a review decision', () => {
+    for (const status of ['complete', 'archived'] as const) {
+      const resolved = legacyUiProjection(model())
+      const changed = legacyUiProjection(reconcileLegacyUi({ ...resolved, objects: resolved.objects.map(object =>
+        object.id === 'r' ? setObjectStatus(object, status) : object) }))
+      const projection = searchProjectionFromAppState(changed)
+      expect(projection.complete).toBe(true)
+      expect(projection.omittedCount).toBe(0)
+      expect(projection.documents.some(document => document.kind === 'reminder')).toBe(false)
+      expect(projection.documents.some(document => document.id === 'capture:r')).toBe(true)
+    }
+  })
+
+  it('still reports broken reminder target and creation provenance as incomplete', () => {
+    const brokenTarget = model()
+    brokenTarget.reminderInstructions![0].targetId = 'missing-target'
+    expect(searchProjectionFromAppState({ ...legacyUiProjection(model()), model: brokenTarget }).complete).toBe(false)
+    const missingCreation = model()
+    missingCreation.interpretations.at(-1)!.legacy.history = []
+    expect(searchProjectionFromAppState({ ...legacyUiProjection(model()), model: missingCreation }).complete).toBe(false)
   })
 
   it('returns every matching kind by default rather than truncating before later kind buckets', () => {

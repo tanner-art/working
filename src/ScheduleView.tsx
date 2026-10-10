@@ -1,14 +1,20 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { AppState, PersistedState, StagedAction } from './domain'
 import { reconcileCurrentSession } from './store'
 import { scheduleStagedAction, setStagedActionPriority } from './actionStaging'
 import { calculateAdaptivePlan, isPlanEligible, setActionPlanEligibility } from './adaptivePlan'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 const localDateTimeValue = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 
-function StagedActionRow({ action, state, update, readDecisionModel, decisionBlocked }: { action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string }) {
+function StagedActionRow({ registerSearchHandoffGuard, action, state, update, readDecisionModel, decisionBlocked, focus, onFocusHandled }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; action: StagedAction; state: AppState; update: (next: (state: AppState) => AppState) => void; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string; focus: boolean; onFocusHandled?: () => void }) {
   const [when, setWhen] = useState(() => localDateTimeValue(new Date(Date.now() + 60 * 60_000)))
+  const initialWhen = useRef(when)
+  useSearchHandoffGuard(registerSearchHandoffGuard, `schedule:${action.id}`, () => action.status !== 'staged' || when === initialWhen.current)
   const [message, setMessage] = useState('')
+  const row = useRef<HTMLLIElement>(null)
+  useEffect(() => { if (focus && row.current) { row.current.focus(); onFocusHandled?.() } }, [focus])
   const object = state.objects.find(item => item.id === action.objectId)
   if (!object) return null
   const submit = (event: FormEvent) => {
@@ -19,7 +25,7 @@ function StagedActionRow({ action, state, update, readDecisionModel, decisionBlo
     } catch (error) { setMessage((error as Error).message) }
   }
   const eligible = isPlanEligible(object)
-  return <li><article><h2>{object.interpretation.summary}</h2>
+  return <li ref={row} tabIndex={focus ? -1 : undefined}><article><h2>{object.interpretation.summary}</h2>
     <label>Priority <select aria-label={`Priority for ${object.interpretation.summary}`} value={action.priority} disabled={action.status !== 'staged'} onChange={event => {
       try {
         update(current => setStagedActionPriority(current, action.objectId, Number(event.target.value) as StagedAction['priority']))
@@ -38,7 +44,7 @@ function StagedActionRow({ action, state, update, readDecisionModel, decisionBlo
   </article></li>
 }
 
-export function ScheduleView({ state, update, readAccountModel, readDecisionModel, decisionBlocked }: { state: AppState; update: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string }) {
+export function ScheduleView({ registerSearchHandoffGuard, state, update, readAccountModel, readDecisionModel, decisionBlocked, focusActionId = null, onFocusHandled }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AppState; update: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string; focusActionId?: string | null; onFocusHandled?: () => void }) {
   const projection = useMemo(() => {
     try { return { model: reconcileCurrentSession(state, readAccountModel?.(state)), error: '' } }
     catch { return { model: state.model, error: 'Showing the last loaded Schedule while account changes are unsaved. Retry saving or download a backup.' } }
@@ -57,6 +63,6 @@ export function ScheduleView({ state, update, readAccountModel, readDecisionMode
         : <p>No Actions are eligible yet. Add a staged Action when you are ready.</p>}
       {plan.blockedCount > 0 && <p role="status">{plan.blockedCount} eligible {plan.blockedCount === 1 ? 'Action is' : 'Actions are'} waiting on dependencies.</p>}
     </details>
-    {actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow key={action.id} action={action} state={state} update={update} readDecisionModel={readDecisionModel} decisionBlocked={decisionIssue} />)}</ul> : <p className="empty">No staged Actions yet.</p>}
+    {actions.length ? <ul className="detail-list">{actions.map(action => <StagedActionRow registerSearchHandoffGuard={registerSearchHandoffGuard} key={action.id} action={action} state={state} update={update} readDecisionModel={readDecisionModel} decisionBlocked={decisionIssue} focus={action.objectId === focusActionId} onFocusHandled={onFocusHandled} />)}</ul> : <p className="empty">No staged Actions yet.</p>}
   </main>
 }

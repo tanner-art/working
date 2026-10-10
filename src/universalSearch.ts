@@ -1,4 +1,4 @@
-import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, SemanticObject, SourceCorrection } from './domain'
+import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, ResolvedReminderInstruction, SemanticObject, SourceCorrection } from './domain'
 import { bankFromLegacy, isCanvasRecord } from './canvasBank'
 import { isPersistedState, reconcileLegacyUi } from './migration'
 
@@ -35,10 +35,12 @@ function textFields(fields: Partial<Record<SearchField, string>>): Partial<Recor
 /** Invalid or ambiguous source identities are omitted, never guessed or merged. */
 export function createUniversalSearchIndex(input: readonly SearchDocument[]) {
   let entries = compile(input)
+  let sourceCount = input.length
   return {
     get size() { return entries.length },
+    get omittedCount() { return sourceCount - entries.length },
     /** Replace from a fresh source projection after edits, merges, or account reloads. */
-    replace(next: readonly SearchDocument[]) { entries = compile(next) },
+    replace(next: readonly SearchDocument[]) { entries = compile(next); sourceCount = next.length },
     query(raw: string, limit = Number.MAX_SAFE_INTEGER): SearchResult[] {
       const terms = normalize(raw.trim()).split(/\s+/).filter(Boolean)
       if (!terms.length || !Number.isFinite(limit) || limit <= 0) return []
@@ -113,21 +115,27 @@ function semanticDocuments(objects: readonly SemanticObject[], captures: Set<str
   })
 }
 
+/** A withdrawn source is intentionally absent; broken provenance remains an omitted candidate. */
+function reminderInstructionState(model: PersistedState, instruction: ResolvedReminderInstruction,
+  captures: Map<string, CaptureRecord>, interpretations: Set<string>, targets: Set<string>): 'index' | 'retired' | 'invalid' {
+  const source = model.interpretations.find(reading => reading?.id === instruction?.sourceInterpretationId)
+  const current = source && model.interpretations.filter(reading => reading?.legacy?.id === source.legacy?.id).at(-1)
+  const creation = source?.legacy?.history?.find(entry => entry.reminderInstruction?.instructionId === instruction?.id && entry.reminderInstruction.action === 'created')?.reminderInstruction
+  if (!instruction || !validId(instruction.id) || !validId(instruction.targetId) || !targets.has(instruction.targetId) ||
+      !stableIds(instruction.captureIds) || !instruction.captureIds.length || !instruction.captureIds.every(id => captures.has(id)) ||
+      !validId(instruction.sourceInterpretationId) || !interpretations.has(instruction.sourceInterpretationId) ||
+      !source || !instruction.captureIds.every(id => source.captureIds?.includes(id)) ||
+      creation?.targetId !== instruction.targetId || creation.mode !== instruction.mode || !current ||
+      !current.legacy.history?.some(entry => entry.reminderInstruction?.instructionId === instruction.id && entry.reminderInstruction.action === 'created')) return 'invalid'
+  return current.reviewState === 'rejected' || current.legacy.kind !== 'reminder' || current.legacy.status !== 'confirmed' ? 'retired' : 'index'
+}
+
 function reminderDocuments(model: PersistedState, captures: Map<string, CaptureRecord>, interpretations: Set<string>, corrections: readonly SourceCorrection[]): SearchDocument[] {
   const targets = new Set(model.semanticObjects.filter(value => value && validId(value.id)).map(value => value.id))
   const latestCorrection = new Map<string, string>()
   for (const correction of corrections) if (validId(correction?.captureId) && validText(correction?.correctedContent)) latestCorrection.set(correction.captureId, correction.correctedContent)
   return (Array.isArray(model.reminderInstructions) ? model.reminderInstructions : []).flatMap(instruction => {
-    const source = model.interpretations.find(reading => reading?.id === instruction?.sourceInterpretationId)
-    const current = source && model.interpretations.filter(reading => reading?.legacy?.id === source.legacy?.id).at(-1)
-    const creation = source?.legacy?.history?.find(entry => entry.reminderInstruction?.instructionId === instruction?.id && entry.reminderInstruction.action === 'created')?.reminderInstruction
-    if (!instruction || !validId(instruction.id) || !validId(instruction.targetId) || !targets.has(instruction.targetId) ||
-        !stableIds(instruction.captureIds) || !instruction.captureIds.length || !instruction.captureIds.every(id => captures.has(id)) ||
-        !validId(instruction.sourceInterpretationId) || !interpretations.has(instruction.sourceInterpretationId) ||
-        !source || !instruction.captureIds.every(id => source.captureIds?.includes(id)) ||
-        creation?.targetId !== instruction.targetId || creation.mode !== instruction.mode ||
-        !current || current.reviewState === 'rejected' || current.legacy.kind !== 'reminder' || current.legacy.status !== 'confirmed' ||
-        !current.legacy.history?.some(entry => entry.reminderInstruction?.instructionId === instruction.id && entry.reminderInstruction.action === 'created')) return []
+    if (reminderInstructionState(model, instruction, captures, interpretations, targets) !== 'index') return []
     return [{ kind: 'reminder' as const, id: instruction.id, captureIds: [...instruction.captureIds],
       interpretationIds: [instruction.sourceInterpretationId], targetId: instruction.targetId,
       fields: { 'reminder-source': instruction.captureIds.map(id => latestCorrection.get(id) ?? captures.get(id)!.originalContent).join(' ') } }]
@@ -159,4 +167,22 @@ export function searchDocumentsFromAppState(state: AppState): SearchDocument[] {
   if (!state) return []
   try { return searchDocumentsFromModel(reconcileLegacyUi(state)) }
   catch { return [] }
+}
+
+/** Search may be partial; callers must not present an empty projection as a complete no-match. */
+export function searchProjectionFromAppState(state: AppState): { documents: SearchDocument[]; omittedCount: number; complete: boolean } {
+  try {
+    const model = reconcileLegacyUi(state)
+    if (!isPersistedState(model)) return { documents: [], omittedCount: 0, complete: false }
+    const documents = searchDocumentsFromModel(model)
+    const bank = model.canvasBank?.canvases ?? bankFromLegacy(model.canvas, model.canvasViewport).canvases
+    const captures = new Map(model.captures.filter(value => value && validId(value.id) && validText(value.originalContent)).map(value => [value.id, value]))
+    const interpretations = new Set(model.interpretations.filter(value => value && validId(value.id)).map(value => value.id))
+    const targets = new Set(model.semanticObjects.filter(value => value && validId(value.id)).map(value => value.id))
+    const candidates = model.captures.length + model.semanticObjects.filter(object =>
+      ['action', 'commitment', 'idea'].includes(object.kind) && ['confirmed', 'complete', 'archived'].includes(object.status)).length +
+      (model.reminderInstructions?.filter(instruction => reminderInstructionState(model, instruction, captures, interpretations, targets) !== 'retired').length ?? 0) + bank.length
+    const omittedCount = Math.max(0, candidates - documents.length)
+    return { documents, omittedCount, complete: omittedCount === 0 }
+  } catch { return { documents: [], omittedCount: 0, complete: false } }
 }

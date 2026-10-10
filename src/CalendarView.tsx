@@ -7,6 +7,8 @@ import { activeTemporalDecisions, deadlineProposal, temporalFactIsCurrent } from
 import { confirmCommitmentDeadline, createCalendarCommitment, createDirectCalendarEvent, scheduleCommitment } from './calendarEntry'
 import { buildCalendarMonth, buildCalendarTimeGrid, dayAriaLabel, dayNumber, monthLabel, navigateCalendarDate, parseLocalDateKey, weekStart, WEEKDAY_LABELS } from './calendar'
 import type { CalendarDayCell } from './calendar'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 type CalendarMode = 'month' | 'week' | 'day'
 type StartEvent = (date: string, time: string, trigger: HTMLButtonElement) => void
@@ -15,7 +17,11 @@ const dayHeading = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 
 const time = (iso: string) => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(iso))
 const dateLabel = (key: string) => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(parseLocalDateKey(key))
 
-export function CalendarView({ state, onOpen, onUpdate, readAccountModel, readDecisionModel, decisionBlocked }: { state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string }) {
+export function canLeaveCalendarForSearch(commitment: string, directEventDraftOpen: boolean): boolean {
+  return !commitment.trim() && !directEventDraftOpen
+}
+
+export function CalendarView({ registerSearchHandoffGuard, state, onOpen, onUpdate, readAccountModel, readDecisionModel, decisionBlocked }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AppState; onOpen: (id: string) => void; onUpdate: (next: (state: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState; readDecisionModel?: (current: AppState) => PersistedState; decisionBlocked?: string }) {
   const projection = useMemo(() => {
     try { return { model: reconcileCurrentSession(state, readAccountModel?.(state)), error: '' } }
     catch { return { model: state.model, error: 'Showing the last loaded Calendar while account changes are unsaved. Retry saving or download a backup.' } }
@@ -29,6 +35,7 @@ export function CalendarView({ state, onOpen, onUpdate, readAccountModel, readDe
   const [scheduleMessage, setScheduleMessage] = useState('')
   const [eventDraft, setEventDraft] = useState<{ date: string; time: string } | null>(null)
   const [eventTitle, setEventTitle] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'calendar', () => canLeaveCalendarForSearch(commitment, eventDraft !== null))
   const [eventMessage, setEventMessage] = useState('')
   const titleRef = useRef<HTMLInputElement>(null)
   const addEventRef = useRef<HTMLButtonElement>(null)
