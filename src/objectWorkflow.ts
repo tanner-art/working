@@ -83,7 +83,14 @@ export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): Th
 }
 
 function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
-  if (hasCreatedReminderInstruction(object) && (status === 'review' || status === 'inbox')) return object.status
+  if (hasCreatedReminderInstruction(object)) {
+    if (object.status === 'review' || object.status === 'inbox') {
+      throw new Error('This created Reminder has an invalid Review status. Its history was left unchanged; recovery needs an explicit decision.')
+    }
+    // A created instruction is already resolved. The generic complete/archive →
+    // confirmed rule would incorrectly send it back to Review.
+    return status === 'review' || status === 'inbox' ? object.status : status
+  }
   if (hasStagedActionResolution(object) && (status === 'review' || status === 'inbox' ||
     (['complete', 'archived'].includes(object.status) && status === 'confirmed'))) return object.status
   return (['complete', 'archived'].includes(object.status) && status === 'confirmed') || object.status === 'review' || object.status === 'inbox' ||

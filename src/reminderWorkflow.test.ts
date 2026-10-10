@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ThoughtObject } from './domain'
-import { legacyUiProjection, migrateLegacyState } from './migration'
+import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
 import { reminderDeliveryFailureMessage } from './ReminderResolution'
 import { resolveReminder, resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
@@ -46,7 +46,12 @@ describe('Reminder workflow', () => {
     expect(setObjectKind(original, 'reminder')).toBe(original)
     // Even an already-corrupt historical projection must not show a Review card or resolve again.
     const stale = { ...original, status: 'review' as const }
+    const historical = legacyUiProjection(migrateLegacyState({ objects: [target(), stale], canvas: [] }))
+    expect(historical.objects.find(item => item.id === stale.id)?.status).toBe('review')
+    expect(historical.model?.reminderInstructions).toHaveLength(1)
     expect(reviewObjects([stale])).toEqual([])
+    expect(() => setObjectStatus(stale, 'confirmed')).toThrow('recovery needs an explicit decision')
+    expect(() => updateObject(stale, { ...stale, status: 'confirmed' })).toThrow('recovery needs an explicit decision')
     for (const kind of ['idea', 'action', 'commitment', 'reminder'] as const) {
       await expect(resolveReviewCapture(stale, kind)).resolves.toMatchObject({ status: 'recoverable-error' })
     }
@@ -56,6 +61,21 @@ describe('Reminder workflow', () => {
     expect(() => resolveCommitment(stale, { title: 'Launch', dependencyIds: [] })).toThrow('cannot be reclassified')
     expect(original).toEqual(before)
     expect(current.model!.reminderInstructions).toHaveLength(1)
+  })
+
+  it.each(['complete', 'archived'] as const)('permits resolved Reminder %s → confirmed without falling into Review', status => {
+    const resolved = resolveReminderInState(state(), 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    const original = resolved.objects.find(item => item.id === 'capture:reminder')!
+    const finished = setObjectStatus(original, status)
+    expect(finished.status).toBe(status)
+    for (const restored of [setObjectStatus(finished, 'confirmed'), updateObject(finished, { ...finished, status: 'confirmed' })]) {
+      expect(restored.status).toBe('confirmed')
+      expect(reviewObjects([restored])).toEqual([])
+      expect(restored.history.filter(entry => entry.reminderInstruction?.action === 'created')).toHaveLength(1)
+      const projected = legacyUiProjection(reconcileLegacyUi({ ...resolved, objects: resolved.objects.map(item => item.id === restored.id ? restored : item) }))
+      expect(projected.model?.reminderInstructions).toEqual(resolved.model?.reminderInstructions)
+      expect(projected.objects.find(item => item.id === restored.id)?.status).toBe('confirmed')
+    }
   })
 
   it('rejects a stale cross-kind save before local data changes', () => {

@@ -29,4 +29,17 @@ describe('Reminder object detail Type affordance', () => {
     expect(markup.includes('<option value="inbox" disabled=""')).toBe(created)
     expect(markup).toContain('>Folder<select')
   })
+
+  it.each(['complete', 'archived'] as const)('keeps Confirmed selectable for a %s created Reminder', status => {
+    vi.stubGlobal('document', { activeElement: null })
+    vi.stubGlobal('HTMLElement', class {})
+    const object = { ...reminder(true), status }
+    const markup = renderToStaticMarkup(<ObjectPanel object={object} history={{ immutableSource: object.originalContent,
+      currentText: object.originalContent, revisions: [], corrections: [], progression: [] }}
+      onClose={() => undefined} onSave={() => undefined} onRevise={() => undefined}
+      onCorrect={() => undefined} onReverse={() => undefined} />)
+    expect(markup).toContain('<option value="confirmed">confirmed</option>')
+    expect(markup).toContain(`<option value="${status}" selected="">${status}</option>`)
+    expect(markup).toContain('<option value="review" disabled="">review</option>')
+  })
 })
