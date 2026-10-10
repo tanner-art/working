@@ -5,8 +5,8 @@ import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_COLORS, CANVAS_SIZE, CONNECTION_COLORS, DEFAULT_CANVAS_COLOR, DEFAULT_CONNECTION_COLOR, DEFAULT_CONTAINER_COLOR, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionMarkerAppearance, connectionEndpoints, didMoveCanvasConnectionHandle, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, updateCanvasNodeAppearance, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
-import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
-import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
+import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureResult, type GestureState, type PointerSample } from './canvasGestures'
+import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown, viewportAtPinchStart } from './canvasInteraction'
 import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
 import { canvasObjectSelection } from './canvasSelection'
 import { MobileCanvasToolbar } from './surfaces/canvas'
@@ -120,7 +120,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const rect = canvasRef.current?.getBoundingClientRect()
     return { x: rect?.left ?? 0, y: rect?.top ?? 0 }
   }
-  const applyGestureEffect = (effect: GestureEffect) => {
+  const applyGestureEffect = (effect: GestureEffect, pinchStart?: CanvasViewport, preservePinchPreview = false) => {
     if (effect.type === 'select') { selectObject(effect.id); setEditMode(false); return }
     if (effect.type === 'open-edit-menu') { selectObject(effect.id); setEditMode(true); return }
     if (effect.type === 'begin-move') {
@@ -136,7 +136,12 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
-    if (effect.type === 'begin-pinch') { beginPinchInteraction(pinchInteraction.current, viewport, effect.first, effect.second, canvasOrigin()); return }
+    if (effect.type === 'begin-pinch') {
+      const start = pinchStart ?? viewport
+      beginPinchInteraction(pinchInteraction.current, start, effect.first, effect.second, canvasOrigin(), preservePinchPreview)
+      if (preservePinchPreview) setPinchPreview(start)
+      return
+    }
     if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second, canvasOrigin()); if (preview) setPinchPreview(preview); return }
     if (effect.type === 'commit-pinch') { const preview = commitPinchInteraction(pinchInteraction.current); if (preview) onViewport(preview); setPinchPreview(null); return }
     // The reducer has already installed its next state before effects run. In the
@@ -144,7 +149,24 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     // it with idle before begin-pinch and preview-pinch can run.
     if (effect.type === 'cancel') { clearTransientInteraction() }
   }
-  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => { const result = reduceCanvasGesture(gesture.current, action); gesture.current = result.state; result.effects.forEach(applyGestureEffect) }
+  const applyGestureResult = (result: GestureResult, previousMode: GestureState['mode']) => {
+    // A second pointer emits cancel before begin-pinch. Snapshot the mutable pan
+    // delta now; React's panPreview may not have rendered its latest value yet.
+    const panDrag = previousMode === 'panning' ? drag.current : null
+    const visiblePan = panDrag?.originalPan
+      ? { x: panDrag.originalPan.x + panDrag.dx, y: panDrag.originalPan.y + panDrag.dy }
+      : null
+    const previousPinch = pinchInteraction.current.preview
+    const preservePinchPreview = visiblePan !== null || previousPinch !== null
+    const pinchStart = result.effects.some(effect => effect.type === 'begin-pinch')
+      ? viewportAtPinchStart(viewport, visiblePan, previousPinch)
+      : undefined
+    gesture.current = result.state
+    result.effects.forEach(effect => applyGestureEffect(effect, pinchStart, preservePinchPreview))
+  }
+  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => {
+    applyGestureResult(reduceCanvasGesture(gesture.current, action), gesture.current.mode)
+  }
   const worldPoint = (event: React.PointerEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect()
     return { x: (event.clientX - (rect?.left ?? 0) - pan.x) / scale, y: (event.clientY - (rect?.top ?? 0) - pan.y) / scale }
@@ -174,9 +196,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
     if (resize) {
-      const result = reduceResizePointerDown(gesture.current, sample, item!.id, editMode)
-      gesture.current = result.state
-      result.effects.forEach(applyGestureEffect)
+      applyGestureResult(reduceResizePointerDown(gesture.current, sample, item!.id, editMode), gesture.current.mode)
     } else dispatchGesture({ type: 'pointer-down', sample, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
