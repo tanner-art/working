@@ -81,8 +81,12 @@ describe('workspace search navigation contract', () => {
     expect(calls).toEqual([])
     expect(performWorkspaceNavigation({ type: 'close-surface' }, context, host)).toEqual({ ok: true })
     expect(calls).toEqual(['close'])
-    expect(performWorkspaceNavigation({ type: 'close-surface' }, { ...context, authenticatedUserId: undefined }, host).ok).toBe(false)
-    expect(calls).toEqual(['close'])
+    expect(performWorkspaceNavigation({ type: 'close-surface' }, { ...context, stateIsCurrent: false }, host)).toEqual({ ok: true })
+    expect(calls).toEqual(['close', 'close'])
+    expect(performWorkspaceNavigation({ type: 'close-surface' }, { ...context, authenticatedUserId: undefined }, host)).toEqual({
+      ok: false, message: 'Account or workspace is unavailable. Navigation was not completed.',
+    })
+    expect(calls).toEqual(['close', 'close'])
   })
 
   it('gates Search-button and popstate entry through the same account and Canvas-save boundary', () => {

@@ -141,9 +141,11 @@ export function unavailableSearchResult(): WorkspaceNavigationOutcome { return {
 export function performWorkspaceNavigation(
   request: WorkspaceNavigationRequest, context: WorkspaceNavigationContext, host: WorkspaceNavigationHost,
 ): WorkspaceNavigationOutcome {
-  if (!context.available || !context.stateIsCurrent ||
-      (context.accountUserId !== undefined && context.accountUserId !== context.authenticatedUserId)) return unavailableSearchResult()
+  if (!context.available || (context.accountUserId !== undefined && context.accountUserId !== context.authenticatedUserId)) {
+    return { ok: false, message: 'Account or workspace is unavailable. Navigation was not completed.' }
+  }
   if (request.type === 'close-surface') { host.close(); return { ok: true } }
+  if (!context.stateIsCurrent) return unavailableSearchResult()
   if (request.snapshotToken !== context.snapshotToken) return unavailableSearchResult()
   const destination = resolveSearchDestination(context.state, request.document)
   if (!destination) return unavailableSearchResult()
