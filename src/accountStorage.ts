@@ -184,13 +184,27 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
   let model: PersistedState | undefined
   let active = false
   let failed = false
+  let pendingSaves = 0
   let pendingMerge: AccountMergePlan | undefined
   let queue = Promise.resolve()
   const check = () => { if (currentUser() !== userId) throw Error('Account session changed. Export unsaved work, then return to local data.') }
+  const decisionBlockReason = () => pendingSaves
+    ? 'Account changes are saving. Wait for them to finish before confirming time.'
+    : failed ? 'Account changes are not saved. Retry saving or download a backup before confirming time.' : undefined
   return {
     userId,
     snapshot(state: AppState, settings: LocalSettings, digest: DigestDelivery) {
       return accountData({ ...state, model: model ?? state.model }, settings, digest)
+    },
+    decisionBlockReason,
+    /** Temporal gestures must target a committed interpretation, not a version
+     * that a queued account write may still replace or reject. */
+    decisionModel(state: AppState, settings: LocalSettings, digest: DigestDelivery): PersistedState {
+      check()
+      if (!active) throw Error('Load account data before confirming time.')
+      const blocked = decisionBlockReason()
+      if (blocked) throw Error(blocked)
+      return accountData({ ...state, model: model ?? state.model }, settings, digest).model
     },
     async open(local?: AccountData) {
       check()
@@ -242,6 +256,7 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
     },
     save(data: AccountData, retry = false) {
       const snapshot = validateData(data)
+      pendingSaves++
       const operation = queue.then(async () => {
         check()
         if (!active || (failed && !retry)) throw Error(saveFailure)
@@ -253,7 +268,7 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
           const result = await adapter.write(userId, data, revision)
           check(); revision = result.revision; model = result.data.model; failed = false
         } catch { failed = true; throw Error(saveFailure) }
-      })
+      }).finally(() => { pendingSaves-- })
       queue = operation.catch(() => {})
       return operation
     },
