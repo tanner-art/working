@@ -96,4 +96,19 @@ describe('Canvas Bank search surface', () => {
     expect(markup).toContain('Download backup')
     expect(markup).not.toContain('No confirmed connections yet.')
   })
+
+  it('keeps unique suffixes visible in graph labels with long matching summaries', () => {
+    const graph = { candidates: [], hiddenCount: 0,
+      nodes: [
+        { id: 'first', label: 'A very long matching thought summary (idea abcd)', kind: 'idea' },
+        { id: 'second', label: 'A very long matching thought summary (idea efgh)', kind: 'idea' },
+      ],
+      links: [{ id: 'link', sourceId: 'first', targetId: 'second' }],
+    }
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[]} connections={graph}
+      focusTarget={null} onCreate={() => undefined} onOpen={() => undefined} onOpenIdea={() => undefined}
+      onConnect={() => undefined} />)
+    expect(markup).toMatch(/<text[^>]*>[^<]*\(idea abcd\)<\/text>/)
+    expect(markup).toMatch(/<text[^>]*>[^<]*\(idea efgh\)<\/text>/)
+  })
 })
