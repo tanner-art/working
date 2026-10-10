@@ -21,7 +21,7 @@ vi.mock('react', async importOriginal => {
   }
 })
 
-type HostElement = ReactElement<{ children?: unknown; onClick?: () => void; role?: string }>
+type HostElement = ReactElement<{ children?: unknown; onClick?: () => void; role?: string; open?: boolean }>
 
 function hostElements(node: unknown): HostElement[] {
   if (Array.isArray(node)) return node.flatMap(hostElements)
@@ -38,18 +38,30 @@ function words(node: unknown): string {
 }
 
 function schedule(state: AppState, update: (next: (state: AppState) => AppState) => void) {
-  const elements = hostElements(ScheduleView({ state, update }))
+  const tree = ScheduleView({ state, update }) as HostElement
+  const elements = hostElements(tree)
+  const directChildren = Array.isArray(tree.props.children) ? tree.props.children : [tree.props.children]
+  const topLevelStatus = directChildren.filter(isValidElement).map(element => element as HostElement)
+    .filter(element => element.type === 'p' && element.props.role === 'status')
+  const hasText = (elements: HostElement[], message: string) => elements.some(element =>
+    element.props.role === 'status' && words(element.props.children).replace(/\s+/g, ' ').includes(message))
   return {
     click(label: 'Add to plan' | 'Remove from plan') {
       const button = elements.find(element => element.type === 'button' && words(element.props.children) === label)
       expect(button, `Schedule must render ${label}`).toBeDefined()
       button!.props.onClick!()
     },
-    visible(message: string) {
-      expect(elements.some(element => element.props.role === 'status' && words(element.props.children).replace(/\s+/g, ' ').includes(message))).toBe(true)
+    topLevelStatus(message: string) {
+      expect(hasText(topLevelStatus, message)).toBe(true)
     },
-    absent(message: string) {
-      expect(elements.some(element => element.props.role === 'status' && words(element.props.children).replace(/\s+/g, ' ').includes(message))).toBe(false)
+    noTopLevelStatus(message: string) {
+      expect(hasText(topLevelStatus, message)).toBe(false)
+    },
+    collapsedDetailsStatus(message: string) {
+      const details = elements.find(element => element.type === 'details')
+      expect(details).toBeDefined()
+      expect(details!.props.open).not.toBe(true)
+      expect(hasText(hostElements(details!.props.children), message)).toBe(true)
     },
   }
 }
@@ -71,35 +83,46 @@ function stagedState(dependency = false): AppState {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('AG-03 preparatory Schedule click evidence', () => {
-  it('clicks Add and Remove through App-style state update and local save/reload, then reverses eligibility', () => {
+  it('invokes Add and Remove handlers with App-style state update and local save/reload, then reverses eligibility', () => {
     const storage = new Map<string, string>()
     vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => { storage.set(key, value) } })
     expect(saveState(stagedState())).toBeUndefined()
     let state = loadStateResult().state
+    let updateCalls = 0
+    let saveResult: string | undefined
     const update = (next: (current: AppState) => AppState) => {
-      state = next(state) // App's synchronous latest-state update before its persistence effect.
-      expect(saveState(state)).toBeUndefined()
+      state = next(state) // Mirrors App's synchronous latest-state update before its persistence effect.
+      updateCalls += 1
+      saveResult = saveState(state)
     }
     schedule(state, update).click('Add to plan')
+    expect(updateCalls).toBe(1)
+    expect(saveResult).toBeUndefined()
     state = loadStateResult().state
-    schedule(state, update).visible('Adaptive Plan recommends next: Prepare launch')
+    schedule(state, update).topLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(state.objects[0].history.at(-1)?.planEligibility?.eligible).toBe(true)
     expect(state.model?.calendarEvents).toEqual([])
     schedule(state, update).click('Remove from plan')
+    expect(updateCalls).toBe(2)
+    expect(saveResult).toBeUndefined()
     state = loadStateResult().state
-    schedule(state, update).absent('Adaptive Plan recommends next: Prepare launch')
+    schedule(state, update).noTopLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(state.objects[0].history.map(entry => entry.planEligibility?.eligible).filter(value => value !== undefined)).toEqual([true, false])
+    expect(state.model?.calendarEvents).toEqual([])
     schedule(state, update).click('Add to plan')
+    expect(updateCalls).toBe(3)
+    expect(saveResult).toBeUndefined()
     state = loadStateResult().state
     state = { ...state, objects: state.objects.map(object => object.id === 'plan-action' ? reverseObject(object) : object) }
     expect(saveState(state)).toBeUndefined()
     const reversed = loadStateResult().state
-    schedule(reversed, update).absent('Adaptive Plan recommends next: Prepare launch')
+    schedule(reversed, update).noTopLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(calculateAdaptivePlan(reversed).recommendations).toEqual([])
+    expect(reversed.model?.calendarEvents).toEqual([])
   })
 
-  it('clicks Add and Remove through account session save/reload without touching local data', async () => {
+  it('invokes Add and Remove handlers through account session save/reload, keeping another account and local data untouched', async () => {
     const localWrite = vi.fn()
     vi.stubGlobal('localStorage', { getItem: () => 'preserved local data', setItem: localWrite })
     let row: AccountRow | null = null
@@ -113,38 +136,70 @@ describe('AG-03 preparatory Schedule click evidence', () => {
       },
     }
     const owner = 'account-owner'
-    let session = createAccountSession(adapter, owner, () => owner)
+    let currentUser = owner
+    let session = createAccountSession(adapter, owner, () => currentUser)
     let state = (await session.open(accountData(stagedState(), defaultSettings, disabledDelivery))).state
+    await expect(createAccountSession(adapter, 'other-account', () => 'other-account').open()).rejects.toThrow('No account data yet')
     const pending: Promise<void>[] = []
+    let updateCalls = 0
     const update = (next: (current: AppState) => AppState) => {
-      state = next(state) // App's update precedes its async account persistence effect.
+      state = next(state) // Mirrors App's update before its async account persistence effect.
+      updateCalls += 1
       pending.push(session.save(session.snapshot(state, defaultSettings, disabledDelivery)))
     }
     schedule(state, update).click('Add to plan')
+    expect(updateCalls).toBe(1)
+    expect(pending).toHaveLength(1)
     await Promise.all(pending.splice(0))
-    session = createAccountSession(adapter, owner, () => owner)
+    session = createAccountSession(adapter, owner, () => currentUser)
     state = (await session.open()).state
-    schedule(state, update).visible('Adaptive Plan recommends next: Prepare launch')
+    schedule(state, update).topLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(state.model?.calendarEvents).toEqual([])
     schedule(state, update).click('Remove from plan')
+    expect(updateCalls).toBe(2)
+    expect(pending).toHaveLength(1)
     await Promise.all(pending.splice(0))
-    state = (await createAccountSession(adapter, owner, () => owner).open()).state
-    schedule(state, update).absent('Adaptive Plan recommends next: Prepare launch')
+    session = createAccountSession(adapter, owner, () => currentUser)
+    state = (await session.open()).state
+    schedule(state, update).noTopLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(state.objects[0].history.map(entry => entry.planEligibility?.eligible).filter(value => value !== undefined)).toEqual([true, false])
+    expect(state.model?.calendarEvents).toEqual([])
+    schedule(state, update).click('Add to plan')
+    expect(updateCalls).toBe(3)
+    expect(pending).toHaveLength(1)
+    await Promise.all(pending.splice(0))
+    session = createAccountSession(adapter, owner, () => currentUser)
+    state = (await session.open()).state
+    state = { ...state, objects: state.objects.map(object => object.id === 'plan-action' ? reverseObject(object) : object) }
+    await session.save(session.snapshot(state, defaultSettings, disabledDelivery))
+    state = (await createAccountSession(adapter, owner, () => currentUser).open()).state
+    schedule(state, update).noTopLevelStatus('Adaptive Plan recommends next: Prepare launch')
+    expect(calculateAdaptivePlan(state).recommendations).toEqual([])
+    expect(state.model?.calendarEvents).toEqual([])
+    const ownerRow = structuredClone(row)
+    currentUser = 'other-account'
+    await expect(session.save(session.snapshot(state, defaultSettings, disabledDelivery))).rejects.toThrow('Account session changed')
+    expect(row).toEqual(ownerRow)
+    await expect(createAccountSession(adapter, 'other-account', () => 'other-account').open()).rejects.toThrow('No account data yet')
     expect(localWrite).not.toHaveBeenCalled()
   })
 
-  it('clicks Add for dependency-blocked work, then reloads the visible block without a recommendation', () => {
+  it('invokes Add for dependency-blocked work, then reloads the collapsed-details block text without a recommendation', () => {
     const storage = new Map<string, string>()
     vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => { storage.set(key, value) } })
     expect(saveState(stagedState(true))).toBeUndefined()
     let state = loadStateResult().state
-    schedule(state, next => { state = next(state); expect(saveState(state)).toBeUndefined() }).click('Add to plan')
+    let updateCalls = 0
+    let saveResult: string | undefined
+    schedule(state, next => { state = next(state); updateCalls += 1; saveResult = saveState(state) }).click('Add to plan')
+    expect(updateCalls).toBe(1)
+    expect(saveResult).toBeUndefined()
     state = loadStateResult().state
     const view = schedule(state, () => undefined)
-    view.visible('1 eligible Action is waiting on dependencies.')
-    view.absent('Adaptive Plan recommends next: Prepare launch')
+    view.collapsedDetailsStatus('1 eligible Action is waiting on dependencies.')
+    view.noTopLevelStatus('Adaptive Plan recommends next: Prepare launch')
     expect(calculateAdaptivePlan(state)).toMatchObject({ recommendations: [], blockedCount: 1 })
+    expect(state.model?.calendarEvents).toEqual([])
   })
 })
