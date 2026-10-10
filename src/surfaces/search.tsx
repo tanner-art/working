@@ -3,6 +3,6 @@ import { defineAppSurface, type WorkspaceSurfaceProps } from '../appSurfaceRegis
 
 export const surface = defineAppSurface({ id: 'search', path: '/search', persistence: 'workspace' })
 
-export function WorkspaceSurface({ state, snapshotToken, navigate }: WorkspaceSurfaceProps) {
-  return <GlobalSearchView state={state} snapshotToken={snapshotToken} navigate={navigate} />
+export function WorkspaceSurface({ state, snapshotToken, navigate, readModel }: WorkspaceSurfaceProps) {
+  return <GlobalSearchView state={state} snapshotToken={snapshotToken} navigate={navigate} readModel={readModel} />
 }

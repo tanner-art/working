@@ -5,6 +5,7 @@ import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './mig
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { createUniversalSearchIndex, searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
+import { reconcileCurrentSession } from './store'
 import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, workspaceHistoryLocation, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
@@ -68,7 +69,7 @@ describe('workspace search navigation contract', () => {
     const calls: (SearchDestination | 'close')[] = []
     const host = { open: (destination: SearchDestination) => calls.push(destination), close: () => { calls.push('close') } }
     const context = { state, snapshotToken: 'current', stateIsCurrent: true, available: true,
-      accountUserId: 'account-a', authenticatedUserId: 'account-a' }
+      accountUserId: 'account-a', authenticatedUserId: 'account-a', readModel: reconcileCurrentSession }
     const result = { type: 'open-search-result' as const, document: document(state, 'idea'), snapshotToken: 'current' }
     expect(performWorkspaceNavigation(result, context, host)).toEqual({ ok: true })
     expect(calls).toEqual([{ view: 'review', objectId: 'i' }])

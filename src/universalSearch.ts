@@ -1,6 +1,7 @@
 import type { AppState, CanvasElement, CanvasRecord, CaptureRecord, PersistedState, ResolvedReminderInstruction, SemanticObject, SourceCorrection } from './domain'
 import { bankFromLegacy, isCanvasRecord } from './canvasBank'
-import { isPersistedState, reconcileLegacyUi } from './migration'
+import { isPersistedState } from './migration'
+import { reconcileCurrentSession } from './store'
 
 export type SearchKind = 'capture' | 'action' | 'commitment' | 'reminder' | 'idea' | 'canvas'
 export type SearchField = 'original' | 'corrected-source' | 'current-meaning' | 'reminder-source' | 'canvas-title' | 'canvas-element'
@@ -163,16 +164,16 @@ export function searchDocumentsFromModel(model: PersistedState): SearchDocument[
 }
 
 /** A loaded local or account AppState uses its canonical model, avoiding duplicate UI projections. */
-export function searchDocumentsFromAppState(state: AppState): SearchDocument[] {
+export function searchDocumentsFromAppState(state: AppState, readModel: (current: AppState) => PersistedState = reconcileCurrentSession): SearchDocument[] {
   if (!state) return []
-  try { return searchDocumentsFromModel(reconcileLegacyUi(state)) }
+  try { return searchDocumentsFromModel(readModel(state)) }
   catch { return [] }
 }
 
 /** Search may be partial; callers must not present an empty projection as a complete no-match. */
-export function searchProjectionFromAppState(state: AppState): { documents: SearchDocument[]; omittedCount: number; complete: boolean } {
+export function searchProjectionFromAppState(state: AppState, readModel: (current: AppState) => PersistedState = reconcileCurrentSession): { documents: SearchDocument[]; omittedCount: number; complete: boolean } {
   try {
-    const model = reconcileLegacyUi(state)
+    const model = readModel(state)
     if (!isPersistedState(model)) return { documents: [], omittedCount: 0, complete: false }
     const documents = searchDocumentsFromModel(model)
     const bank = model.canvasBank?.canvases ?? bankFromLegacy(model.canvas, model.canvasViewport).canvases
