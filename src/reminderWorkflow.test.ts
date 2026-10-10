@@ -1,13 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ThoughtObject } from './domain'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { dailyLogReminderProjection, specificReminderProjection } from './reminderProjection'
 import { reminderDeliveryFailureMessage } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
+import { updateObject } from './objectWorkflow'
+import { loadStateResult, saveState } from './store'
 
 const target = (): ThoughtObject => ({ id: 'idea:target', kind: 'idea', originalContent: 'Launch concept', source: 'text', createdAt: '2026-09-27T08:00:00Z', confidence: .9, status: 'confirmed', interpretation: { summary: 'Launch concept', suggestedKind: 'idea', rationale: 'Confirmed idea' }, metadata: {}, relationships: [], history: [] })
 const reminder = (): ThoughtObject => ({ id: 'capture:reminder', kind: 'reminder', originalContent: 'Remind me about launch', source: 'text', createdAt: '2026-09-27T08:01:00Z', confidence: .5, status: 'review', interpretation: { summary: 'Launch reminder', suggestedKind: 'reminder', rationale: 'Timing needs review' }, metadata: {}, relationships: [], history: [] })
 const state = () => legacyUiProjection(migrateLegacyState({ objects: [target(), reminder()], canvas: [] }))
+afterEach(() => vi.unstubAllGlobals())
 
 describe('Reminder workflow', () => {
   it('records Specific from Review with source/target evidence and makes it visibly due after reload', () => {
@@ -45,5 +48,29 @@ describe('Reminder workflow', () => {
     expect(feedback).toBe('This reminder is no longer active. Refresh and try again.')
     expect(handled.model!.reminderInstructions?.[0]).toMatchObject({ deliveryState: 'handled', handledAt: '2026-09-27T08:03:00.000Z' })
     expect(dailyLogReminderProjection(handled.model!)).toEqual([])
+  })
+
+  it('keeps autosaved interpretations intact through Review resolution and delivery without a reload', () => {
+    let raw = JSON.stringify(state().model)
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    let current = loadStateResult().state
+    const original = structuredClone(current.model!.interpretations)
+    current = { ...current, objects: current.objects.map(item => item.id === 'idea:target'
+      ? updateObject(item, { ...item, context: 'Launch planning' }) : item) }
+    expect(saveState(current)).toBeUndefined()
+    const edited = structuredClone(JSON.parse(raw).interpretations)
+    expect(edited).toHaveLength(original.length + 1)
+
+    current = resolveReminderInState(current, 'capture:reminder', { targetId: 'idea:target', mode: 'daily-log' }, '2026-09-27T08:02:00.000Z')
+    expect(saveState(current)).toBeUndefined()
+    const resolved = JSON.parse(raw)
+    expect(resolved.interpretations.slice(0, edited.length)).toEqual(edited)
+    const instructionId = resolved.reminderInstructions[0].id
+    current = setReminderDeliveryState(current, instructionId, 'handled', '2026-09-27T08:03:00.000Z')
+    expect(saveState(current)).toBeUndefined()
+    const reloaded = loadStateResult().state
+    expect(reloaded.model!.interpretations.slice(0, edited.length)).toEqual(edited)
+    expect(reloaded.model!.reminderInstructions?.[0].deliveryState).toBe('handled')
+    expect(dailyLogReminderProjection(reloaded.model!)).toEqual([])
   })
 })

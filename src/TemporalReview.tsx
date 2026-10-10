@@ -1,9 +1,10 @@
-import type { AppState, TemporalTarget } from './domain'
-import { reconcileLegacyUi } from './migration'
-import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision, temporalFactIsCurrent } from './temporalConfirmation'
+import type { AppState, PersistedState, TemporalTarget } from './domain'
+import { reconcileCurrentSession } from './store'
+import { activeTemporalDecisions, deadlineProposal, eventProposal, temporalFactIsCurrent } from './temporalConfirmation'
+import { decideTemporalReview } from './temporalReviewWorkflow'
 
-export function TemporalReview({ state, onUpdate }: { state: AppState; onUpdate: (fn: (current: AppState) => AppState) => void }) {
-  const model = reconcileLegacyUi(state)
+export function TemporalReview({ state, onUpdate, readAccountModel }: { state: AppState; onUpdate: (fn: (current: AppState) => AppState) => void; readAccountModel?: (current: AppState) => PersistedState }) {
+  const model = readAccountModel?.(state) ?? reconcileCurrentSession(state)
   const active = activeTemporalDecisions(model)
   const proposals = [
     ...model.semanticObjects.map(o => deadlineProposal(model, o.id)),
@@ -25,14 +26,14 @@ export function TemporalReview({ state, onUpdate }: { state: AppState; onUpdate:
         <blockquote>{model.captures.find(c => c.id === reading.captureIds[0])?.originalContent}</blockquote>
         {target.kind === 'event-scheduling' && <p>Linked objects: {target.objectIds.map(id => model.semanticObjects.find(o => o.id === id)?.summary).join(', ') || 'None'}. Scheduling does not confirm these obligations.</p>}
         {prior && <p>{temporalFactIsCurrent(model, prior) ? 'Timing confirmed' : 'Proposal changed — reverse the earlier confirmation before confirming this date'} · {prior.target.kind === 'fixed-deadline' ? prior.target.date : prior.target.startsAt} · <time>{prior.at}</time></p>}
-        <button className="secondary" onClick={() => onUpdate(current => recordTemporalDecision(current, reconcileLegacyUi(current), prior?.target ?? target, prior))}>
+        <button className="secondary" onClick={() => onUpdate(current => decideTemporalReview(current, prior?.target ?? target, prior, readAccountModel?.(current)))}>
           {prior ? target.kind === 'fixed-deadline' ? 'Reverse fixed deadline' : 'Reverse event scheduling' : target.kind === 'fixed-deadline' ? 'Confirm fixed deadline' : 'Confirm event scheduling'}
         </button>
       </article>
     })}</div>
     {active.filter(e => !proposals.some(p => p.kind === e.target.kind && (p.kind === 'fixed-deadline' && e.target.kind === 'fixed-deadline' ? p.objectId === e.target.objectId : p.kind === 'event-scheduling' && e.target.kind === 'event-scheduling' && p.eventId === e.target.eventId))).map(entry => <article className="review-card" key={entry.id}>
       <p>Earlier timing confirmation: {entry.target.kind === 'fixed-deadline' ? `${entry.target.objectId} · ${entry.target.date}` : `${entry.target.title} · ${entry.target.startsAt}`} · {entry.at}</p>
-      <button className="secondary" onClick={() => onUpdate(current => recordTemporalDecision(current, reconcileLegacyUi(current), entry.target, entry))}>Reverse earlier timing confirmation</button>
+      <button className="secondary" onClick={() => onUpdate(current => decideTemporalReview(current, entry.target, entry, readAccountModel?.(current)))}>Reverse earlier timing confirmation</button>
     </article>)}
   </section>
 }

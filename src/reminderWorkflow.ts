@@ -1,6 +1,6 @@
 import type { AppState, ReminderInstructionAudit, ResolvedReminderInstruction, SemanticObject, ThoughtObject } from './domain'
-import { legacyUiProjection, reconcileLegacyUi } from './migration'
 import { setObjectKind } from './objectWorkflow'
+import { advanceModelProjection, reconcileCurrentSession } from './store'
 
 export type ReminderMode = 'specific' | 'daily-log'
 export type ReminderChoice = Readonly<{ targetId: string; mode: ReminderMode; dueAt?: string }>
@@ -31,23 +31,23 @@ function sourceObjectId(instruction: ResolvedReminderInstruction): string {
 
 /** Handle or dismiss an active instruction without removing its source evidence. */
 export function setReminderDeliveryState(state: AppState, instructionId: string, deliveryState: 'handled' | 'dismissed', at = new Date().toISOString()): AppState {
-  const model = reconcileLegacyUi(state)
+  const model = reconcileCurrentSession(state)
   const instruction = model.reminderInstructions?.find(value => value.id === instructionId)
   if (!instruction || instruction.deliveryState !== 'active') throw new Error('This reminder is no longer active. Refresh and try again.')
   const objectId = sourceObjectId(instruction)
   const object = state.objects.find(value => value.id === objectId)
   if (!object) throw new Error('This reminder source is no longer available. Its evidence was left unchanged.')
   const audit: ReminderInstructionAudit = { instructionId, action: deliveryState }
-  return legacyUiProjection(reconcileLegacyUi({ ...state, objects: state.objects.map(value => value.id === objectId
+  return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId
     ? { ...value, history: [...value.history, { at, event: deliveryState === 'handled' ? 'Handled reminder' : 'Dismissed reminder', reminderInstruction: audit }] }
-    : value) }))
+    : value) })
 }
 
 /** Mounted Review boundary: records explicit input, then returns a fresh persisted projection. */
 export function resolveReminderInState(state: AppState, objectId: string, choice: ReminderChoice, at = new Date().toISOString()): AppState {
-  const model = reconcileLegacyUi(state)
+  const model = reconcileCurrentSession(state)
   const object = state.objects.find(value => value.id === objectId)
   if (!object) throw new Error('This capture is no longer available. Refresh Review and try again.')
   const resolved = resolveReminder(object.kind === 'reminder' ? object : setObjectKind(object, 'reminder'), model.semanticObjects, choice, at)
-  return legacyUiProjection(reconcileLegacyUi({ ...state, objects: state.objects.map(value => value.id === objectId ? resolved : value) }))
+  return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId ? resolved : value) })
 }
