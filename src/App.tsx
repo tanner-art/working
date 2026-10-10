@@ -212,7 +212,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     latestState.current = next
     setState(next)
   }
-  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null)
+  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null, !activeWorkspaceSurface)
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
   const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)

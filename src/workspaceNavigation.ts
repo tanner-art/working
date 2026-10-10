@@ -83,6 +83,7 @@ export function leaveWorkspaceHistory(history: WorkspaceHistory, path: string, s
   else history.replaceState({}, '', '/')
 }
 
+/** Compensation assumes the adjacent origin/Search pair created by enterWorkspaceHistory. */
 export function recoverRejectedWorkspacePopstate(history: Readonly<{ go: (steps: number) => void }>, currentSurfaceIsOpen: boolean): void {
   history.go(currentSurfaceIsOpen ? 1 : -1)
 }
