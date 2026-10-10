@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { listCanvases } from './canvasBank'
 import { filterCanvasesByTitle } from './canvasBankSearch'
-import type { CanvasBank as CanvasBankModel } from './domain'
+import type { CanvasBank as CanvasBankModel, ThoughtObject } from './domain'
 
-export function CanvasBank({ bank, focusTarget, onCreate, onOpen }: {
+export function CanvasBank({ bank, ideas, focusTarget, onCreate, onOpen, onOpenIdea }: {
   bank: CanvasBankModel
+  ideas: ThoughtObject[]
   focusTarget: 'create' | string | null
   onCreate: () => void
   onOpen: (id: string) => void
+  onOpenIdea: (id: string) => void
 }) {
   const createRef = useRef<HTMLButtonElement>(null)
   const cardRefs = useRef(new Map<string, HTMLButtonElement>())
@@ -43,5 +45,12 @@ export function CanvasBank({ bank, focusTarget, onCreate, onOpen }: {
             <span aria-hidden="true">→</span>
           </button>)}</section>}
       </>}
+    <section className="canvas-bank-ideas" aria-labelledby="canvas-bank-ideas-heading">
+      <h2 id="canvas-bank-ideas-heading">Ideas <span>{ideas.length}</span></h2>
+      {ideas.length === 0 ? <p className="canvas-bank-ideas-empty">No resolved ideas yet.</p> :
+        <div className="canvas-bank-idea-list">{ideas.map(item => <button key={item.id} className="canvas-bank-idea" onClick={() => onOpenIdea(item.id)} aria-label={`Open idea: ${item.currentContent ?? item.originalContent}`}>
+          <strong>{item.currentContent ?? item.originalContent}</strong><small>{item.interpretation.summary}</small><span aria-hidden="true">→</span>
+        </button>)}</div>}
+    </section>
   </div>
 }
