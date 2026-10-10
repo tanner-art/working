@@ -18,12 +18,12 @@ function ColorControl({ label, value, colors, onChange }: { label: string; value
   </div></fieldset>
 }
 
-export function CanvasExitControl({ onExit }: { onExit: () => void }) {
-  return <button type="button" className="canvas-exit" aria-label="Close canvas and return to Canvas Bank" title="Close canvas" onClick={onExit}><span aria-hidden="true">×</span><span className="canvas-exit-label">Back to Bank</span></button>
+export function CanvasExitControl({ onExit, autoFocus = false }: { onExit: () => void; autoFocus?: boolean }) {
+  return <button autoFocus={autoFocus} type="button" className="canvas-exit" aria-label="Close canvas and return to Canvas Bank" title="Close canvas" onClick={onExit}><span aria-hidden="true">×</span><span className="canvas-exit-label">Back to Bank</span></button>
 }
 
-export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onViewport, onCommit, onText, onFinishText, canUndo, canRedo, onUndo, onRedo, onCaptureObject, onExit, saveStatus }: {
-  title: string; autoFocusTitle: boolean; onTitle: (title: string) => void
+export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, elements, viewport, onTitle, onViewport, onCommit, onText, onFinishText, canUndo, canRedo, onUndo, onRedo, onCaptureObject, onExit, saveStatus }: {
+  title: string; autoFocusTitle: boolean; autoFocusCanvas?: boolean; onTitle: (title: string) => void
   elements: CanvasElement[]; viewport: CanvasViewport; onViewport: (viewport: CanvasViewport) => void
   onCommit: (elements: CanvasElement[]) => void; onText: (id: string, text: string) => void; onFinishText: () => void
   canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void
@@ -361,7 +361,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   return <div className="canvas-page">
     <div className="canvas-head">
     <div>
-    <CanvasExitControl onExit={onExit} />
+    <CanvasExitControl onExit={onExit} autoFocus={autoFocusCanvas} />
     <label className="sr-only" htmlFor="canvas-title">Canvas title</label>
     <input ref={titleInput} id="canvas-title" className="canvas-title-input" maxLength={120} value={titleDraft} onChange={event => { cancelTitle.current = false; setTitleDraft(event.target.value) }} onBlur={commitTitle} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { cancelTitle.current = true; setTitleDraft(title); event.currentTarget.blur() } }} />
     <p className="canvas-save-status" role="status">{saveStatus}</p>

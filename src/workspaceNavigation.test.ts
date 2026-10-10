@@ -5,7 +5,7 @@ import { legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './mig
 import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
-import { performWorkspaceNavigation, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
+import { leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, resolveSearchDestination, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
 const at = '2026-10-09T00:00:00.000Z'
@@ -80,5 +80,33 @@ describe('workspace search navigation contract', () => {
     expect(calls).toEqual([])
     expect(performWorkspaceNavigation({ type: 'close-surface' }, context, host)).toEqual({ ok: true })
     expect(calls).toEqual(['close'])
+    expect(performWorkspaceNavigation({ type: 'close-surface' }, { ...context, authenticatedUserId: undefined }, host).ok).toBe(false)
+    expect(calls).toEqual(['close'])
+  })
+
+  it('gates Search-button and popstate entry through the same account and Canvas-save boundary', () => {
+    const calls: string[] = []
+    const host = { enterSurface: () => calls.push('enter'), leaveSurface: () => calls.push('leave') }
+    let prepared = 0
+    const context = { available: true, accountUserId: 'account-a', authenticatedUserId: 'account-a',
+      prepareCanvasExit: () => { prepared++; return true } }
+    expect(performWorkspaceRouteTransition('workspace', { ...context, available: false }, host).ok).toBe(false)
+    expect(performWorkspaceRouteTransition('workspace', { ...context, authenticatedUserId: undefined }, host).ok).toBe(false)
+    expect(prepared).toBe(0)
+    expect(calls).toEqual([])
+    expect(performWorkspaceRouteTransition('workspace', { ...context, prepareCanvasExit: () => false }, host).ok).toBe(false)
+    expect(calls).toEqual([])
+    expect(performWorkspaceRouteTransition('workspace', context, host)).toEqual({ ok: true })
+    expect(performWorkspaceRouteTransition('app', context, host)).toEqual({ ok: true })
+    expect(prepared).toBe(1)
+    expect(calls).toEqual(['enter', 'leave'])
+  })
+
+  it('returns from pushed Search without creating a duplicate root history entry', () => {
+    const calls: string[] = []
+    const history = { back: () => calls.push('back'), replaceState: (_data: unknown, _unused: string, url: string) => calls.push(`replace:${url}`) }
+    leaveWorkspaceHistory(history, '/search', true)
+    leaveWorkspaceHistory(history, '/search', false)
+    expect(calls).toEqual(['back', 'replace:/'])
   })
 })

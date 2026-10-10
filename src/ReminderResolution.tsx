@@ -26,13 +26,13 @@ export function ReminderResolution({ object, targets, onResolve, onCancel }: { o
 }
 
 /** Visible in-app fallback; an already-resolved stale click becomes a recoverable message. */
-export function ReminderProjections({ state, onDeliveryState, focusInstructionId = null }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void; focusInstructionId?: string | null }) {
+export function ReminderProjections({ state, onDeliveryState, focusInstructionId = null, onFocusHandled }: { state: AppState; onDeliveryState: (instructionId: string, state: 'handled' | 'dismissed') => void; focusInstructionId?: string | null; onFocusHandled?: () => void }) {
   const now = useMemo(() => new Date(), [state])
   const inFlight = useRef(new Set<string>())
   const rowRefs = useRef(new Map<string, HTMLLIElement>())
   const [pending, setPending] = useState<readonly string[]>([])
   const [message, setMessage] = useState('')
-  useEffect(() => { if (focusInstructionId) rowRefs.current.get(focusInstructionId)?.focus() }, [focusInstructionId])
+  useEffect(() => { const row = focusInstructionId ? rowRefs.current.get(focusInstructionId) : undefined; if (row) { row.focus(); onFocusHandled?.() } }, [focusInstructionId])
   if (!state.model) return null
   const specific = specificReminderProjection(state.model, now)
   const daily = dailyLogReminderProjection(state.model, now)

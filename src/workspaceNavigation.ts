@@ -32,6 +32,36 @@ export type WorkspaceNavigationHost = Readonly<{
   open: (destination: SearchDestination) => void
 }>
 
+export type WorkspaceRouteContext = Readonly<{
+  available: boolean
+  accountUserId?: string
+  authenticatedUserId?: string
+  prepareCanvasExit: () => boolean
+}>
+
+/** Browser history and the Search button share one fail-closed route gate. */
+export function performWorkspaceRouteTransition(
+  destination: 'workspace' | 'app', context: WorkspaceRouteContext,
+  host: Readonly<{ enterSurface: () => void; leaveSurface: () => void }>,
+): WorkspaceNavigationOutcome {
+  if (!context.available || (context.accountUserId !== undefined && context.accountUserId !== context.authenticatedUserId)) {
+    return { ok: false, message: 'Account or workspace is unavailable. Navigation was not completed.' }
+  }
+  if (destination === 'workspace') {
+    if (!context.prepareCanvasExit()) return { ok: false, message: 'Finish saving Canvas changes before leaving the Canvas.' }
+    host.enterSurface()
+  } else host.leaveSurface()
+  return { ok: true }
+}
+
+export function leaveWorkspaceHistory(
+  history: Readonly<{ back: () => void; replaceState: (data: unknown, unused: string, url: string) => void }>,
+  path: string, searchWasPushed: boolean,
+): void {
+  if (searchWasPushed && path === '/search') history.back()
+  else history.replaceState({}, '', '/')
+}
+
 const unavailable = 'This result has changed or is no longer available. Refresh Search and try again.'
 const fields: SearchField[] = ['original', 'corrected-source', 'current-meaning', 'reminder-source', 'canvas-title', 'canvas-element']
 const equalIds = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((id, index) => id === right[index])
@@ -80,10 +110,10 @@ export function unavailableSearchResult(): WorkspaceNavigationOutcome { return {
 export function performWorkspaceNavigation(
   request: WorkspaceNavigationRequest, context: WorkspaceNavigationContext, host: WorkspaceNavigationHost,
 ): WorkspaceNavigationOutcome {
-  if (!context.available || !context.stateIsCurrent) return unavailableSearchResult()
-  if (request.type === 'close-surface') { host.close(); return { ok: true } }
-  if (request.snapshotToken !== context.snapshotToken ||
+  if (!context.available || !context.stateIsCurrent ||
       (context.accountUserId !== undefined && context.accountUserId !== context.authenticatedUserId)) return unavailableSearchResult()
+  if (request.type === 'close-surface') { host.close(); return { ok: true } }
+  if (request.snapshotToken !== context.snapshotToken) return unavailableSearchResult()
   const destination = resolveSearchDestination(context.state, request.document)
   if (!destination) return unavailableSearchResult()
   host.open(destination)
