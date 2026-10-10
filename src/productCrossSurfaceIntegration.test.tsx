@@ -15,7 +15,7 @@ import { searchProjectionFromAppState, type SearchDocument } from './universalSe
 import { performWorkspaceNavigation, type SearchDestination } from './workspaceNavigation'
 
 const digest = { enabled: false }
-const now = new Date(2026, 9, 10, 10, 0)
+const now = new Date(2026, 9, 10, 0, 10)
 const review: ThoughtObject = {
   id: 'dentist', kind: 'commitment', status: 'review', originalContent: 'Dentist appointment', source: 'text',
   createdAt: '2026-10-01T08:00:00.000Z', confidence: 1,
@@ -23,7 +23,7 @@ const review: ThoughtObject = {
   metadata: {}, relationships: [], history: [{ at: '2026-10-01T08:00:00.000Z', event: 'Captured' }],
 }
 const resolve = (state: AppState): AppState => ({ ...state, objects: [resolveCommitment(state.objects[0], {
-  title: 'Dentist appointment', date: '2026-10-10', time: '09:30', dependencyIds: [],
+  title: 'Dentist appointment', date: '2026-10-10', time: '00:05', dependencyIds: [],
 })] })
 const edit = (state: AppState): AppState => ({ ...state, objects: [updateObject(state.objects[0], {
   ...state.objects[0], context: 'Bring insurance card',
@@ -39,6 +39,8 @@ function expectCrossSurface(state: AppState, readModel: (state: AppState) => Per
   const model = readModel(state)
   const event = model.calendarEvents?.find(item => item.objectIds.includes('dentist'))
   expect(event).toMatchObject({ status: 'scheduled', objectIds: ['dentist'] })
+  expect(event?.startsAt).toBe(new Date(2026, 9, 10, 0, 5).toISOString())
+  expect(event?.temporalContext).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
   expect(model.temporalHistory?.at(-1)?.target).toMatchObject({ kind: 'event-scheduling', eventId: event?.id,
     interpretationId: model.interpretations.at(-1)?.id })
   const calendar = renderToStaticMarkup(<CalendarView state={state} onOpen={() => undefined}
@@ -49,6 +51,11 @@ function expectCrossSurface(state: AppState, readModel: (state: AppState) => Per
     onOpen={() => undefined} readAccountModel={account ? readModel : undefined} />)
   expect(today).toContain('1 scheduled')
   expect(today).toContain('Dentist appointment')
+  expect(today).toContain('12:05 AM')
+  const otherDay = (date: Date) => renderToStaticMarkup(<Today state={state} now={date}
+    onCapture={() => undefined} onOpen={() => undefined} readAccountModel={account ? readModel : undefined} />)
+  expect(otherDay(new Date(2026, 9, 9, 23, 59))).toContain('0 scheduled')
+  expect(otherDay(new Date(2026, 9, 11, 0, 10))).toContain('0 scheduled')
   const current = documentFor(state, readModel)
   expect(current.interpretationIds).toEqual(model.semanticObjects.find(item => item.id === 'dentist')?.interpretationIds)
   expect(current.interpretationIds).toHaveLength(4)
@@ -74,8 +81,8 @@ function expectCrossSurface(state: AppState, readModel: (state: AppState) => Per
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
-describe('AG04 bounded Commitment cross-surface evidence', () => {
-  it('keeps one local no-reload Review → Calendar → Today → Search lineage and rejects a stale result', () => {
+describe('bounded Commitment projection and navigation-contract evidence (not mounted UI)', () => {
+  it('projects a locally saved, no-reload Commitment into Calendar, Today, and Search and rejects an old result', () => {
     vi.useFakeTimers(); vi.setSystemTime(now)
     let raw: string | null = JSON.stringify(migrateLegacyState({ objects: [review], canvas: [] }))
     vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
@@ -84,7 +91,7 @@ describe('AG04 bounded Commitment cross-surface evidence', () => {
     state = edit(state)
     expect(saveState(state)).toBeUndefined()
     const prior = documentFor(state, reconcileCurrentSession)
-    state = scheduleCommitment(state, 'dentist', 'UTC')
+    state = scheduleCommitment(state, 'dentist')
     expect(saveState(state)).toBeUndefined()
     const saved = raw
     expectCrossSurface(state, reconcileCurrentSession, prior)
@@ -95,7 +102,7 @@ describe('AG04 bounded Commitment cross-surface evidence', () => {
     expect(reloaded.state.model?.calendarEvents?.[0].objectIds).toEqual(['dentist'])
   })
 
-  it('keeps one account no-reload Review → Calendar → Today → Search lineage and refuses cross-account navigation', async () => {
+  it('projects an account-saved, no-reload Commitment into Calendar, Today, and Search and refuses cross-account navigation', async () => {
     vi.useFakeTimers(); vi.setSystemTime(now)
     let row: AccountRow | null = null
     const adapter: AccountAdapter = {
@@ -114,7 +121,7 @@ describe('AG04 bounded Commitment cross-surface evidence', () => {
     state = edit(state)
     await save(state)
     const prior = documentFor(state, readModel)
-    state = scheduleCommitment(state, 'dentist', 'UTC', session.decisionModel(state, defaultSettings, digest))
+    state = scheduleCommitment(state, 'dentist', undefined, session.decisionModel(state, defaultSettings, digest))
     await save(state)
     expectCrossSurface(state, readModel, prior, { userId: 'owner' })
     const reopened = await createAccountSession(adapter, 'owner', () => 'owner').open()
