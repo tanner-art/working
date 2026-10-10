@@ -5,10 +5,12 @@ import { branchCanvasChild } from './canvasBranch'
 import { CANVAS_COLORS, CANVAS_SIZE, CONNECTION_COLORS, DEFAULT_CANVAS_COLOR, DEFAULT_CONNECTION_COLOR, DEFAULT_CONTAINER_COLOR, canvasShapeLabels, canvasNodeShape, canvasSize, canvasConnectorPath, connectionAppearance, connectionMarkerAppearance, connectionEndpoints, didMoveCanvasConnectionHandle, normalizeCurveHandle, perimeterAnchorAtPoint, resizeCanvasNode, convertCanvasNode, updateCanvasConnection, updateCanvasConnectionAnchors, updateCanvasNodeAppearance, type CanvasShape, type ConnectionPath, type ConnectionPattern, type ConnectionWeight } from './canvasGeometry'
 import { attachBlocksInside, canvasGroups, moveCanvasNode, removeCanvasNode, setCanvasGroup } from './canvasGroups'
 import { fitCanvasViewport, zoomCanvasViewport } from './canvasViewport'
-import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureState, type PointerSample } from './canvasGestures'
-import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown } from './canvasInteraction'
-import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke } from './canvasStrokes'
+import { idleGestureState, reduceCanvasGesture, type GestureEffect, type GestureResult, type GestureState, type PointerSample } from './canvasGestures'
+import { CANVAS_RESIZE_TARGET_SIZE, beginPinchInteraction, clearPinchInteraction, commitPinchInteraction, createPinchInteraction, previewPinchInteraction, reduceResizePointerDown, viewportAtPinchStart } from './canvasInteraction'
+import { applyCanvasStrokeShape, applyCanvasStrokeSmoothing, canvasStrokeIntersectsLasso, normalizeCanvasLassoPoints, normalizeCanvasStrokePoints, previewCanvasStrokeShape, projectCanvasStroke, removeSelectedCanvasStrokes } from './canvasStrokes'
+import { canvasObjectSelection } from './canvasSelection'
 import { MobileCanvasToolbar } from './surfaces/canvas'
+import { CANVAS_INK_COLORS, CANVAS_INK_WIDTHS, DEFAULT_CANVAS_INK, canvasInkAppearance, createCanvasInkStroke, type CanvasInkAppearance } from './canvasInk'
 
 function ColorControl({ label, value, colors, onChange }: { label: string; value: string; colors: readonly string[]; onChange: (value: string) => void }) {
   return <fieldset className="canvas-color-control"><legend>{label}</legend><div className="canvas-swatches">
@@ -16,6 +18,16 @@ function ColorControl({ label, value, colors, onChange }: { label: string; value
       style={{ backgroundColor: color }} aria-label={`${label}: ${color}`} aria-pressed={value.toLowerCase() === color.toLowerCase()} onClick={() => onChange(color)} />)}
     <label className="canvas-custom-color">Custom<input aria-label={`Custom ${label.toLowerCase()}`} type="color" value={value} onChange={event => onChange(event.target.value)} /></label>
   </div></fieldset>
+}
+
+function InkControl({ appearance, onChange }: { appearance: CanvasInkAppearance; onChange: (appearance: CanvasInkAppearance) => void }) {
+  return <details className="canvas-ink-options"><summary>Ink</summary><div className="canvas-ink-panel">
+    <ColorControl label="Ink color" value={appearance.color} colors={CANVAS_INK_COLORS}
+      onChange={color => onChange({ ...appearance, color })} />
+    <fieldset className="canvas-ink-widths"><legend>Ink width</legend><div>{CANVAS_INK_WIDTHS.map(width =>
+      <button type="button" key={width} aria-label={`${width} pixel ink width`} aria-pressed={appearance.width === width}
+        onClick={() => onChange({ ...appearance, width })}>{width}</button>)}</div></fieldset>
+  </div></details>
 }
 
 export function CanvasExitControl({ onExit }: { onExit: () => void }) {
@@ -57,6 +69,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const canvasRef = useRef<HTMLDivElement>(null)
   const [editMode, setEditMode] = useState(false)
   const [tool, setTool] = useState<'select' | 'pen' | 'lasso'>('select')
+  const [ink, setInk] = useState<CanvasInkAppearance>(() => ({ ...DEFAULT_CANVAS_INK }))
   const gesture = useRef<GestureState>(idleGestureState())
   const holdTimer = useRef<number | null>(null)
   const [selected, setSelected] = useState<string | null>(null); const [connectFrom, setConnectFrom] = useState<string | null>(null)
@@ -78,12 +91,18 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
   const [dragOffset, setDragOffset] = useState<{ id: string; dx: number; dy: number } | null>(null)
   const [connectionPreview, setConnectionPreview] = useState<{ id: string; patch: Pick<CanvasElement, 'sourceAnchor' | 'targetAnchor' | 'curveHandle'> } | null>(null)
   const connectionDrag = useRef<{ pointerId: number; id: string; kind: 'source' | 'target' | 'curve'; start: { x: number; y: number } } | null>(null)
-  const penStroke = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']> } | null>(null)
-  const [penPreview, setPenPreview] = useState<NonNullable<CanvasElement['rawPoints']> | null>(null)
+  const penStroke = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']>; appearance: CanvasInkAppearance } | null>(null)
+  const [penPreview, setPenPreview] = useState<{ points: NonNullable<CanvasElement['rawPoints']>; appearance: CanvasInkAppearance } | null>(null)
   const lassoPath = useRef<{ pointerId: number; sample: PointerSample; points: NonNullable<CanvasElement['rawPoints']> } | null>(null)
   const [lassoPreview, setLassoPreview] = useState<NonNullable<CanvasElement['rawPoints']> | null>(null)
   const [selectedStrokeIds, setSelectedStrokeIds] = useState<Set<string>>(() => new Set())
   const [refinementCandidateId, setRefinementCandidateId] = useState<string | null>(null)
+  const selectObject = (id: string) => {
+    const next = canvasObjectSelection(id)
+    setSelected(next.selectedId)
+    setSelectedStrokeIds(next.selectedStrokeIds)
+    setRefinementCandidateId(next.refinementCandidateId)
+  }
   const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
@@ -102,16 +121,20 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     const base = newCanvasElement(shape === 'container' ? 'container' : 'text', worldX, worldY)
     const next = convertCanvasNode([base], base.id, shape)[0]
     onCommit([...elements, next])
-    setSelected(next.id)
+    selectObject(next.id)
   }
   const clearHold = () => { if (holdTimer.current !== null) { window.clearTimeout(holdTimer.current); holdTimer.current = null } }
   const dismissRefinementPreview = () => setRefinementCandidateId(null)
   const clearTransientInteraction = () => { clearHold(); dismissRefinementPreview(); drag.current = null; connectionDrag.current = null; penStroke.current = null; lassoPath.current = null; clearPinchInteraction(pinchInteraction.current); setPanPreview(null); setPinchPreview(null); setDragOffset(null); setResizePreview(null); setConnectionPreview(null); setPenPreview(null); setLassoPreview(null) }
   const clearInteraction = () => { clearTransientInteraction(); gesture.current = idleGestureState() }
   useEffect(() => () => clearInteraction(), [])
-  const applyGestureEffect = (effect: GestureEffect) => {
-    if (effect.type === 'select') { setSelected(effect.id); setEditMode(false); return }
-    if (effect.type === 'open-edit-menu') { setSelected(effect.id); setEditMode(true); return }
+  const canvasOrigin = () => {
+    const rect = canvasRef.current?.getBoundingClientRect()
+    return { x: rect?.left ?? 0, y: rect?.top ?? 0 }
+  }
+  const applyGestureEffect = (effect: GestureEffect, pinchStart?: CanvasViewport, preservePinchPreview = false) => {
+    if (effect.type === 'select') { selectObject(effect.id); setEditMode(false); return }
+    if (effect.type === 'open-edit-menu') { selectObject(effect.id); setEditMode(true); return }
     if (effect.type === 'begin-move') {
       const item = elements.find(value => value.id === effect.id)
       if (item) drag.current = { pointerId: effect.start.pointerId, id: effect.id, startX: effect.start.x, startY: effect.start.y, originalX: item.x, originalY: item.y, dx: 0, dy: 0, moved: true }
@@ -125,15 +148,37 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
-    if (effect.type === 'begin-pinch') { beginPinchInteraction(pinchInteraction.current, viewport, effect.first, effect.second); return }
-    if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second); if (preview) setPinchPreview(preview); return }
+    if (effect.type === 'begin-pinch') {
+      const start = pinchStart ?? viewport
+      beginPinchInteraction(pinchInteraction.current, start, effect.first, effect.second, canvasOrigin(), preservePinchPreview)
+      if (preservePinchPreview) setPinchPreview(start)
+      return
+    }
+    if (effect.type === 'preview-pinch') { const preview = previewPinchInteraction(pinchInteraction.current, effect.first, effect.second, canvasOrigin()); if (preview) setPinchPreview(preview); return }
     if (effect.type === 'commit-pinch') { const preview = commitPinchInteraction(pinchInteraction.current); if (preview) onViewport(preview); setPinchPreview(null); return }
     // The reducer has already installed its next state before effects run. In the
     // second-pointer path that state is pinch-zooming, so cleanup must not replace
     // it with idle before begin-pinch and preview-pinch can run.
     if (effect.type === 'cancel') { clearTransientInteraction() }
   }
-  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => { const result = reduceCanvasGesture(gesture.current, action); gesture.current = result.state; result.effects.forEach(applyGestureEffect) }
+  const applyGestureResult = (result: GestureResult, previousMode: GestureState['mode']) => {
+    // A second pointer emits cancel before begin-pinch. Snapshot the mutable pan
+    // delta now; React's panPreview may not have rendered its latest value yet.
+    const panDrag = previousMode === 'panning' ? drag.current : null
+    const visiblePan = panDrag?.originalPan
+      ? { x: panDrag.originalPan.x + panDrag.dx, y: panDrag.originalPan.y + panDrag.dy }
+      : null
+    const previousPinch = pinchInteraction.current.preview
+    const preservePinchPreview = visiblePan !== null || previousPinch !== null
+    const pinchStart = result.effects.some(effect => effect.type === 'begin-pinch')
+      ? viewportAtPinchStart(viewport, visiblePan, previousPinch)
+      : undefined
+    gesture.current = result.state
+    result.effects.forEach(effect => applyGestureEffect(effect, pinchStart, preservePinchPreview))
+  }
+  const dispatchGesture = (action: Parameters<typeof reduceCanvasGesture>[1]) => {
+    applyGestureResult(reduceCanvasGesture(gesture.current, action), gesture.current.mode)
+  }
   const worldPoint = (event: React.PointerEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect()
     return { x: (event.clientX - (rect?.left ?? 0) - pan.x) / scale, y: (event.clientY - (rect?.top ?? 0) - pan.y) / scale }
@@ -155,17 +200,15 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       event.preventDefault()
       ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
       const start = { pointerId: event.pointerId, sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, points: [point] }
-      if (tool === 'pen') { penStroke.current = start; setPenPreview([point]) } else { lassoPath.current = start; setLassoPreview([point]) }
+      if (tool === 'pen') { const appearance = { ...ink }; penStroke.current = { ...start, appearance }; setPenPreview({ points: [point], appearance }) } else { lassoPath.current = start; setLassoPreview([point]) }
       return
     }
     const target = resize ? { kind: 'resize' as const, id: item!.id } : item ? { kind: 'node' as const, id: item.id } : { kind: 'canvas' as const }
-    if (item) setSelected(item.id)
+    if (item) selectObject(item.id)
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
     if (resize) {
-      const result = reduceResizePointerDown(gesture.current, sample, item!.id, editMode)
-      gesture.current = result.state
-      result.effects.forEach(applyGestureEffect)
+      applyGestureResult(reduceResizePointerDown(gesture.current, sample, item!.id, editMode), gesture.current.mode)
     } else dispatchGesture({ type: 'pointer-down', sample, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
@@ -176,7 +219,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (active?.pointerId === event.pointerId) {
       const points = [...active.points, worldPoint(event)]
       penStroke.current = { ...active, points }
-      setPenPreview(points)
+      setPenPreview({ points, appearance: active.appearance })
       return
     }
     const lasso = lassoPath.current
@@ -194,7 +237,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (active?.pointerId === event.pointerId) {
       const points = normalizeCanvasStrokePoints([...active.points, worldPoint(event)])
       penStroke.current = null; setPenPreview(null)
-      if (points) onCommit([...elements, { id: crypto.randomUUID(), type: 'freehand', x: points[0].x, y: points[0].y, rawPoints: points }])
+      if (points) onCommit([...elements, createCanvasInkStroke(crypto.randomUUID(), points, active.appearance)])
       return
     }
     const lasso = lassoPath.current
@@ -293,7 +336,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       setConnectFrom(null)
     } else {
       if (selected !== id) setEditMode(false)
-      setSelected(id)
+      selectObject(id)
     }
   }
   const arrows = elements.filter(item => item.type === 'arrow')
@@ -348,10 +391,19 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     if (!branch) return
     onCommit(branch.elements)
     setConnectFrom(null)
-    setSelected(branch.childId)
+    selectObject(branch.childId)
     setEditMode(true)
   }
-  const removeSelected = () => { if (!selected) return; onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null) }
+  const removeSelected = () => {
+    if (selectedStrokeIds.size > 0) {
+      const remaining = removeSelectedCanvasStrokes(elements, selectedStrokeIds)
+      if (remaining !== elements) onCommit(remaining)
+      setSelectedStrokeIds(new Set()); dismissRefinementPreview()
+      return
+    }
+    if (!selected) return
+    onCommit(removeCanvasNode(elements, selected)); setSelected(null); setConnectFrom(null)
+  }
   const fit = (selection = false) => {
     const rect = canvasRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -369,6 +421,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <div className="canvas-tools">
     <button onClick={() => add('text')}>+ Text</button>
     <button className={tool === 'pen' ? 'selected-tool' : ''} aria-pressed={tool === 'pen'} onClick={() => { cancel(); setTool(current => current === 'pen' ? 'select' : 'pen'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Pen</button>
+    <InkControl appearance={ink} onChange={setInk} />
     <button className={tool === 'lasso' ? 'selected-tool' : ''} aria-pressed={tool === 'lasso'} onClick={() => { cancel(); setTool(current => current === 'lasso' ? 'select' : 'lasso'); setConnectFrom(null); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) }}>Lasso</button>
     <button disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
     <button onClick={() => add('container')}>+ Group</button>
@@ -379,7 +432,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <button disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
     <button disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>↗ Connect</button>
     <button disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
-    <button disabled={!selected} onClick={removeSelected}>Delete</button>
+    <button disabled={!selected && selectedStrokeIds.size === 0} onClick={removeSelected}>Delete</button>
     <span/>
     <button disabled={!canUndo} title="Undo (Ctrl/Cmd+Z)" onClick={onUndo}>↶ Undo</button>
     <button disabled={!canRedo} title="Redo (Ctrl/Cmd+Shift+Z)" onClick={onRedo}>↷ Redo</button>
@@ -398,6 +451,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
       </>}
       secondary={<>
         <button type="button" disabled={!canPreviewSmoothing} onClick={openSmoothingPreview}>Preview refinement</button>
+        <InkControl appearance={ink} onChange={setInk} />
         <button type="button" onClick={() => add('container')}>Add group</button>
         <label className="canvas-palette">Add shape <select aria-label="Add canvas shape" value="" onChange={event => { if (event.target.value) add(event.target.value as CanvasShape) }}>
           <option value="" disabled>Choose shape…</option>{Object.entries(canvasShapeLabels).filter(([shape]) => shape !== 'text' && shape !== 'container').map(([shape, label]) => <option key={shape} value={shape}>{label}</option>)}
@@ -406,7 +460,7 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
         <button type="button" disabled={selectedElement?.type !== 'text'} aria-pressed={selectedElement?.nodeVariant === 'bulleted-list'} onClick={() => selectedElement && onCommit(toggleCanvasNodeVariant(elements, selectedElement.id))}>{selectedElement?.nodeVariant === 'bulleted-list' ? 'Plain text' : 'Bulleted list'}</button>
         <button type="button" disabled={!selectedElement} className={connectFrom ? 'selected-tool' : ''} onClick={() => setConnectFrom(connectFrom ? null : selected)}>Connect</button>
         <button type="button" disabled={!canCaptureSelected} onClick={() => selectedElement && onCaptureObject(selectedElement)}>Capture node</button>
-        <button type="button" disabled={!selected} onClick={removeSelected}>Delete</button>
+        <button type="button" disabled={!selected && selectedStrokeIds.size === 0} onClick={removeSelected}>Delete</button>
         <button type="button" disabled={!canUndo} onClick={onUndo}>Undo</button>
         <button type="button" disabled={!canRedo} onClick={onRedo}>Redo</button>
         <button type="button" onClick={() => fit()}>Fit canvas</button>
@@ -430,11 +484,16 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     <ColorControl label="Line color" value={selectedElement.connectionColor ?? DEFAULT_CONNECTION_COLOR} colors={CONNECTION_COLORS} onChange={connectionColor => onCommit(updateCanvasConnection(elements, selectedElement.id, { connectionColor }))} />
     </>}
     </div>
-    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size === 1 ? 'One stroke selected · preview refinement or circle another selection' : 'Lasso active · circle one stroke to preview refinement · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
+    <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size > 0 ? `${selectedStrokeIds.size} ${selectedStrokeIds.size === 1 ? 'stroke' : 'strokes'} selected · ${selectedStrokeIds.size === 1 ? 'preview refinement or Delete' : 'Delete selection'}` : 'Lasso active · circle strokes to select · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
     <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
-    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => <g key={stroke.id}><path className={`canvas-stroke${selectedStrokeIds.has(stroke.id) ? ' selected' : ''}`} d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>)}{penPreview && <path className="canvas-stroke canvas-stroke-preview" d={strokePath(penPreview)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
-    <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId); const to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); setSelected(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); setSelected(arrow.id) } }}/></g> })}<defs>
+    <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => {
+      const appearance = canvasInkAppearance(stroke), isSelected = selectedStrokeIds.has(stroke.id)
+      return <g key={stroke.id}><path className={`canvas-stroke${isSelected ? ' selected' : ''}`}
+        style={{ stroke: isSelected ? '#507737' : appearance.color, strokeWidth: isSelected ? Math.max(5, appearance.width + 2) : appearance.width }}
+        d={strokePath(renderedStrokePoints(stroke))} />{refinementCandidateId === stroke.id && smoothingPreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(smoothingPreviewPoints(stroke)!)} />}{refinementCandidateId === stroke.id && shapePreviewPoints(stroke) && <path className="canvas-stroke canvas-smoothing-preview" d={strokePath(shapePreviewPoints(stroke)!)} />}</g>
+    })}{penPreview && <path className="canvas-stroke canvas-stroke-preview" style={{ stroke: penPreview.appearance.color, strokeWidth: penPreview.appearance.width }} d={strokePath(penPreview.points)} />}{lassoPreview && <path className="canvas-lasso-preview" d={`${strokePath(lassoPreview)} Z`} />}</svg>
+    <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId), to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); selectObject(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); selectObject(arrow.id) } }}/></g> })}<defs>
     {arrows.map((arrow, index) => <marker key={arrow.id} id={`head-${index}`} markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" style={connectionMarkerAppearance(renderedArrow(arrow))} /></marker>)}
     </defs>
     </svg>{elements.filter(item => item.type === 'text' || item.type === 'container').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown), '--canvas-node-fill': shown.fillColor } as CSSProperties} onClick={event => clickNode(event, item.id)}>
@@ -446,8 +505,8 @@ export function Canvas({ title, autoFocusTitle, elements, viewport, onTitle, onV
     </span>
     <span>
     </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') setSelected(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select') down(event) }} />
-    {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => setSelected(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') selectObject(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select') down(event) }} />
+    {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => selectObject(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
     </div> })}{arrows.filter(arrow => selected === arrow.id).map(arrow => {
       const positions = connectionHandlePositions(arrow)
       if (!positions) return null

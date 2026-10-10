@@ -122,6 +122,9 @@ export interface CanvasElement {
   curveHandle?: CanvasCurveHandle
   /** Present only on a freehand mark. These are the authoritative raw samples. */
   rawPoints?: CanvasStrokePoint[]
+  /** Canvas-only appearance; older strokes retain their original default when omitted. */
+  strokeColor?: string
+  strokeWidth?: number
   /** Active local presentation; omitted means the preserved raw stroke is shown. */
   projection?: CanvasStrokeProjection
   /** Accepted local refinements; rawPoints remain authoritative and unchanged. */
