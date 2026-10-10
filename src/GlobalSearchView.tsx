@@ -77,7 +77,7 @@ export function GlobalSearchView({ state, snapshotToken, navigate, initialQuery 
     <header className="page-header"><div><p className="eyebrow">One place to find it</p><h1 id="universal-search-title">Search Threadline</h1></div><button type="button" className="secondary" onClick={close} aria-label="Close Search">Close</button></header>
     <label className="universal-search-label" htmlFor="universal-search-query">Search your thoughts</label>
     <input autoFocus id="universal-search-query" type="search" value={query} autoComplete="off" placeholder="Search anything" onChange={event => { setQuery(event.target.value); setVisible(initialVisible); setMessage('') }} />
-    {message && <p role="alert" className="universal-search-error">{message} Reopen Search after checking your account and saved workspace.</p>}
+    {message && <p role="alert" className="universal-search-error">{message}</p>}
     {incomplete && <p role="alert" className="universal-search-error">Some items could not be indexed, so these results may be incomplete.</p>}
     <p className="universal-search-count" role="status" aria-live="polite">{query.trim() ? `${results.length} ${results.length === 1 ? 'matching item' : 'matching items'}${incomplete ? ' shown; results may be incomplete' : ''}` : 'Enter a search term.'}</p>
     {query.trim() ? <section aria-label="Search results">
