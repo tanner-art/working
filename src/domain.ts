@@ -53,6 +53,8 @@ export interface ConfirmationGesture {
 export interface HistoryEvent {
   at: string
   event: string
+  /** A user-authored semantic link; Canvas arrows never create this audit. */
+  relationshipConfirmation?: { id: string; targetId: string; type: 'relates_to'; source: 'user-confirmed-link' }
   confirmation?: ConfirmationGesture
   actionStage?: { priority: ActionPriority; source: 'review-action-staging' }
   actionPriority?: { priority: ActionPriority; source: 'schedule-priority-selection' }
@@ -232,7 +234,7 @@ export interface SemanticRelationship extends Relationship {
   id: string
   sourceId: string
   scope: 'semantic'
-  provenance: { interpretationId: string; evidence: 'legacy-unverified' }
+  provenance: { interpretationId: string; evidence: 'legacy-unverified' | 'user-confirmed'; gestureId?: string; confirmedAt?: string }
 }
 export interface PersistedState {
   temporalHistory?: TemporalDecision[]

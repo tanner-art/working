@@ -5,6 +5,7 @@ import { CanvasBank } from './CanvasBankView'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { confirmObject, resolvedIdeas, setObjectStatus } from './objectWorkflow'
 import { makeObject } from './store'
+import { confirmedConnectionGraph, connectThoughts } from './semanticLinks'
 
 const canvas = (id: string, title: string, updatedAt: string) => ({
   ...createCanvasRecord('2026-09-26T08:00:00.000Z', id),
@@ -65,5 +66,23 @@ describe('Canvas Bank search surface', () => {
 
     expect(markup).toContain('aria-label="Open Product map"')
     expect(markup).toContain('aria-label="Open idea: Build a garden"')
+  })
+
+  it('shows only confirmed semantic links with a navigable list and a tucked-away authoring control', () => {
+    const first = confirmObject(makeObject({ kind: 'idea', source: 'text', originalContent: 'Garden', confidence: .9,
+      interpretation: { summary: 'Garden', suggestedKind: 'idea', rationale: 'Idea' } }))
+    const second = confirmObject(makeObject({ kind: 'idea', source: 'text', originalContent: 'Sunlight', confidence: .9,
+      interpretation: { summary: 'Sunlight', suggestedKind: 'idea', rationale: 'Idea' } }))
+    const baseline = legacyUiProjection(migrateLegacyState({ objects: [first, second], canvas: [] }))
+    const linked = connectThoughts(baseline, first.id, second.id, 'gesture:ui', '2026-10-10T12:00:00.000Z')
+    const markup = renderToStaticMarkup(<CanvasBank bank={{ canvases: [] }} ideas={[first, second]}
+      connections={confirmedConnectionGraph(linked)} focusTarget={null} onCreate={() => undefined}
+      onOpen={() => undefined} onOpenIdea={() => undefined} onConnect={() => undefined} />)
+    expect(markup).toContain('Connections <span>1</span>')
+    expect(markup).toContain('<summary>＋ Connect thoughts</summary>')
+    expect(markup).toContain('Canvas arrows and older unverified links stay separate.')
+    expect(markup).toContain('aria-label="Open Garden"')
+    expect(markup).toContain('aria-label="Open Sunlight"')
+    expect(markup).toContain('<line')
   })
 })
