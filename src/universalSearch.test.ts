@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createCanvasRecord } from './canvasBank'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
-import { confirmObject, reverseObject } from './objectWorkflow'
+import { confirmObject, reverseObject, setObjectStatus, updateObject } from './objectWorkflow'
 import { correctOriginal, reviseInterpretation } from './reviewRevision'
 import { resolveReminderInState } from './reminderWorkflow'
 import type { AppState, ThoughtObject } from './domain'
@@ -153,6 +153,12 @@ describe('universal search source adapters', () => {
     expect(after.omittedCount).toBe(0)
     expect(after.documents.some(document => document.kind === 'reminder')).toBe(false)
     expect(after.documents.some(document => document.id === 'capture:r')).toBe(true)
+    const edited = legacyUiProjection(reconcileLegacyUi({ ...reversed, objects: reversed.objects.map(object =>
+      object.id === 'r' ? updateObject(object, { ...object, context: 'Personal' }) : object) }))
+    expect(searchProjectionFromAppState(edited).complete).toBe(true)
+    const statusSaved = legacyUiProjection(reconcileLegacyUi({ ...edited, objects: edited.objects.map(object =>
+      object.id === 'r' ? setObjectStatus(object, 'complete') : object) }))
+    expect(searchProjectionFromAppState(statusSaved).complete).toBe(true)
   })
 
   it('returns every matching kind by default rather than truncating before later kind buckets', () => {

@@ -142,7 +142,7 @@ function retiredReminderInstruction(model: PersistedState, instruction: { source
   const current = source && model.interpretations.filter(reading => reading?.legacy?.id === source.legacy?.id).at(-1)
   if (!current) return false // Missing provenance is an incomplete projection, not a legitimate retirement.
   if (current.reviewState === 'rejected') return true
-  const decision = current.legacy.history?.at(-1)?.reviewDecision
+  const decision = [...(current.legacy.history ?? [])].reverse().find(entry => entry.reviewDecision)?.reviewDecision
   return (decision === 'reversed' || decision === 'rejected' || decision === 'superseded') &&
     (current.legacy.status !== 'confirmed' || current.legacy.kind !== 'reminder')
 }
