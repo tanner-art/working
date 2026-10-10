@@ -35,7 +35,7 @@ import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
 import { useSearchHandoffGuard } from './useSearchHandoffGuard'
 import { createSearchHandoffGuards, type RegisterSearchHandoffGuard } from './searchHandoffGuards'
 import { findWorkspaceReturnFocusTarget } from './workspaceFocus'
-import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, prepareFocusedCanvasSearchExit, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
@@ -416,13 +416,16 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     setFocusCanvasTitle(false)
     setOpenCanvasId(id)
   }
-  const exitCanvas = () => {
+  const finishCanvasEditing = () => {
     canvasCommitTitle.current?.()
     canvas?.finishText()
     canvasTextSaveQueue.flush()
+  }
+  const closeCanvasEditor = () => {
     setOpenCanvasId(null)
     setFocusCanvasEntry(false)
   }
+  const exitCanvas = () => { finishCanvasEditing(); closeCanvasEditor() }
   const navigate = (next: View) => {
     swipeStart.current = null
     closeMoreMenu(moreMenu.current)
@@ -453,8 +456,15 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       available: !accountBusy && accountValid && !initial.error && !clearing.current,
       accountUserId: cloud?.session.userId,
       authenticatedUserId: currentAccount.status === 'signed-in' ? currentAccount.session.user.id : undefined,
-      // Commit current input synchronously; the editor remains mounted while Search is shown.
-      prepareCanvasExit: () => { if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush() } return true },
+      prepareCanvasExit: () => prepareFocusedCanvasSearchExit({
+        editing: !!openCanvasId,
+        currentState: () => latestState.current,
+        finishEditing: finishCanvasEditing,
+        accountMode: !!cloud,
+        accountSavePending: () => canvasTextSaveQueue.hasPending() || !!saveError || cloudStatus === 'Saving account changes…',
+        saveLocal: () => { const error = saveState(latestState.current); setSaveError(error); return !error },
+        exit: closeCanvasEditor,
+      }),
     }
   }
   const openSearch = () => {

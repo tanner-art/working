@@ -43,6 +43,30 @@ export type WorkspaceRouteContext = Readonly<{
   prepareCanvasExit: () => boolean
 }>
 
+/** Search may replace focused Canvas only after its current edits are safely handed off. */
+export function prepareFocusedCanvasSearchExit(context: Readonly<{
+  editing: boolean
+  currentState: () => unknown
+  finishEditing: () => void
+  accountMode: boolean
+  accountSavePending: () => boolean
+  saveLocal: () => boolean
+  exit: () => void
+}>): boolean {
+  if (!context.editing) return true
+  try {
+    const before = context.currentState()
+    context.finishEditing()
+    // A new account edit starts an async save on the next render. Keep the editor
+    // mounted until that save finishes; flush() alone cannot attest success.
+    if (context.accountMode
+      ? context.currentState() !== before || context.accountSavePending()
+      : !context.saveLocal()) return false
+    context.exit()
+    return true
+  } catch { return false }
+}
+
 /** Browser history and the Search button share one fail-closed route gate. */
 export function performWorkspaceRouteTransition(
   destination: 'workspace' | 'app', context: WorkspaceRouteContext,

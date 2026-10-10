@@ -6,7 +6,7 @@ import { confirmObject } from './objectWorkflow'
 import { resolveReminderInState, setReminderDeliveryState } from './reminderWorkflow'
 import { createUniversalSearchIndex, searchDocumentsFromAppState, type SearchDocument } from './universalSearch'
 import { reconcileCurrentSession } from './store'
-import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, recoverRejectedWorkspacePopstate, resolveSearchDestination, workspaceHistoryLocation, type SearchDestination } from './workspaceNavigation'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, prepareFocusedCanvasSearchExit, recoverRejectedWorkspacePopstate, resolveSearchDestination, workspaceHistoryLocation, type SearchDestination } from './workspaceNavigation'
 import type { AppState, ThoughtObject } from './domain'
 
 const at = '2026-10-09T00:00:00.000Z'
@@ -120,6 +120,68 @@ describe('workspace search navigation contract', () => {
     expect(performWorkspaceRouteTransition('app', context, host)).toEqual({ ok: true })
     expect(prepared).toBe(1)
     expect(calls).toEqual(['enter', 'leave'])
+  })
+
+  it('exits focused Canvas before Search opens from the desktop button or browser history', () => {
+    for (const entry of ['desktop button', 'popstate']) {
+      const calls: string[] = []
+      const state = {}
+      const prepareCanvasExit = () => prepareFocusedCanvasSearchExit({
+        editing: true, currentState: () => state,
+        finishEditing: () => calls.push('finish draft'), accountMode: false,
+        accountSavePending: () => { throw Error('Account path is not used') },
+        saveLocal: () => { calls.push('save local'); return true },
+        exit: () => calls.push('exit Canvas'),
+      })
+      expect(performWorkspaceRouteTransition('workspace', { available: true, prepareCanvasExit },
+        { enterSurface: () => calls.push('open Search'), leaveSurface: () => undefined })).toEqual({ ok: true })
+      expect(calls, entry).toEqual(['finish draft', 'save local', 'exit Canvas', 'open Search'])
+    }
+  })
+
+  it('keeps focused Canvas mounted if a local save fails or an account edit/save is pending', () => {
+    const calls: string[] = []
+    let current: { draft?: string } = {}
+    let pending = true
+    let failed = false
+    const makeContext = (accountMode: boolean, finishEditing: () => void, saveLocal: () => boolean) => ({
+      available: true,
+      prepareCanvasExit: () => prepareFocusedCanvasSearchExit({ editing: true,
+        currentState: () => current, finishEditing, accountMode,
+        accountSavePending: () => pending || failed, saveLocal,
+        exit: () => calls.push('exit Canvas'),
+      }),
+    })
+    const host = { enterSurface: () => calls.push('open Search'), leaveSurface: () => undefined }
+    expect(performWorkspaceRouteTransition('workspace', makeContext(false, () => calls.push('finish draft'), () => false), host).ok).toBe(false)
+    expect(calls).toEqual(['finish draft'])
+    calls.length = 0
+    expect(performWorkspaceRouteTransition('workspace', makeContext(true, () => { calls.push('finish draft'); current = { draft: 'Unsent Canvas title' } }, () => true), host).ok).toBe(false)
+    expect(calls).toEqual(['finish draft'])
+    expect(current.draft).toBe('Unsent Canvas title')
+    calls.length = 0
+    expect(performWorkspaceRouteTransition('workspace', makeContext(true, () => calls.push('finish draft'), () => true), host).ok).toBe(false)
+    expect(calls).toEqual(['finish draft'])
+    calls.length = 0
+    pending = false
+    failed = true
+    expect(performWorkspaceRouteTransition('workspace', makeContext(true, () => calls.push('finish draft'), () => true), host).ok).toBe(false)
+    expect(calls).toEqual(['finish draft'])
+    calls.length = 0
+    failed = false
+    expect(performWorkspaceRouteTransition('workspace', makeContext(true, () => calls.push('finish draft'), () => true), host)).toEqual({ ok: true })
+    expect(calls).toEqual(['finish draft', 'exit Canvas', 'open Search'])
+  })
+
+  it('leaves regular Canvas Bank Search available without an editor save or exit', () => {
+    const calls: string[] = []
+    const prepareCanvasExit = () => prepareFocusedCanvasSearchExit({
+      editing: false, currentState: () => ({}), finishEditing: () => calls.push('finish draft'), accountMode: true,
+      accountSavePending: () => true, saveLocal: () => false, exit: () => calls.push('exit Canvas'),
+    })
+    expect(performWorkspaceRouteTransition('workspace', { available: true, prepareCanvasExit },
+      { enterSurface: () => calls.push('open Search'), leaveSurface: () => undefined })).toEqual({ ok: true })
+    expect(calls).toEqual(['open Search'])
   })
 
   it('returns from pushed Search without creating a duplicate root history entry', () => {

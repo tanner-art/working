@@ -14,4 +14,10 @@ describe('Search return focus', () => {
     const root = { querySelector: vi.fn(() => hidden) } as unknown as ParentNode
     expect(findWorkspaceReturnFocusTarget(root)).toBeNull()
   })
+
+  it('prefers the visible Search control when the sidebar is available', () => {
+    const search = { isConnected: true, closest: () => null }
+    const root = { querySelector: vi.fn((selector: string) => selector === '.sidebar [aria-label="Search"]' ? search : null) } as unknown as ParentNode
+    expect(findWorkspaceReturnFocusTarget(root)).toBe(search)
+  })
 })
