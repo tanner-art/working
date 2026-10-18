@@ -2313,6 +2313,25 @@ def bounded_run_worker_gate(
     }
 
 
+def coordinator_continuation_gate(registry, dispatch, bounded_run, config_path):
+    """Empty worker scope needs a native approval certificate and bound service."""
+    from .delivery_coordinator import require_coordinator_health
+    from .delivery_service import load_coordinator
+    try:
+        certificate = registry.delivery_activation_preflight(bounded_run, observed_at=dispatch.observed_at)
+        if certificate.get("coordinator_only") is not True:
+            raise OperatorError("coordinator-only activation certificate required")
+        coordinator = load_coordinator(config_path, registry.database)
+        if (coordinator.run_id != certificate["run_id"]
+                or coordinator.planner.worker_id != certificate["coordinator_worker_id"]):
+            raise OperatorError("coordinator-only activation service binding mismatch")
+        require_coordinator_health(scope_dispatch_snapshot(dispatch, [], bounded_run["parent_limit"]),
+                                   coordinator.planner)
+        return {"run_package_ids": [], "continuation_certificate": certificate}
+    except RegistryError as error:
+        raise OperatorError("coordinator-only activation failed: " + str(error)) from error
+
+
 def preflight(
     database: Path,
     config_path: Path,
@@ -2330,6 +2349,7 @@ def preflight(
     require_kill_switch: bool = True,
     canary_feature_id: str | None = None,
     run_package_ids: Sequence[str] | None = None,
+    bounded_run: Mapping[str, Any] | None = None,
     allow_allowed_authors_pending_recovery: bool = False,
     allow_stopping_ownership_reconciliation: bool = False,
 ) -> Mapping[str, Any]:
@@ -2390,7 +2410,11 @@ def preflight(
         if require_permissions_gate else {"gate": "deferred-to-prepare-dry-run"}
     )
     dispatch = registry.dispatch_snapshot(observed_at=observed_at)
+    if bounded_run is not None and tuple(bounded_run["package_ids"]) != tuple(run_package_ids or ()):
+        raise OperatorError("bounded run and package allowlist differ")
     workers = (
+        coordinator_continuation_gate(registry, dispatch, bounded_run, config_path)
+        if require_workers and bounded_run is not None and not bounded_run["package_ids"] else
         bounded_run_worker_gate(
             dispatch, run_package_ids,
             review_input_lookup=registry.review_input,
@@ -3643,7 +3667,7 @@ def enable_live(
     evidence = preflight(
         database, config_path, release, preservation_path, expected_commit,
         expected_revision, require_workers=True, canary_feature_id=canary_feature_id,
-        run_package_ids=run_package_ids,
+        run_package_ids=run_package_ids, bounded_run=bounded_run,
     )
     config = _load_object(config_path, "runner config")
     root = release / "scripts" / "runner"
@@ -3669,7 +3693,7 @@ def enable_live(
             database, config_path, release, preservation_path, expected_commit,
             expected_revision, require_workers=True,
             canary_feature_id=canary_feature_id,
-            run_package_ids=run_package_ids,
+            run_package_ids=run_package_ids, bounded_run=bounded_run,
         )
         revision = registry.set_dispatch_control(
             expected_revision=expected_revision,
@@ -3719,7 +3743,7 @@ def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
     base_ref = value.get("base_ref")
     limit = value.get("parent_limit")
     if (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id)
-            or not isinstance(packages, list) or not packages or len(set(packages)) != len(packages)
+            or not isinstance(packages, list) or len(set(packages)) != len(packages)
             or any(not isinstance(item, str) or not item for item in packages)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")

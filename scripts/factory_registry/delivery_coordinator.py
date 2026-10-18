@@ -67,6 +67,33 @@ class PlannerConfiguration:
     capacity_pool: str | None = None
 
 
+def require_coordinator_health(dispatch, planner):
+    """Shared read-only activation/runtime gate for the real coordinator account."""
+    rejected = decide_shadow(dispatch).global_rejections
+    if rejected:
+        raise RegistryConflict("DELIVERY_COORDINATOR_CAPACITY_BLOCKED", ",".join(str(item.code) for item in rejected))
+    worker = next((item for item in dispatch.workers if item["id"] == planner.worker_id), None)
+    if worker is None or worker.get("role") != "ORCHESTRA":
+        raise RegistryConflict("DELIVERY_COORDINATOR_INVALID")
+    try:
+        age = (datetime.fromisoformat(timestamp(dispatch.observed_at).replace("Z", "+00:00")) -
+               datetime.fromisoformat(timestamp(worker.get("last_heartbeat_at")).replace("Z", "+00:00"))).total_seconds()
+    except (TypeError, ValueError, RegistryConflict):
+        age = -1
+    if not 0 <= age <= 180 or worker.get("availability") not in {"IDLE", "BUSY"}:
+        raise RegistryConflict("DELIVERY_COORDINATOR_HEARTBEAT_INVALID")
+    pool = planner.capacity_pool
+    if (not isinstance(pool, str) or not re.fullmatch(r"[0-9a-f]{64}", pool)
+            or worker.get("provider_diagnostics", {}).get("capacity_pool") != pool):
+        raise RegistryConflict("DELIVERY_COORDINATOR_ACCOUNT_UNBOUND")
+    for scope in worker.get("capacity_scopes") or ("default",):
+        observations = [item for item in dispatch.usage_observations if item.get("worker_id") == worker["id"]
+            and item.get("capacity_scope", "default") == scope]
+        latest = max(observations, key=lambda item: item["observed_at"], default={})
+        if latest.get("provider_diagnostics", {}).get("capacity_pool") != pool:
+            raise RegistryConflict("DELIVERY_COORDINATOR_CAPACITY_ACCOUNT_MISMATCH")
+
+
 class DeliveryCoordinator:
     def __init__(self, registry, *, repository: Path, run_id: str, state_directory: Path,
                  planner: PlannerConfiguration, github: GitHubProjection, integration: IntegrationPolicy,
@@ -113,29 +140,7 @@ class DeliveryCoordinator:
                 raise RegistryConflict("DISPATCH_PAUSED")
         if planner:
             dispatch = self.registry.dispatch_snapshot(observed_at=self.clock())
-            rejected = decide_shadow(dispatch).global_rejections
-            if rejected:
-                raise RegistryConflict("DELIVERY_COORDINATOR_CAPACITY_BLOCKED", ",".join(str(item.code) for item in rejected))
-            worker = next((item for item in dispatch.workers if item["id"] == self.planner.worker_id), None)
-            if worker is None or worker.get("role") != "ORCHESTRA":
-                raise RegistryConflict("DELIVERY_COORDINATOR_INVALID")
-            try:
-                age = (datetime.fromisoformat(timestamp(self.clock()).replace("Z", "+00:00")) -
-                       datetime.fromisoformat(timestamp(worker.get("last_heartbeat_at")).replace("Z", "+00:00"))).total_seconds()
-            except (TypeError, ValueError, RegistryConflict):
-                age = -1
-            if not 0 <= age <= 180 or worker.get("availability") not in {"IDLE", "BUSY"}:
-                raise RegistryConflict("DELIVERY_COORDINATOR_HEARTBEAT_INVALID")
-            pool = self.planner.capacity_pool
-            if (not isinstance(pool, str) or not re.fullmatch(r"[0-9a-f]{64}", pool)
-                    or worker.get("provider_diagnostics", {}).get("capacity_pool") != pool):
-                raise RegistryConflict("DELIVERY_COORDINATOR_ACCOUNT_UNBOUND")
-            for scope in worker.get("capacity_scopes") or ("default",):
-                observations = [item for item in dispatch.usage_observations if item.get("worker_id") == worker["id"]
-                    and item.get("capacity_scope", "default") == scope]
-                latest = max(observations, key=lambda item: item["observed_at"], default={})
-                if latest.get("provider_diagnostics", {}).get("capacity_pool") != pool:
-                    raise RegistryConflict("DELIVERY_COORDINATOR_CAPACITY_ACCOUNT_MISMATCH")
+            require_coordinator_health(dispatch, self.planner)
         return snapshot
 
     def _git(self, *args):

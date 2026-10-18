@@ -19,6 +19,41 @@ from scripts.factory_registry import test_delivery_registry as registry_fixtures
 from scripts.runner.task_readiness import check_packet
 
 
+class EmptyDeliveryScopeTests(unittest.TestCase):
+    def test_empty_bound_scope_does_not_fall_back_to_github_or_start_provider(self):
+        import contextlib
+        import io
+        import runner
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {'repo': directory, 'state': str(root / 'state'), 'worktrees': str(root / 'trees'),
+                      'path': '/usr/bin:/bin', 'gh': 'gh', 'git': 'git', 'pnpm': 'pnpm',
+                      'github': 'owner/repo', 'allowed_authors': ['owner'],
+                      'capacity_collectors': {'codex-a': {'command': ['capacity']}},
+                      'agents': {'codex-a': {'command': ['agent']}}}
+            config_path = root / 'config.json'
+            config_path.write_text(json.dumps(config))
+            registry = Mock()
+            registry.registry.dispatch_control.return_value = {'bounded_run': {
+                'run_id': 'run-2', 'package_ids': [], 'deadline': '2026-10-18T20:00:00Z',
+                'base_ref': 'codex/delivery', 'parent_limit': 2}}
+            registry.bounded_source_issues.return_value = ()
+            with patch.object(runner, 'run', return_value='') as run, \
+                    patch.object(runner, 'refresh_capacity_observations'), \
+                    patch.object(runner.RunnerRegistryControl, 'from_config', return_value=registry), \
+                    patch('sys.argv', ['runner', '--config', str(config_path), '--agent', 'codex-a']), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                runner.main()
+            registry.claim_with_retry.assert_not_called()
+            registry.reserve_attempt.assert_not_called()
+            # Identity and display-only queue projection remain allowed;
+            # runner:ready assignment fallback and provider execution do not.
+            self.assertEqual([call.args[0] for call in run.call_args_list],
+                             [['gh', 'api', 'repos/owner/repo', '--jq', '.full_name'],
+                              ['gh', 'issue', 'list', '--repo', 'owner/repo', '--state', 'open',
+                               '--limit', '100', '--json', 'number,title,labels,createdAt']])
+
+
 class RunnerCorrectionTests(unittest.TestCase):
     def setUp(self):
         self.fixture = repair_fixtures.DeliveryRepairTests()

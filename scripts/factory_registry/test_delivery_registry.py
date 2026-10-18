@@ -739,7 +739,7 @@ class DeliveryRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(RegistryConflict, "DELIVERY_APPROVAL_REQUIRED"):
             self.registry.delivery_approval("FEATURE-1")
 
-    def test_approved_only_continuation_stays_paused_without_runnable_work(self):
+    def test_approved_only_continuation_has_empty_deny_all_worker_scope(self):
         self.submit()
         self.authorize()
         _, pair = self.plan_and_pair()
@@ -750,7 +750,7 @@ class DeliveryRegistryTests(unittest.TestCase):
         self.finish_review(review_input)
         self.stop()
         self.authorize(run_id="run-2", seconds=52)
-        for ids, error in (([], "INVALID_BOUNDED_RUN_SCOPE"), (["TASK-1", "TASK-2"], "DELIVERY_ACTIVATION_PACKAGE_MISMATCH"),
+        for ids, error in ((["TASK-1", "TASK-2"], "DELIVERY_ACTIVATION_PACKAGE_MISMATCH"),
                            (["TASK-2"], "DELIVERY_ACTIVATION_PACKAGE_MISMATCH")):
             with self.subTest(ids=ids), self.assertRaisesRegex(RegistryConflict, error):
                 self.start(run="run-2", package_ids=ids, seconds=53)
@@ -759,6 +759,14 @@ class DeliveryRegistryTests(unittest.TestCase):
                 owner="orchestra", expected_revision=self.revision(), recorded_at=self.stamp(54))
         self.assertEqual(self.registry.dispatch_control()["dispatch_mode"], "PAUSED")
         self.assertTrue(self.registry.dispatch_control()["kill_switch_engaged"])
+        self.start(run="run-2", package_ids=[], seconds=55)
+        scope = self.registry.dispatch_control()["bounded_run"]
+        self.assertEqual(scope["package_ids"], [])
+        self.assertTrue(self.registry.delivery_scope_extension_is_safe(scope, scope))
+        with self.assertRaises(RegistryConflict):
+            self.registry.acquire_lease("TASK-1", "builder", acquired_at=self.stamp(56), expires_at=self.stamp(300))
+        self.registry.reserve_delivery_action("run-2", "FEATURE-1", "resumed-integration", "INTEGRATE", {},
+            owner="orchestra", expected_revision=self.revision(), recorded_at=self.stamp(56))
 
 
 if __name__ == "__main__":

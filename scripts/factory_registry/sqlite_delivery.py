@@ -81,6 +81,8 @@ class DeliveryRegistryMixin:
             return set()
         authorization = read_record(connection, "authorization:" + scope["run_id"])
         if authorization is None:
+            if not scope["package_ids"]:
+                raise RegistryConflict("DELIVERY_COORDINATOR_CONTINUATION_NOT_AUTHORIZED")
             return set()
         active = read_record(connection, "active-authorization")
         if (active is None or active.get("run_id") != scope["run_id"]
@@ -88,6 +90,11 @@ class DeliveryRegistryMixin:
                 or any(scope.get(key) != authorization[key] for key in ("run_id", "deadline", "base_ref", "parent_limit"))
                 or now >= authorization["deadline"]):
             raise RegistryConflict("DELIVERY_ACTIVATION_INVALID")
+        for feature_id, expected_hash in authorization["request_hashes"].items():
+            request = read_record(connection, "request:" + feature_id)
+            if (request is None or request["request_sha256"] != expected_hash
+                    or digest(request["brief"]) != expected_hash):
+                raise RegistryConflict("DELIVERY_REQUEST_CHANGED")
         pairs = [json.loads(row[0]) for row in connection.execute(
             "SELECT value FROM registry_metadata WHERE key LIKE 'delivery:membership:%'")]
         pairs = [pair for pair in pairs if pair["run_id"] == scope["run_id"]]
@@ -106,9 +113,85 @@ class DeliveryRegistryMixin:
                 allowed.add(pair["review_id"])
                 if review[0] == "ON_DECK":
                     deferred.add(pair["review_id"])
-        if not allowed or set(scope["package_ids"]) != allowed:
+        if not allowed and not scope["package_ids"]:
+            self._delivery_continuation_certificate(connection, scope, authorization)
+            return set()
+        if set(scope["package_ids"]) != allowed:
             raise RegistryConflict("DELIVERY_ACTIVATION_PACKAGE_MISMATCH")
         return deferred
+
+    def _delivery_continuation_certificate(self, connection, scope, authorization):
+        """Certify exact native approvals, never infer authority from an empty queue."""
+        from .sqlite_registry import _review_input_from_evidence, _verify_operator_review_packet, _with_native_review_ci
+        if scope["package_ids"]:
+            raise RegistryConflict("DELIVERY_CONTINUATION_SCOPE_NOT_EMPTY")
+        if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL").fetchone()
+                or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL").fetchone()
+                or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL").fetchone()):
+            raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+        actions = [json.loads(row[0]) for row in connection.execute(
+            "SELECT value FROM registry_metadata WHERE key LIKE 'delivery:action:%'")]
+        if any(action["feature_id"] in authorization["feature_ids"]
+               and action["state"] in {"RUNNING", "UNCERTAIN"} for action in actions):
+            raise RegistryConflict("DELIVERY_ACTION_UNRESOLVED")
+        bindings = []
+        for feature_id in sorted(authorization["feature_ids"]):
+            if read_record(connection, "integration:" + feature_id) is not None:
+                continue
+            pairs = [json.loads(row[0]) for row in connection.execute(
+                "SELECT value FROM registry_metadata WHERE key LIKE ?", (PREFIX + "pair:" + feature_id + ":%",))]
+            if not pairs:
+                continue
+            pair = max(pairs, key=lambda item: item["generation"])
+            membership = read_record(connection, f"membership:{scope['run_id']}:{feature_id}:{pair['generation']}")
+            if membership is None or any(membership.get(key) != pair.get(key)
+                    for key in ("feature_id", "generation", "implementation_id", "review_id", "plan_action_id")):
+                raise RegistryConflict("DELIVERY_MEMBERSHIP_INVALID")
+            implementation = connection.execute("SELECT status FROM work_packages WHERE id=?", (pair["implementation_id"],)).fetchone()
+            review = connection.execute("SELECT status FROM work_packages WHERE id=?", (pair["review_id"],)).fetchone()
+            if implementation is None or review is None:
+                raise RegistryConflict("DELIVERY_MEMBERSHIP_INVALID")
+            if implementation[0] != "VERIFY_REVIEW" or review[0] != "DONE":
+                continue
+            outcome = connection.execute("SELECT state FROM review_outcomes WHERE review_package_id=?",
+                                         (pair["review_id"],)).fetchone()
+            if outcome is None or outcome[0] != "APPROVED":
+                continue
+            approval = self._delivery_approval(connection, feature_id)
+            evidence = connection.execute("SELECT * FROM evidence WHERE id=?", (approval["review_input_evidence_id"],)).fetchone()
+            source = _with_native_review_ci(connection, _review_input_from_evidence(evidence))
+            _verify_operator_review_packet(source)
+            for attempt_id, package_id, worker_id in (
+                (source.implementation_attempt_id, pair["implementation_id"], approval["implementer_worker_id"]),
+                (approval["review_attempt_id"], pair["review_id"], approval["reviewer_worker_id"]),
+            ):
+                attempt = connection.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+                if (attempt is None or attempt["package_id"] != package_id or attempt["worker_id"] != worker_id
+                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
+                    raise RegistryConflict("DELIVERY_CONTINUATION_NATIVE_ATTEMPT_REQUIRED")
+            if approval["implementer_worker_id"] == approval["reviewer_worker_id"]:
+                raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
+            bindings.append(approval)
+        if not bindings:
+            raise RegistryConflict("DELIVERY_COORDINATOR_CONTINUATION_NOT_AUTHORIZED")
+        certificate = {"coordinator_only": True, "run_id": scope["run_id"],
+                       "coordinator_worker_id": authorization["coordinator_worker_id"],
+                       "authorization_sha256": digest(authorization), "initial_scope": dict(scope),
+                       "approved_bindings": bindings}
+        return {**certificate, "certificate_sha256": digest(certificate)}
+
+    def delivery_activation_preflight(self, scope, *, observed_at):
+        """Read-only gate; LIVE repeats this validation inside its CAS transaction."""
+        from .sqlite_registry import _bounded_run_scope
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            limit = int(connection.execute("SELECT value FROM registry_metadata WHERE key='active_parent_limit'").fetchone()[0])
+            scope = _bounded_run_scope(scope, active_parent_limit=limit)
+            self._delivery_activation_packages(connection, scope, timestamp(observed_at))
+            if scope is None or scope["package_ids"]:
+                return {"coordinator_only": False}
+            authorization = read_record(connection, "authorization:" + scope["run_id"])
+            return self._delivery_continuation_certificate(connection, scope, authorization)
 
     def _delivery_control_transition(self, connection, new_mode, scope, now):
         active = read_record(connection, "active-authorization")
@@ -117,7 +200,11 @@ class DeliveryRegistryMixin:
         run_id = active["run_id"]
         prior = read_record(connection, "run-state:" + run_id)
         if new_mode == "LIVE" and scope and scope["run_id"] == run_id:
-            write_record(connection, "run-state:" + run_id, {"state": "LIVE", "activated_at": now})
+            state = {"state": "LIVE", "activated_at": now, "initial_scope": dict(scope)}
+            if not scope["package_ids"]:
+                state["continuation_certificate"] = self._delivery_continuation_certificate(
+                    connection, scope, read_record(connection, "authorization:" + run_id))
+            write_record(connection, "run-state:" + run_id, state)
         elif prior and new_mode in {"STOPPING", "PAUSED", "RECOVERY_REQUIRED"}:
             write_record(connection, "run-state:" + run_id,
                          {**prior, "state": "STOPPED", "stopped_at": now}, replace_existing=True)
@@ -546,7 +633,7 @@ class DeliveryRegistryMixin:
                 != {key: value for key, value in current.items() if key != "package_ids"}):
             return False
         old, new = set(baseline.get("package_ids", ())), set(current.get("package_ids", ()))
-        if not old or not old <= new:
+        if not old <= new:
             return False
         with self._connection() as connection:
             connection.execute("BEGIN")
@@ -555,6 +642,17 @@ class DeliveryRegistryMixin:
             if (not auth or not active or active["run_id"] != auth["run_id"]
                     or any(current.get(key) != auth[key] for key in ("run_id", "deadline", "base_ref", "parent_limit"))):
                 return False
+            if not old:
+                state = read_record(connection, "run-state:" + auth["run_id"]) or {}
+                certificate = state.get("continuation_certificate") or {}
+                unsigned = {key: value for key, value in certificate.items() if key != "certificate_sha256"}
+                if (state.get("initial_scope") != baseline or certificate.get("initial_scope") != baseline
+                        or certificate.get("coordinator_only") is not True or not certificate.get("approved_bindings")
+                        or certificate.get("run_id") != auth["run_id"]
+                        or certificate.get("coordinator_worker_id") != auth["coordinator_worker_id"]
+                        or certificate.get("authorization_sha256") != digest(auth)
+                        or certificate.get("certificate_sha256") != digest(unsigned)):
+                    return False
             scope = connection.execute("SELECT value FROM registry_metadata WHERE key='bounded_run_scope'").fetchone()
             if scope is None or json.loads(scope[0]) != current:
                 return False

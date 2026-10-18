@@ -102,7 +102,7 @@ class _ReadOnlyRegistry(SQLiteRegistry):
 def _scope_matches(database: pathlib.Path, expected: Any, actual: Any) -> bool:
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         return False
-    if actual == expected:
+    if actual == expected and expected.get("package_ids"):
         return True
     # The immutable guard spec can only grow by Registry-certified delivery
     # pairs. Run identity, deadline, target and concurrency remain immutable;

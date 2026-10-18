@@ -88,14 +88,16 @@ from package estimates.
   while the VERIFY_REVIEW parent remains context. Old provenance is not
   rewritten. Corrections after CHANGES_REQUESTED are planned by the LIVE loop
   or explicitly prepared under a fresh bounded PAUSED authorization.
-- **Approved-only resume is not supported yet:** if all remaining work is
-  approved but unintegrated, there are no runnable packages with which to
-  activate a new run. Empty scopes fail `INVALID_BOUNDED_RUN_SCOPE`; including
-  old VERIFY_REVIEW/DONE packages fails
-  `DELIVERY_ACTIVATION_PACKAGE_MISMATCH`. New integration stays blocked by
-  `DISPATCH_PAUSED`. A dedicated coordinator-only continuation boundary awaits
-  design review. Already-published effects may still be reconciled while
-  PAUSED without another push.
+- Approved but unintegrated work can resume under a fresh authorization with
+  `package_ids: []` only when the Registry certifies exact native approvals,
+  completed independent attempts, readable review packets, unchanged owner
+  contracts, and no unresolved ownership/actions. This scope denies every
+  worker claim. The operator also verifies the configured coordinator account,
+  heartbeat and shared capacity reserve. Integration remains forbidden while
+  PAUSED; LIVE records an immutable continuation certificate. The guards accept
+  subsequent scope growth only through Registry-certified successor pairs.
+  Empty legacy/uncertified runs fail closed. Already-published effects may
+  still be reconciled while PAUSED without another push.
 - Failed/uncertain provider execution is not automatically an approval or
   permission for unlimited retries. It remains an explicit reconciliation
   blocker; other authorized independent features may continue.
@@ -213,6 +215,13 @@ against that same scope. Then use `operator_cli enable-live --mode lanes
 transitions PAUSED to LIVE. `submit`, `authorize`, `prepare`, `status` and `tick`
 do not.
 
+For approved-only continuation, use an empty `package_ids` array in that exact
+envelope. Do not include old VERIFY_REVIEW/DONE packages or invent READY work to
+start the run. The activation transaction repeats the read-only continuation
+preflight and persists its exact approval bindings. Guard verification of an
+empty scope requires that committed certificate; equality alone is insufficient.
+If activation fails, no empty-scope service has permission to run or dispatch.
+
 ### 4. Observe, stop and resume
 
 The local dashboard's delivery summary shows feature, next action, blocker,
@@ -249,8 +258,9 @@ draining and reconciling uncertain actions, subject to the resume limits above.
 
 ### Preserved installed baseline
 
-This branch first incorporates installed Factory release `44da816` through
-merge commit `bb2fbf2`; those existing safety changes were absent from the
+The original checkpoint incorporated installed Factory release `44da816` through
+merge commit `bb2fbf2`; the durable recovery branch restores those file changes
+in `3315657` (see `DELIVERY_RECOVERY_2026-10-18.md`). They were absent from the
 observed `origin/main` (`b97ec39`). They are not new delivery-loop work. In
 particular, that baseline includes the PAUSED-only historical no-commit
 classification commands, external-integration review provenance and projection,

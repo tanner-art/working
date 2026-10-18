@@ -280,7 +280,7 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
     base_ref = value.get("base_ref")
     parent_limit = value.get("parent_limit", DEFAULT_BOUNDED_RUN_PARENT_LIMIT)
     if (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id)
-            or not isinstance(package_ids, (list, tuple)) or not package_ids
+            or not isinstance(package_ids, (list, tuple))
             or any(not isinstance(item, str) or not item for item in package_ids)
             or len(set(package_ids)) != len(package_ids)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
