@@ -155,6 +155,7 @@
     <h2>Authoritative Factory State</h2>
     <div class="kpis" id="registry-kpis"></div>
     <p class="note" id="registry-note"></p>
+    <div id="delivery-progress"></div>
   </section>
 
   <section id="section-registry-queue">
@@ -304,6 +305,8 @@
     var note = document.getElementById('registry-note');
     var tbody = document.querySelector('#registry-packages-table tbody');
     var groups = document.getElementById('feature-groups');
+    var deliveryProgress = document.getElementById('delivery-progress');
+    clearChildren(deliveryProgress);
     clearChildren(kpis);
     clearChildren(tbody);
     clearChildren(groups);
@@ -315,6 +318,17 @@
       return;
     }
     var projection = registry.projection;
+    var deliveryLabels = {PLAN: 'Preparing', PROJECT: 'Preparing work', REPAIR: 'Preparing correction',
+      WAIT_IMPLEMENTATION: 'Implementation', PUBLISH_REVIEW: 'Checking review readiness',
+      WAIT_REVIEW: 'Independent review', INTEGRATE: 'Approved — integrating', COMPLETE: 'Integrated',
+      WAIT_DEPENDENCIES: 'Waiting for integration', RECONCILE_ACTION: 'Recovering',
+      NEEDS_DECISION: 'Needs your decision', BLOCKED: 'Blocked'};
+    (registry.delivery || []).forEach(function (feature) {
+      deliveryProgress.appendChild(el('p', { text: feature.title + ' — '
+        + (deliveryLabels[feature.next_action] || feature.next_action)
+        + (feature.reason ? ': ' + feature.reason : '')
+        + (feature.integration_commit ? ' · ' + feature.integration_commit.slice(0, 8) : '') }));
+    });
     var control = registry.control;
     var ownership = registry.ownership;
     var run = control.bounded_run;

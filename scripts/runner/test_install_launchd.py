@@ -33,6 +33,14 @@ class LaunchdInstallerTests(unittest.TestCase):
     def plan(self, state, mode='serial', live=False, port=8787):
         return installer.service_plan(self.config(state), state / 'config.json', pathlib.Path(__file__).parent, mode, live, port)
 
+    def delivery_plan(self, state, *, live=False):
+        config = self.config(state)
+        config['registry_database'] = str(state / 'registry.sqlite3')
+        config['agents']['codex-b']['provider'] = 'openai'
+        config['delivery'] = {'run_id': 'delivery-run', 'planner_agent': 'codex-b',
+                              'coordinator_worker_id': 'orchestra', 'validation_commands': [['pnpm', 'check']]}
+        return installer.service_plan(config, state / 'config.json', pathlib.Path(__file__).parent, 'lanes', live)
+
     @staticmethod
     def absent_run(calls):
         def run(args, **kwargs):
@@ -275,6 +283,119 @@ class LaunchdInstallerTests(unittest.TestCase):
             plan = self.plan(pathlib.Path(directory) / 'state', mode='lanes', live=True)
             self.assertTrue(all('--dry-run' not in data['ProgramArguments'] for _, data in plan[:3]))
             self.assertNotIn('--dry-run', plan[-1][1]['ProgramArguments'])
+
+    def test_delivery_service_is_opt_in_supervised_and_dry_plan_only_reads_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            dry = dict(self.delivery_plan(state))[installer.DELIVERY_LABEL]
+            live = dict(self.delivery_plan(state, live=True))[installer.DELIVERY_LABEL]
+            self.assertEqual(dry['ProgramArguments'], [installer.sys.executable, '-m', installer.DELIVERY_MODULE,
+                'status', '--database', str(state / 'registry.sqlite3'), '--run-id', 'delivery-run'])
+            self.assertEqual(live['ProgramArguments'], [installer.sys.executable, '-m', installer.DELIVERY_MODULE,
+                'tick', '--database', str(state / 'registry.sqlite3'), '--config', str((state / 'config.json').resolve())])
+            self.assertEqual(live['StartInterval'], 60)
+            self.assertEqual(live['WorkingDirectory'], str(pathlib.Path(__file__).parent.parent.parent))
+            self.assertEqual(live['EnvironmentVariables'], installer.service_environment('/usr/bin:/bin'))
+            self.assertNotIn('do-not-copy', plistlib.dumps(live).decode())
+            self.assertNotIn(installer.DELIVERY_LABEL, dict(self.plan(state, mode='lanes')))
+            self.assertNotIn(installer.DELIVERY_LABEL, installer.labels_for_mode('lanes'))
+            self.assertIn(installer.DELIVERY_LABEL, installer.labels_for_mode('lanes', include_delivery=True))
+
+    def test_delivery_plan_rejects_bad_config_or_serial_mode_without_launching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = pathlib.Path(directory) / 'state'
+            base = self.config(state)
+            base['registry_database'] = str(state / 'registry.sqlite3')
+            base['agents']['codex-b']['provider'] = 'openai'
+            valid = {'run_id': 'delivery-run', 'planner_agent': 'codex-b',
+                     'coordinator_worker_id': 'orchestra', 'validation_commands': [['pnpm', 'check']]}
+            for delivery in (None, {}, {**valid, 'secret': 'rejected'}, {**valid, 'run_id': '--bad'},
+                             {**valid, 'planner_agent': 'claude'}, {**valid, 'coordinator_worker_id': 'codex-b'},
+                             {**valid, 'validation_commands': []}):
+                with self.subTest(delivery=delivery), self.assertRaises(ValueError):
+                    installer.service_plan({**base, 'delivery': delivery}, state / 'config.json',
+                                           pathlib.Path(__file__).parent, 'lanes')
+            with self.assertRaisesRegex(ValueError, 'lane mode'):
+                installer.service_plan({**base, 'delivery': valid}, state / 'config.json',
+                                       pathlib.Path(__file__).parent, 'serial')
+
+    def test_generic_install_allows_status_but_never_tick_even_with_dry_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            plan = self.delivery_plan(root / 'state')
+            installer.install(plan, mode='lanes', replace_mode=False, state=root / 'state',
+                              home=root / 'home', run=self.absent_run([]), uid=1)
+            for label, data in self.delivery_plan(root / 'state', live=True):
+                if label == installer.DELIVERY_LABEL:
+                    data['ProgramArguments'].append('--dry-run')
+                    with self.assertRaisesRegex(ValueError, 'reviewed Registry operator'):
+                        installer.install([(label, data)], mode='lanes', replace_mode=False,
+                            state=root / 'state', home=root / 'other', run=self.absent_run([]), uid=1)
+
+    def test_delivery_service_is_stopped_and_replaced_by_status_on_pause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            live = self.delivery_plan(state, live=True)
+            for label, data in live:
+                installer.atomic_write_plist(installer.label_path(label, home), data)
+            calls = []
+            control = Mock()
+            control.reconcile_stopping_runtimes.return_value = {'unresolved': ()}
+            def run(args, **kwargs):
+                calls.append(args)
+                if args[1] == 'print':
+                    present = installer.label_path(args[-1].rsplit('/', 1)[-1], home).exists()
+                    return subprocess.CompletedProcess(args, 0 if present else 1)
+                return subprocess.CompletedProcess(args, 0)
+            installer.pause_to_dry_run(self.delivery_plan(state), mode='lanes', registry_control=control,
+                                      state=state, home=home, run=run, uid=1)
+            self.assertIn(['launchctl', 'bootout', f'gui/1/{installer.DELIVERY_LABEL}'], calls)
+            definition = plistlib.loads(installer.label_path(installer.DELIVERY_LABEL, home).read_bytes())
+            self.assertEqual(definition['ProgramArguments'][3], 'status')
+            control.engage_stop.assert_called_once()
+            control.finalize_paused.assert_called_once()
+
+    def test_disabled_delivery_service_is_found_and_removed_during_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            for label, data in self.delivery_plan(state):
+                installer.atomic_write_plist(installer.label_path(label, home), data)
+            calls = []
+            def run(args, **kwargs):
+                calls.append(args)
+                if args[1] == 'print':
+                    present = installer.label_path(args[-1].rsplit('/', 1)[-1], home).exists()
+                    return subprocess.CompletedProcess(args, 0 if present else 1)
+                return subprocess.CompletedProcess(args, 0)
+            installer.install_operator_plan(self.plan(state, mode='lanes'), mode='lanes', replace_mode=False,
+                replace_current=True, state=state, home=home, run=run, uid=1)
+            self.assertFalse(installer.label_path(installer.DELIVERY_LABEL, home).exists())
+            self.assertIn(['launchctl', 'bootout', f'gui/1/{installer.DELIVERY_LABEL}'], calls)
+
+    def test_migration_to_serial_removes_delivery_plist_without_losing_recovery_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state, home = root / 'state', root / 'home'
+            for label, data in self.delivery_plan(state, live=True):
+                installer.atomic_write_plist(installer.label_path(label, home), data)
+            previous = installer.label_path(installer.DELIVERY_LABEL, home).read_bytes()
+            calls = []
+            def run(args, **kwargs):
+                calls.append(args)
+                if args[1] == 'print':
+                    present = installer.label_path(args[-1].rsplit('/', 1)[-1], home).exists()
+                    return subprocess.CompletedProcess(args, 0 if present else 1)
+                return subprocess.CompletedProcess(args, 0)
+            installer.install_operator_plan(self.plan(state), mode='serial', replace_mode=True,
+                state=state, home=home, run=run, uid=1)
+            self.assertFalse(installer.label_path(installer.DELIVERY_LABEL, home).exists(),
+                             'A disabled coordinator must not restart on login')
+            backups = list((state / 'launchd-backups').glob(f'*/{installer.DELIVERY_LABEL}.plist'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), previous)
+            self.assertIn(['launchctl', 'bootout', f'gui/1/{installer.DELIVERY_LABEL}'], calls)
 
     def test_invalid_lane_config_and_port_fail_before_installation(self):
         with tempfile.TemporaryDirectory() as directory:

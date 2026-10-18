@@ -106,6 +106,15 @@ DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8787
 REFRESH_SECONDS = 10
 
+# Only Registry-owned constants are public diagnostics. A shape check alone
+# can accidentally publish an uppercase token from a provider failure detail.
+DELIVERY_PUBLIC_REASONS = frozenset({
+    'DELIVERY_GENERATION_BUDGET_EXHAUSTED',
+    'DELIVERY_ATTEMPT_BLOCKED_RECONCILIATION_REQUIRED',
+    'DELIVERY_PLANNING_ATTEMPTS_EXHAUSTED',
+    'DELIVERY_INTEGRATION_ATTEMPTS_EXHAUSTED',
+})
+
 DEFAULT_STALE_AFTER_SECONDS = fstatus.DEFAULT_STALE_AFTER_SECONDS
 DEFAULT_UTILIZATION_WINDOW_DAYS = fstatus.DEFAULT_UTILIZATION_WINDOW_DAYS
 DEFAULT_UTILIZATION_TARGET_WORKERS = fstatus.DEFAULT_UTILIZATION_TARGET_WORKERS
@@ -219,6 +228,19 @@ def load_registry_report(config, observed_at):
         control = dict(registry.dispatch_control())
         if int(projection['registryRevision']) != control['revision']:
             raise RuntimeError('Registry changed during dashboard observation')
+        delivery_snapshot = registry.delivery_snapshot(run_id=(control.get('bounded_run') or {}).get('run_id'))
+        if delivery_snapshot['revision'] != control['revision']:
+            raise RuntimeError('Registry changed during delivery observation')
+        delivery = [{
+            'feature_id': item['feature_id'], 'title': item['brief']['title'],
+            'next_action': item['next_action'],
+            'reason': (item['reason'] if isinstance(item['reason'], str)
+                       and item['reason'] in DELIVERY_PUBLIC_REASONS else
+                       'See local delivery evidence for details' if item['reason'] else None),
+            'implementation_id': (item['pair'] or {}).get('implementation_id'),
+            'review_id': (item['pair'] or {}).get('review_id'),
+            'integration_commit': (item['integration'] or {}).get('integration_commit'),
+        } for item in delivery_snapshot['features']]
         active_attempts = sum(
             1
             for feature in projection['features']
@@ -269,6 +291,7 @@ def load_registry_report(config, observed_at):
                 'bounded_run': control.get('bounded_run'),
             },
             'ownership': ownership,
+            'delivery': delivery,
         }
     except Exception:
         # Never expose database paths or raw SQLite/provider diagnostics.

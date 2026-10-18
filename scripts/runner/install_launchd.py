@@ -6,6 +6,7 @@ import os
 import pathlib
 import plistlib
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,8 @@ LANE_AGENTS = ('codex-a', 'codex-b', 'claude')
 MIN_AGENT_SLOTS = 1
 MAX_AGENT_SLOTS = 3
 DASHBOARD_LABEL = 'life.threadline.factory-dashboard'
+DELIVERY_LABEL = 'life.threadline.factory.delivery'
+DELIVERY_MODULE = 'scripts.factory_registry.delivery_cli'
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 SERVICE_UMASK = 0o077
@@ -208,9 +211,58 @@ def validate_runner_commands(agent, value):
                 raise ValueError(f'{agent} {field} must use an explicit --tools allowlist without Agent')
 
 
+def validate_delivery_config(config):
+    """Validate service shape only; the loader verifies live account authority."""
+    if 'delivery' not in config:
+        return None
+    delivery = config['delivery']
+    fields = {'run_id', 'planner_agent', 'coordinator_worker_id', 'validation_commands'}
+    if not isinstance(delivery, dict) or set(delivery) != fields:
+        raise ValueError('delivery service requires the exact supported configuration fields')
+    for field in ('run_id', 'coordinator_worker_id'):
+        if (not isinstance(delivery[field], str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', delivery[field])):
+            raise ValueError(f'delivery {field} is invalid')
+    agent_id = delivery['planner_agent']
+    agents = config.get('agents')
+    if (agent_id not in ('codex-a', 'codex-b') or not isinstance(agents, dict)
+            or not isinstance(agents.get(agent_id), dict)
+            or agents[agent_id].get('provider') != 'openai'
+            or delivery['coordinator_worker_id'] == agent_id):
+        raise ValueError('delivery planner requires a configured OpenAI lane and separate coordinator identity')
+    database = config.get('registry_database')
+    if not isinstance(database, str) or not pathlib.Path(database).is_absolute():
+        raise ValueError('delivery service requires an absolute Registry database path')
+    commands = delivery['validation_commands']
+    if (not isinstance(commands, list) or not commands
+            or any(not isinstance(command, list) or not command
+                   or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in command)
+                   for command in commands)):
+        raise ValueError('delivery validation_commands must be non-empty argument lists')
+    return delivery
+
+
+def _dry_service(label, data):
+    if label == DASHBOARD_LABEL:
+        return True
+    arguments = data.get('ProgramArguments', ())
+    if label == DELIVERY_LABEL:
+        # A dry service is a read-only query, not a coordinator with a flag
+        # that could still bootstrap planning while the Registry is PAUSED.
+        return (len(arguments) == 8
+                and list(arguments[1:5]) == ['-m', DELIVERY_MODULE, 'status', '--database']
+                and isinstance(arguments[5], str) and pathlib.Path(arguments[5]).is_absolute()
+                and arguments[6] == '--run-id' and isinstance(arguments[7], str)
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', arguments[7]) is not None)
+    return '--dry-run' in arguments
+
+
 def service_plan(config, config_path, root, mode='serial', live=False, dashboard_port=8787):
     """Return ordered, non-secret plist data without writing or launching it."""
     config_path = pathlib.Path(config_path).resolve()
+    delivery = validate_delivery_config(config)
+    if delivery is not None and mode != 'lanes':
+        raise ValueError('delivery service requires lane mode')
     state = pathlib.Path(config['state'])
     common = [sys.executable, str(root / 'runner.py'), '--config', str(config_path)]
     if not live:
@@ -244,10 +296,16 @@ def service_plan(config, config_path, root, mode='serial', live=False, dashboard
                 args.extend(('--slot', str(slot)))
             plan.append((label, runner_data(label, args, root, state, config['path'], f'launchd-{log_name}.log', f'launchd-{log_name}-error.log')))
     plan.append((DASHBOARD_LABEL, dashboard_data(config_path, root, state, config['path'], port)))
+    if delivery is not None:
+        args = [sys.executable, '-m', DELIVERY_MODULE, 'tick' if live else 'status',
+                '--database', config['registry_database']]
+        args.extend(('--config', str(config_path)) if live else ('--run-id', delivery['run_id']))
+        plan.append((DELIVERY_LABEL, runner_data(DELIVERY_LABEL, args, root, state, config['path'],
+                                               'launchd-delivery.log', 'launchd-delivery-error.log')))
     return plan
 
 
-def labels_for_mode(mode):
+def labels_for_mode(mode, *, include_delivery=False):
     if mode == 'serial':
         return (SERIAL_LABEL,)
     # Include every supported slot so migration back to serial discovers and
@@ -256,7 +314,7 @@ def labels_for_mode(mode):
         lane_identity(agent, slot)[0]
         for agent in LANE_AGENTS
         for slot in range(1, MAX_AGENT_SLOTS + 1)
-    ) + (DASHBOARD_LABEL,)
+    ) + (DASHBOARD_LABEL,) + ((DELIVERY_LABEL,) if include_delivery else ())
 
 
 def is_loaded(label, uid, run=subprocess.run):
@@ -292,9 +350,9 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
         raise ValueError('mode must be serial or lanes')
     plan_labels = tuple(label for label, _ in plan)
     destinations = {label: label_path(label, home) for label, _ in plan}
-    allowed_labels = set(labels_for_mode(mode))
+    allowed_labels = set(labels_for_mode(mode, include_delivery=True))
     current_labels = tuple(dict.fromkeys((
-        *labels_for_mode('serial'), *labels_for_mode('lanes'),
+        *labels_for_mode('serial'), *labels_for_mode('lanes', include_delivery=True),
     )))
     if (
         not plan
@@ -302,8 +360,7 @@ def pause_to_dry_run(plan, *, mode, registry_control, state, home=None,
         or any(label not in allowed_labels for label in plan_labels)
         or not any(label != DASHBOARD_LABEL for label in plan_labels)
         or any(
-            label != DASHBOARD_LABEL
-            and '--dry-run' not in data.get('ProgramArguments', ())
+            not _dry_service(label, data)
             for label, data in plan
         )
     ):
@@ -387,17 +444,14 @@ def install(
     target_labels = tuple(destinations)
     if replace_mode and replace_current:
         raise ValueError('--replace-mode and --replace-current cannot be combined')
-    live_runner = any(
-        label != DASHBOARD_LABEL and '--dry-run' not in data.get('ProgramArguments', ())
-        for label, data in plan
-    )
+    live_runner = any(not _dry_service(label, data) for label, data in plan)
     if (live_runner or replace_current) and _operator_capability is not _OPERATOR_INSTALL_CAPABILITY:
         raise ValueError(
             'live or replace-current installation requires the reviewed Registry operator'
         )
     old_mode = 'lanes' if mode == 'serial' else 'serial'
-    old_labels = labels_for_mode(old_mode)
-    current_labels = labels_for_mode(mode)
+    old_labels = labels_for_mode(old_mode, include_delivery=True)
+    current_labels = labels_for_mode(mode, include_delivery=True)
     obsolete_labels = tuple(label for label in current_labels if label not in destinations)
     obsolete_paths = {label: label_path(label, home) for label in obsolete_labels}
     target_loaded = [label for label in target_labels if is_loaded(label, uid, run)]
@@ -478,6 +532,11 @@ def install(
         for label in target_labels:
             run(['launchctl', 'bootstrap', f'gui/{uid}', str(destinations[label])], check=True)
             bootstrapped.append(label)
+        if mode == 'serial' and DELIVERY_LABEL in old_conflicts:
+            # A successfully replaced coordinator must not revive at the
+            # next login. Its exact old definition remains in the backup;
+            # ordinary legacy mode-migration behavior is otherwise unchanged.
+            old_paths[DELIVERY_LABEL].unlink(missing_ok=True)
         for label in obsolete_conflicts:
             obsolete_paths[label].unlink(missing_ok=True)
     except Exception as exc:

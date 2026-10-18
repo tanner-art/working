@@ -210,15 +210,88 @@ def contract_shape_reasons(contract: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(set(reasons)))
 
 
+def _native_delivery_review_reasons(
+    contract: Mapping[str, Any], *, package: Mapping[str, Any], snapshot: Any,
+    source: Mapping[str, Any], repository: pathlib.Path | None, run_base: str,
+) -> tuple[str, ...]:
+    """Bind historical planning to a native review, never a caller-chosen SHA.
+
+    The caller obtains ``source`` from Registry.review_input, which verifies
+    the immutable review packet. These checks also bind it to the exact pair,
+    source contract, saved registration proofs and compatible target ancestry.
+    """
+    invalid = ("NATIVE_DELIVERY_REVIEW_BINDING_INVALID",)
+    if not isinstance(source, Mapping):
+        return invalid
+    diagnostics = package.get("provider_diagnostics") or {}
+    target = next((item for item in snapshot.work_packages
+                   if item.get("id") == source.get("target_package_id")), None)
+    target_diagnostics = (target.get("provider_diagnostics") or {}) if target else {}
+    if not isinstance(diagnostics, Mapping) or not isinstance(target_diagnostics, Mapping):
+        return invalid
+    source_contract = source.get("contract")
+    source_base = source.get("base_commit")
+    implementation = source.get("implementation_commit")
+    proof = diagnostics.get("readiness_proof")
+    target_proof = target_diagnostics.get("readiness_proof")
+    if (package.get("kind") != "REVIEW" or not target or target.get("kind") != "PARENT"
+            or not diagnostics.get("delivery_feature_id")
+            or diagnostics.get("delivery_feature_id") != target_diagnostics.get("delivery_feature_id")
+            or type(diagnostics.get("delivery_generation")) is not int
+            or diagnostics.get("delivery_generation") != target_diagnostics.get("delivery_generation")
+            or diagnostics.get("review_target_package_id") != target.get("id")
+            or source.get("review_package_id") != package.get("id")
+            or source.get("external_integration") is not None
+            or not isinstance(source_contract, Mapping)
+            or not isinstance(proof, Mapping) or not isinstance(target_proof, Mapping)
+            or not isinstance(source_base, str) or not _SHA.fullmatch(source_base)
+            or not isinstance(implementation, str) or not _SHA.fullmatch(implementation)
+            or proof.get("base_commit") != source_base or target_proof.get("base_commit") != source_base
+            or proof.get("target_ref") != run_base or target_proof.get("target_ref") != run_base):
+        return invalid
+    digest = hashlib.sha256(json.dumps(source_contract, separators=(",", ":"), sort_keys=True,
+                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+    declared, source_declared = contract.get("readiness"), source_contract.get("readiness")
+    dependencies = {str(edge["dependency_id"]) for edge in snapshot.dependencies
+                    if edge["package_id"] == package.get("id")}
+    if (dependencies != {target["id"]} or source_contract.get("task") != target["id"]
+            or source_contract.get("kind") != "PARENT" or source_contract.get("schema_version") != 2
+            or source.get("contract_sha256") != digest
+            or target_diagnostics.get("queue_contract_sha256") != digest
+            or target_proof.get("queue_contract_sha256") != digest
+            or ready_contract_reasons(target)
+            or not isinstance(declared, Mapping) or not isinstance(source_declared, Mapping)
+            or declared.get("base_commit") != source_base or source_declared.get("base_commit") != source_base
+            or any(declared.get(key) != source_declared.get(key) for key in (
+                "planning_paths", "existing_paths", "new_paths", "integration_paths", "test_paths"))
+            or contract.get("paths") != source_contract.get("paths")
+            or proof.get("planning_sha256") != target_proof.get("planning_sha256")):
+        return invalid
+    if repository is None or not repository.is_dir():
+        return ("REPOSITORY_UNAVAILABLE",)
+    # Sibling integration may advance the branch, but neither a rewritten
+    # target nor an unrelated implementation is a compatible review base.
+    if (not _git(repository, "--no-replace-objects", "merge-base", "--is-ancestor", source_base, implementation)
+            or not _git(repository, "--no-replace-objects", "merge-base", "--is-ancestor", source_base, run_base)):
+        return ("NATIVE_DELIVERY_REVIEW_ANCESTRY_MISMATCH",)
+    return ()
+
+
 def check_packet(
     contract: Mapping[str, Any], *, repository: pathlib.Path | None,
     run_base: str, package: Mapping[str, Any], snapshot: Any,
     github_issue: int | None,
+    review_input: Mapping[str, Any] | None = None,
 ) -> Readiness:
     """Check exact source, base tree, paths, tests and active path ownership."""
     if contract.get("schema_version") != 2:
         return Readiness("NEEDS_PREPARATION", ("LEGACY_SPARSE_CONTRACT",))
     reasons: list[str] = []
+    if review_input is not None:
+        reasons.extend(_native_delivery_review_reasons(
+            contract, package=package, snapshot=snapshot, source=review_input,
+            repository=repository, run_base=run_base,
+        ))
     if (package.get("source_system") != "github_issue"
             or not str(package.get("source_ref") or "").isdigit()
             or github_issue != int(package["source_ref"])):
@@ -235,7 +308,7 @@ def check_packet(
     elif base_commit is not None:
         if not _git(repository, "cat-file", "-e", f"{base_commit}^{{commit}}"):
             reasons.append("BASE_COMMIT_MISSING")
-        elif _git_commit(repository, run_base) != base_commit:
+        elif review_input is None and _git_commit(repository, run_base) != base_commit:
             # A mutable branch may advance after run activation. The packet
             # names one exact tree, not merely an ancestor of current main.
             reasons.append("BASE_REF_CHANGED")
@@ -307,7 +380,7 @@ def check_packet(
         proof = diagnostics.get("readiness_proof") if isinstance(diagnostics, Mapping) else None
         if not isinstance(proof, Mapping):
             reasons.append("REGISTRATION_PROOF_MISSING")
-        elif (repository is not None
+        elif (review_input is None and repository is not None
               and _git_commit(repository, str(proof.get("target_ref")))
               != _git_commit(repository, run_base)):
             reasons.append("REGISTRATION_TARGET_REF_MISMATCH")
@@ -315,12 +388,17 @@ def check_packet(
             try:
                 actual_proof = registration_proof(
                     contract, repository=repository,
-                    target_ref=str(proof.get("target_ref")),
+                    target_ref=base_commit if review_input is not None else str(proof.get("target_ref")),
                     acceptance_criteria=tuple(package.get("acceptance_criteria") or ()),
                 )
             except (ValueError, OSError, subprocess.TimeoutExpired) as error:
                 reasons.append(f"REGISTRATION_PROOF_INVALID:{error}")
             else:
+                if review_input is not None:
+                    # Recompute the exact historical contract and planning
+                    # hashes. The original target name was separately checked
+                    # above; it is not required to remain at its old tip.
+                    actual_proof = {**actual_proof, "target_ref": proof.get("target_ref")}
                 if dict(proof) != actual_proof:
                     reasons.append("REGISTRATION_PROOF_CHANGED")
     return Readiness("READY" if not reasons else "BLOCKED", tuple(sorted(set(reasons))), base_commit)

@@ -163,6 +163,13 @@ class RunnerRegistryControl:
             (package is not None and (package.get("provider_diagnostics") or {}).get("readiness_schema_version") == 2)
             or (isinstance(task_contract, dict) and task_contract.get("schema_version") == 2)
         )
+        review_input = None
+        if (package is not None and package.get("kind") == "REVIEW"
+                and (package.get("provider_diagnostics") or {}).get("delivery_feature_id")):
+            # A sibling may integrate while this review waits. Native delivery
+            # reviews inspect their immutable input, not the current target
+            # tip; all implementation and legacy readiness stays unchanged.
+            review_input = self.registry.review_input(package_id)
         if requires_readiness:
             if package is None:
                 raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", "PACKAGE_MISSING")
@@ -172,11 +179,13 @@ class RunnerRegistryControl:
                 task_contract, repository=self.repository,
                 run_base=self.integration_base(), package=package,
                 snapshot=snapshot, github_issue=github_issue,
+                review_input=review_input,
             )
             if readiness.state != "READY":
                 raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE", ",".join(readiness.reasons))
         if package is not None and package.get("kind") == "REVIEW":
-            self.registry.review_input(package_id)
+            if review_input is None:
+                self.registry.review_input(package_id)
             implementer = self.registry.review_implementer_worker(package_id)
             if implementer == worker_id:
                 raise RegistryConflict(
@@ -314,17 +323,23 @@ class RunnerRegistryControl:
             except RegistryConflict as error:
                 if error.code != "DISPATCH_NOT_AUTHORIZED" or retry:
                     raise
-                # A heartbeat is the only harmless revision race.  Re-read the
-                # exact lease, bounded-run envelope, ownership, and dispatch
-                # eligibility before the one retry; any replacement or lost
-                # authority fails closed.
+                # Re-read lease, ownership and eligibility before one retry.
+                # Continuous delivery may add certified implementation/review
+                # pairs to its existing envelope; only the Registry can attest
+                # that this exact change is a harmless extension. Legacy runs
+                # and all other reservation facts remain strictly unchanged.
                 current = self._reservation_facts(
                     attempt_id, package_id, worker_id, baseline["lease_id"]
                 )
                 if not current["eligible"]:
                     raise RegistryConflict("DISPATCH_PAIR_INELIGIBLE")
-                if ({key: value for key, value in current.items() if key != "revision"}
-                        != {key: value for key, value in baseline.items() if key != "revision"}):
+                if ({key: value for key, value in current.items() if key not in {"revision", "bounded_run"}}
+                        != {key: value for key, value in baseline.items() if key not in {"revision", "bounded_run"}}):
+                    raise
+                if (current["bounded_run"] != baseline["bounded_run"]
+                        and self.registry.delivery_scope_extension_is_safe(
+                            baseline["bounded_run"], current["bounded_run"]
+                        ) is not True):
                     raise
                 revision = int(current["revision"])
 

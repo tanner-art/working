@@ -19,6 +19,9 @@ from scripts.factory_registry.models import (
 )
 from scripts.factory_registry.repository import RegistryConflict
 from scripts.factory_registry.operator import OperatorError, record_external_integration_review_input
+from scripts.factory_registry.control_center_projection import (
+    ControlCenterProjectionError, project_control_center,
+)
 from scripts.factory_registry.sqlite_registry import SQLiteRegistry, _review_contract_sha256
 from scripts.runner.registry_control import RunnerRegistryControl
 
@@ -196,6 +199,86 @@ class ExternalIntegrationReviewTests(unittest.TestCase):
         self.assertEqual({item["id"]: item["status"] for item in final.work_packages}["TASK-231"], "DONE")
         self.assertEqual(final.attempts[0]["outcome"], "FAILED")
         self.assertEqual(final.review_outcomes[-1]["state"], "APPROVED")
+        projection = project_control_center(final)
+        self.assertEqual(next(item for item in projection["reviews"]
+                              if item["id"] == "external-verdict")["state"], "approved")
+        forged_history = tuple(
+            {**item, "integration_commit": "0" * 40} if item["id"] == "bridge-1" else item
+            for item in final.historical_reconciliations
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "external review provenance"):
+            project_control_center(replace(final, historical_reconciliations=forged_history))
+        forged_evidence = tuple(
+            {**item, "metadata": {**item["metadata"], "reviewed_commit": "0" * 40}}
+            if item["id"] == "external-verdict-evidence" else item
+            for item in final.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "external review evidence"):
+            project_control_center(replace(final, evidence=forged_evidence))
+        for field in ("integration_commit", "repository_head"):
+            missing_history = tuple(
+                {key: value for key, value in item.items() if key != field}
+                if item["id"] == "bridge-1" else item
+                for item in final.historical_reconciliations
+            )
+            missing_input = tuple(
+                {**item, "metadata": {
+                    **item["metadata"],
+                    "external_integration": {
+                        key: value for key, value in item["metadata"]["external_integration"].items()
+                        if key != field
+                    },
+                }} if item["id"] == "external-review-input" else item
+                for item in final.evidence
+            )
+            with self.subTest(missing_field=field), self.assertRaisesRegex(
+                ControlCenterProjectionError, "external review provenance"
+            ):
+                project_control_center(replace(
+                    final, historical_reconciliations=missing_history, evidence=missing_input,
+                ))
+        missing_uri_history = tuple(
+            {key: value for key, value in item.items() if key != "evidence_uri"}
+            if item["id"] == "bridge-1" else item
+            for item in final.historical_reconciliations
+        )
+        missing_uri_input = tuple(
+            {**item, "uri": None} if item["id"] == "external-review-input" else item
+            for item in final.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "external review provenance"):
+            project_control_center(replace(
+                final, historical_reconciliations=missing_uri_history, evidence=missing_uri_input,
+            ))
+        missing_contract = tuple(
+            {**item, "metadata": {
+                key: value for key, value in item["metadata"].items()
+                if key != "contract_sha256"
+            }} if item["id"] in {"external-review-input", "external-verdict-evidence"} else item
+            for item in final.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "external review provenance"):
+            project_control_center(replace(final, evidence=missing_contract))
+        invalid_commit_history = tuple(
+            {**item, "integration_commit": "not-a-commit"}
+            if item["id"] == "bridge-1" else item
+            for item in final.historical_reconciliations
+        )
+        invalid_commit_input = tuple(
+            {**item, "metadata": {
+                **item["metadata"],
+                "external_integration": {
+                    **item["metadata"]["external_integration"],
+                    "integration_commit": "not-a-commit",
+                },
+            }} if item["id"] == "external-review-input" else item
+            for item in final.evidence
+        )
+        with self.assertRaisesRegex(ControlCenterProjectionError, "external review provenance"):
+            project_control_center(replace(
+                final, historical_reconciliations=invalid_commit_history,
+                evidence=invalid_commit_input,
+            ))
 
     def test_bridge_rejects_mismatched_contract_and_packet_without_mutation(self):
         review_input = self.review_input()

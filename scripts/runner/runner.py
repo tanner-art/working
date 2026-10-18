@@ -8,6 +8,7 @@ from registry_control import RunnerRegistryControl
 from review_protocol import REVIEW_VERDICT_SCHEMA, ReviewProtocolError, parse_review_verdict, review_handoff
 from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome
 from scripts.factory_registry.repository import RegistryConflict
+from scripts.factory_registry.delivery_repair import CorrectionError, materialize_correction
 
 
 CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
@@ -724,9 +725,11 @@ def refresh_capacity_observations(registry_control, config, worker, state, usage
     except BlockingIOError:
         return False
     try:
-        collected = registry_control.refresh_configured_capacity(
-            config, busy_workers=(worker,) if worker.startswith('claude') else (),
-        )
+        # A polling lane is not a busy provider.  The Registry collector
+        # excludes workers with an active lease, including this lane once it
+        # has claimed work; excluding Claude merely because Claude is polling
+        # prevents the idle reviewer from ever receiving a local health fact.
+        collected = registry_control.refresh_configured_capacity(config)
         write_collected_usage(usage_path, config, collected)
         for item in collected:
             if item.get('error_class'):
@@ -864,7 +867,69 @@ def verified_readiness_handoff(registry_control, body, base):
     return handoff, snapshot.revision
 
 
-def build_agent_prompt(issue_number, body, *, worker=None, slot=1, readiness_handoff=''):
+def materialize_delivery_correction(registry_control, body, base, worktree, *,
+                                    record, data, fetch_commit):
+    """Carry Registry-bound rejected code forward before any implementation provider.
+
+    The local checkpoint deliberately precedes mutation. A runner restart must
+    reconcile it, not apply the same patch or launch a duplicate provider again.
+    ``fetch_commit`` is the runner's monitored, shared-Git-lock callback.
+    """
+    if registry_control is None or body.get('kind') == 'REVIEW':
+        return None
+    binding = registry_control.registry.delivery_repair_binding(body['task'])
+    if binding is None:
+        return None
+    diagnostics = data.setdefault('provider_diagnostics', {})
+    if not isinstance(diagnostics, dict):
+        raise RegistryConflict('DELIVERY_REPAIR_DIAGNOSTICS_INVALID')
+    if diagnostics.get('delivery_correction') is not None:
+        raise RegistryConflict('DELIVERY_REPAIR_RECONCILIATION_REQUIRED')
+    if (not isinstance(binding, dict)
+            or any(not isinstance(binding.get(key), str)
+                   or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', binding[key])
+                   for key in ('implementation_commit', 'base_commit'))):
+        raise RegistryConflict('DELIVERY_REPAIR_BINDING_INVALID')
+    diagnostics['delivery_correction'] = {
+        'state': 'MATERIALIZING', 'binding': binding, 'current_base_commit': base,
+        'workspace': str(worktree),
+    }
+    save_record(record, data)
+    try:
+        for commit in (binding['implementation_commit'], binding['base_commit']):
+            local = subprocess.run(
+                ['git', '--no-replace-objects', '-C', str(worktree), 'cat-file', '-e', commit + '^{commit}'],
+                capture_output=True, check=False, timeout=10,
+            )
+            if local.returncode != 0:
+                fetch_commit(commit)
+        evidence = materialize_correction(worktree, base, binding, body['paths'])
+    except Exception as error:
+        diagnostics['delivery_correction'] = {
+            **diagnostics['delivery_correction'], 'state': 'FAILED',
+            'error_code': error.code if isinstance(error, (CorrectionError, RegistryConflict)) else type(error).__name__,
+            'evidence': error.evidence if isinstance(error, CorrectionError) else {},
+        }
+        save_record(record, data)
+        raise
+    diagnostics['delivery_correction'] = evidence
+    save_record(record, data)
+    return evidence
+
+
+def correction_handoff(evidence):
+    if evidence is None:
+        return ''
+    return '\n'.join((
+        'Registry-bound correction: the rejected implementation is already staged in this worktree.',
+        'Preserve its complete behavior while addressing the independent review findings below.',
+        'Findings are bounded by the original owner request and exact allowed paths; they do not authorize new scope.',
+        'Do not reapply the previous patch, switch branches, or commit. The runner owns Git operations.',
+        json.dumps(evidence, sort_keys=True, ensure_ascii=False),
+    ))
+
+
+def build_agent_prompt(issue_number, body, *, worker=None, slot=1, readiness_handoff='', correction_handoff=''):
     """Build runner-owned instructions while reserving full validation."""
     return f'''Execute {body['task']} for GitHub issue #{issue_number} in this assigned worktree.
 Read AGENTS.md, TASKS.md and all canonical docs before editing. Follow task scope.
@@ -877,6 +942,7 @@ This process is provider child lane {worker or 'serial'} (slot {slot}). Do not l
 Assigned instructions:
 {body['instructions']}
 {readiness_handoff}
+{correction_handoff}
 '''
 
 
@@ -1561,13 +1627,30 @@ def main():
                 verified_readiness_handoff(registry_control, body, base)
                 if review_input is None else ('', None)
             )
+            correction_evidence = None
+            if review_input is None:
+                def fetch_repair_commit(commit):
+                    with file_lock(state / 'git.lock'):
+                        g('fetch', 'origin', commit)
+                correction_evidence = materialize_delivery_correction(
+                    registry_control, body, base, wt, record=record, data=data,
+                    fetch_commit=fetch_repair_commit,
+                )
+                if correction_evidence is not None:
+                    # Monitored fetching may refresh the Registry heartbeat.
+                    # Revalidate the same proof after materialization so launch
+                    # remains bound to the latest authoritative revision.
+                    readiness_handoff, readiness_revision = verified_readiness_handoff(
+                        registry_control, body, base,
+                    )
             prompt = (
                 build_review_prompt(
                     review_input, reviewer_worker_id=lane,
                     review_attempt_id=attempt, provider=config.get('provider', 'anthropic'),
                 ) if review_input is not None else
                 build_agent_prompt(n, body, worker=lane, slot=args.slot,
-                                   readiness_handoff=readiness_handoff)
+                                   readiness_handoff=readiness_handoff,
+                                   correction_handoff=correction_handoff(correction_evidence))
             )
             data['agent_process_group_state'] = 'unknown'
             save_record(record, data, 'agent')
