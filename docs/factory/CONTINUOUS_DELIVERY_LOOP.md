@@ -104,6 +104,12 @@ from package estimates.
 - Explicit PAUSED preparation admits planning (including bounded correction
   planning), issue-contract projection, and recovery of those two action kinds
   only. It cannot dispatch workers, review, or publish an integration.
+  Its coordinator heartbeat uses a separate atomic preparation operation bound
+  to the fresh active authorization, coordinator identity and deadline. It
+  requires PAUSED, kill-engaged, idle Orchestra and no active ownership; stopped
+  or superseded authorizations cannot use it. Ordinary worker heartbeats remain
+  LIVE-only. The installed-loader regression exercises real Registry telemetry
+  and heartbeat persistence before invoking the simulated read-only planner.
 
 ## Operator setup and usage
 

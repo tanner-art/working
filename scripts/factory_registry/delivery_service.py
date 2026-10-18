@@ -147,7 +147,12 @@ def load_coordinator(config_path: Path, database: Path, *, prepare: bool = False
             last_refresh[0] = now
         # This is the coordinator's own observed liveness, not invented worker
         # activity or a re-dated capacity observation.
-        control.observe_worker_heartbeat(coordinator_id)
+        if prepare:
+            registry.record_delivery_preparation_heartbeat(auth['run_id'], coordinator_id,
+                expected_revision=registry.dispatch_control()['revision'],
+                recorded_at=datetime.now(timezone.utc).isoformat())
+        else:
+            control.observe_worker_heartbeat(coordinator_id)
 
     return _ServiceCoordinator(registry, repository=Path(config["repo"]), run_id=auth["run_id"], prepare=prepare,
         state_directory=Path(config["state"]) / "delivery", health_refresh=refresh_health,

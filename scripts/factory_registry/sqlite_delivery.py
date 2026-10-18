@@ -75,6 +75,45 @@ def write_record(connection, key: str, value: Mapping[str, Any], *, replace_exis
 class DeliveryRegistryMixin:
     """Internal SQLite adapter mixin; callers use these public Registry methods."""
 
+    def record_delivery_preparation_heartbeat(self, run_id: str, worker_id: str, *,
+                                             expected_revision: int, recorded_at: str):
+        """Observe only the authorized coordinator during fresh PAUSED bootstrap.
+
+        This is not a general paused-worker heartbeat exception. Scope, deadline,
+        mode and ownership are checked under the same writer lock as the update.
+        It grants no dispatch authority and leaves capacity measurements intact.
+        """
+        identifier(run_id)
+        identifier(worker_id)
+        recorded_at = timestamp(recorded_at)
+        request = {'run_id': run_id, 'worker_id': worker_id, 'observed_at': recorded_at}
+
+        def observe(connection, now):
+            authorization = read_record(connection, 'authorization:' + run_id)
+            if authorization is None or authorization['coordinator_worker_id'] != worker_id:
+                raise RegistryConflict('DELIVERY_COORDINATOR_INVALID')
+            self._delivery_scope(connection, run_id, authorization['feature_ids'][0], now, allow_paused=True)
+            control = connection.execute('SELECT * FROM factory_control WHERE singleton=1').fetchone()
+            if control['dispatch_mode'] != 'PAUSED' or not control['kill_switch_engaged']:
+                raise RegistryConflict('DELIVERY_PREPARATION_NOT_AUTHORIZED')
+            if (connection.execute('SELECT 1 FROM leases WHERE released_at IS NULL').fetchone()
+                    or connection.execute('SELECT 1 FROM attempts WHERE ended_at IS NULL').fetchone()
+                    or connection.execute('SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL').fetchone()):
+                raise RegistryConflict('ACTIVE_OWNERSHIP_PRESENT')
+            worker = connection.execute('SELECT role,availability,last_heartbeat_at FROM workers WHERE id=?',
+                                        (worker_id,)).fetchone()
+            if worker is None or worker['role'] != 'ORCHESTRA' or worker['availability'] != 'IDLE':
+                raise RegistryConflict('DELIVERY_COORDINATOR_INVALID')
+            if worker['last_heartbeat_at'] is not None and now <= timestamp(worker['last_heartbeat_at']):
+                raise RegistryConflict('INVALID_HEARTBEAT_CHRONOLOGY')
+            connection.execute('UPDATE workers SET last_heartbeat_at=?, updated_at=? WHERE id=?',
+                               (now, now, worker_id))
+            return request
+
+        return self._delivery_mutate('DELIVERY_PREPARATION_HEARTBEAT',
+            'delivery-preparation-heartbeat:' + digest(request), request,
+            expected_revision, recorded_at, observe)
+
     def _delivery_activation_packages(self, connection, scope, now):
         """Only registered delivery review placeholders may enter a LIVE scope."""
         if scope is None:

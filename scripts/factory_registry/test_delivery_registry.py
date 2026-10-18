@@ -57,6 +57,111 @@ class DeliveryRegistryTests(unittest.TestCase):
     def revision(self):
         return self.registry.dispatch_control()["revision"]
 
+    def test_preparation_heartbeat_is_narrow_auditable_and_retry_safe(self):
+        self.submit()
+        self.authorize()
+        before = self.registry.dispatch_snapshot(observed_at=self.stamp())
+        revision = self.revision()
+        result = self.registry.record_delivery_preparation_heartbeat('run-1', 'orchestra',
+            expected_revision=revision, recorded_at=self.stamp(1))
+        self.assertEqual(result['revision'], revision + 1)
+        self.assertEqual(self.registry.record_delivery_preparation_heartbeat('run-1', 'orchestra',
+            expected_revision=revision, recorded_at=self.stamp(1)), result)
+        after = self.registry.dispatch_snapshot(observed_at=self.stamp(2))
+        self.assertEqual(before.active_leases, after.active_leases)
+        self.assertEqual(before.work_packages, after.work_packages)
+        self.assertEqual(before.usage_observations, after.usage_observations)
+        for old, new in zip(before.workers, after.workers):
+            self.assertEqual({k: v for k, v in old.items() if k not in {'last_heartbeat_at', 'updated_at'}},
+                             {k: v for k, v in new.items() if k not in {'last_heartbeat_at', 'updated_at'}})
+        with self.registry._connection() as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM task_events WHERE event_type='DELIVERY_PREPARATION_HEARTBEAT'").fetchone()[0], 1)
+        with self.assertRaisesRegex(RegistryConflict, 'INVALID_HEARTBEAT_CHRONOLOGY'):
+            self.registry.record_delivery_preparation_heartbeat('run-1', 'orchestra',
+                expected_revision=self.revision(), recorded_at=self.stamp())
+        with self.assertRaisesRegex(RegistryConflict, 'DISPATCH_PAUSED'):
+            self.registry.record_worker_heartbeat('orchestra', observed_at=self.stamp(2))
+
+    def test_preparation_heartbeat_rejects_invalid_authority_without_mutation(self):
+        scenarios = ('missing', 'wrong-worker', 'expired', 'superseded', 'stopped',
+                     'stopping', 'live', 'kill-off', 'not-orchestra', 'busy', 'stale-revision',
+                     'same-bounded-run')
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                fixture = DeliveryRegistryTests()
+                fixture.setUp()
+                try:
+                    fixture.submit()
+                    fixture.authorize()
+                    worker, run, stamp = 'orchestra', 'run-1', fixture.stamp(1)
+                    if scenario == 'missing':
+                        run = 'absent'
+                    elif scenario == 'wrong-worker':
+                        worker = 'codex-a'
+                    elif scenario == 'expired':
+                        stamp = fixture.stamp(3600)
+                    elif scenario == 'superseded':
+                        fixture.authorize(run_id='run-2')
+                    else:
+                        # Simulate malformed/recovered control states only in this
+                        # disposable test database; production uses operator APIs.
+                        with fixture.registry._connection() as connection:
+                            if scenario == 'stopped':
+                                connection.execute("INSERT INTO registry_metadata VALUES (?,?)",
+                                    ('delivery:run-state:run-1', json.dumps({'schema_version': 1, 'state': 'STOPPED'})))
+                            elif scenario in {'stopping', 'live'}:
+                                connection.execute('UPDATE factory_control SET dispatch_mode=?', (scenario.upper(),))
+                            elif scenario == 'kill-off':
+                                connection.execute('UPDATE factory_control SET kill_switch_engaged=0')
+                            elif scenario == 'not-orchestra':
+                                connection.execute("UPDATE workers SET role='WORKER' WHERE id='orchestra'")
+                            elif scenario == 'busy':
+                                connection.execute("UPDATE workers SET availability='BUSY' WHERE id='orchestra'")
+                            elif scenario == 'same-bounded-run':
+                                connection.execute("INSERT INTO registry_metadata VALUES (?,?)",
+                                    ('bounded_run_scope', json.dumps({'run_id': 'run-1', 'package_ids': ['TASK-1'],
+                                        'deadline': fixture.stamp(3600), 'base_ref': 'codex/delivery', 'parent_limit': 2})))
+                            connection.commit()
+                    revision = fixture.revision()
+                    before = fixture.registry.dispatch_snapshot(observed_at=stamp).workers
+                    with self.assertRaises(RegistryConflict):
+                        fixture.registry.record_delivery_preparation_heartbeat(run, worker,
+                            expected_revision=revision - (scenario == 'stale-revision'), recorded_at=stamp)
+                    self.assertEqual(fixture.revision(), revision)
+                    self.assertEqual(fixture.registry.dispatch_snapshot(observed_at=stamp).workers, before)
+                finally:
+                    fixture.doCleanups()
+
+    def test_preparation_heartbeat_rejects_active_ownership(self):
+        self.submit()
+        self.authorize()
+        _, pair = self.plan_and_pair()
+        self.register(pair)
+        self.registry.register_worker(Worker('builder', 'Builder', ('implementation',), (Lane.FEATURE,)))
+        self.start()
+        self.registry.acquire_lease('TASK-1', 'builder', acquired_at=self.stamp(11), expires_at=self.stamp(300))
+        self.registry.begin_attempt_runtime('active-attempt', package_id='TASK-1', worker_id='builder',
+            runner_pid=12345, started_at=self.stamp(12), expected_revision=self.revision())
+        with self.registry._connection() as connection:
+            connection.execute("UPDATE factory_control SET dispatch_mode='PAUSED', kill_switch_engaged=1")
+            connection.execute("DELETE FROM registry_metadata WHERE key IN ('delivery:run-state:run-1','bounded_run_scope')")
+            connection.commit()
+        # Test each remaining ownership class, including partially reconciled
+        # malformed recovery states, without treating release as completion.
+        for release in ('none', 'lease', 'attempt'):
+            with self.subTest(released=release):
+                with self.registry._connection() as connection:
+                    if release == 'lease':
+                        connection.execute('UPDATE leases SET released_at=?', (self.stamp(13),))
+                    elif release == 'attempt':
+                        connection.execute('UPDATE attempts SET ended_at=?', (self.stamp(13),))
+                    connection.commit()
+                revision = self.revision()
+                with self.assertRaisesRegex(RegistryConflict, 'ACTIVE_OWNERSHIP_PRESENT'):
+                    self.registry.record_delivery_preparation_heartbeat('run-1', 'orchestra',
+                        expected_revision=revision, recorded_at=self.stamp(14))
+                self.assertEqual(self.revision(), revision)
+
     def brief(self, feature_id="FEATURE-1", dependencies=()):
         return FeatureBrief.from_dict({
             "id": feature_id, "title": "User feature " + feature_id,

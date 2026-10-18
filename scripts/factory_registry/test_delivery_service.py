@@ -1,6 +1,7 @@
 """Installed-service account binding without provider or live operations."""
 
 from copy import deepcopy
+from datetime import timedelta
 import json
 import os
 from pathlib import Path
@@ -186,6 +187,57 @@ class DeliveryServiceTests(unittest.TestCase):
         self.assertEqual(refresh.call_count, 2)
         self.assertEqual(heartbeat.call_count, 3)
         self.assertTrue(all(call.args == ('orchestra',) for call in heartbeat.call_args_list))
+
+    def test_installed_paused_prepare_reaches_planner_with_real_registry_health(self):
+        # Mock only external capacity/provider/Git observations, not the Registry
+        # heartbeat boundary that previously made installed preparation fail.
+        stamp = self.fixture.stamp(1)
+        for worker_id, role in [('codex-b', 'WORKER'), ('orchestra', 'ORCHESTRA')]:
+            self.fixture.registry.register_worker(Worker(worker_id, worker_id, ('coordination',),
+                (Lane.FEATURE,), role=role, provider_diagnostics={
+                    'capacity_pool': self.pool, 'capacity_mode': 'percentage',
+                    'capacity_scopes': ['short_window', 'weekly_window'],
+                    'provider': 'openai', 'service_state': 'healthy',
+                    'authentication_state': 'valid', 'live_invocation_state': 'succeeded'}))
+        coordinator = service.load_coordinator(self.path, self.fixture.database, prepare=True)
+        coordinator.clock = lambda: self.fixture.stamp(2)
+        calls = []
+
+        def planner(**kwargs):
+            calls.append(kwargs['prompt'])
+            kwargs['monitor']()
+            result = {'state': 'NEEDS_DECISION', 'feature_id': 'FEATURE-1',
+                'base_commit': self.fixture.base, 'user_experience': self.fixture.brief().user_experience,
+                'dependency_feature_ids': [], 'decisions_needed': ['Choose the button label.'], 'package': None}
+            kwargs['validate_result'](result)
+            kwargs['on_result'](result, 0.25)
+
+        coordinator.planner_runner = planner
+        sample = {'account_identity_sha256': self.pool, 'ordinary_usage_allowed': True,
+            'observed_at': stamp, 'primary': {'usedPercent': 10, 'windowDurationMins': 300},
+            'secondary': {'usedPercent': 15, 'windowDurationMins': 10080}}
+        before = self.fixture.registry.dispatch_control()
+        with patch('scripts.runner.registry_control.collect_rate_limits', return_value=sample), \
+                patch.object(service, 'datetime') as clock, \
+                patch.object(coordinator, '_refresh_base', return_value=self.fixture.base):
+            clock.now.side_effect = [self.fixture.now + timedelta(seconds=1, microseconds=i)
+                                    for i in range(100)]
+            result = coordinator.tick()
+        self.assertEqual(result['results'][0], {'feature_id': 'FEATURE-1', 'action': 'PLAN', 'state': 'OBSERVED'})
+        self.assertEqual(len(calls), 1)
+        after = self.fixture.registry.dispatch_control()
+        self.assertEqual(after['dispatch_mode'], before['dispatch_mode'])
+        self.assertTrue(after['kill_switch_engaged'])
+        snapshot = self.fixture.registry.dispatch_snapshot(observed_at=self.fixture.stamp(2))
+        self.assertFalse(snapshot.active_leases)
+        with self.fixture.registry._connection() as connection:
+            self.assertEqual(connection.execute('SELECT count(*) FROM attempts').fetchone()[0], 0)
+        coordinator_worker = next(w for w in snapshot.workers if w['id'] == 'orchestra')
+        self.assertIsNotNone(coordinator_worker['last_heartbeat_at'])
+        self.assertEqual(coordinator_worker['role'], 'ORCHESTRA')
+        self.assertEqual(coordinator_worker['availability'], 'IDLE')
+        with self.assertRaisesRegex(RegistryConflict, 'DISPATCH_PAUSED'):
+            self.fixture.registry.record_worker_heartbeat('codex-b', observed_at=self.fixture.stamp(2))
 
 
 class DeliveryServiceModeTests(unittest.TestCase):
