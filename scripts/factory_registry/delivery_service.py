@@ -17,6 +17,7 @@ from .operator import _validate_config
 from .repository import RegistryConflict
 from .sqlite_registry import SQLiteRegistry
 from scripts.runner.registry_control import RunnerRegistryControl
+from scripts.runner.capacity_publication import usage_path, write_collected_usage
 
 
 def waiting_result(control, run_id=None):
@@ -141,6 +142,9 @@ def load_coordinator(config_path: Path, database: Path, *, prepare: bool = False
         now = time.monotonic()
         if last_refresh[0] is None or now - last_refresh[0] >= 60:
             results = control.refresh_configured_capacity(config)
+            # The coordinator and worker lanes share the same measured facts.
+            # Publish before a fresh Registry signal suppresses another probe.
+            write_collected_usage(usage_path(config), config, results)
             fresh = [item for item in results if item.get("worker_id") == coordinator_id and item.get("observations")]
             if not fresh:
                 raise RegistryConflict("DELIVERY_COORDINATOR_TELEMETRY_UNAVAILABLE")

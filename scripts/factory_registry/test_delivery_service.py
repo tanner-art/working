@@ -1,7 +1,7 @@
 """Installed-service account binding without provider or live operations."""
 
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -33,11 +33,11 @@ class DeliveryServiceTests(unittest.TestCase):
         self.path = self.fixture.root / 'config.json'
         agents = {}
         for name in ('codex-a', 'codex-b'):
-            agents[name] = {'provider': 'openai', 'slots': 1, 'capacity_mode': 'percentage',
+            agents[name] = {'provider': 'openai', 'model': 'gpt-5.6-terra', 'slots': 1, 'capacity_mode': 'percentage',
                 'capacity_scopes': ['short_window', 'weekly_window'],
                 'command': ['/opt/homebrew/bin/codex', 'exec', '--disable', 'multi_agent', '-'],
                 'env': {'CODEX_HOME': self.auth_home if name == 'codex-b' else str(self.fixture.root / 'auth-a')}}
-        agents['claude'] = {'provider': 'anthropic', 'slots': 1, 'capacity_mode': 'provider_signal',
+        agents['claude'] = {'provider': 'anthropic', 'model': 'sonnet', 'slots': 1, 'capacity_mode': 'provider_signal',
             'capacity_scopes': ['provider_signal'], 'env': {},
             'command': [sys.executable, str(self.release / 'scripts/runner/claude_keychain.py'),
                         'exec', '/opt/homebrew/bin/claude', '-p', '--tools', 'Read,Glob,Grep']}
@@ -165,9 +165,14 @@ class DeliveryServiceTests(unittest.TestCase):
             self.load()
 
     def test_telemetry_refresh_requires_real_shared_account_observation(self):
+        from scripts.factory_registry.codex_capacity import normalize_buckets
         coordinator = self.load()
+        measured = normalize_buckets('codex-b', {'ordinary_usage_allowed': True,
+            'account_identity_sha256': self.pool, 'observed_at': self.fixture.stamp(1),
+            'primary': {'usedPercent': 10, 'windowDurationMins': 300},
+            'secondary': {'usedPercent': 15, 'windowDurationMins': 10080}})
         with patch.object(service.RunnerRegistryControl, 'refresh_configured_capacity', return_value=(
-                {'worker_id': 'codex-b', 'observations': [{'state': 'GREEN'}]},
+                {'worker_id': 'codex-b', 'observations': measured},
                 {'worker_id': 'orchestra', 'observations': (), 'error_class': 'Unavailable'},
         )) as refresh, patch.object(service.RunnerRegistryControl, 'observe_worker_heartbeat') as heartbeat:
             with self.assertRaisesRegex(RegistryConflict, 'DELIVERY_COORDINATOR_TELEMETRY_UNAVAILABLE'):
@@ -238,6 +243,46 @@ class DeliveryServiceTests(unittest.TestCase):
         self.assertEqual(coordinator_worker['availability'], 'IDLE')
         with self.assertRaisesRegex(RegistryConflict, 'DISPATCH_PAUSED'):
             self.fixture.registry.record_worker_heartbeat('codex-b', observed_at=self.fixture.stamp(2))
+
+    def test_coordinator_health_reaches_real_runner_usage_gate_without_reprobing(self):
+        from scripts.runner.usage_policy import worker_state
+        from scripts.runner.registry_control import RunnerRegistryControl
+        self.worker('claude')
+        self.fixture.register(self.fixture.plan_and_pair()[1])
+        self.fixture.start(seconds=0)
+        self.config['claude_health_probe'] = {'worker_id': 'claude', 'cadence_seconds': 120}
+        state = self.fixture.root / 'state'
+        state.mkdir()
+        usage_path = state / 'usage.json'
+        stale = {'workers': {'claude': {'default': {'provider': 'anthropic', 'model': 'sonnet',
+            'capacity_mode': 'provider_signal', 'observed_at': self.fixture.stamp(-86400),
+            'service_state': 'healthy', 'authentication_state': 'valid',
+            'live_invocation_state': 'succeeded', 'limit_signal': 'NONE'}}}}
+        usage_path.write_text(json.dumps(stale))
+        self.write()
+        coordinator = service.load_coordinator(self.path, self.fixture.database)
+        sample = {'account_identity_sha256': self.pool, 'ordinary_usage_allowed': True,
+            'observed_at': self.fixture.stamp(1),
+            'primary': {'usedPercent': 10, 'windowDurationMins': 300},
+            'secondary': {'usedPercent': 15, 'windowDurationMins': 10080}}
+        probe = {'succeeded': True, 'limit_signal': None, 'returncode': 0,
+                 'observed_at': self.fixture.stamp(1)}
+        with patch('scripts.runner.registry_control.collect_rate_limits', return_value=sample), \
+                patch('scripts.runner.registry_control.probe_claude_health', return_value=probe) as health, \
+                patch('scripts.runner.registry_control.utc_now', return_value=self.fixture.stamp(2)), \
+                patch.object(service, 'datetime') as clock:
+            clock.now.return_value = self.fixture.now + timedelta(seconds=2)
+            coordinator.health_refresh()
+            collected = RunnerRegistryControl(self.fixture.database).refresh_configured_capacity(self.config)
+        self.assertEqual(health.call_count, 1, 'the fresh Registry signal suppresses duplicate probes')
+        self.assertNotIn('claude', [item['worker_id'] for item in collected])
+        published = json.loads(usage_path.read_text())
+        self.assertEqual(worker_state(self.config, published, 'claude',
+            now=self.fixture.now + timedelta(seconds=3)), 'normal')
+        self.assertEqual(datetime.fromisoformat(published['workers']['claude']['default']['observed_at'].replace('Z', '+00:00')),
+                         datetime.fromisoformat(probe['observed_at']))
+        self.assertNotIn('orchestra', published['workers'])
+        self.assertFalse(self.fixture.registry.dispatch_snapshot(observed_at=self.fixture.stamp(3)).active_leases)
 
 
 class DeliveryServiceModeTests(unittest.TestCase):

@@ -314,9 +314,13 @@ class SQLiteRegistry(DeliveryRegistryMixin):
 
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database)
+        self._snapshot_connection: sqlite3.Connection | None = None
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        if self._snapshot_connection is not None:
+            yield self._snapshot_connection
+            return
         connection = sqlite3.connect(self.database, timeout=10, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -324,6 +328,28 @@ class SQLiteRegistry(DeliveryRegistryMixin):
         try:
             yield connection
         finally:
+            connection.close()
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator["SQLiteRegistry"]:
+        """Pin several read APIs to one WAL revision without blocking writers.
+
+        A distinct, query-only reader is scoped to this call, never shared with
+        execution or another request. The retained closed connection makes use
+        after exit fail rather than silently switching back to live reads.
+        """
+        connection = sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=10, isolation_level=None)
+        reader = SQLiteRegistry(self.database)
+        reader._snapshot_connection = connection
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            connection.execute("SELECT value FROM registry_metadata WHERE key='revision'").fetchone()
+            yield reader
+        finally:
+            connection.rollback()
             connection.close()
 
     def _preflight_schema_version(self) -> int | None:
@@ -5449,7 +5475,9 @@ class SQLiteRegistry(DeliveryRegistryMixin):
         """Return one consistent, read-only scheduler input at a registry revision."""
         observed_at = _normalize_timestamp(observed_at)
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            owns_transaction = not connection.in_transaction
+            if owns_transaction:
+                connection.execute("BEGIN")
             metadata = {
                 row["key"]: row["value"]
                 for row in connection.execute(
@@ -5529,7 +5557,8 @@ class SQLiteRegistry(DeliveryRegistryMixin):
                     if key in diagnostics:
                         item[key] = diagnostics[key]
                 usage.append(item)
-            connection.commit()
+            if owns_transaction:
+                connection.commit()
         return DispatchSnapshot(
             revision=int(metadata["revision"]),
             observed_at=observed_at,
@@ -5548,7 +5577,9 @@ class SQLiteRegistry(DeliveryRegistryMixin):
         observed_at = _normalize_timestamp(observed_at)
         with self._connection() as connection:
             connection.execute("PRAGMA query_only = ON")
-            connection.execute("BEGIN")
+            owns_transaction = not connection.in_transaction
+            if owns_transaction:
+                connection.execute("BEGIN")
             metadata = {
                 row["key"]: row["value"]
                 for row in connection.execute("SELECT key, value FROM registry_metadata")
@@ -5675,5 +5706,6 @@ class SQLiteRegistry(DeliveryRegistryMixin):
                     ) if "historical_package_reconciliations" in tables else ()
                 ),
             )
-            connection.commit()
+            if owns_transaction:
+                connection.commit()
         return snapshot

@@ -703,7 +703,9 @@ class DeliveryRegistryMixin:
 
     def delivery_snapshot(self, *, run_id: str | None = None) -> Mapping[str, Any]:
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            owns_transaction = not connection.in_transaction
+            if owns_transaction:
+                connection.execute("BEGIN")
             try:
                 records = {}
                 for row in connection.execute("SELECT key FROM registry_metadata WHERE key LIKE 'delivery:%'"):
@@ -787,11 +789,13 @@ class DeliveryRegistryMixin:
                                  "next_action": action, "reason": reason, "review_outcome": outcome,
                                  "generation": generation, "prepared_plan": prepared, "plan_attempts": len(plans),
                                  "integration": receipt, "unresolved_actions": unfinished})
-                connection.rollback()
+                if owns_transaction:
+                    connection.rollback()
                 return {"revision": revision, "control": control, "authorization": authorization,
                         "features": rows, "records": records}
             except Exception:
-                connection.rollback()
+                if owns_transaction:
+                    connection.rollback()
                 raise
 
     def publish_delivery_review(self, run_id: str, feature_id: str, review_id: str,

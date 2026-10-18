@@ -78,6 +78,21 @@ from package estimates.
 
 ### Current limits
 
+Verification update, 2026-10-18: canary `delivery-canary-20261018-02`
+produced PR #462 at `9fa39ba40bca32f9d7584785ef6bcb805f79a288` and
+independent Claude approval. Implementation and review attempt runtimes were
+73.60224 and 67.327402 seconds respectively; waiting is not agent execution.
+Repeated dashboard revision drift triggered a safety stop during integration.
+At Registry revision 26594 the Factory is PAUSED, kill-engaged and drained;
+integration remains UNCERTAIN without a published receipt, and the successor
+has not started. This does not prove the full live cycle.
+
+The proposed shared-capacity publication and query-only dashboard snapshot
+repairs pass 533 Registry tests, 361 runner tests, and 773 app tests plus build
+and API typecheck. Their regressions exercise the real Registry/runner usage
+gate and concurrent SQLite commits, with only provider responses simulated.
+These repairs are not yet installed or certified by a new live canary.
+
 - Governing repository instructions prohibit agents from merging into `main`.
   The installed delivery loader therefore rejects `main` and `master` with
   `MAIN_INTEGRATION_NOT_AUTHORIZED`. Use an explicitly approved non-main
@@ -237,6 +252,19 @@ not a public dashboard upload. Waiting dependencies or one blocked feature do
 not justify pausing unrelated eligible work. LIVE passes continue refreshing
 real shared-account telemetry and coordinator liveness even while waiting for
 implementation or review.
+
+The coordinator publishes its measured capacity observations through the same
+atomic, locked usage-file publisher as worker lanes. Otherwise a fresh Registry
+Claude probe can suppress the runner's next probe while its compatibility gate
+still sees an old usage file. Publication preserves original timestamps, retains
+failed collectors' prior (aging) facts, and cannot replace newer evidence with an
+older sample. Registry-only Orchestra aliases stay out of runner account data.
+
+Each local dashboard response reads projection, control, delivery and ownership
+from one query-only WAL snapshot. Concurrent telemetry/stop/claim commits do not
+invalidate a coherent observation or block writers; the next refresh sees the
+new revision. Missing/corrupt sources still produce a sanitized error, never an
+empty valid queue. A snapshot is observation only, never dispatch permission.
 
 At owner stop/deadline, use the existing operator `stop`, `reconcile` and
 `return-paused` flow; do not erase leases or rewrite SQLite. A stopped run cannot

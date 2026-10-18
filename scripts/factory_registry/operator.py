@@ -195,6 +195,7 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/runner/review_protocol.py",
     "scripts/runner/runner.py",
     "scripts/runner/usage_policy.py",
+    "scripts/runner/capacity_publication.py",
 })
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import unittest
@@ -134,6 +135,68 @@ class DeliveryDashboardTests(unittest.TestCase):
         self.assertIsNone(result["projection"])
         self.assertIsNone(result["control"])
         self.assertNotIn("delivery", result)
+
+    def test_concurrent_writer_does_not_break_one_dashboard_observation(self):
+        self.fx.submit()
+        before = self.fx.revision()
+        build = dashboard.build_control_center_projection
+
+        def build_then_write(reader, **kwargs):
+            result = build(reader, **kwargs)
+            # An independent connection commits while the dashboard is reading.
+            # It must neither block nor cause a mixed-revision/error response.
+            self.fx.submit(self.fx.brief("FEATURE-2"))
+            return result
+
+        with patch.object(dashboard, "build_control_center_projection", side_effect=build_then_write):
+            result = dashboard.load_registry_report(self.config, self.fx.stamp(7))
+        self.assertTrue(result["available"], result)
+        self.assertIsNone(result["ownership"]["error"])
+        self.assertEqual(result["control"]["revision"], before)
+        self.assertEqual(result["projection"]["registryRevision"], str(before))
+        self.assertEqual([row["feature_id"] for row in result["delivery"]], ["FEATURE-1"])
+        self.assertGreater(self.fx.revision(), before)
+        self.assertEqual(len(self.report()["delivery"]), 2)
+
+    def test_pinned_reader_is_query_only_isolated_and_unusable_after_exit(self):
+        self.fx.submit()
+        before = self.fx.revision()
+        with self.registry.read_snapshot() as reader:
+            with reader._connection() as connection:
+                with self.assertRaises(sqlite3.OperationalError):
+                    connection.execute("UPDATE registry_metadata SET value='0' WHERE key='revision'")
+            self.fx.submit(self.fx.brief("FEATURE-2"))
+            with self.registry.read_snapshot() as newer:
+                self.assertGreater(newer.dispatch_control()['revision'], before)
+            self.assertEqual(reader.dispatch_snapshot(observed_at=self.fx.stamp(7)).revision, before)
+            self.assertEqual(reader.control_center_snapshot(observed_at=self.fx.stamp(7)).revision, before)
+            self.assertEqual(reader.delivery_snapshot()['revision'], before)
+            self.assertEqual(reader.dispatch_control()['revision'], before)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            with reader._connection() as connection:
+                connection.execute('SELECT 1')
+
+    def test_ownership_reads_stay_pinned_when_stop_commits_mid_observation(self):
+        pair = self.prepared_pair()
+        self.fx.register(pair)
+        self.fx.finish_implementation(pair)
+        before = self.fx.revision()
+        read_delivery = dashboard.SQLiteRegistry.delivery_snapshot
+
+        def read_then_stop(reader, **kwargs):
+            result = read_delivery(reader, **kwargs)
+            self.registry.set_dispatch_control(expected_revision=self.fx.revision(), expected_mode='LIVE',
+                new_mode='STOPPING', kill_switch_engaged=True, reason='concurrent stop',
+                changed_at=self.fx.stamp(22))
+            return result
+
+        with patch.object(dashboard.SQLiteRegistry, 'delivery_snapshot', read_then_stop):
+            result = dashboard.load_registry_report(self.config, self.fx.stamp(21))
+        self.assertTrue(result['available'], result)
+        self.assertIsNone(result['ownership']['error'])
+        self.assertEqual(result['control']['revision'], before)
+        self.assertEqual(result['control']['dispatch_mode'], 'LIVE')
+        self.assertEqual(self.report(seconds=23)['control']['dispatch_mode'], 'STOPPING')
 
     def test_projection_revision_drift_fails_closed_before_reading_delivery(self):
         self.fx.submit()

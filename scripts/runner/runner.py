@@ -9,6 +9,7 @@ from review_protocol import REVIEW_VERDICT_SCHEMA, ReviewProtocolError, parse_re
 from scripts.factory_registry.models import Evidence, ReviewInput, ReviewOutcome
 from scripts.factory_registry.repository import RegistryConflict
 from scripts.factory_registry.delivery_repair import CorrectionError, materialize_correction
+from scripts.runner.capacity_publication import write_collected_usage
 
 
 CLAUDE_TOKEN_ENV = 'CLAUDE_CODE_OAUTH_TOKEN'
@@ -652,57 +653,6 @@ def review_source_is_green(github, repository, review_input):
             and pr_tree_id == merge_tree_id)
 
 
-def write_collected_usage(path, config, collected):
-    """Publish only fresh collector records in the existing usage-policy shape."""
-    with file_lock(path.with_suffix('.collector.lock')):
-        try:
-            workers = validate_usage(json.loads(path.read_text()))
-        except FileNotFoundError:
-            workers = {}
-        for item in collected:
-            # A failed percentage collection intentionally has no replacement
-            # observation.  Retain its prior usage record so normal staleness
-            # gating constrains it; never write a fabricated fresh timestamp.
-            if not item['observations']:
-                continue
-            worker_id = item['worker_id']
-            # Registry-only aliases may receive a verified shared-account
-            # observation, but are not runner dispatch agents.  Their
-            # Registry fact must remain there without inventing a usage.json
-            # account or requiring dispatch settings.
-            if worker_id not in config.get('agents', {}):
-                continue
-            settings = agent_settings(config, worker_id)
-            first = item['observations'][0]
-            diagnostics = first['provider_diagnostics']
-            if diagnostics.get('capacity_mode') == 'provider_signal':
-                # Provider signal has no percentage scopes.  Preserve the
-                # exact provider observation timestamp and never invent one.
-                workers.setdefault(worker_id, {})[settings['account']] = {
-                    'provider': 'anthropic', 'model': settings['model'],
-                    'capacity_mode': 'provider_signal',
-                    'observed_at': first['observed_at'],
-                    'service_state': diagnostics['service_state'],
-                    'authentication_state': diagnostics['authentication_state'],
-                    'live_invocation_state': diagnostics['live_invocation_state'],
-                    'limit_signal': diagnostics['limit_signal'],
-                }
-                continue
-            scopes = {}
-            for observation in item['observations']:
-                diagnostics = observation['provider_diagnostics']
-                value = {'used_percent': observation['consumed_percent'],
-                         'observed_at': observation['observed_at']}
-                if observation['reset_at'] is not None:
-                    value['reset_at'] = observation['reset_at']
-                scopes[diagnostics['capacity_scope']] = value
-            workers.setdefault(worker_id, {})[settings['account']] = {
-                'provider': 'openai', 'model': settings['model'],
-                'capacity_mode': 'percentage', 'scopes': scopes,
-            }
-        current = {'workers': workers}
-        validate_usage(current)
-        save(path, current)
 
 
 def refresh_capacity_observations(registry_control, config, worker, state, usage_path,
