@@ -345,6 +345,8 @@ class DeliveryCoordinator:
 
     def _integrate(self, feature, action=None):
         approval = ApprovalBinding(**self.registry.delivery_approval(feature["feature_id"]))
+        if action is not None and action['run_id'] != self.run_id:
+            self.registry.delivery_action_membership(self.run_id, action['action_id'])
         if action is None:
             self._guard()
             self._ci(self.registry.review_input(feature["pair"]["review_id"]))

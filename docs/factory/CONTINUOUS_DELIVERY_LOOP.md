@@ -93,6 +93,13 @@ and API typecheck. Their regressions exercise the real Registry/runner usage
 gate and concurrent SQLite commits, with only provider responses simulated.
 These repairs are not yet installed or certified by a new live canary.
 
+The subsequent stopped-integration continuation repair passes 541 Registry
+tests and the same 361 runner / 773 app checks. Eight new real-Git/Registry
+regressions cover reuse, publication replay, stale-action rejection, invalid
+candidates, crash-left RUNNING candidates, target/approval mismatch and target
+movement. A query-only check also validates the real canary candidate's binding;
+it does not authorize, activate or mutate the live Registry.
+
 - Governing repository instructions prohibit agents from merging into `main`.
   The installed delivery loader therefore rejects `main` and `master` with
   `MAIN_INTEGRATION_NOT_AUTHORIZED`. Use an explicitly approved non-main
@@ -106,13 +113,27 @@ These repairs are not yet installed or certified by a new live canary.
 - Approved but unintegrated work can resume under a fresh authorization with
   `package_ids: []` only when the Registry certifies exact native approvals,
   completed independent attempts, readable review packets, unchanged owner
-  contracts, and no unresolved ownership/actions. This scope denies every
+  contracts, and no unresolved ownership. Unresolved planning or provider work
+  still blocks authorization. One unfinished integration action per feature
+  may instead be adopted from a stopped run: the Registry certifies its exact
+  native approval, persisted validated candidate, unchanged request and target,
+  and coordinator identity. It records a new immutable continuation binding;
+  the original action, candidate and review are not rewritten during adoption.
+  Activation rejects an action changed since authorization. This scope denies every
   worker claim. The operator also verifies the configured coordinator account,
   heartbeat and shared capacity reserve. Integration remains forbidden while
   PAUSED; LIVE records an immutable continuation certificate. The guards accept
   subsequent scope growth only through Registry-certified successor pairs.
   Empty legacy/uncertified runs fail closed. Already-published effects may
-  still be reconciled while PAUSED without another push.
+  still be reconciled without another push. The installed service remains inert
+  while PAUSED: continuation requires a new authorization and reviewed LIVE
+  transition. Recovery first checks the remote for the exact candidate. If
+  present it records ALREADY_PUBLISHED; otherwise the existing pre-publication
+  scope/deadline/CI checks and exact remote CAS apply. A moved target requires
+  revalidation and preserves the prior candidate in the action history. No
+  implementation or review attempt is repeated merely to recover integration.
+  Resumed completion records total elapsed time separately and leaves execution
+  runtime unavailable rather than counting the paused interval as agent work.
 - Failed/uncertain provider execution is not automatically an approval or
   permission for unlimited retries. It remains an explicit reconciliation
   blocker; other authorized independent features may continue.

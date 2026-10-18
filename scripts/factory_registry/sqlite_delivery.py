@@ -134,6 +134,13 @@ class DeliveryRegistryMixin:
             if (request is None or request["request_sha256"] != expected_hash
                     or digest(request["brief"]) != expected_hash):
                 raise RegistryConflict("DELIVERY_REQUEST_CHANGED")
+        for row in connection.execute("SELECT value FROM registry_metadata WHERE key GLOB ?",
+                                      (PREFIX + 'integration-resume:' + scope['run_id'] + ':*',)):
+            binding = json.loads(row[0])
+            action = read_record(connection, 'action:' + binding['action_id'])
+            if action is None:
+                raise RegistryConflict('DELIVERY_ACTION_UNRESOLVED')
+            self._delivery_action_membership(connection, action, scope['run_id'], initial=True)
         pairs = [json.loads(row[0]) for row in connection.execute(
             "SELECT value FROM registry_metadata WHERE key LIKE 'delivery:membership:%'")]
         pairs = [pair for pair in pairs if pair["run_id"] == scope["run_id"]]
@@ -161,7 +168,6 @@ class DeliveryRegistryMixin:
 
     def _delivery_continuation_certificate(self, connection, scope, authorization):
         """Certify exact native approvals, never infer authority from an empty queue."""
-        from .sqlite_registry import _review_input_from_evidence, _verify_operator_review_packet, _with_native_review_ci
         if scope["package_ids"]:
             raise RegistryConflict("DELIVERY_CONTINUATION_SCOPE_NOT_EMPTY")
         if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL").fetchone()
@@ -170,9 +176,13 @@ class DeliveryRegistryMixin:
             raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
         actions = [json.loads(row[0]) for row in connection.execute(
             "SELECT value FROM registry_metadata WHERE key LIKE 'delivery:action:%'")]
-        if any(action["feature_id"] in authorization["feature_ids"]
-               and action["state"] in {"RUNNING", "UNCERTAIN"} for action in actions):
-            raise RegistryConflict("DELIVERY_ACTION_UNRESOLVED")
+        resumes = []
+        for action in actions:
+            if action["feature_id"] in authorization["feature_ids"] and action["state"] in {"RUNNING", "UNCERTAIN"}:
+                binding = self._delivery_action_membership(connection, action, scope['run_id'], initial=True)
+                if binding is None:
+                    raise RegistryConflict("DELIVERY_ACTION_UNRESOLVED")
+                resumes.append(binding)
         bindings = []
         for feature_id in sorted(authorization["feature_ids"]):
             if read_record(connection, "integration:" + feature_id) is not None:
@@ -196,28 +206,91 @@ class DeliveryRegistryMixin:
                                          (pair["review_id"],)).fetchone()
             if outcome is None or outcome[0] != "APPROVED":
                 continue
-            approval = self._delivery_approval(connection, feature_id)
-            evidence = connection.execute("SELECT * FROM evidence WHERE id=?", (approval["review_input_evidence_id"],)).fetchone()
-            source = _with_native_review_ci(connection, _review_input_from_evidence(evidence))
-            _verify_operator_review_packet(source)
-            for attempt_id, package_id, worker_id in (
-                (source.implementation_attempt_id, pair["implementation_id"], approval["implementer_worker_id"]),
-                (approval["review_attempt_id"], pair["review_id"], approval["reviewer_worker_id"]),
-            ):
-                attempt = connection.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
-                if (attempt is None or attempt["package_id"] != package_id or attempt["worker_id"] != worker_id
-                        or attempt["outcome"] != "SUCCEEDED" or attempt["ended_at"] is None):
-                    raise RegistryConflict("DELIVERY_CONTINUATION_NATIVE_ATTEMPT_REQUIRED")
-            if approval["implementer_worker_id"] == approval["reviewer_worker_id"]:
-                raise RegistryConflict("REVIEW_INDEPENDENCE_REQUIRED")
+            approval = self._delivery_native_approval(connection, feature_id)
             bindings.append(approval)
         if not bindings:
             raise RegistryConflict("DELIVERY_COORDINATOR_CONTINUATION_NOT_AUTHORIZED")
         certificate = {"coordinator_only": True, "run_id": scope["run_id"],
                        "coordinator_worker_id": authorization["coordinator_worker_id"],
                        "authorization_sha256": digest(authorization), "initial_scope": dict(scope),
-                       "approved_bindings": bindings}
+                       "approved_bindings": bindings, "integration_resumes": resumes}
         return {**certificate, "certificate_sha256": digest(certificate)}
+
+    def _delivery_native_approval(self, connection, feature_id):
+        from .sqlite_registry import _review_input_from_evidence, _verify_operator_review_packet, _with_native_review_ci
+        approval = self._delivery_approval(connection, feature_id)
+        evidence = connection.execute("SELECT * FROM evidence WHERE id=?", (approval['review_input_evidence_id'],)).fetchone()
+        source = _with_native_review_ci(connection, _review_input_from_evidence(evidence))
+        _verify_operator_review_packet(source)
+        review = connection.execute('SELECT review_package_id FROM review_outcomes WHERE id=?',
+                                    (approval['review_outcome_id'],)).fetchone()
+        if review is None or source.review_package_id != review[0]:
+            raise RegistryConflict('DELIVERY_APPROVAL_BINDING_MISMATCH')
+        for attempt_id, package_id, worker_id in (
+            (source.implementation_attempt_id, approval['package_id'], approval['implementer_worker_id']),
+            (approval['review_attempt_id'], review[0], approval['reviewer_worker_id']),
+        ):
+            attempt = connection.execute('SELECT * FROM attempts WHERE id=?', (attempt_id,)).fetchone()
+            if (attempt is None or attempt['package_id'] != package_id or attempt['worker_id'] != worker_id
+                    or attempt['outcome'] != 'SUCCEEDED' or attempt['ended_at'] is None):
+                raise RegistryConflict('DELIVERY_CONTINUATION_NATIVE_ATTEMPT_REQUIRED')
+        if approval['implementer_worker_id'] == approval['reviewer_worker_id']:
+            raise RegistryConflict('REVIEW_INDEPENDENCE_REQUIRED')
+        return approval
+
+    def _delivery_resume_binding(self, connection, action, authorization):
+        """Certify continuation, not absence of a remote effect or an approval."""
+        prior = read_record(connection, 'authorization:' + action['run_id'])
+        stopped = read_record(connection, 'run-state:' + action['run_id']) or {}
+        feature_id = action['feature_id']
+        candidate = action['checkpoint'].get('candidate')
+        if (action['action'] != 'INTEGRATE' or action['state'] not in {'RUNNING', 'UNCERTAIN'}
+                or action['run_id'] == authorization['run_id'] or stopped.get('state') != 'STOPPED'
+                or not prior or prior['base_ref'] != authorization['base_ref']
+                or prior['coordinator_worker_id'] != authorization['coordinator_worker_id']
+                or prior['request_hashes'].get(feature_id) != authorization['request_hashes'].get(feature_id)
+                or not isinstance(candidate, dict)):
+            raise RegistryConflict('DELIVERY_ACTION_UNRESOLVED', feature_id)
+        approval = self._delivery_native_approval(connection, feature_id)
+        unsigned = {key: value for key, value in candidate.items() if key != 'receipt_sha256'}
+        validations = candidate.get('validation')
+        if (action.get('input_sha256') != digest(action['inputs'])
+                or action['inputs'].get('approval_sha256') != digest(approval)
+                or candidate.get('receipt_sha256') != digest(unsigned)
+                or candidate.get('kind') != 'factory-integration-candidate' or candidate.get('schema_version') != 1
+                or candidate.get('integration_id') != action['action_id'] or candidate.get('approval') != approval
+                or candidate.get('target_branch') != authorization['base_ref']
+                or any(not isinstance(candidate.get(key), str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', candidate[key])
+                       for key in ('target_before', 'target_after'))
+                or not isinstance(validations, list) or not validations
+                or any(not isinstance(item, dict) or item.get('returncode') != 0 or item.get('timed_out') is not False
+                       or item.get('validated_commit') != candidate['target_after'] for item in validations)):
+            raise RegistryConflict('DELIVERY_RESUME_BINDING_INVALID')
+        return {'run_id': authorization['run_id'], 'original_run_id': action['run_id'],
+                'feature_id': feature_id, 'action_id': action['action_id'], 'action_sha256': digest(action),
+                'input_sha256': action['input_sha256'], 'approval_sha256': digest(approval),
+                'candidate_receipt_sha256': candidate['receipt_sha256']}
+
+    def _delivery_action_membership(self, connection, action, run_id, *, initial=False):
+        if action['run_id'] == run_id:
+            return None
+        binding = read_record(connection, f'integration-resume:{run_id}:{action["action_id"]}')
+        if (binding is None or binding['original_run_id'] != action['run_id']
+                or binding['feature_id'] != action['feature_id'] or binding['action_id'] != action['action_id']
+                or binding['run_id'] != run_id or binding['input_sha256'] != digest(action['inputs'])
+                or binding['approval_sha256'] != digest(self._delivery_native_approval(connection, action['feature_id']))
+                or (initial and binding['action_sha256'] != digest(action))):
+            raise RegistryConflict('DELIVERY_ACTION_UNRESOLVED')
+        return binding
+
+    def delivery_action_membership(self, run_id, action_id):
+        """Read-only pre-effect proof for cross-run integration recovery."""
+        with self._connection() as connection:
+            connection.execute('BEGIN')
+            action = read_record(connection, 'action:' + identifier(action_id))
+            if action is None or action['action'] != 'INTEGRATE':
+                raise RegistryConflict('DELIVERY_INTEGRATION_ACTION_INVALID')
+            return self._delivery_action_membership(connection, action, identifier(run_id))
 
     def delivery_activation_preflight(self, scope, *, observed_at):
         """Read-only gate; LIVE repeats this validation inside its CAS transaction."""
@@ -333,7 +406,7 @@ class DeliveryRegistryMixin:
                                         (spec["coordinator_worker_id"],)).fetchone()
             if worker is None or worker["role"] != "ORCHESTRA":
                 raise RegistryConflict("DELIVERY_COORDINATOR_INVALID")
-            requests = {}
+            requests, unresolved_actions = {}, []
             for feature_id in ids:
                 request = read_record(connection, "request:" + feature_id)
                 if request is None:
@@ -341,8 +414,11 @@ class DeliveryRegistryMixin:
                 requests[feature_id] = request
                 unresolved = [json.loads(row[0]) for row in connection.execute(
                     "SELECT value FROM registry_metadata WHERE key LIKE 'delivery:action:%'")]
-                if any(item["feature_id"] == feature_id and item["state"] in {"RUNNING", "UNCERTAIN"} for item in unresolved):
-                    raise RegistryConflict("DELIVERY_ACTION_UNRESOLVED", feature_id)
+                unfinished = [item for item in unresolved if item['feature_id'] == feature_id
+                              and item['state'] in {'RUNNING', 'UNCERTAIN'}]
+                if len(unfinished) > 1:
+                    raise RegistryConflict('DELIVERY_ACTION_UNRESOLVED', feature_id)
+                unresolved_actions.extend(unfinished)
             visited, visiting = set(), set()
 
             def visit(feature_id):
@@ -363,6 +439,9 @@ class DeliveryRegistryMixin:
                 visit(feature_id)
             authorization = {**spec, "request_hashes": {key: value["request_sha256"]
                                                        for key, value in requests.items()}, "authorized_at": now}
+            for action in unresolved_actions:
+                binding = self._delivery_resume_binding(connection, action, authorization)
+                write_record(connection, f'integration-resume:{spec["run_id"]}:{action["action_id"]}', binding)
             write_record(connection, "authorization:" + spec["run_id"], authorization)
             write_record(connection, "active-authorization", {"run_id": spec["run_id"]}, replace_existing=True)
             # A new bounded run can continue immutable unfinished work from a
@@ -375,7 +454,9 @@ class DeliveryRegistryMixin:
                     pair = max(pairs, key=lambda item: item["generation"])
                     write_record(connection, f"membership:{spec['run_id']}:{feature_id}:{pair['generation']}",
                                  {**pair, "run_id": spec["run_id"], "original_run_id": pair["run_id"], "adopted_at": now})
-            return {"run_id": spec["run_id"], "feature_ids": ids}
+            return {"run_id": spec["run_id"], "feature_ids": ids,
+                    **({'integration_resume_action_ids': sorted(action['action_id'] for action in unresolved_actions)}
+                       if unresolved_actions else {})}
 
         return self._delivery_mutate("DELIVERY_RUN_AUTHORIZED", "delivery-authorize:" + spec["run_id"],
                                      spec, expected_revision, recorded_at, authorize)
@@ -903,8 +984,9 @@ class DeliveryRegistryMixin:
             authorization, _, _ = self._delivery_scope(connection, run_id, feature_id, now, reconcile=True)
             action = read_record(connection, "action:" + action_id)
             if (action is None or action["action"] != "INTEGRATE" or action["feature_id"] != feature_id
-                    or action["run_id"] != run_id or action["state"] not in {"RUNNING", "UNCERTAIN"}):
+                    or action["state"] not in {"RUNNING", "UNCERTAIN"}):
                 raise RegistryConflict("DELIVERY_INTEGRATION_ACTION_INVALID")
+            resumed = self._delivery_action_membership(connection, action, run_id)
             candidate = action["checkpoint"].get("candidate")
             if not isinstance(candidate, dict):
                 raise RegistryConflict("DELIVERY_CANDIDATE_NOT_PERSISTED")
@@ -948,7 +1030,9 @@ class DeliveryRegistryMixin:
                         datetime.fromisoformat(action["started_at"].replace("Z", "+00:00"))).total_seconds()
             write_record(connection, "action:" + action_id,
                          {**action, "state": "SUCCEEDED", "checkpoint": {"candidate": candidate,
-                          "publication": dict(publication)}, "runtime_seconds": max(0, duration), "updated_at": now},
+                          "publication": dict(publication)}, "runtime_seconds": None if resumed else max(0, duration),
+                          **({'elapsed_seconds': max(0, duration), 'completed_run_id': run_id} if resumed else {}),
+                          "updated_at": now},
                          replace_existing=True)
             return {"feature_id": feature_id, "package_id": approval["package_id"],
                     "integration_commit": candidate["target_after"]}
