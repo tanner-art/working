@@ -147,7 +147,28 @@ They were not implemented by TASK-029.
 ### Exact response to move forward
 `Choose the Supabase project for Threadline, set Vercel env vars, then validate hosted email login/logout and local-data preservation.`
 
-## TASK-042 delivery: explicit signed-in account storage (#60)
+## October 19: automatic account workspace (SYNC-01)
+
+The owner's cross-device requirement supersedes the manual activation UX below.
+Sign-in/reload now reads the signed-in user's existing workspace automatically,
+without importing or deleting local data. An empty account offers one explicit
+initial sync. The original device copy remains available via Settings → Data;
+device-only capture IDs are counted visibly, and the existing preview/confirm
+merge flow is retained. Errors never masquerade as an empty account.
+
+Account mode checks for changes every 15 seconds while visible, on focus/online,
+and on returning to a non-editing surface. Reads cannot advance the write revision
+under queued/failed saves, changed local state, or open editors. Review, Canvas,
+Schedule, Calendar and Settings retain drafts; returning to Capture/Today permits
+refresh. This is guarded snapshot synchronization, not simultaneous collaborative
+editing or durable offline account storage. Stale concurrent writes remain
+rejected with export/reload recovery. No database schema or ownership policy changes.
+
+The historical descriptions below document the old implementation; they do not
+override SYNC-01's automatic load behavior. Real phone/laptop verification remains
+required; a synthetic 98-capture test does not certify the owner's device migration.
+
+## TASK-042 delivery: explicit signed-in account storage (#60, historical)
 
 The client now shares its existing Supabase auth client with an account adapter. A user
 must explicitly choose **Copy this device’s local data into my account** or **Load account

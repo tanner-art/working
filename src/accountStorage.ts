@@ -29,7 +29,7 @@ export interface AccountAdapter {
   read(userId: string): Promise<AccountRow | null>
   write(userId: string, data: AccountData, revision: string | null): Promise<AccountRow>
 }
-export type AccountStorageErrorCode = 'load-unavailable' | 'save-unavailable' | 'conflict' | 'owner-mismatch'
+export type AccountStorageErrorCode = 'load-unavailable' | 'save-unavailable' | 'conflict' | 'owner-mismatch' | 'empty-account'
 export class AccountStorageError extends Error {
   constructor(readonly code: AccountStorageErrorCode, message: string) {
     super(message)
@@ -184,6 +184,8 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
   let model: PersistedState | undefined
   let active = false
   let failed = false
+  let pendingWrites = 0
+  let activity = 0
   let pendingMerge: AccountMergePlan | undefined
   let queue = Promise.resolve()
   const check = () => { if (currentUser() !== userId) throw Error('Account session changed. Export unsaved work, then return to local data.') }
@@ -197,9 +199,11 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
       try {
         const result = local ? await adapter.write(userId, local, null) : await adapter.read(userId)
         check()
-        if (!result) throw Error('No account data yet. Copy this device’s local data first.')
-        revision = result.revision; model = result.data.model; active = true; failed = false
-        return { state: legacyUiProjection(result.data.model), data: result.data }
+        if (!result) throw new AccountStorageError('empty-account', 'No account data yet. Sync this device’s captures first.')
+        if (result.user_id !== userId) throw Error(loadFailure)
+        const data = validateData(result.data)
+        revision = result.revision; model = data.model; active = true; failed = false; activity++
+        return { state: legacyUiProjection(data.model), data }
       } catch (error) {
         if (error instanceof Error && error.message.startsWith('No account data')) throw error
         if (local && isAccountStorageError(error, 'conflict')) {
@@ -207,6 +211,23 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
         }
         throw Error(local ? 'Local copy was not imported. The account may already contain data, or storage is unavailable. Load account data instead; local data is untouched.' : loadFailure)
       }
+    },
+    /** Read-only refresh. Never advance our revision beneath pending/failed edits.
+     * The caller checks editor/draft identity again after the asynchronous read. */
+    async refresh(canApply: () => boolean) {
+      check()
+      if (!active || failed || pendingWrites) return { status: 'deferred' as const }
+      const started = activity
+      let row: AccountRow | null
+      try { row = await adapter.read(userId) } catch { check(); throw Error(loadFailure) }
+      check()
+      if (!row || row.user_id !== userId) throw Error(loadFailure)
+      if (started !== activity || failed || pendingWrites) return { status: 'deferred' as const }
+      if (row.revision === revision) return { status: 'unchanged' as const }
+      const data = validateData(row.data)
+      if (!canApply()) return { status: 'deferred' as const }
+      revision = row.revision; model = data.model; activity++
+      return { status: 'updated' as const, state: legacyUiProjection(model), data }
     },
     async previewMerge(local: AccountData, choices: AccountMergeChoices): Promise<AccountMergePlan> {
       check()
@@ -242,6 +263,7 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
     },
     save(data: AccountData, retry = false) {
       const snapshot = validateData(data)
+      pendingWrites++; activity++
       const operation = queue.then(async () => {
         check()
         if (!active || (failed && !retry)) throw Error(saveFailure)
@@ -254,8 +276,9 @@ export function createAccountSession(adapter: AccountAdapter, userId: string, cu
           check(); revision = result.revision; model = result.data.model; failed = false
         } catch { failed = true; throw Error(saveFailure) }
       })
-      queue = operation.catch(() => {})
-      return operation
+      const settled = operation.finally(() => { pendingWrites--; activity++ })
+      queue = settled.catch(() => {})
+      return settled
     },
   }
 }

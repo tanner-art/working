@@ -41,7 +41,7 @@ describe('auth configuration and presentation', () => {
     expect(dataOwnershipLabel({ status: 'error', message: 'x' })).toMatch(/^Local-only\./)
     expect(dataOwnershipLabel(sessionState(session))).toMatch(/^Signed in, but still local-only\./)
     for (const state of [sessionState(null), sessionState(session), { status: 'loading' } as const]) {
-      expect(dataOwnershipLabel(state)).toContain('explicitly copy or load')
+      expect(dataOwnershipLabel(state)).toContain('Sign in to open your account')
     }
   })
 })
