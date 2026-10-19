@@ -1,8 +1,8 @@
 import { isCanvasBank } from './canvasBank'
 import type { CanvasBank, CanvasRecord } from './domain'
+import { jsonEqual as equal } from './jsonEquality'
 
 const copy = <T>(value: T): T => structuredClone(value)
-const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
 
 export function mergeCanvasBanks(accountValue: CanvasBank, deviceValue: CanvasBank): { merged: CanvasBank; added: number; duplicates: number } {
   if (!isCanvasBank(accountValue) || !isCanvasBank(deviceValue)) throw Error('Merge stopped: a canvas bank is invalid. Both sources are untouched.')

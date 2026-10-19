@@ -1,4 +1,5 @@
 import type { CaptureRecord } from './domain'
+import { jsonEqual } from './jsonEquality'
 
 export type GroupingKind = 'topic' | 'context' | 'recent'
 export type GroupingSuggestionSource = 'deterministic' | 'provider'
@@ -124,7 +125,7 @@ function requirePendingProposal(state: GroupingReviewState, proposalId: string):
 export function persistGroupingProposal(state: GroupingReviewState, proposal: GroupingProposalSnapshot): GroupingReviewState {
   const existing = state.proposals.find(item => item.id === proposal.id)
   if (existing) {
-    if (JSON.stringify(snapshot(existing)) === JSON.stringify(proposal)) return state
+    if (jsonEqual(snapshot(existing), proposal)) return state
     throw new Error(`Grouping proposal ID already exists with different evidence: ${proposal.id}`)
   }
   const next: GroupingReviewState = {
@@ -320,7 +321,7 @@ export function isGroupingReviewState(value: unknown, captures?: readonly Pick<C
   if (!state.history.every(item => {
     if (!item || typeof item !== 'object' || !validDate(item.at) || !isSnapshot(item.proposal, captureIds) || !proposalIds.has(item.proposal.id)) return false
     const persisted = state.proposals.find(proposal => proposal.id === item.proposal.id)
-    if (!persisted || JSON.stringify(snapshot(persisted)) !== JSON.stringify(item.proposal) || Date.parse(item.at) < Date.parse(item.proposal.provenance.generatedAt)) return false
+    if (!persisted || !jsonEqual(snapshot(persisted), item.proposal) || Date.parse(item.at) < Date.parse(item.proposal.provenance.generatedAt)) return false
     if (item.decision === 'confirmed') return item.source === 'grouping-review-confirmation' && unique(item.selectedCandidateIds) && item.selectedCandidateIds.length > 0 &&
       item.selectedCandidateIds.every(id => item.proposal.relationships.some(candidate => candidate.id === id)) && unique(item.createdRelationshipIds) && unique(item.suppressedCandidateIds) &&
       item.createdRelationshipIds.length + item.suppressedCandidateIds.length === item.selectedCandidateIds.length &&
@@ -355,7 +356,7 @@ export function isGroupingReviewState(value: unknown, captures?: readonly Pick<C
       const candidate = proposal.relationships.find(item => item.id === relationship?.provenance.candidateId)
       if (!reversals.length && (!relationship || !candidate || relationship.provenance.confirmationId !== decision.id ||
           !decision.selectedCandidateIds.includes(relationship.provenance.candidateId) || decision.suppressedCandidateIds.includes(relationship.provenance.candidateId) ||
-          relationship.provenance.suggestionSource !== proposal.provenance.source || JSON.stringify(relationship.provenance.signals) !== JSON.stringify(candidate.signals))) return false
+          relationship.provenance.suggestionSource !== proposal.provenance.source || !jsonEqual(relationship.provenance.signals, candidate.signals))) return false
     }
   }
   return state.relationships.every(relationship => state.history.some(item =>

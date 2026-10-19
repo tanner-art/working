@@ -1,5 +1,6 @@
 import { createAccountSession, isAccountStorageError, type AccountAdapter, type AccountData, type AccountSession } from './accountStorage'
 import type { AppState } from './domain'
+import { jsonEqual } from './jsonEquality'
 
 export type AccountWorkspace = { session: AccountSession; state: AppState; data: AccountData }
 
@@ -31,5 +32,5 @@ export function deviceOnlyCaptureCount(local: AccountData, account: AccountData)
 
 /** Equal raw capture IDs do not imply equal reviewed thoughts or canvas edits. */
 export function deviceCopyDiffers(local: AccountData, account: AccountData): boolean {
-  return JSON.stringify(local.model) !== JSON.stringify(account.model)
+  return !jsonEqual(local.model, account.model)
 }

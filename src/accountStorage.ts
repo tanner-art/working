@@ -7,6 +7,7 @@ import { readDelivery, type DigestDelivery } from './digestDelivery'
 import { bankFromLegacy } from './canvasBank'
 import { mergeCanvasBanks } from './canvasBankMerge'
 import type { GroupingReviewState } from './groupingProposal'
+import { jsonEqual as equal, stableJson } from './jsonEquality'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
@@ -52,7 +53,7 @@ export function validateData(value: unknown): AccountData {
   readDelivery({ getItem: () => JSON.stringify(data.digest) })
   return structuredClone(data)
 }
-const accountFingerprint = (value: AccountData) => JSON.stringify(validateData(value))
+const accountFingerprint = (value: AccountData) => stableJson(validateData(value))!
 export async function guardAccountMergePreview(
   local: AccountData,
   prepare: (snapshot: AccountData) => Promise<AccountMergePlan>,
@@ -65,7 +66,6 @@ export async function guardAccountMergePreview(
   }
   return plan
 }
-const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right)
 function mergeRecords<T extends { id: string }>(account: T[], device: T[], label: string) {
   const merged = structuredClone(account)
   let added = 0

@@ -53,3 +53,22 @@ review; production is not certified by a passing mocked test.
 Record measured author execution and independent reviewer runtime separately in
 the final evidence. Do not label elapsed wall-clock time as provider execution
 time or estimate agent hours from package size.
+
+## Owner-authorized account-load repair (October 19)
+
+The installed phone reported the generic account-load failure after a successful
+HTTP read. A synthetic reproduction found the schema-v2 validator compared JSON
+object insertion order, which Postgres jsonb does not preserve. The owner
+explicitly assigned the repair. This extends SYNC-01 only to key-order-independent
+JSON comparisons used by account load/save, merge, local-difference detection,
+and their nested semantic, temporal, grouping and canvas validation paths.
+
+Additional owned paths: src/jsonEquality.ts and its tests, src/migration.ts,
+src/temporalConfirmation.ts, src/groupingProposal.ts and its tests,
+src/canvasBankMerge.ts, and src/testSupport/jsonbRoundTrip.ts.
+
+Acceptance: database-reordered fields must load/save/merge without losing any
+capture; changed values, extra fields, array/audit ordering changes, duplicate
+identities and stale writes remain rejected. No production-data mutation,
+database migration, permission change, Factory change or main merge is allowed.
+Exact-commit independent review is required again for this repair.

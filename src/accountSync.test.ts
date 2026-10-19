@@ -3,6 +3,7 @@ import { accountData, createAccountSession, type AccountAdapter, type AccountDat
 import { canRefreshWorkspace, deviceOnlyCaptureCount, deviceCopyDiffers, openSignedInWorkspace } from './accountSync'
 import { makeObject } from './store'
 import { defaultSettings } from './settings'
+import { jsonbRoundTrip } from './testSupport/jsonbRoundTrip'
 
 const captures = (count: number): AccountData => accountData({ objects: Array.from({ length: count }, (_, n) => makeObject({
   kind: 'idea', originalContent: `Preserved phone capture ${n + 1}`, source: 'text', confidence: .7,
@@ -14,7 +15,7 @@ function backend() {
     read: vi.fn(async userId => row?.user_id === userId ? structuredClone(row) : null),
     write: vi.fn(async (userId, data, revision) => {
       if ((row?.revision ?? null) !== revision || (row && row.user_id !== userId)) throw Error('conflict')
-      row = { user_id: userId, data: structuredClone(data), revision: crypto.randomUUID() }
+      row = { user_id: userId, data: jsonbRoundTrip(data), revision: crypto.randomUUID() }
       return structuredClone(row)
     }),
   }
@@ -27,6 +28,10 @@ function deferred<T>() {
 }
 
 describe('automatic cross-device account workspace', () => {
+  it('does not report a local-only difference for reordered account fields', () => {
+    const local = captures(2)
+    expect(deviceCopyDiffers(local, jsonbRoundTrip(local))).toBe(false)
+  })
   it('opens all 98 exact captures on laptop sign-in and reload without local writes', async () => {
     const db = backend(); const local = captures(98); const original = structuredClone(local)
     const phone = createAccountSession(db.adapter, 'owner', () => 'owner')
