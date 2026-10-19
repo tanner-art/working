@@ -27,10 +27,13 @@ are rewritten by the comparison.
 
 - Before repair: database-style round-trip mocks caused 13 failures across
   account storage and sync tests.
-- After repair: 812 tests in 74 files pass, including those same mocks.
+- After repair: 813 tests in 74 files pass, including those same mocks.
 - Added negative coverage for changed values/types, added fields, array order
   and multiplicity, altered semantic IDs, reversed interpretation history,
   grouping-signal tampering and changed canvas geometry.
+- Follow-up audit reproduced one more failure for a saved recognized Canvas
+  shape. Its nested derived-geometry comparisons now use the same comparator;
+  reordered shape evidence passes while changed raw geometry is rejected.
 - Specific and daily-log Reminders plus scheduled Actions survive reordered
   snapshots with temporal decisions preserved.
 - An actual read-only Supabase SQL expression converted a synthetic full account

@@ -65,7 +65,8 @@ and their nested semantic, temporal, grouping and canvas validation paths.
 
 Additional owned paths: src/jsonEquality.ts and its tests, src/migration.ts,
 src/temporalConfirmation.ts, src/groupingProposal.ts and its tests,
-src/canvasBankMerge.ts, and src/testSupport/jsonbRoundTrip.ts.
+src/canvasBankMerge.ts, src/canvasStrokes.ts (embedded shape validation), and
+src/testSupport/jsonbRoundTrip.ts.
 
 Acceptance: database-reordered fields must load/save/merge without losing any
 capture; changed values, extra fields, array/audit ordering changes, duplicate

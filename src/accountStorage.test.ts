@@ -14,6 +14,7 @@ import { dailyLogReminderProjection, specificReminderProjection } from './remind
 import { activeTemporalDecisions } from './temporalConfirmation'
 import { confirmedActions } from './objectWorkflow'
 import { jsonbRoundTrip } from './testSupport/jsonbRoundTrip'
+import { applyCanvasStrokeShape } from './canvasStrokes'
 
 const payload = () => accountData({ objects: [], canvas: [] }, defaultSettings, { enabled: false })
 function database() {
@@ -257,6 +258,17 @@ describe('guided account merge', () => {
     expect(mergeAccountData(reordered, source, choices).preview.added).toEqual({ captures: 0, thoughts: 0, canvases: 0, events: 0 })
     reordered.model.canvasBank!.canvases[0].elements[0].x++
     expect(() => mergeAccountData(reordered, source, choices)).toThrow('Merge stopped: canvas identity')
+  })
+
+  it('loads reordered Canvas shape evidence but rejects geometry inconsistent with its raw stroke', () => {
+    const stroke = applyCanvasStrokeShape({ id: 'shape', type: 'freehand' as const, x: 0, y: 0,
+      rawPoints: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 40, y: 0 }] }, '2026-09-22T12:00:00Z')!
+    const source = accountData({ objects: [], canvas: [stroke] }, defaultSettings, { enabled: false })
+    const reordered = jsonbRoundTrip(source)
+    expect(validateData(reordered)).toEqual(jsonbRoundTrip(source))
+    const changed = structuredClone(reordered)
+    changed.model.canvas[0].rawPoints![2].y = 100
+    expect(() => validateData(changed)).toThrow('Invalid account data')
   })
 
   it('unions distinct scheduled Actions and both Reminder modes with valid downstream projections', () => {

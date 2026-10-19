@@ -1,3 +1,5 @@
+import { jsonEqual } from './jsonEquality'
+
 /**
  * A canvas-space point captured from a pen or lasso gesture. It deliberately
  * contains only JSON numbers: pressure, screen coordinates, and timestamps are
@@ -67,7 +69,7 @@ export function isCanvasStrokeRefinement(value: unknown): value is CanvasStrokeR
 
 /** The active render projection must be exactly the latest recorded result. */
 export function isActiveCanvasStrokeRefinement(refinement: unknown, projection: unknown): boolean {
-  return isCanvasStrokeRefinement(refinement) && isCanvasStrokeProjection(projection) && projection.kind !== 'raw' && JSON.stringify(refinement.result) === JSON.stringify(projection)
+  return isCanvasStrokeRefinement(refinement) && isCanvasStrokeProjection(projection) && projection.kind !== 'raw' && jsonEqual(refinement.result, projection)
 }
 
 /** Creates validated, JSON-safe metadata for one user-accepted smoothing action. */
@@ -106,7 +108,7 @@ export function previewCanvasStrokeShape(rawPoints: unknown): Extract<CanvasStro
 export function isCanvasStrokeShapeProjectionForRaw(rawPoints: unknown, projection: unknown): boolean {
   if (!isCanvasStrokeProjection(projection) || projection.kind !== 'shape') return false
   const proposal = previewCanvasStrokeShape(rawPoints)
-  return proposal !== null && JSON.stringify(proposal) === JSON.stringify(projection)
+  return proposal !== null && jsonEqual(proposal, projection)
 }
 
 export function createCanvasStrokeShapeRefinement(sourceId: unknown, rawPoints: unknown, appliedAt: unknown): CanvasStrokeRefinement | null {
