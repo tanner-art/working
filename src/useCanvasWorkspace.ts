@@ -17,6 +17,7 @@ export function useCanvasWorkspace(state: AppState, update: (fn: (state: AppStat
     session = createCanvasSession(repository)
     sessions.current.set(canvasId, session)
   }
+  session?.synchronize()
   useEffect(() => {
     if (!session) return
     const onKeyDown = (event: KeyboardEvent) => {

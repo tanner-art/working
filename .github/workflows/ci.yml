@@ -6,7 +6,8 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Match the pinned Python build; ubuntu-latest can advance independently.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:

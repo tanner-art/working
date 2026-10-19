@@ -12,6 +12,15 @@ export function createCanvasSession(repository: CanvasRepository) {
     history = next
   }
   return {
+    /** A remote workspace snapshot is a new editing baseline. Old undo/redo or
+     * text-coalescing state must never restore geometry from the prior snapshot. */
+    synchronize() {
+      const elements = repository.read().elements
+      if (!sameCanvas(history.present, elements)) {
+        history = emptyCanvasHistory(elements)
+        textEdit = undefined
+      }
+    },
     get canUndo() { return canUndoCanvas(history) },
     get canRedo() { return canRedoCanvas(history) },
     finishText() { textEdit = undefined },

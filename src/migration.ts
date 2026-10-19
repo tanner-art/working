@@ -4,6 +4,7 @@ import type { ActionPriority, AppState, CommitmentScheduleAudit, ConfirmationGes
 import { isCanvasViewport } from './canvasDocument'
 import { bankFromLegacy, isCanvasBank } from './canvasBank'
 import { isAppState } from './store'
+import { jsonEqual as equal } from './jsonEquality'
 
 // Compatibility authority stays inside migration. Validation uses detached copies;
 // only validated projections expose registered history entries to callers.
@@ -61,7 +62,6 @@ function materializeReminderInstructions(model: PersistedState) {
 }
 
 const copy = <T>(value: T): T => structuredClone(value)
-const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
 const unique = (ids: string[]) => ids.every(id => id.length > 0) && new Set(ids).size === ids.length
 const fail = (): never => { throw new Error('Saved model is invalid or ambiguous; stored data must remain untouched.') }
 const actionPriorities: ActionPriority[] = [1, 2, 3, 4, 5]

@@ -1,6 +1,7 @@
 import type { ActionPriority, AppState, ThoughtObject } from './domain'
 import { reconcileLegacyUi } from './migration'
 import { eventProposal, recordTemporalDecision } from './temporalConfirmation'
+import { checkpointState } from './store'
 
 const validPriorities: ActionPriority[] = [1, 2, 3, 4, 5]
 
@@ -27,8 +28,9 @@ export function scheduleStagedAction(state: AppState, objectId: string, startsAt
   if (!current || current.kind !== 'action' || current.status !== 'confirmed' || !stage || stage.status !== 'staged') throw new Error('This Action is no longer awaiting scheduling. Refresh Schedule and try again.')
   const eventId = crypto.randomUUID()
   const candidate: AppState = { ...state, objects: state.objects.map(object => object.id !== objectId ? object : { ...object, history: [...object.history, { at: new Date().toISOString(), event: 'Scheduled staged Action', actionSchedule: { eventId, startsAt, temporalContext } }] }) }
-  const scheduled = reconcileLegacyUi(candidate)
+  const checkpoint = checkpointState(candidate)
+  const scheduled = checkpoint.model!
   const target = eventProposal(scheduled, eventId)
   if (!target) throw new Error('The CalendarEvent could not be prepared safely. This Action remains staged.')
-  return { ...recordTemporalDecision(candidate, scheduled, target), model: scheduled }
+  return recordTemporalDecision(checkpoint, scheduled, target)
 }

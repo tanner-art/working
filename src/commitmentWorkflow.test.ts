@@ -1,16 +1,76 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CommitmentResolution } from './CommitmentResolution'
 import { Review } from './App'
 import { commitmentRouteId, resolveCommitment, retrieveCommitment } from './commitmentWorkflow'
 import type { ThoughtObject } from './domain'
-import { legacyUiProjection, migrateLegacyState } from './migration'
+import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import { resolveReviewCapture } from './reviewResolution'
+import { loadStateResult, saveState, serializeState } from './store'
+import { stageAction } from './actionStaging'
+import { reverseObject } from './objectWorkflow'
+import { MorningDigest } from './DigestPanel'
 
 const review = (patch: Partial<ThoughtObject> = {}): ThoughtObject => ({ id: 'commitment/one', kind: 'idea', status: 'review', originalContent: 'Deliver the draft', source: 'text', createdAt: '2026-10-01T08:00:00.000Z', confidence: .6, interpretation: { summary: 'Deliver the draft', suggestedKind: 'commitment', rationale: 'Promise inferred' }, metadata: {}, relationships: [], history: [{ at: '2026-10-01T08:00:00.000Z', event: 'Captured' }], ...patch })
 
 describe('Commitment Review workflow', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it.each(['welcome', 'capture-date', 'idea', 'action'] as const)('preserves proposal evidence through %s resolution, render, save, reload, and reversal', scenario => {
+    const proposal = review({ kind: scenario === 'action' ? 'action' : scenario === 'idea' ? 'idea' : 'commitment',
+      interpretation: { summary: 'Original proposal', suggestedKind: scenario === 'idea' ? 'idea' : scenario === 'action' ? 'action' : 'commitment',
+        rationale: 'Original inference', ...(scenario === 'capture-date' ? { suggestedDate: '2026-10-21' } : {}) } })
+    const sibling = review({ id: 'staged-sibling', kind: 'action' })
+    let raw: string | null = scenario === 'welcome' ? null : JSON.stringify({ objects: [sibling, proposal], canvas: [] })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const loaded = loadStateResult()
+    expect(loaded.error).toBeUndefined()
+    let state = loaded.state
+    const targetId = scenario === 'welcome' ? 'welcome-commitment' : proposal.id
+    const siblingId = scenario === 'welcome' ? 'welcome-action' : sibling.id
+    expect(saveState(state)).toBeUndefined()
+    state = { ...state, objects: state.objects.map(object => object.id === siblingId ? stageAction(object) : object) }
+    expect(saveState(state)).toBeUndefined()
+    const captures = structuredClone(serializeState(state).captures)
+    const original = state.objects.find(object => object.id === targetId)!
+    const resolved = resolveCommitment(original, { title: 'Dentist appointment', date: '2026-10-22', time: '14:00', dependencyIds: [] })
+    expect(resolved.interpretation).toEqual({ ...original.interpretation, summary: 'Dentist appointment' })
+    expect(original.interpretation.summary).not.toBe('Dentist appointment')
+    state = { ...state, objects: state.objects.map(object => object.id === targetId ? resolved : object) }
+    const model = reconcileLegacyUi(state)
+    expect(isPersistedState(model)).toBe(true)
+    expect(model.captures).toEqual(captures)
+    expect(model.calendarEvents).toEqual([])
+    expect(model.temporalHistory ?? []).toEqual([])
+    expect(model.semanticObjects.find(object => object.id === targetId)).toMatchObject({ kind: 'commitment', status: 'confirmed', metadata: {} })
+    expect(model.stagedActions).toMatchObject([{ objectId: siblingId, status: 'staged' }])
+    expect(() => renderToStaticMarkup(createElement(MorningDigest, { state, visible: true, onShow: () => undefined }))).not.toThrow()
+    expect(saveState(state)).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(isPersistedState(reloaded.state.model)).toBe(true)
+    expect(reloaded.state.objects.find(object => object.id === targetId)).toEqual(resolved)
+    expect(retrieveCommitment(reloaded.state, commitmentRouteId(targetId))).toMatchObject({ status: 'found', object: { id: targetId } })
+    const reversed = { ...reloaded.state, objects: reloaded.state.objects.map(object => object.id === targetId ? reverseObject(object) : object) }
+    expect(saveState(reversed)).toBeUndefined()
+    const afterReversal = loadStateResult()
+    expect(afterReversal.error).toBeUndefined()
+    expect(afterReversal.state.model?.captures).toEqual(captures)
+    expect(afterReversal.state.objects.find(object => object.id === targetId)?.status).toBe('review')
+  })
+
+  it('still rejects arbitrary edits to immutable proposal fields without overwriting storage', () => {
+    let raw = JSON.stringify({ objects: [review()], canvas: [] })
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    const state = loadStateResult().state
+    const preserved = raw
+    const tampered = { ...state, objects: state.objects.map(object => ({ ...object, interpretation: { ...object.interpretation, rationale: 'Rewritten inference' } })) }
+    expect(() => reconcileLegacyUi(tampered)).toThrow('invalid or ambiguous')
+    expect(saveState(tampered)).toBeDefined()
+    expect(raw).toBe(preserved)
+  })
+
   it('keeps Review reachable through the Commitment choice and exposes only the primary setup fields', async () => {
     const pending = await resolveReviewCapture(review(), 'commitment')
     expect(pending).toMatchObject({ status: 'needs-input' })

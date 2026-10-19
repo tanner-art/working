@@ -73,8 +73,8 @@ export function accountLabel(state: AuthState): string {
 }
 /** Account identity alone never implies that account storage has been activated. */
 export function dataOwnershipLabel(state: AuthState, active = false): string {
-  if (active) return 'Account storage active. Edits save to your account. Load account data on another device to see the latest saved version.'
-  const base = 'This workspace lives in this browser on this device. Use Settings → Data to explicitly copy or load account data.'
+  if (active) return 'Account storage active. Edits save to your account. Sign in on another device to open the same data; updates refresh when you are not editing.'
+  const base = 'This workspace lives in this browser on this device. Sign in to open your account, or use Sync this device to preserve these captures in an empty account. Settings → Data can combine existing copies.'
   return state.status === 'signed-in' ? `Signed in, but still local-only. ${base}` : `Local-only. ${base}`
 }
 export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {

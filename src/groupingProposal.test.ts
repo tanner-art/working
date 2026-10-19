@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { jsonbRoundTrip } from './testSupport/jsonbRoundTrip'
 import type { CaptureRecord, PersistedState } from './domain'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import {
@@ -24,6 +25,17 @@ const generatedAt = '2026-09-23T11:00:00Z'
 const proposal = () => suggestGroupingProposals({ captures, generatedAt })[0]
 
 describe('review-only grouping decisions', () => {
+  it('accepts reordered confirmed provenance but rejects a changed signal', () => {
+    const suggested = proposal()
+    const pending = persistGroupingProposal(emptyGroupingReviewState(), suggested)
+    const confirmed = confirmGroupingProposal(pending, suggested.id, [suggested.relationships[0].id], { at: '2026-09-23T12:00:00Z', id: 'confirm:jsonb' })
+    const reordered = jsonbRoundTrip(confirmed)
+    expect(isGroupingReviewState(reordered, captures)).toBe(true)
+    const { reviewState: _reviewState, ...suggestion } = suggested
+    expect(persistGroupingProposal(reordered, suggestion)).toBe(reordered)
+    reordered.relationships[0].provenance.signals[0].weight = .12345
+    expect(isGroupingReviewState(reordered, captures)).toBe(false)
+  })
   it('persists a proposal in Review without creating a relationship and cancel is inert', () => {
     const original = emptyGroupingReviewState()
     const next = persistGroupingProposal(original, proposal())
