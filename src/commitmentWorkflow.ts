@@ -27,9 +27,10 @@ export function resolveCommitment(object: ThoughtObject, details: CommitmentDeta
   const commitment = object.kind === 'commitment' ? object : { ...object, kind: 'commitment' as const }
   if (choice.dependencyIds.includes(commitment.id)) throw new Error('A commitment cannot depend on itself.')
   const { deadline: _priorDeadline, ...otherMetadata } = commitment.metadata
-  const { suggestedDate: _priorSuggestedDate, ...otherInterpretation } = commitment.interpretation
   const revision = commitment.interpretation.summary === choice.title ? [] : [{ at, event: 'Revised interpretation', reviewRevision: { from: commitment.interpretation.summary, to: choice.title } }]
-  return confirmObject({ ...commitment, interpretation: { ...otherInterpretation, summary: choice.title, suggestedKind: 'commitment' },
+  // Suggested kind/date are immutable proposal evidence, not the current obligation.
+  // Record the user's choice in kind/setup/confirmation and revise only the summary.
+  return confirmObject({ ...commitment, interpretation: { ...commitment.interpretation, summary: choice.title },
     metadata: { ...otherMetadata, ...(choice.date ? { deadline: choice.date } : {}) },
     relationships: choice.dependencyIds.map(targetId => ({ targetId, type: 'depends_on' })),
     history: [...commitment.history, ...revision, { at, event: 'Set Commitment details', commitmentSetup: choice }] })
