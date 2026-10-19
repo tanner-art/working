@@ -28,3 +28,8 @@ export function deviceOnlyCaptureCount(local: AccountData, account: AccountData)
   const ids = new Set(account.model.captures.map(capture => capture.id))
   return local.model.captures.filter(capture => !ids.has(capture.id)).length
 }
+
+/** Equal raw capture IDs do not imply equal reviewed thoughts or canvas edits. */
+export function deviceCopyDiffers(local: AccountData, account: AccountData): boolean {
+  return JSON.stringify(local.model) !== JSON.stringify(account.model)
+}

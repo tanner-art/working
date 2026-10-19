@@ -24,6 +24,9 @@ Baseline: reviewed repair `90e4465b9187615d7ec6d54b8a68227d542b095b`
 - Owned paths: src/accountStorage.ts, src/accountStorage.test.ts,
   src/accountSync.ts, src/accountSync.test.ts, src/App.tsx, src/auth.ts,
   src/auth.test.ts, docs/AUTH_DATA_PLAN.md, this package and verification evidence.
+  Review-discovered required sync boundary: src/useCanvasWorkspace.ts,
+  src/canvasSession.ts and src/canvasSessionSync.test.ts must invalidate stale
+  editor history when a remote canvas snapshot becomes the new baseline.
 - Out of scope: Factory, main merge, realtime collaborative editing, conflict
   guessing, bulk data overwrite, local deletion, new tables, unrelated features.
 - Acceptance: a synthetic 98-capture phone workspace reaches the account through

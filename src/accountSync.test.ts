@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { accountData, createAccountSession, type AccountAdapter, type AccountData, type AccountRow } from './accountStorage'
-import { canRefreshWorkspace, deviceOnlyCaptureCount, openSignedInWorkspace } from './accountSync'
+import { canRefreshWorkspace, deviceOnlyCaptureCount, deviceCopyDiffers, openSignedInWorkspace } from './accountSync'
 import { makeObject } from './store'
 import { defaultSettings } from './settings'
 
@@ -106,6 +106,13 @@ describe('automatic cross-device account workspace', () => {
     const local = captures(98)
     expect(deviceOnlyCaptureCount(local, local)).toBe(0)
     expect(deviceOnlyCaptureCount(local, captures(0))).toBe(98)
+  })
+  it('still exposes a different device copy when raw capture IDs match', () => {
+    const local = captures(98); const cloud = structuredClone(local)
+    expect(deviceCopyDiffers(local, cloud)).toBe(false)
+    cloud.model.semanticObjects.pop()
+    expect(deviceOnlyCaptureCount(local, cloud)).toBe(0)
+    expect(deviceCopyDiffers(local, cloud)).toBe(true)
   })
 })
 

@@ -2,7 +2,7 @@
 
 ## Implementation checks
 
-- Full suite: 794 tests / 72 files passing before final review.
+- Full suite: 797 tests / 73 files passing after review remediation.
 - App TypeScript/build and API TypeScript pass; no lint script configured.
 - Build retains the existing large-bundle warning; no bundling refactor included.
 - Unit fixtures: initial 98-capture upload; automatic laptop open/reload with exact
@@ -47,3 +47,27 @@ captures and retains the explicit preview/confirm merge path.
 Independent exact-commit review and remote CI follow the implementation commit.
 No main merge, production deployment or actual-phone sync certification is
 claimed by this document. No Factory state or safety controls changed.
+
+## Independent review remediation
+
+Claude review of be59ede returned APPROVED with two medium usability findings,
+not data-safety failures. Both are addressed: automatic activation deferred by an
+editor now resumes on the next safe surface; failed canvas saves no longer disable
+the explicit export-and-return-to-device recovery path. Account-change recovery
+now truly selects local data instead of reloading into a different account.
+An explicit device-mode choice survives auth status rechecking during this visit.
+
+Additional required sync boundary identified during review: a cached canvas editor
+could retain old undo/text history across a remote snapshot. It now synchronizes
+its baseline before reopening; regression tests preserve remote geometry and
+normal local undo. A differing device copy is also exposed when capture IDs match
+but current semantic/canvas content differs.
+
+Follow-up browser verification reached sign-out and the preserved-workspace screen,
+then the browser automation could not dismiss its test confirmation dialog. The
+Settings-resume follow-up is therefore not claimed as browser-verified. Original
+98/99/100 two-instance evidence above remains valid for the first reviewed commit.
+
+Both GitHub validation runs and Vercel preview passed for be59ede. Hosted UI access
+is blocked by Vercel deployment protection: connected account lacks this team's
+access (connector 403 and browser “You Need Access”). No protection was disabled.

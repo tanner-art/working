@@ -2,7 +2,7 @@ import { buildMorningDigest } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
 import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
-import { canRefreshWorkspace, deviceOnlyCaptureCount, openSignedInWorkspace } from './accountSync'
+import { canRefreshWorkspace, deviceOnlyCaptureCount, deviceCopyDiffers, openSignedInWorkspace } from './accountSync'
 import { readDelivery, setDeliveryEnabled } from './digestDelivery'
 import { supabase, auth, accountLabel, dataOwnershipLabel, type AuthState } from './auth'
 import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_INSTALL_KEY, defaultSettings, readSettings, resetSettings, writeSettings, SETTINGS_KEY, type LocalSettings } from './settings'
@@ -67,18 +67,20 @@ export function App() {
   const [cloud, setCloud] = useState<CloudWorkspace>()
   const [preparedMerge, setPreparedMerge] = useState<PreparedMerge>()
   const [generation, setGeneration] = useState(0)
-  const [startup, setStartup] = useState<{ userId: string; checking: boolean; message: string }>()
+  const [startup, setStartup] = useState<{ userId: string; checking: boolean; message: string; waitingForSafe?: boolean }>()
+  const [safeOpenAttempt, setSafeOpenAttempt] = useState(0)
   const workspaceShown = useRef(false)
+  const deviceChoice = useRef<string | undefined>(undefined)
   const opening = useRef(0)
   const switchGuard = useRef<() => string | undefined>(() => '')
   const signedInId = account.state.status === 'signed-in' ? account.state.session.user.id : undefined
   useEffect(() => {
-    if (!signedInId || cloud || surface.id === 'tutorial-preview' || surface.id === 'landing-preview') return
+    if (!signedInId || cloud || deviceChoice.current === signedInId || surface.id === 'tutorial-preview' || surface.id === 'landing-preview') return
     const request = ++opening.current
     let cancelled = false
     const before = switchGuard.current()
     if (before === undefined) {
-      setStartup({ userId: signedInId, checking: false, message: 'Finish your current edit, then open your synced account. Your device data is preserved.' })
+      setStartup({ userId: signedInId, checking: false, waitingForSafe: true, message: 'Your account will open when you return to Capture or Today without an unfinished edit. Device data stays preserved.' })
       return
     }
     setStartup({ userId: signedInId, checking: true, message: 'Opening your synced captures…' })
@@ -96,9 +98,10 @@ export function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [signedInId])
+  }, [signedInId, safeOpenAttempt])
   const useDevice = () => {
     opening.current++
+    deviceChoice.current = signedInId
     setPreparedMerge(undefined); setCloud(undefined); setGeneration(value => value + 1)
     if (signedInId) setStartup({ userId: signedInId, checking: false, message: 'Viewing this device’s preserved copy. Use Settings → Data to combine it with your account.' })
   }
@@ -143,6 +146,7 @@ export function App() {
   workspaceShown.current = true
   return <ThreadlineApp key={generation} account={account} cloud={cloud} workspaceSurface={workspaceSurfaceModuleForPath(window.location.pathname)} onOpenAccount={open}
     switchGuard={switchGuard} syncMessage={startup && startup.userId === signedInId ? startup.message : ''} onUseDevice={useDevice}
+    waitingForSafeOpen={!!startup?.waitingForSafe && startup.userId === signedInId} onSafeOpen={() => setSafeOpenAttempt(value => value + 1)}
     mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
@@ -175,12 +179,13 @@ function TutorialPreview() {
   </div></main>
 }
 
-function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge, switchGuard, syncMessage, onUseDevice }: {
+function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergePlan, onPreviewMerge, onConfirmMerge, onCancelMerge, switchGuard, syncMessage, onUseDevice, waitingForSafeOpen, onSafeOpen }: {
   account: ReturnType<typeof useAuthState>; cloud?: CloudWorkspace; onOpenAccount: (local?: AccountData) => Promise<void>
   workspaceSurface: ReturnType<typeof workspaceSurfaceModuleForPath>
   mergePlan?: AccountMergePlan; onPreviewMerge: (local: AccountData, choices: AccountMergeChoices) => Promise<AccountMergePlan>
   onConfirmMerge: (currentLocal: AccountData) => Promise<void>; onCancelMerge: () => void
   switchGuard: { current: () => string | undefined }; syncMessage: string; onUseDevice: () => void
+  waitingForSafeOpen: boolean; onSafeOpen: () => void
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
@@ -207,7 +212,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       if (localStorage.getItem('thoughtflow-state-v1') === null) return 0
       const local = loadStateResult()
       if (local.error) return -1
-      return deviceOnlyCaptureCount(accountData(local.state, readSettings(localStorage), readDelivery(localStorage)), cloud.data)
+      const data = accountData(local.state, readSettings(localStorage), readDelivery(localStorage))
+      return deviceOnlyCaptureCount(data, cloud.data) || (deviceCopyDiffers(data, cloud.data) ? -2 : 0)
     } catch { return -1 }
   })
   const [mergeChoices, setMergeChoices] = useState<AccountMergeChoices>({ settings: 'account', digest: 'account' })
@@ -284,6 +290,9 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     return JSON.stringify([latestState.current, latestPreferences.current, latestDigest.current])
   }
   switchGuard.current = () => refreshGuard.current()
+  useEffect(() => {
+    if (waitingForSafeOpen && !cloud && refreshGuard.current() !== undefined) onSafeOpen()
+  }, [waitingForSafeOpen, view, draft, selectedObjectId, accountBusy, cloudStatus, saveError])
   useEffect(() => {
     if (!cloud) return
     let disposed = false
@@ -384,7 +393,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         {mergePlan && <div className="merge-preview" role="status"><p><strong>Ready to add from this device:</strong> {mergePlan.preview.added.thoughts} thoughts, {mergePlan.preview.added.canvases} canvases, {mergePlan.preview.added.events} calendar events.</p><p>{mergePlan.preview.duplicates} identical records will stay single. Nothing has been written yet.</p><div className="settings-actions"><button className="secondary" onClick={onCancelMerge}>Cancel preview</button><button className="primary" disabled={accountBusy || captureBusy} onClick={() => void confirmMerge()}>Confirm and save combined data</button></div></div>}
       </div>}
     </>}
-    {cloud && <><p>Digest preference is saved with your account. Account mode currently offers the digest on demand; scheduled notices remain local-mode only.</p><label><input type="checkbox" checked={digest!.enabled} onChange={event => setDigest(setDeliveryEnabled(digest!, event.target.checked, new Date()))} />Enable 7 AM in-app digest preference</label><button className="secondary" disabled={canvasTextSaveQueue.hasPending() || cloudStatus === 'Saving account changes…'} onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) onUseDevice() }}>Return to this device’s local data</button></>}
+    {cloud && <><p>Digest preference is saved with your account. Account mode currently offers the digest on demand; scheduled notices remain local-mode only.</p><label><input type="checkbox" checked={digest!.enabled} onChange={event => setDigest(setDeliveryEnabled(digest!, event.target.checked, new Date()))} />Enable 7 AM in-app digest preference</label><button className="secondary" disabled={cloudStatus === 'Saving account changes…'} onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) onUseDevice() }}>Return to this device’s local data</button></>}
     {accountMessage && <p role="alert">{accountMessage}</p>}
   </section>
   const downloadBackup = () => {
@@ -465,7 +474,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (next === 'canvas') setBankFocusTarget(null)
     setView(next)
   }
-  if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => window.location.reload()}>Return to local data</button></main>
+  if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) onUseDevice() }}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
@@ -485,7 +494,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       </section>}
       {installMessage && <p className="storage-alert" role="status">{installMessage}</p>}
       {cloud && <div className="sync-status" role="status"><p>{refreshError || (cloudStatus === 'Synced with your account.' && refreshGuard.current() === undefined ? 'Saved to account. Updates resume when you finish editing.' : cloudStatus)} · {state.objects.length} saved thoughts</p>
-        {deviceOnly !== 0 && <details><summary>{deviceOnly < 0 ? 'Device backup needs attention' : `${deviceOnly} device-only capture${deviceOnly === 1 ? '' : 's'} preserved`}</summary><p>Your local copy has not been deleted. To review or combine it, open Settings → Data → Return to this device’s local data.</p></details>}
+        {deviceOnly !== 0 && <details><summary>{deviceOnly === -2 ? 'Different device copy preserved' : deviceOnly < 0 ? 'Device backup needs attention' : `${deviceOnly} device-only capture${deviceOnly === 1 ? '' : 's'} preserved`}</summary><p>Your local copy has not been deleted. To review or combine it, open Settings → Data → Return to this device’s local data.</p></details>}
       </div>}
       {!cloud && account.state.status === 'signed-in' && <section className="storage-alert" aria-label="Account sync"><p>{syncMessage || 'These captures are saved only on this device.'}</p>
         <button className="primary" disabled={!accountAdapter || accountBusy || captureBusy || !!saveError || !!initial.error} onClick={() => void openAccount(true)}>Sync this device’s {state.objects.length} saved thoughts</button>
