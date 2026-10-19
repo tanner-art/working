@@ -52,6 +52,15 @@ export function serializeState(state: AppState): PersistedState {
   const session = state.model && sessions.get(state.model)
   return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
 }
+/** Anchor a multi-step transition to its validated evidence without losing local
+ * session ownership. Carry the original expected storage value, never refresh it:
+ * a concurrent write must still make the eventual save fail closed. */
+export function checkpointState(state: AppState): AppState {
+  const session = state.model && sessions.get(state.model)
+  const model = serializeState(state)
+  if (session) sessions.set(model, { model: structuredClone(model), raw: session.raw })
+  return { ...state, model }
+}
 export function saveState(state: AppState): string | undefined {
   if (!isAppState(state)) return 'Changes could not be saved because their format is invalid.'
   try {
