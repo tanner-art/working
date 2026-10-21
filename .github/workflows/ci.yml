@@ -6,18 +6,9 @@ on:
 
 jobs:
   verify:
-    # Match the pinned Python build; ubuntu-latest can advance independently.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Registry canaries verify an exact base commit from before the PR.
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version-file: .github/python-version
-          cache: pip
-          cache-dependency-path: .github/requirements-factory-ci.txt
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -26,15 +17,4 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Install deterministic Factory Python dependencies
-        run: >-
-          python3 -m pip install
-          --disable-pip-version-check
-          --require-hashes
-          --no-deps
-          -r .github/requirements-factory-ci.txt
-      - name: Test Factory registry, scheduler, and live observer
-        run: python3 -m unittest discover -s scripts/factory_registry -p 'test_*.py' -v
-      - name: Test legacy Factory runner
-        run: python3 -m unittest discover -s scripts/runner -p 'test_*.py' -v
       - run: pnpm check

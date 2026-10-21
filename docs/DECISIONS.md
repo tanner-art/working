@@ -107,32 +107,6 @@ TASK-035 (local-to-account migration/import), TASK-036 (sign-out/offline behavio
 (privacy/export/delete settings). TASK-030's original combined scope is superseded by
 TASK-034–037; see AUTH_DATA_PLAN.md.
 
-### D-012: Portable Factory Registry and Central Lease Authority
-
-Ratified by the 2026-09-24 Factory migration direction and implemented as a non-live foundation in PR #150.
-
-**Decision.** The Factory registry boundary is backend-neutral. SQLite in WAL mode is the local migration/control-plane adapter, not a permanent architectural dependency. A future Postgres, Supabase, or other adapter must preserve the same contract and pass the same contract tests. After controlled cutover, the registry is the operational source of truth; dashboards and other views are projections and cannot own scheduling state.
-
-Active work is represented by transactional leases. The registry centrally enforces at most one live lease per package, at most one per worker, and no more than three active parent packages globally. `ACTIVE` cannot be established by a direct status write. The feature lifecycle remains `ON DECK → READY → ACTIVE → VERIFY / REVIEW → BLOCKED → DONE`.
-
-**Current authority boundary.** The installed runner remains the live dispatcher until a separately reviewed controlled restart. Merged registry code alone has no authority to claim work, launch processes, mutate the legacy queue, or restart services.
-
-### D-013: Capability-Based, Provider-Neutral Factory Dispatch
-
-Ratified by the 2026-09-24 Factory migration direction and implemented without live authority in PRs #150–152.
-
-**Decision.** Workers are selected by capabilities, approved lanes, availability, capacity, dependencies, package priority, and readiness age (`ready_at`). Agent, provider, and model names are diagnostic metadata and cannot establish permanent roles, eligibility, or ordering. Orchestra coordinates and adjudicates and cannot claim routine implementation work.
-
-Missing, stale, future, invalid, or unknown usage is constrained. Dispatch must preserve at least 20% Orchestra capacity. Exact provider/account-to-capacity-scope mapping and the treatment of any economy/slow class remain open owner decisions; code must not infer them from provider identity.
-
-### D-014: Preservation and Shadow Evidence Precede Factory Cutover
-
-Ratified by the 2026-09-24 Factory migration direction and implemented as preservation, shadow, and observation foundations in PRs #150–152.
-
-**Decision.** Preserved worktrees and branches are evidence. Migration must not delete, reset, rebase, clean, consolidate, rename, or opportunistically refactor them. Shadow dispatch must run against a consistent projection of live state, record the assignment it would make, compare it with observable legacy behavior, and perform no launch or mutation. Unresolved provenance, reconciliation, capacity, or comparison evidence fails the gate.
-
-Passing shadow evidence does not itself grant live authority. Cutover requires the documented acceptance evidence, independent ASSURANCE review, rollback procedure, and a separately reviewed controlled restart. An implementer cannot be the sole reviewer.
-
 ### D-015: Bounded Production Risk Precedes Speculative Expansion
 
 Ratified by the 2026-09-24 Factory governance direction and recorded by RISK-003.
@@ -141,25 +115,9 @@ Ratified by the 2026-09-24 Factory governance direction and recorded by RISK-003
 
 This ordering rule does not authorize unassigned work, broaden a package, or bypass product-owner decisions. It governs which already-bounded work should be dispatched first.
 
-### D-016: Staged, Provider-Neutral Factory Capacity
+### Factory decisions D-012–014 and D-016
 
-Ratified by the product owner on 2026-09-24.
-
-**Decision.** Percentage-observed workers are normal below 90%, caution from
-90% to below 95%, checkpoint from 95% to below 98%, and hard stop at 98%.
-Caution avoids substantial or uncertain parents. Checkpoint permits healthy
-bounded work to reach a clean commit/push boundary and prevents another
-substantial or uncertain parent from starting. Crossing 95% alone never
-interrupts healthy active work. Hard stop permits only emergency recovery or a
-very small bounded ASSURANCE package.
-
-Packages carry provider-neutral size and risk classification. Provider/model
-identity never substitutes for that data. Workers without provider percentage
-telemetry are eligible from fresh healthy service, authentication, heartbeat,
-and successful live-invocation evidence when no actual rate-limit, exhaustion,
-throttling, or capacity-launch failure is present. No percentage ceiling is
-inferred. Missing or stale percentage scopes remain constrained, and Orchestra
-retains at least 20% in every declared percentage scope.
+Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/DECISIONS.md). These are engineering controls, not changes to product architecture.
 
 ## Open Decisions
 
@@ -178,16 +136,6 @@ How may a user pin work so automatic recalculation cannot move it?
 ### OD-007: Semantic Object Membership Cardinality
 May a semantic object belong to multiple projects or contexts, or only one parent? Raised by the `wip/pre-orchestration` salvage audit (docs/ARCHIVE_SALVAGE_AUDIT.md), which found a single-parent `belongs_to` relationship modeled without this being a ratified decision. This gates how the Relationship model's project-containment shape is implemented.
 
-### OD-008: Factory Cutover, Archive Visibility, and Retention
-When exactly does the registry replace GitHub labels and the local queue as live dispatch truth? Should preserved historical worktrees appear in the default queue or a separate archive? What retention periods apply to task events, attempt logs, failure details, evidence, and usage observations? Until approval, the installed runner remains authoritative, preserved work remains visible to reconciliation, and records are retained.
+### Factory open decisions OD-008–011
 
-### OD-009: Factory Dashboard Write Authority
-Will one owner or multiple administrators have dashboard write access, and which roles may create, reprioritize, pause, reassign, dependency-lock, or unblock packages? Until approval, dashboards remain read-only projections.
-
-### OD-010: Factory Restart and Merge Controls
-Which initial worker capabilities and lane permissions should be configured as data, and may any role besides the owner merge to main? The initial Agent A, Agent B, and Claude mapping is configuration rather than identity semantics. The existing no-agent-main-merge rule remains in force until an explicit decision changes it.
-
-### OD-011: Factory Capacity Source Mapping
-Which real provider/account window maps to each declared Orchestra percentage
-scope when accounts are shared or changed? Missing, stale, future, malformed,
-unknown, or unmapped percentage telemetry remains constrained.
+Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/DECISIONS.md). No source extraction grants deployment, restart or main-merge authority.

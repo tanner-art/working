@@ -51,15 +51,15 @@ The September 23 runner-hardening merge series is also present on main. The inst
 
 Each numbered product area is an epic. The list is retained as the September 22 planning record rather than as current dispatch authority. Deliver one small reviewed PR at a time and retain the confirmation, provenance, and recovery boundaries in the detailed priority document.
 
-## Current dispatch order
+## Historical Factory dispatch order (moved to separate repository)
 
 - Factory control-plane hardening is now the priority milestone. The
-  [September 25 reconciliation](docs/factory/CONTROL_PLANE_HARDENING_RECONCILIATION_2026-09-25.md)
+  [September 25 reconciliation](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/factory/CONTROL_PLANE_HARDENING_RECONCILIATION_2026-09-25.md)
   defines 10 pre-canary repair packages and one post-canary portfolio package.
   Committing that plan does not make any repair or product package runnable.
 - The owner-authorized September 26 focused repair is a supervised Registry
   bounded-pilot sequence (one or two implementation/review pairs), documented
-  in [FACTORY_USABLE_RELEASE.md](docs/factory/FACTORY_USABLE_RELEASE.md). It
+  in [FACTORY_USABLE_RELEASE.md](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/factory/FACTORY_USABLE_RELEASE.md). It
   preserves the CP definitions and does not mark them complete or authorize
   unattended eight-hour operation.
 - Broad product development remains paused until the control-plane repair
@@ -67,12 +67,12 @@ Each numbered product area is an epic. The list is retained as the September 22 
   canary.
 - Open production release checks and other bounded production-relevant risks take precedence over speculative platform work.
 - RISK-003 remains preserved in
-  [its reconciliation record](docs/factory/TASK-RISK-GOVERNANCE-RECONCILIATION.md),
+  [its reconciliation record](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/factory/TASK-RISK-GOVERNANCE-RECONCILIATION.md),
   but it is not current dispatch authority for this milestone.
 
 **Dispatch principle:** A known production-relevant risk with a small, bounded remediation outranks speculative platform expansion.
 
-## Separate activation and operations
+## Historical activation and operations
 
 - The installed runner remains the live dispatcher. The registry, scheduler, and observer merged in PRs #150–152 are migration/control-plane components with no live launch, claim, restart, or cutover authority yet.
 - The latest merged live-observation evidence found updating idle parent heartbeats, no READY legacy queue entries, stale Agent A and Agent B usage, and no Claude usage record. All implementation workers were therefore constrained at that observation. This evidence is time-bound and must not be treated as a permanent worker identity or availability rule.

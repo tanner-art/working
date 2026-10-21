@@ -3,14 +3,12 @@ import { describe, expect, it } from 'vitest'
 import { createAppSurfaceRegistry, surfaceModulesFromDiscoveredModules, workspaceSurfaceModuleForPath, type WorkspaceSurfaceProps } from '../appSurfaceRegistry'
 import { WorkspaceSurfaceRenderer } from './surfaceRendering'
 import type { AppState } from '../domain'
-import { surface as dashboardSurface } from './dashboard.surface'
 import { surface as landingPreviewSurface } from './landing-preview.surface'
 import { surface as settingsSurface } from './settings.surface'
 import { surface as tutorialPreviewSurface } from './tutorial-preview.surface'
 
 const state = { objects: [], canvas: [] } as AppState
 const builtinModules = {
-  './dashboard.surface.ts': { surface: dashboardSurface },
   './landing-preview.surface.ts': { surface: landingPreviewSurface },
   './settings.surface.ts': { surface: settingsSurface },
   './tutorial-preview.surface.ts': { surface: tutorialPreviewSurface },
@@ -37,7 +35,6 @@ describe('workspace surface rendering', () => {
     }
     const registry = createAppSurfaceRegistry(modules)
     expect(registry).toEqual(expect.arrayContaining([
-      dashboardSurface,
       landingPreviewSurface,
       settingsSurface,
       tutorialPreviewSurface,
@@ -52,7 +49,7 @@ describe('workspace surface rendering', () => {
     expect(received!.state.objects[0].id).toBe('fixture')
   })
 
-  it('rejects malformed rendered modules and never resolves previews or factory projections', () => {
+  it('rejects malformed rendered modules and never resolves previews', () => {
     expect(() => createAppSurfaceRegistry({ './bad.tsx': { surface: { id: 'bad', path: '/bad', persistence: 'workspace' }, WorkspaceSurface: 'not-a-component' } })).toThrow('Malformed workspace surface module')
     expect(() => createAppSurfaceRegistry({
       './schedule.tsx': { surface: { id: 'schedule', path: '/schedule', persistence: 'workspace' }, WorkspaceSurface: () => null },
@@ -60,11 +57,9 @@ describe('workspace surface rendering', () => {
     })).toThrow('Duplicate surface id schedule')
     const modules = {
       './preview.tsx': { surface: { id: 'preview', path: '/preview', persistence: 'none' as const } },
-      './dashboard.tsx': { surface: { id: 'dashboard', path: '/dashboard', persistence: 'factory-projection' as const } },
     }
     const registry = createAppSurfaceRegistry(modules)
     expect(workspaceSurfaceModuleForPath(modules, registry, '/preview')).toBeUndefined()
-    expect(workspaceSurfaceModuleForPath(modules, registry, '/dashboard')).toBeUndefined()
   })
 
   it('only selects TSX modules that explicitly declare a surface export', () => {

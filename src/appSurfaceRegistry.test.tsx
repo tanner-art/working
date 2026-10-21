@@ -13,13 +13,13 @@ const moduleFor = (id: string, path: string, persistence = 'none') => ({
 describe('application surface registry', () => {
   it('discovers every existing hosted surface from separate modules', () => {
     expect(appSurfaceRegistry).toEqual(expect.arrayContaining([
-      { id: 'dashboard', path: '/dashboard', persistence: 'factory-projection' },
       { id: 'settings', path: '/settings', persistence: 'workspace' },
       { id: 'landing-preview', path: '/preview/landing', persistence: 'none' },
       { id: 'tutorial-preview', path: '/preview/tutorial', persistence: 'none' },
     ]))
     const surfaceIds = appSurfaceRegistry.map(surface => surface.id)
     const surfacePaths = appSurfaceRegistry.map(surface => surface.path)
+    expect(surfacePaths).not.toContain('/dashboard')
     expect(new Set(surfaceIds).size).toBe(surfaceIds.length)
     expect(new Set(surfacePaths).size).toBe(surfacePaths.length)
   })
