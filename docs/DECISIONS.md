@@ -117,7 +117,7 @@ This ordering rule does not authorize unassigned work, broaden a package, or byp
 
 ### Factory decisions D-012–014 and D-016
 
-Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/6cf93f2b1025cbbf7de981f8ed6125b5d3af77fa/docs/DECISIONS.md). These are engineering controls, not changes to product architecture.
+Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/c3e38fcc0717b46c2390cabaeab1195a24cbf74d/docs/DECISIONS.md). These are engineering controls, not changes to product architecture.
 
 ## Open Decisions
 
@@ -138,4 +138,4 @@ May a semantic object belong to multiple projects or contexts, or only one paren
 
 ### Factory open decisions OD-008–011
 
-Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/6cf93f2b1025cbbf7de981f8ed6125b5d3af77fa/docs/DECISIONS.md). No source extraction grants deployment, restart or main-merge authority.
+Preserved in the [Factory decision log](https://github.com/tanner-art/threadline-factory/blob/c3e38fcc0717b46c2390cabaeab1195a24cbf74d/docs/DECISIONS.md). No source extraction grants deployment, restart or main-merge authority.

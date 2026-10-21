@@ -4,6 +4,7 @@ import entry from './main.tsx?raw'
 import app from './App.tsx?raw'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { appSurfaceRegistry, appSurfaceDefinitionForPath } from './appRoutes'
+import removedFactoryStyleRoots from './testSupport/removedFactoryStyleRoots.json'
 const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
 
 describe('product repository boundary', () => {
@@ -24,10 +25,12 @@ describe('product repository boundary', () => {
     expect(styles).not.toMatch(/\.factory-shell|\.factory-auth|\.public-dashboard/)
   })
   it('has no product consumers of removed dashboard-only class names', () => {
-    const removed = /\b(metric-card|panel-heading|task-row|task-status|dashboard-panel|agent-card|ship-list)\b/
+    // All selector roots removed from efd2dba styles.css, not just the seven
+    // generic-looking legacy dashboard roots called out in the first review.
+    const removed = new RegExp('\\b(' + removedFactoryStyleRoots.join('|') + ')\\b')
     const sourceRoot = new URL('./', import.meta.url)
     for (const path of readdirSync(sourceRoot, { recursive: true })) {
-      if (!/\.(ts|tsx)$/.test(path) || /\.(test|spec)\./.test(path)) continue
+      if (!/\.(ts|tsx|js|jsx)$/.test(path) || /\.(test|spec)\./.test(path)) continue
       expect(readFileSync(new URL(path, sourceRoot), 'utf8'), path).not.toMatch(removed)
     }
   })
