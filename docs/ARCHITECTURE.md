@@ -80,7 +80,7 @@ Persistence must support stable references, preserved source revisions, and cons
 
 ## Engineering Factory control plane
 
-The engineering control plane is maintained separately in [threadline-factory](https://github.com/tanner-art/threadline-factory/blob/codex/factory-extraction-20261021/docs/ARCHITECTURE.md). It does not own the product semantic model or user data. See [the separation and cutover boundary](FACTORY_SEPARATION.md); source extraction does not install or activate a release.
+The engineering control plane is maintained separately in [threadline-factory](https://github.com/tanner-art/threadline-factory/blob/6cf93f2b1025cbbf7de981f8ed6125b5d3af77fa/docs/ARCHITECTURE.md). It does not own the product semantic model or user data. See [the separation and cutover boundary](FACTORY_SEPARATION.md); source extraction does not install or activate a release.
 
 ## Open product decisions
 
