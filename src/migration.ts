@@ -3,6 +3,7 @@ import { isGroupingReviewState } from './groupingProposal'
 import type { ActionPriority, AppState, CommitmentScheduleAudit, ConfirmationGesture, HistoryEvent, Interpretation, PersistedState, ResolvedReminderInstruction, SemanticObject, StagedAction, ThoughtObject } from './domain'
 import { isCanvasViewport } from './canvasDocument'
 import { bankFromLegacy, isCanvasBank } from './canvasBank'
+import { isCaptureLibrary } from './captureLibrary'
 import { isAppState } from './store'
 import { jsonEqual as equal } from './jsonEquality'
 
@@ -254,7 +255,8 @@ function projectModel(model: PersistedState): AppState {
     return item
   })
   return { objects, canvas: copy(model.canvas), ...(model.canvasViewport === undefined ? {} : { canvasViewport: copy(model.canvasViewport) }),
-    canvasBank: copy(model.canvasBank ?? bankFromLegacy(model.canvas, model.canvasViewport)), model: copy(model) }
+    canvasBank: copy(model.canvasBank ?? bankFromLegacy(model.canvas, model.canvasViewport)),
+    ...(model.captureLibrary === undefined ? {} : { captureLibrary: copy(model.captureLibrary) }), model: copy(model) }
 }
 
 /** Append evidence versions on UI changes; source edits and destructive removals fail closed. */
@@ -264,6 +266,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
     const model = migrateLegacyState({ objects: state.objects, canvas: state.canvas })
     if (state.canvasViewport !== undefined) model.canvasViewport = copy(state.canvasViewport)
     model.canvasBank = copy(state.canvasBank ?? bankFromLegacy(state.canvas, state.canvasViewport))
+    if (state.captureLibrary !== undefined) model.captureLibrary = copy(state.captureLibrary)
     return model
   }
   if (!isPersistedState(state.model)) return fail()
@@ -319,6 +322,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
   }
   model.legacyUiIds = state.objects.map(o => o.id)
   model.canvasBank = copy(nextBank)
+  if (state.captureLibrary !== undefined) model.captureLibrary = copy(state.captureLibrary)
   if (state.temporalHistory !== undefined) {
     const previousHistory = model.temporalHistory ?? []
     if (equal(state.temporalHistory.slice(0, previousHistory.length), previousHistory)) model.temporalHistory = copy(state.temporalHistory)
@@ -384,7 +388,8 @@ export function isPersistedState(value: unknown): value is PersistedState {
   try {
     if (!value || typeof value !== 'object') return false
     const m = value as PersistedState
-    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'reminderInstructions', 'stagedActions', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'temporalHistory', 'groupingReview'].includes(key))) return false
+    if (Object.keys(m).some(key => !['schemaVersion', 'captures', 'sourceCorrections', 'interpretations', 'semanticObjects', 'reminderInstructions', 'stagedActions', 'calendarEvents', 'relationships', 'legacyUiIds', 'canvas', 'canvasViewport', 'canvasBank', 'captureLibrary', 'temporalHistory', 'groupingReview'].includes(key))) return false
+    if (m.captureLibrary !== undefined && !isCaptureLibrary(m.captureLibrary, m.legacyUiIds)) return false
     if (m.canvasViewport !== undefined && !isCanvasViewport(m.canvasViewport)) return false
     if (m.canvasBank !== undefined && !isCanvasBank(m.canvasBank)) return false
     if (m.schemaVersion !== 2 || ![m.captures, m.interpretations, m.semanticObjects, m.calendarEvents,

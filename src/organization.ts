@@ -11,8 +11,13 @@ export interface FolderRecord {
   parentId: string | null
   createdAt: string
   updatedAt: string
+  color?: FolderColor
+  emoji?: string
   tombstone?: OrganizationTombstone
 }
+
+export const folderColors = ['slate', 'blue', 'green', 'amber', 'rose', 'purple'] as const
+export type FolderColor = typeof folderColors[number]
 
 /** Metadata for a saved canvas. Canvas content and immutable capture evidence remain in their own stores. */
 export interface CanvasFileRecord {
@@ -98,8 +103,10 @@ export function validateOrganizationState(value: unknown): OrganizationState {
   const validTombstone = (value: OrganizationTombstone | undefined) => !value ||
     Boolean(exactKeys(value, ['operationId', 'deletedAt', 'deletedBy', 'rootId']) && value.operationId && validDate(value.deletedAt) && value.deletedBy === 'account-owner-confirmed' && value.rootId)
   for (const folder of state.folders) {
-    if (!exactKeys(folder, ['id', 'name', 'parentId', 'createdAt', 'updatedAt', 'tombstone']) ||
+    if (!exactKeys(folder, ['id', 'name', 'parentId', 'createdAt', 'updatedAt', 'tombstone', 'color', 'emoji']) ||
         !folder.id || normalizedName(folder.name) !== folder.name || !folder.name || folder.name.length > 120 ||
+        (folder.color !== undefined && !folderColors.includes(folder.color)) ||
+        (folder.emoji !== undefined && (typeof folder.emoji !== 'string' || folder.emoji.trim() !== folder.emoji || [...folder.emoji].length > 16)) ||
         !validDate(folder.createdAt) || !validDate(folder.updatedAt) || (folder.parentId !== null && !folderIds.has(folder.parentId)) ||
         !validTombstone(folder.tombstone)) throw Error('Organization data is invalid.')
     if (!folder.tombstone) {
@@ -180,6 +187,17 @@ export function moveFolder(state: OrganizationState, input: { folderId: string; 
   }
   ensureSiblingNameAvailable(current, folder.name, input.parentId, folder.id)
   return validateOrganizationState({ ...current, folders: current.folders.map(item => item.id === folder.id ? { ...item, parentId: input.parentId, updatedAt: input.at } : item) })
+}
+
+/** Presentation and names change independently of folder identity and its contents. */
+export function editFolder(state: OrganizationState, input: { folderId: string; name: string; color?: FolderColor; emoji?: string; at: string }): OrganizationState {
+  const current = validateOrganizationState(state)
+  const folder = activeFolder(current, input.folderId)
+  const name = normalizedName(input.name)
+  requireDate(input.at)
+  ensureSiblingNameAvailable(current, name, folder.parentId, folder.id)
+  return validateOrganizationState({ ...current, folders: current.folders.map(item => item.id === folder.id
+    ? { ...item, name, color: input.color, emoji: input.emoji?.trim() || undefined, updatedAt: input.at } : item) })
 }
 
 export function createCanvasFile(state: OrganizationState, input: { id: string; title: string; folderId?: string | null; captureIds?: string[]; at: string }): OrganizationState {
