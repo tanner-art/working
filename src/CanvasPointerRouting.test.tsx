@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isValidElement, type ReactElement, type PointerEvent } from 'react'
 import { Canvas } from './Canvas'
 import type { CanvasViewport } from './domain'
+import { canvasSize } from './canvasGeometry'
 
 const hooks = vi.hoisted(() => ({ stateIndex: 0, tool: 'select' }))
 vi.mock('react', async importOriginal => {
@@ -10,6 +11,7 @@ vi.mock('react', async importOriginal => {
     // Invoke the real component handlers without rendering between samples. This
     // deliberately exercises event batching / stale render closures, not a DOM.
     useEffect: () => undefined,
+    useMemo: (calculate: () => unknown) => calculate(),
     useRef: (current: unknown) => ({ current }),
     useState: (initial: unknown) => {
       const index = hooks.stateIndex++
@@ -25,7 +27,7 @@ function find(tree: unknown, matches: (element: Element) => boolean): Element | 
   return matches(tree) ? tree : find(tree.props.children, matches)
 }
 const event = (pointerId: number, x: number, y = 30) => ({
-  pointerId, clientX: x, clientY: y, button: 0,
+  pointerId, clientX: x, clientY: y, button: 0, pointerType: 'touch',
   preventDefault: vi.fn(), stopPropagation: vi.fn(), currentTarget: { setPointerCapture: vi.fn() },
 }) as unknown as PointerEvent
 function setup() {
@@ -39,21 +41,31 @@ function setup() {
   const surface = find(tree, element => element.props.className === 'canvas')!
   const textarea = find(tree, element => element.type === 'textarea')!
   const send = (name: string, sample: PointerEvent, target = surface) => (target.props[name] as (event: PointerEvent) => void)(sample)
-  return { viewport, commit, text, send, textarea }
+  return { viewport, commit, text, send, textarea, tree }
 }
 beforeEach(() => {
   hooks.stateIndex = 0; hooks.tool = 'select'
-  vi.stubGlobal('window', { setTimeout: vi.fn(() => 1), clearTimeout: vi.fn() })
+  vi.stubGlobal('window', { setTimeout: vi.fn(() => 1), clearTimeout: vi.fn(), requestAnimationFrame: vi.fn(() => 1), cancelAnimationFrame: vi.fn() })
 })
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Canvas pointer routing (synthetic component handlers)', () => {
+  it('creates a content-sized node through the actual Text toolbar action', () => {
+    const { tree, commit } = setup()
+    const addText = find(tree, element => element.type === 'button' && element.props.children === '+ Text')!
+    ;(addText.props.onClick as () => void)()
+    const node = commit.mock.calls[0][0].at(-1)
+    expect(node.autoSize).toBe(true)
+    expect(canvasSize({ ...node, text: 'Dad' })).toEqual({ width: 58, height: 42 })
+    expect(canvasSize({ ...node, text: 'Repair Foreman' }).width).toBeGreaterThan(56)
+  })
   it('keeps ordinary text editing native but accepts a second finger over text', () => {
     const { send, textarea, viewport, commit, text } = setup()
     const ordinary = event(10, 20)
     send('onPointerDown', ordinary, textarea)
     expect(ordinary.preventDefault).not.toHaveBeenCalled()
     expect(ordinary.currentTarget.setPointerCapture).not.toHaveBeenCalled()
+    send('onPointerUp', ordinary)
     send('onPointerDown', event(1, 20))
     const second = event(2, 100)
     send('onPointerDown', second, textarea)
@@ -66,6 +78,19 @@ describe('Canvas pointer routing (synthetic component handlers)', () => {
     send('onPointerMove', event(1, 50))
     send('onPointerUp', event(1, 50))
     expect(viewport.mock.calls.at(-1)![0]).toEqual({ ...zoomed, x: zoomed.x + 30 })
+    expect(commit).not.toHaveBeenCalled()
+    expect(text).not.toHaveBeenCalled()
+  })
+
+  it('pinches when both fingers start over text without editing or moving the block', () => {
+    const { send, textarea, viewport, commit, text } = setup()
+    const first = event(1, 20)
+    send('onPointerDown', first, textarea)
+    expect(first.preventDefault).not.toHaveBeenCalled()
+    send('onPointerDown', event(2, 100), textarea)
+    send('onPointerMove', event(2, 260))
+    send('onPointerUp', event(2, 260)); send('onPointerUp', event(1, 20))
+    expect(viewport.mock.calls.at(-1)![0].scale).toBe(3)
     expect(commit).not.toHaveBeenCalled()
     expect(text).not.toHaveBeenCalled()
   })

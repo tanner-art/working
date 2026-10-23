@@ -17,6 +17,19 @@
 .search-coming-soon h2 { margin: 0 0 6px; font-size: 22px; }
 .search-coming-soon p { margin: 0; color: #5c6d60; }
 
+/* Keep the visible handle tiny without requiring precision finger input. */
+.canvas-page > .canvas { overflow: clip; } /* Focus must not create a second, hidden scroll offset beside viewport pan. */
+.canvas-node .canvas-drag-handle {
+  position: absolute; left: -22px; top: -22px; width: 44px; height: 44px;
+  min-height: 44px; margin: 0; padding: 0; justify-content: center; align-items: center;
+  transform-origin: center; z-index: 3;
+}
+.canvas-node .canvas-drag-handle span { width: 7px; height: 7px; background: #839879; box-shadow: 0 0 0 2px #fffefa; }
+.canvas-node.shape-text { padding: 8px 12px; border-radius: 10px; box-shadow: 0 2px 5px #2331280c; }
+.canvas-node.shape-text textarea { font-size: 16px; line-height: 24px; padding: 0; margin: 0; }
+.canvas-node .canvas-resize-handle { right: -22px; bottom: -22px; border: 0; background: transparent; font-size: 0; }
+.canvas-node .canvas-resize-handle::after { content: ''; display: block; width: 7px; height: 7px; margin: auto; border-radius: 50%; background: #718966; box-shadow: 0 0 0 2px #fffefa; }
+
 @media (max-width: 720px), (pointer: coarse) {
   /* Editable controls below 16px trigger focus zoom in mobile Safari. Keep
      native pinch zoom available; larger capture/title typography stays large. */

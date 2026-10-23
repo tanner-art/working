@@ -3,7 +3,8 @@ import type { AppState, CanvasElement } from './domain'
 import { addCanvas, bankFromLegacy, createCanvasRecord, LEGACY_CANVAS_ID, renameCanvas } from './canvasBank'
 import { createCanvasRepository } from './canvasRepository'
 import { createCanvasSession } from './canvasSession'
-import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
+import { DEFAULT_CANVAS_VIEWPORT, newCanvasElement } from './canvasDocument'
+import { canvasSize } from './canvasGeometry'
 import { legacyUiProjection, migrateLegacyState } from './migration'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { moveCanvasNode } from './canvasGroups'
@@ -38,6 +39,19 @@ function open(canvasId = LEGACY_CANVAS_ID) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Canvas Bank repository and editing lifecycle', () => {
+  it('round-trips compact text and expanded zoom without altering the legacy mirror', () => {
+    storage({ objects: [], canvas: elements })
+    const workspace = open()
+    const node = { ...newCanvasElement('text', 100, 100), text: 'Dad' }
+    workspace.session.commit([...workspace.repository.read().elements, node])
+    workspace.session.setViewport({ x: 5, y: 6, scale: 4 })
+    expect(workspace.error).toBeUndefined()
+    const reloaded = open()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.repository.read().viewport.scale).toBe(4)
+    expect(canvasSize(reloaded.repository.read().elements.at(-1)!)).toEqual({ width: 58, height: 42 })
+    expect(reloaded.state.canvas).toEqual(elements)
+  })
   it.each(['v1', 'v2'])('projects a lossless %s migration without writing during read', version => {
     const old = { objects: [], canvas: elements }
     const data = version === 'v1' ? old : migrateLegacyState(old)

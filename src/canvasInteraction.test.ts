@@ -90,7 +90,7 @@ describe('canvas interaction bridge', () => {
     const originalLocalMidpoint = { x: 170, y: 130 }
     const world = { x: (originalLocalMidpoint.x - viewport.x) / viewport.scale, y: (originalLocalMidpoint.y - viewport.y) / viewport.scale }
 
-    expect(preview.scale).toBeCloseTo(1.6)
+    expect(preview.scale).toBeCloseTo(1.7)
     expect(preview.x + world.x * preview.scale).toBeCloseTo(180)
     expect(preview.y + world.y * preview.scale).toBeCloseTo(140)
     expect(commitPinchInteraction(interaction)).toEqual(preview)

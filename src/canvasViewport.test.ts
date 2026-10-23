@@ -9,7 +9,7 @@ const nodes: CanvasElement[] = [
 ]
 
 describe('canvasViewport', () => {
-  it.each([0.55, 1, 1.6])('round-trips points at scale %s', scale => {
+  it.each([0.2, 0.55, 1, 1.6, 4])('round-trips points at scale %s', scale => {
     const viewport: CanvasViewport = { x: -40, y: 125, scale }
     const world = { x: -12.5, y: 80.25 }
     const roundTrip = worldPointAtScreen(viewport, screenPointAtWorld(viewport, world))
@@ -23,8 +23,8 @@ describe('canvasViewport', () => {
     const world = worldPointAtScreen(viewport, focal)
     const zoomed = zoomCanvasViewport(viewport, focal, 1.6)
     expect(screenPointAtWorld(zoomed, world)).toEqual(focal)
-    expect(zoomCanvasViewport(viewport, focal, 99).scale).toBe(1.6)
-    expect(zoomCanvasViewport(viewport, focal, 0).scale).toBe(0.55)
+    expect(zoomCanvasViewport(viewport, focal, 99).scale).toBe(4)
+    expect(zoomCanvasViewport(viewport, focal, 0).scale).toBe(0.2)
   })
 
   it('pans by screen delta and normalizes invalid values', () => {
@@ -43,9 +43,9 @@ describe('canvasViewport', () => {
 
   it('fits only selected nodes and returns a stable default for no nodes', () => {
     const fit = fitCanvasViewport(nodes, { width: 400, height: 300 }, 20, new Set(['a']))
-    expect(fit.scale).toBe(1.6)
+    expect(fit.scale).toBe(1.8)
     expect(fit).toEqual(fitCanvasViewport(nodes.filter(item => item.id === 'a'), { width: 400, height: 300 }, 20))
     expect(fitCanvasViewport([{ ...nodes[2] }], { width: 400, height: 300 })).toEqual({ x: 0, y: 0, scale: 1 })
-    expect(fitCanvasViewport(nodes, { width: Infinity, height: NaN }, NaN).scale).toBeGreaterThanOrEqual(.55)
+    expect(fitCanvasViewport(nodes, { width: Infinity, height: NaN }, NaN).scale).toBeGreaterThanOrEqual(.2)
   })
 })

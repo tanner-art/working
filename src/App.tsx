@@ -49,7 +49,8 @@ import { resolveCommitmentInState, type CommitmentDetails } from './commitmentWo
 import { readReviewTargets } from './reviewTargets'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
-import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
+import { createNavigationSwipe, isViewportZoomed, swipeTargetIsBlocked } from './navigationSwipe'
+import { AccountSyncNotice } from './AccountSyncNotice'
 
 type View = 'today' | 'capture' | 'review' | 'organize' | 'plan' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -259,7 +260,22 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   // Keep existing saved start-page choices; the brand provides a Home path from every tab.
   const [view, setView] = useState<View>(() => previewStartView(window.location.search,
     appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
-  const swipeStart = useRef<{ pointerId: number; x: number; y: number; view: View } | null>(null)
+  const swipeGesture = useRef(createNavigationSwipe())
+  const [clearRequested, setClearRequested] = useState(false)
+  const swipeSurface = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const surface = swipeSurface.current
+    if (!surface) return
+    // A non-passive listener reserves only eligible horizontal gestures. Setting
+    // touch-action on an ancestor would also disable nested horizontal lists.
+    const move = (event: TouchEvent) => {
+      if (event.touches.length !== 1) { swipeGesture.current.cancel(); return }
+      const touch = event.touches[0]
+      if (swipeGesture.current.preventHorizontalScroll(touch.clientX, touch.clientY) && event.cancelable) event.preventDefault()
+    }
+    surface.addEventListener('touchmove', move, { passive: false })
+    return () => surface.removeEventListener('touchmove', move)
+  }, [accountValid, !!initial.error, clearRequested])
   const [viewportZoomed, setViewportZoomed] = useState(() => isViewportZoomed(window.visualViewport?.scale))
   useEffect(() => {
     const viewport = window.visualViewport
@@ -267,13 +283,12 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     const updateZoom = () => {
       const zoomed = isViewportZoomed(viewport.scale)
       setViewportZoomed(zoomed)
-      if (zoomed) swipeStart.current = null
+      if (zoomed) swipeGesture.current.cancel()
     }
     viewport.addEventListener('resize', updateZoom)
     updateZoom()
     return () => viewport.removeEventListener('resize', updateZoom)
   }, [])
-  const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
   const [captureError, setCaptureError] = useState<string | undefined>()
@@ -425,7 +440,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   }
   const dataControls = <section className="settings-card"><h2>Data</h2>
     <p>{dataOwnershipLabel(account.state, !!cloud)}</p>
-    <p role="status">{cloudStatus}</p>
+    {cloud ? <AccountSyncNotice status={cloudStatus} error={refreshError} deviceOnly={deviceOnly} count={state.objects.length} details /> : <p role="status">{cloudStatus}</p>}
     {account.state.status === 'signed-in' && <>
       {!accountAdapter && <p role="alert">Account storage is unconfigured. A public table name and a table with account access policies are required.</p>}
       <p>Signing in opens your account automatically. Updates are checked every 15 seconds and when you return to the app; open editors and unsaved changes are never replaced. Your device’s original copy stays preserved. Concurrent saves are rejected rather than overwriting another device.</p>
@@ -538,7 +553,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const navigate = (next: View) => {
     if (!searchHandoffGuards.canLeave()) { setWorkspaceRouteError('Finish or cancel your open edit before leaving this screen.'); return }
     setWorkspaceRouteError('')
-    swipeStart.current = null
+    swipeGesture.current.cancel()
     if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
     setFocusCanvasEntry(false)
@@ -553,19 +568,25 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     navigate('schedule')
   }, [pendingActionNavigation])
   const onContentPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
-    if (!event.isPrimary) { swipeStart.current = null; return }
-    const allowed = canBeginSwipe({ pointerType: event.pointerType, isPrimary: event.isPrimary, view,
-      deepCanvas: !!openCanvasId, modalOpen: !!selectedObject, mobile: window.matchMedia('(max-width: 720px)').matches,
+    swipeGesture.current.begin({ pointerId: event.pointerId, x: event.clientX, y: event.clientY }, {
+      pointerType: event.pointerType, isPrimary: event.isPrimary, view: activeWorkspaceSurface ? 'search' : view,
+      deepCanvas: !!openCanvasId, modalOpen: !!selectedObject || !!selectedCaptureId || accountBusy, mobile: window.matchMedia('(max-width: 720px)').matches,
       viewportZoomed: viewportZoomed || isViewportZoomed(window.visualViewport?.scale),
       blockedTarget: swipeTargetIsBlocked(event.target, event.currentTarget) })
-    swipeStart.current = allowed ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, view } : null
   }
   const onContentPointerUp = (event: ReactPointerEvent<HTMLElement>) => {
-    const start = swipeStart.current
-    swipeStart.current = null
-    if (!start || start.pointerId !== event.pointerId || start.view !== view || selectedObject || openCanvasId || isViewportZoomed(window.visualViewport?.scale)) return
-    const next = swipeDestination(start.view, event.clientX - start.x, event.clientY - start.y)
-    if (next) navigate(next)
+    if (selectedObject || selectedCaptureId || accountBusy || openCanvasId || isViewportZoomed(window.visualViewport?.scale)) { swipeGesture.current.cancel(); return }
+    const next = swipeGesture.current.finish({ pointerId: event.pointerId, x: event.clientX, y: event.clientY }, activeWorkspaceSurface ? 'search' : view)
+    if (!next) return
+    if (!searchHandoffGuards.canLeave()) { setWorkspaceRouteError('Finish or cancel your open edit before leaving this screen.'); return }
+    if (next === 'search') openSearch()
+    else {
+      if (activeWorkspaceSurface) {
+        const outcome = navigateWorkspace({ type: 'close-surface' })
+        if (!outcome.ok) { setWorkspaceRouteError(outcome.message); return }
+      }
+      navigate(next)
+    }
   }
   const routeContext = () => {
     const currentAccount = auth.getState()
@@ -667,13 +688,17 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) onUseDevice() }}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
-  return <>{workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} />}
+  return <div ref={swipeSurface} onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp}
+    onPointerMove={event => swipeGesture.current.move({ pointerId: event.pointerId, x: event.clientX, y: event.clientY })}
+    onPointerCancel={() => swipeGesture.current.cancel()}
+    onClickCapture={event => { if (swipeGesture.current.consumeClick(event.detail)) { event.preventDefault(); event.stopPropagation() } }}>
+    {workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} />}
   <div hidden={!!activeWorkspaceSurface} inert={!!activeWorkspaceSurface}><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
     <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => {
       const active = view === item.id || (item.id === 'organize' && ['review', 'canvas'].includes(view)) || (item.id === 'plan' && ['schedule', 'calendar', 'commitments'].includes(view))
       return <button className={active ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={active ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'organize' && reviewCount > 0 && <b>{reviewCount}</b>}</button>
     })}</nav></aside>
-    <section className={viewportZoomed ? 'content' : 'content swipe-navigation-surface'} onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
+    <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
         <p>Capture a thought, then open Organize to review its meaning. You can use Threadline in this browser or add it to your home screen.</p>
@@ -686,9 +711,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         <p className="install-help-hint">Reopen anytime in Settings → Mobile install.</p>
       </section>}
       {installMessage && <p className="storage-alert" role="status">{installMessage}</p>}
-      {cloud && <div className="sync-status" role="status"><p>{refreshError || (cloudStatus === 'Synced with your account.' && refreshGuard.current() === undefined ? 'Saved to account. Updates resume when you finish editing.' : cloudStatus)} · {state.objects.length} saved thoughts</p>
-        {deviceOnly !== 0 && <details><summary>{deviceOnly === -2 ? 'Different device copy preserved' : deviceOnly < 0 ? 'Device backup needs attention' : `${deviceOnly} device-only capture${deviceOnly === 1 ? '' : 's'} preserved`}</summary><p>Your local copy has not been deleted. To review or combine it, open Settings → Data → Return to this device’s local data.</p></details>}
-      </div>}
+      {cloud && view !== 'settings' && <AccountSyncNotice status={cloudStatus === 'Synced with your account.' && refreshGuard.current() === undefined ? 'Saved to account. Updates resume when you finish editing.' : cloudStatus} error={refreshError} deviceOnly={deviceOnly} count={state.objects.length} />}
       {!cloud && account.state.status === 'signed-in' && <section className="storage-alert" aria-label="Account sync"><p>{syncMessage || 'These captures are saved only on this device.'}</p>
         <button className="primary" disabled={!accountAdapter || accountBusy || captureBusy || !!saveError || !!initial.error} onClick={() => void openAccount(true)}>Sync this device’s {state.objects.length} saved thoughts</button>
         <button className="secondary" disabled={accountBusy || captureBusy} onClick={() => void openAccount(false)}>Open synced account</button>
@@ -735,7 +758,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
       onReverse={() => withdraw(selectedObject.id, 'reversed')} />}</div>
-  </>
+  </div>
 }
 
 function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: AppState; captureId: string; suspended: boolean; onClose: () => void }) {

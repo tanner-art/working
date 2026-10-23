@@ -105,6 +105,8 @@ export interface CanvasElement {
   text?: string
   /** Canvas presentation only; list text remains ordinary element text. */
   nodeVariant?: 'bulleted-list'
+  /** Opt-in content-sized text; absent preserves legacy/manual geometry. */
+  autoSize?: boolean
   fromId?: string
   toId?: string
   /** Optional canvas-only containment. Only text blocks may belong to a group. */

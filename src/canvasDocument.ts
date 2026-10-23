@@ -1,6 +1,7 @@
 import type { CanvasElement, CanvasViewport } from './domain'
 import { isActiveCanvasStrokeRefinement, isCanvasStrokeProjection, isCanvasStrokeRefinement, isCanvasStrokeShapeProjectionForRaw, normalizeCanvasStrokePoints } from './canvasStrokes'
 import { isCanvasInkColor, isCanvasInkWidth } from './canvasInk'
+import { CANVAS_MIN_SCALE, CANVAS_MAX_SCALE } from './canvasViewport'
 
 export interface CanvasDocument { elements: CanvasElement[]; viewport: CanvasViewport }
 export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { x: 0, y: 0, scale: 1 }
@@ -10,7 +11,7 @@ export function isCanvasViewport(value: unknown): value is CanvasViewport {
   const viewport = value as CanvasViewport
   return Object.keys(value).every(key => ['x', 'y', 'scale'].includes(key)) &&
     Number.isFinite(viewport.x) && Number.isFinite(viewport.y) &&
-    Number.isFinite(viewport.scale) && viewport.scale >= .55 && viewport.scale <= 1.6
+    Number.isFinite(viewport.scale) && viewport.scale >= CANVAS_MIN_SCALE && viewport.scale <= CANVAS_MAX_SCALE
 }
 
 export function isCanvasElements(value: unknown): value is CanvasElement[] {
@@ -56,6 +57,7 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.shape === undefined || (item.type === 'text' && ['rectangle', 'rounded-rectangle', 'ellipse', 'diamond'].includes(item.shape))) &&
     (item.text === undefined || typeof item.text === 'string') &&
     (item.nodeVariant === undefined || (item.type === 'text' && item.nodeVariant === 'bulleted-list')) &&
+    (item.autoSize === undefined || (item.type === 'text' && !item.shape && typeof item.autoSize === 'boolean')) &&
     (item.fromId === undefined || typeof item.fromId === 'string') &&
     (item.toId === undefined || typeof item.toId === 'string') &&
     (item.groupId === undefined || typeof item.groupId === 'string') &&
@@ -89,5 +91,5 @@ export function toggleCanvasNodeVariant(elements: CanvasElement[], id: string): 
 }
 
 export function newCanvasElement(type: CanvasElement['type'], x: number, y: number): CanvasElement {
-  return { id: crypto.randomUUID(), type, x, y, width: type === 'container' ? 320 : 190, height: type === 'container' ? 210 : undefined, text: type === 'container' ? 'Untitled group' : 'New thought' }
+  return { id: crypto.randomUUID(), type, x, y, ...(type === 'text' ? { autoSize: true } : { width: type === 'container' ? 320 : 190, height: type === 'container' ? 210 : undefined }), text: type === 'container' ? 'Untitled group' : 'New thought' }
 }

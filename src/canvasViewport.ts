@@ -1,8 +1,8 @@
 import type { CanvasElement, CanvasViewport } from './domain'
 import { canvasSize } from './canvasGeometry'
 
-export const CANVAS_MIN_SCALE = 0.55
-export const CANVAS_MAX_SCALE = 1.6
+export const CANVAS_MIN_SCALE = 0.2
+export const CANVAS_MAX_SCALE = 4
 export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { x: 0, y: 0, scale: 1 }
 
 export interface CanvasPoint { x: number; y: number }
