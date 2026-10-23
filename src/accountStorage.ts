@@ -8,6 +8,7 @@ import { bankFromLegacy } from './canvasBank'
 import { mergeCanvasBanks } from './canvasBankMerge'
 import type { GroupingReviewState } from './groupingProposal'
 import { jsonEqual as equal, stableJson } from './jsonEquality'
+import { captureLibraryFor, isCaptureLibrary } from './captureLibrary'
 
 export interface AccountData { model: PersistedState; settings: LocalSettings; digest: DigestDelivery }
 export interface AccountRow { user_id: string; revision: string; data: AccountData }
@@ -111,6 +112,13 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   } : undefined
   const legacyUiIds = [...account.model.legacyUiIds]
   for (const id of device.model.legacyUiIds) if (!legacyUiIds.includes(id)) legacyUiIds.push(id)
+  const accountLibrary = captureLibraryFor(legacyUiProjection(account.model).objects, account.model.captureLibrary)
+  const deviceLibrary = captureLibraryFor(legacyUiProjection(device.model).objects, device.model.captureLibrary)
+  const captureLibrary = account.model.captureLibrary || device.model.captureLibrary ? {
+    folders: mergeRecords(accountLibrary.folders, deviceLibrary.folders, 'folder').merged,
+    placements: mergeRecords(accountLibrary.placements, deviceLibrary.placements, 'capture folder placement').merged,
+  } : undefined
+  if (captureLibrary && !isCaptureLibrary(captureLibrary, legacyUiIds)) throw Error('Merge stopped: folder names or destinations conflict. Rename or move the conflicting folders and preview again. Both sources are untouched.')
   const model: PersistedState = {
     schemaVersion: 2,
     captures: captures.merged,
@@ -126,6 +134,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
     canvas: structuredClone(account.model.canvas),
     ...(account.model.canvasViewport === undefined ? {} : { canvasViewport: structuredClone(account.model.canvasViewport) }),
     canvasBank: canvasBank.merged,
+    ...(captureLibrary ? { captureLibrary } : {}),
     ...(mergedTemporalHistory.length ? { temporalHistory: mergedTemporalHistory } : {}),
     ...(groupingReview ? { groupingReview } : {}),
   }

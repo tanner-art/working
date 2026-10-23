@@ -9,6 +9,8 @@ import { clearLocalData, dismissMobileInstall, shouldShowMobileInstall, MOBILE_I
 import { DIGEST_DELIVERY_KEY } from './digestDelivery'
 import { Canvas } from './Canvas'
 import { CanvasBank } from './CanvasBankView'
+import { CaptureLibrary } from './CaptureLibraryView'
+import { captureLibraryFor, changeCaptureLibrary, folderDestinations, folderTrail, type CaptureLibraryState } from './captureLibrary'
 import { useCanvasWorkspace } from './useCanvasWorkspace'
 import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
@@ -24,7 +26,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
-import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
+import { reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
 import { loadStateResult, makeObject, saveState, serializeState } from './store'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
@@ -412,6 +414,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     } catch { throw new Error('Export could not read browser storage. Use Download thoughts backup to preserve the work in this tab.') }
   }
   const reviewCount = reviewObjects(state.objects).length
+  const [searchRequest, setSearchRequest] = useState(0)
+  const captureLibrary = captureLibraryFor(state.objects, state.captureLibrary)
   const capture = async (details?: CaptureDetails) => {
     const content = draft.trim()
     if (!content || capturePending.current) return
@@ -423,7 +427,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       const interpreted = await createInterpretedObject(content)
       const item = applyCaptureDetails(interpreted, details)
       if (clearing.current) return
-      update(current => ({ ...current, objects: [item, ...current.objects] }))
+      update(current => {
+        const objects = [item, ...current.objects]
+        return { ...current, objects, ...(details?.folder ? { captureLibrary: changeCaptureLibrary(captureLibraryFor(current.objects, current.captureLibrary), objects, { type: 'move-capture', id: item.id, folderId: details.folder }) } : {}) }
+      })
       // Preserve any new typing while an asynchronous interpreter is running.
       setDraft(current => current === draft ? '' : current)
       setCaptureSuccess(value => value + 1)
@@ -479,7 +486,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
   return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || (cloud ? 'Synced account' : 'Personal space')}</span></button></aside>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav><button className="nav-item" aria-label="Search captures" onClick={() => { navigate('review'); setSearchRequest(value => value + 1) }}><span aria-hidden="true">⌕</span>Search</button>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || (cloud ? 'Synced account' : 'Personal space')}</span></button></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -516,8 +523,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
       {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
-      {view === 'capture' && <Capture draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} />}
+      {view === 'capture' && <Capture library={captureLibrary} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
+      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} library={<CaptureLibrary objects={state.objects} library={captureLibrary} focusRequest={searchRequest} onOpen={setSelectedObjectId} onChange={change => update(current => ({ ...current, captureLibrary: changeCaptureLibrary(captureLibraryFor(current.objects, current.captureLibrary), current.objects, change) }))} />} />}
       {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
       {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
@@ -647,21 +654,21 @@ function Today({ objects, relationships, onCapture, onOpen }: { objects: Thought
     <section className="list-section"><div className="section-heading"><div><p className="section-label">Object workbench</p><h2>Recent captures</h2></div><span>{recent.length} visible</span></div>{recent.length ? recent.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} />) : <Empty text="Capture something and it will appear here for shaping." />}</section>
   </div>
 }
-type CaptureDetails = { folder: '' | 'Personal' | 'Business'; date: string; time: string }
+type CaptureDetails = { folder: string; date: string; time: string }
 const emptyCaptureDetails: CaptureDetails = { folder: '', date: '', time: '' }
 function applyCaptureDetails(item: ThoughtObject, details = emptyCaptureDetails): ThoughtObject {
-  const context = details.folder || item.context
+  const context = item.context
   const suggestedDate = details.date ? [details.date, details.time].filter(Boolean).join(' ') : item.interpretation.suggestedDate
   return { ...item, context, metadata: { ...item.metadata, deadline: details.date || item.metadata.deadline }, interpretation: { ...item.interpretation, suggestedDate } }
 }
-function Capture({ draft, busy, success, onDraft, onCapture }: { draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
+function Capture({ library, draft, busy, success, onDraft, onCapture }: { library: CaptureLibraryState; draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
   const input = useRef<HTMLTextAreaElement>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [details, setDetails] = useState<CaptureDetails>(emptyCaptureDetails)
   useEffect(() => { if (success) { input.current?.focus(); setDetails(emptyCaptureDetails); setDetailsOpen(false) } }, [success])
   return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" />
     <div className="capture-box"><textarea ref={input} autoFocus aria-label="Raw thought" value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); onCapture(details) } }} />
-      {detailsOpen && <div className="capture-details"><label>Folder<select value={details.folder} onChange={event => setDetails(current => ({ ...current, folder: event.target.value as CaptureDetails['folder'] }))}><option value="">Choose later</option><option value="Personal">Personal</option><option value="Business">Business</option></select></label><label>Date<input type="date" value={details.date} onChange={event => setDetails(current => ({ ...current, date: event.target.value }))} /></label><label>Time<input type="time" value={details.time} onChange={event => setDetails(current => ({ ...current, time: event.target.value }))} /></label></div>}
+      {detailsOpen && <div className="capture-details"><label>Folder<select value={details.folder} onChange={event => setDetails(current => ({ ...current, folder: event.target.value }))}><option value="">Choose later</option>{folderDestinations(library).map(folder => <option key={folder.id} value={folder.id}>{folderTrail(library, folder.id).map(parent => parent.name).join(' / ')}</option>)}</select></label><label>Date<input type="date" value={details.date} onChange={event => setDetails(current => ({ ...current, date: event.target.value }))} /></label><label>Time<input type="time" value={details.time} onChange={event => setDetails(current => ({ ...current, time: event.target.value }))} /></label></div>}
       <div className="capture-footer"><span role="status">{success > 0 && <span className="capture-success">✓ Captured</span>}</span><button className="secondary" type="button" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(open => !open)}>Details</button><button className="primary" disabled={busy || !draft.trim()} onClick={() => onCapture(details)}>{busy ? 'Capturing…' : 'Capture'}</button></div>
     </div>
   </div>
@@ -674,26 +681,19 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void }) {
+export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen, library }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void; library?: React.ReactNode }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
-  const folders = bankObjects(objects)
   return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
     {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
+    {library}
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
       {ideas.length ? ideas.map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No resolved ideas yet." />}
-    </section>
-    <section className="bank-section" aria-labelledby="bank-heading"><h2 id="bank-heading">Thought folders</h2>
-      <p>Filed thoughts grouped by context: Personal or Home, Business or Work. Other contexts stay Unfiled. Use Edit → Context or project to change the grouping.</p>
-      {bankFolders.map(folder => <details className="compact-disclosure bank-folder" key={folder}>
-        <summary>{folder} <span>{folders[folder].length}</span><span className="disclosure-caret" aria-hidden="true" /></summary>
-        {folders[folder].length ? folders[folder].map(item => <ObjectRow key={item.id} item={item} onOpen={onOpen} />) : <Empty text="No filed thoughts here yet." />}
-      </details>)}
     </section>
   </div>
 }
@@ -771,7 +771,7 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
           <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
-          <label>Folder<select value={folderValue} onChange={event => field('context', event.target.value || undefined)}><option value="">Unfiled</option><option value="Personal">Personal</option><option value="Business">Business</option></select></label>
+          <label>Context<select value={folderValue} onChange={event => field('context', event.target.value || undefined)}><option value="">Unspecified</option><option value="Personal">Personal</option><option value="Business">Business</option></select></label>
           <label>Proposed date<input type="date" value={draft.metadata.deadline ?? ''} onChange={event => metadata('deadline', event.target.value)} /></label>
           <label>Time<input type="time" value={proposedTime} onChange={event => setProposedTime(event.target.value)} /></label>
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>

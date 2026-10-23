@@ -1,6 +1,7 @@
 import type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
 export type { CanvasStrokePoint, CanvasStrokeProjection, CanvasStrokeRefinement } from './canvasStrokes'
 import type { GroupingReviewState } from './groupingProposal'
+import type { CaptureLibraryState } from './captureLibrary'
 
 /** Legacy UI vocabulary only. Persisted SemanticKind deliberately excludes reminders. */
 export type ObjectKind = 'idea' | 'action' | 'reminder' | 'project' | 'commitment' | 'person' | 'reference' | 'objective'
@@ -133,7 +134,7 @@ export interface CanvasRecord {
 export interface CanvasBank { canvases: CanvasRecord[] }
 
 /** Compatibility view consumed by existing screens; model retains canonical evidence. */
-export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; canvasBank?: CanvasBank; model?: PersistedState; temporalHistory?: TemporalDecision[] }
+export interface AppState { objects: ThoughtObject[]; canvas: CanvasElement[]; canvasViewport?: CanvasViewport; canvasBank?: CanvasBank; captureLibrary?: CaptureLibraryState; model?: PersistedState; temporalHistory?: TemporalDecision[] }
 
 export const objectLabels: Record<ObjectKind, string> = {
   idea: 'Idea', action: 'Action', reminder: 'Reminder', project: 'Project', commitment: 'Commitment', person: 'Person', reference: 'Reference', objective: 'Objective'
@@ -235,6 +236,7 @@ export interface SemanticRelationship extends Relationship {
   provenance: { interpretationId: string; evidence: 'legacy-unverified' }
 }
 export interface PersistedState {
+  captureLibrary?: CaptureLibraryState
   temporalHistory?: TemporalDecision[]
   schemaVersion: 2
   captures: CaptureRecord[]
