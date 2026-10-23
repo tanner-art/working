@@ -18,6 +18,11 @@ vi.mock('react', async importOriginal => {
   return { ...actual,
     useMemo: (factory: () => unknown) => factory(),
     useState: (initial: unknown) => [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => undefined],
+    useRef: (initial: unknown) => ({ current: initial }),
+    // This preparatory test exercises decision handlers, not mounted focus or
+    // Search guard registration. Those require the browser verification.
+    useEffect: () => undefined,
+    useLayoutEffect: () => undefined,
   }
 })
 
