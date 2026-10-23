@@ -66,6 +66,18 @@ describe('persistence failure handling (ported from 7c0ee6b)', () => {
 
 describe('TASK-024 shape persistence', () => {
   afterEach(() => vi.unstubAllGlobals())
+  it('round-trips styled raw pen strokes in local storage without changing their samples', () => {
+    const stroke: CanvasElement = { id: 'ink', type: 'freehand', x: 4, y: 8,
+      rawPoints: [{ x: 4, y: 8 }, { x: 18, y: 30 }], strokeColor: '#316b8a', strokeWidth: 10 }
+    let raw: string | null = null
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    expect(saveState({ objects: [], canvas: [stroke] })).toBeUndefined()
+    const reloaded = loadStateResult()
+    expect(reloaded.error).toBeUndefined()
+    expect(reloaded.state.canvas).toEqual([stroke])
+    expect(reloaded.state.model?.canvas).toEqual([stroke])
+  })
+
   it('migrates and roundtrips every shape with groups and styled connectors without semantic changes', () => {
     const canvas: CanvasElement[] = [
       { id: 'group', type: 'container', x: 0, y: 0 },

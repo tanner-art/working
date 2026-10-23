@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { CanvasElement } from './domain'
 import { isCanvasElements, toggleCanvasNodeVariant } from './canvasDocument'
 import { commitCanvas, emptyCanvasHistory, redoCanvas, undoCanvas } from './canvasHistory'
-import { createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
+import { applyCanvasStrokeSmoothing, createCanvasStrokeShapeRefinement, createCanvasStrokeSmoothingRefinement } from './canvasStrokes'
+import { DEFAULT_CANVAS_INK, canvasInkAppearance, createCanvasInkStroke } from './canvasInk'
 
 const textNode: CanvasElement = { id: 'note', type: 'text', x: 10, y: 20, text: 'First item\n\nThird item' }
 
@@ -51,6 +52,36 @@ describe('freehand canvas elements', () => {
     expect(isCanvasElements([{ ...stroke, rawPoints: [{ x: 10, y: 20 }, { x: 10, y: 20 }] }])).toBe(false)
     expect(isCanvasElements([{ ...stroke, text: 'not a stroke' }])).toBe(false)
     expect(isCanvasElements([{ ...stroke, pressure: .5 }])).toBe(false)
+  })
+
+  it('keeps legacy ink appearance and validates new freehand-only color and width', () => {
+    expect(canvasInkAppearance(stroke)).toEqual(DEFAULT_CANVAS_INK)
+    const colored = createCanvasInkStroke('colored', stroke.rawPoints!, { color: '#9b3f4e', width: 6 })
+    expect(colored.rawPoints).toBe(stroke.rawPoints)
+    expect(isCanvasElements([colored])).toBe(true)
+    expect(isCanvasElements([{ ...colored, strokeColor: 'red' }])).toBe(false)
+    expect(isCanvasElements([{ ...colored, strokeWidth: 0 }])).toBe(false)
+    expect(isCanvasElements([{ ...colored, strokeWidth: 25 }])).toBe(false)
+    expect(isCanvasElements([{ ...colored, strokeWidth: Infinity }])).toBe(false)
+    expect(isCanvasElements([{ ...textNode, strokeColor: '#9b3f4e' }])).toBe(false)
+    expect(isCanvasElements([{ ...textNode, strokeWidth: 6 }])).toBe(false)
+    expect(() => createCanvasInkStroke('bad', [{ x: 0, y: 0 }, { x: 0, y: 0 }], { color: '#9b3f4e', width: 6 })).toThrow()
+  })
+
+  it('undoes and redoes one styled stroke without rewriting its samples', () => {
+    const colored = createCanvasInkStroke('colored', stroke.rawPoints!, { color: '#316b8a', width: 10 })
+    const history = commitCanvas(emptyCanvasHistory([]), [colored])
+    expect(undoCanvas(history).present).toEqual([])
+    expect(redoCanvas(undoCanvas(history)).present).toEqual([colored])
+    expect(redoCanvas(undoCanvas(history)).present[0].rawPoints).toBe(stroke.rawPoints)
+  })
+
+  it('retains ink appearance through a reversible refinement without changing raw points', () => {
+    const colored = createCanvasInkStroke('colored', stroke.rawPoints!, { color: '#9b3f4e', width: 6 })
+    const refined = applyCanvasStrokeSmoothing(colored, '2026-09-22T12:00:00.000Z')!
+    expect(refined.rawPoints).toBe(stroke.rawPoints)
+    expect(canvasInkAppearance(refined)).toEqual({ color: '#9b3f4e', width: 6 })
+    expect(isCanvasElements([refined])).toBe(true)
   })
 
   it('accepts a reversible smoothing projection only when it names the preserved source stroke', () => {

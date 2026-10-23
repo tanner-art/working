@@ -1,5 +1,5 @@
 import type { AppState, CommitmentSetupAudit, SemanticObject, ThoughtObject } from './domain'
-import { confirmObject } from './objectWorkflow'
+import { confirmObject, hasCreatedReminderInstruction } from './objectWorkflow'
 import { reconcileLegacyUi } from './migration'
 
 export interface CommitmentDetails { title: string; date?: string; time?: string; dependencyIds: readonly string[] }
@@ -20,6 +20,7 @@ function setup(details: CommitmentDetails): CommitmentSetupAudit {
 
 /** Resolves the obligation only; it deliberately does not create a CalendarEvent. */
 export function resolveCommitment(object: ThoughtObject, details: CommitmentDetails, at = new Date().toISOString()): ThoughtObject {
+  if (hasCreatedReminderInstruction(object)) throw new Error('A created Reminder instruction cannot be reclassified as a Commitment.')
   if (object.status !== 'review') throw new Error('This capture is no longer awaiting Commitment setup. Refresh Review and try again.')
   const choice = setup(details)
   // Classification and its dedicated confirmation happen in this single Review

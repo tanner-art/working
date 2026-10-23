@@ -101,10 +101,10 @@ describe('canvasGestures', () => {
     const interaction = createPinchInteraction()
     const first = node()
     const second = node(2, 100, 30)
-    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second)
+    beginPinchInteraction(interaction, { x: 10, y: -5, scale: 1 }, first, second, { x: 0, y: 0 })
 
-    const renderedPreview = previewPinchInteraction(interaction, first, node(2, 180, 50))
-    const latestPreview = previewPinchInteraction(interaction, first, node(2, 220, 70))
+    const renderedPreview = previewPinchInteraction(interaction, first, node(2, 180, 50), { x: 0, y: 0 })
+    const latestPreview = previewPinchInteraction(interaction, first, node(2, 220, 70), { x: 0, y: 0 })
 
     expect(latestPreview).not.toEqual(renderedPreview)
     expect(commitPinchInteraction(interaction)).toEqual(latestPreview)

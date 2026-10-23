@@ -1,5 +1,6 @@
 import type { CanvasElement, CanvasViewport } from './domain'
 import { isActiveCanvasStrokeRefinement, isCanvasStrokeProjection, isCanvasStrokeRefinement, isCanvasStrokeShapeProjectionForRaw, normalizeCanvasStrokePoints } from './canvasStrokes'
+import { isCanvasInkColor, isCanvasInkWidth } from './canvasInk'
 
 export interface CanvasDocument { elements: CanvasElement[]; viewport: CanvasViewport }
 export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { x: 0, y: 0, scale: 1 }
@@ -26,7 +27,7 @@ export function isCanvasElements(value: unknown): value is CanvasElement[] {
 }
 
 const canvasTypes: CanvasElement['type'][] = ['text', 'container', 'arrow', 'freehand']
-const freehandKeys = new Set(['id', 'type', 'x', 'y', 'rawPoints', 'projection', 'refinements'])
+const freehandKeys = new Set(['id', 'type', 'x', 'y', 'rawPoints', 'projection', 'refinements', 'strokeColor', 'strokeWidth'])
 const isColor = (value: unknown): value is string => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
 const isPerimeterAnchor = (value: unknown): boolean => Boolean(value) && typeof value === 'object' &&
   Number.isFinite((value as { x?: unknown }).x) && Number.isFinite((value as { y?: unknown }).y) &&
@@ -67,6 +68,8 @@ function isCanvasElement(value: unknown): value is CanvasElement {
     (item.targetAnchor === undefined || isPerimeterAnchor(item.targetAnchor)) &&
     (item.curveHandle === undefined || isCurveHandle(item.curveHandle)) &&
     (item.rawPoints === undefined || normalizeCanvasStrokePoints(item.rawPoints) !== null) &&
+    (item.strokeColor === undefined || (item.type === 'freehand' && isCanvasInkColor(item.strokeColor))) &&
+    (item.strokeWidth === undefined || (item.type === 'freehand' && isCanvasInkWidth(item.strokeWidth))) &&
     (item.projection === undefined || isCanvasStrokeProjection(item.projection)) &&
     (item.refinements === undefined || (Array.isArray(item.refinements) && item.refinements.length > 0 && item.refinements.every(isCanvasStrokeRefinement))) &&
     (item.type === 'freehand' || (item.rawPoints === undefined && item.projection === undefined && item.refinements === undefined)) &&

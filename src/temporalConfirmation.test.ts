@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppState, PersistedState, TemporalDecision, TemporalTarget } from './domain'
 import { isPersistedState, legacyUiProjection, migrateLegacyState, reconcileLegacyUi } from './migration'
 import { confirmObject, reverseObject, updateObject } from './objectWorkflow'
-import { loadStateResult, makeObject, saveState } from './store'
+import { loadStateResult, makeObject, reconcileCurrentSession, saveState } from './store'
 import { buildMorningDigest } from './morningDigest'
 import { activeTemporalDecisions, deadlineProposal, eventProposal, recordTemporalDecision } from './temporalConfirmation'
+import { decideTemporalReview } from './temporalReviewWorkflow'
+import { accountData, createAccountSession, type AccountAdapter, type AccountRow } from './accountStorage'
+import { defaultSettings } from './settings'
 
 function fixture(kind: 'action' | 'commitment' = 'commitment') {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-14T12:00:00Z'))
@@ -88,7 +91,7 @@ describe('dedicated temporal confirmation', () => {
       m => { m.temporalHistory![0].at = 'yesterday' },
       m => { m.temporalHistory![0].at = '2026-02-30T12:00:00Z' },
       m => { m.temporalHistory![0].at = '2025-09-14T12:00:00Z' },
-      m => { m.temporalHistory![0].target.interpretationId = 'missing' },
+      m => { Object.assign(m.temporalHistory![0].target, { interpretationId: 'missing' }) },
       m => { Object.assign(m.temporalHistory![0].target, { objectId: 'different' }) },
       m => { Object.assign(m.temporalHistory![0].target, { date: '2026-09-16' }) },
       m => { Object.assign(m.temporalHistory![1].target, { eventId: 'other' }) },
@@ -136,6 +139,70 @@ describe('dedicated temporal confirmation', () => {
     raw = JSON.stringify(corrupt)
     expect(loadStateResult().error).toContain('left untouched')
     expect(saveState(state)).toContain('Stored data changed')
+  })
+  it('binds Review timing to the latest autosaved interpretation after multiple edits without reloading', () => {
+    let raw = JSON.stringify(fixture().model)
+    vi.stubGlobal('localStorage', { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value } })
+    let current = loadStateResult().state
+    const original = structuredClone(current.model!.interpretations)
+    for (const date of ['2026-09-16', '2026-09-17']) {
+      current = { ...current, objects: [updateObject(current.objects[0], { ...current.objects[0], metadata: { deadline: date } })] }
+      expect(saveState(current)).toBeUndefined()
+    }
+    const edited = structuredClone(JSON.parse(raw).interpretations)
+    expect(edited).toHaveLength(original.length + 2)
+    const target = deadlineProposal(reconcileCurrentSession(current), current.objects[0].id)!
+    expect(target).toMatchObject({ date: '2026-09-17', interpretationId: edited.at(-1).id })
+    current = decideTemporalReview(current, target)
+    expect(saveState(current)).toBeUndefined()
+    const reloaded = loadStateResult().state
+    expect(reloaded.model!.interpretations).toEqual(edited)
+    expect(reloaded.model!.temporalHistory?.at(-1)?.target).toEqual(target)
+    expect(digest(reloaded).upcoming).toHaveLength(1)
+
+    const earlier = deadlineProposal(reconcileCurrentSession(current), current.objects[0].id)!
+    current = { ...current, objects: [updateObject(current.objects[0], { ...current.objects[0], metadata: { deadline: '2026-09-18' } })] }
+    expect(saveState(current)).toBeUndefined()
+    const saved = raw
+    expect(() => decideTemporalReview(current, earlier)).toThrow('Temporal proposal changed')
+    expect(raw).toBe(saved)
+    const prior = activeTemporalDecisions(reconcileCurrentSession(current))[0]
+    current = decideTemporalReview(current, prior.target, prior)
+    expect(saveState(current)).toBeUndefined()
+    const reversed = loadStateResult().state
+    expect(reversed.model!.interpretations.slice(0, edited.length)).toEqual(edited)
+    expect(activeTemporalDecisions(reversed.model!)).toEqual([])
+    expect(digest(reversed).upcoming).toEqual([])
+  })
+  it('binds account Review timing to the account session model after multiple saves', async () => {
+    let row: AccountRow | null = null
+    const adapter: AccountAdapter = {
+      read: async () => row,
+      write: async (userId, data, revision) => {
+        if (row?.revision !== (revision ?? undefined) && !(row === null && revision === null)) throw Error('conflict')
+        row = { user_id: userId, revision: crypto.randomUUID(), data: structuredClone(data) }
+        return structuredClone(row)
+      },
+    }
+    const session = createAccountSession(adapter, 'owner', () => 'owner')
+    const digestConfig = { enabled: false }
+    const opened = await session.open(accountData(fixture(), defaultSettings, digestConfig))
+    let current = opened.state
+    for (const date of ['2026-09-16', '2026-09-17']) {
+      current = { ...current, objects: [updateObject(current.objects[0], { ...current.objects[0], metadata: { deadline: date } })] }
+      await session.save(session.snapshot(current, defaultSettings, digestConfig))
+    }
+    const before = structuredClone(row!.data.model.interpretations)
+    expect(before).toHaveLength(opened.data.model.interpretations.length + 2)
+    const latest = session.snapshot(current, defaultSettings, digestConfig).model
+    const target = deadlineProposal(latest, current.objects[0].id)!
+    expect(target).toMatchObject({ date: '2026-09-17', interpretationId: before.at(-1)!.id })
+    current = decideTemporalReview(current, target, undefined, latest)
+    await session.save(session.snapshot(current, defaultSettings, digestConfig))
+    const reloaded = await createAccountSession(adapter, 'owner', () => 'owner').open()
+    expect(reloaded.data.model.interpretations).toEqual(before)
+    expect(reloaded.data.model.temporalHistory?.at(-1)?.target).toEqual(target)
+    expect(digest(reloaded.state).upcoming).toHaveLength(1)
   })
   it('matches verified event instants to the device-local day and excludes cancelled events', () => {
     const state = withEvent(fixture())
