@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from .models import (
@@ -110,6 +111,19 @@ class Registry(Protocol):
         expected_revision: int,
         recorded_at: str,
     ) -> int: ...
+
+    def recontract_on_deck_pair(
+        self,
+        implementation: WorkPackage,
+        review: WorkPackage,
+        *,
+        expected_revision: int,
+        recorded_at: str,
+        operation_id: str,
+        repository: Path,
+        target_ref: str,
+        contracts: tuple[Mapping[str, Any], Mapping[str, Any]],
+    ) -> Mapping[str, Any]: ...
 
     def register_followup_review(
         self,

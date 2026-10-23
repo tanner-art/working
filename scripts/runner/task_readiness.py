@@ -37,17 +37,23 @@ def _safe_path(value: Any) -> bool:
 
 
 def _git(repo: pathlib.Path, *args: str) -> bool:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, check=False,
-    ).returncode == 0
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False, timeout=10,
+        ).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _git_commit(repo: pathlib.Path, ref: str) -> str | None:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     commit = result.stdout.strip()
     return commit if result.returncode == 0 and _SHA.fullmatch(commit) else None
 
@@ -141,6 +147,8 @@ def ready_contract_reasons(package: Mapping[str, Any]) -> tuple[str, ...]:
     proof = diagnostics.get("readiness_proof")
     digest = diagnostics.get("queue_contract_sha256")
     reasons = []
+    if diagnostics.get("on_deck_recontract_requires_promotion") is True:
+        reasons.append("ON_DECK_RECONTRACT_REQUIRES_PROMOTION")
     if not package.get("lane"):
         reasons.append("PACKAGE_LANE_UNASSIGNED")
     if (not isinstance(criteria, (list, tuple)) or not criteria
