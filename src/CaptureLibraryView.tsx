@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
 import type { ThoughtObject } from './domain'
-import { captureFolderId, folderDestinations, folderTrail, searchCaptures, type CaptureLibraryState, type LibraryChange } from './captureLibrary'
+import { captureFolderId, filterCaptureCompletion, isCaptureCompleted, folderDestinations, folderTrail, searchCaptures, type CaptureCompletionFilter, type CaptureLibraryState, type LibraryChange } from './captureLibrary'
 import { folderColors, type FolderColor } from './organization'
 import './captureLibrary.css'
 import { useSearchHandoffGuard } from './useSearchHandoffGuard'
@@ -17,6 +17,7 @@ export function CaptureLibrary({ objects, library, onChange, onOpen, focusReques
   objects: readonly ThoughtObject[]; library: CaptureLibraryState; onChange: (change: LibraryChange) => void; onOpen: (id: string) => void; focusRequest?: number; registerSearchHandoffGuard?: RegisterSearchHandoffGuard
 }) {
   const [query, setQuery] = useState('')
+  const [completion, setCompletion] = useState<CaptureCompletionFilter>('all')
   const [folderId, setFolderId] = useState<string | null>(null)
   const [allCaptures, setAllCaptures] = useState(true)
   const [editor, setEditor] = useState<Editor | null>(null)
@@ -33,7 +34,7 @@ export function CaptureLibrary({ objects, library, onChange, onOpen, focusReques
   const currentId = currentFolder?.id ?? null
   const trail = folderTrail(library, currentId)
   const searching = query.trim().length > 0
-  const results = searchCaptures(objects, query, library).filter(object => searching || allCaptures || captureFolderId(library, object.id) === currentId)
+  const results = filterCaptureCompletion(searchCaptures(objects, query, library), library, completion).filter(object => searching || allCaptures || captureFolderId(library, object.id) === currentId)
   const folders = library.folders.filter(folder => !folder.tombstone && folder.parentId === currentId).sort((a, b) => a.name.localeCompare(b.name))
   const openFolder = (id: string | null) => { setFolderId(id); setAllCaptures(false); setQuery(''); setError(''); setEditor(null) }
   const begin = (next: Editor) => {
@@ -67,6 +68,7 @@ export function CaptureLibrary({ objects, library, onChange, onOpen, focusReques
   })
   return <section className="capture-library" aria-labelledby="capture-library-heading">
     <div className="library-toolbar"><h2 id="capture-library-heading">Captures</h2><button className="secondary" onClick={() => begin({ type: 'create', id: crypto.randomUUID(), name: '', color: 'slate', emoji: '' })}>+ Folder</button></div>
+    <div className="library-completion-filters" role="group" aria-label="Capture completion">{(['all', 'open', 'completed'] as const).map(filter => <button type="button" key={filter} aria-pressed={completion === filter} onClick={() => setCompletion(filter)}>{filter === 'all' ? 'All' : filter === 'open' ? 'Not completed' : 'Completed'}</button>)}</div>
     <div className="library-search"><label htmlFor="capture-search" className="library-sr-only">Search all captures</label><input ref={search} id="capture-search" type="search" placeholder="Search all captures…" value={query} onChange={event => { setQuery(event.target.value); setEditor(null) }} /><button className="secondary" disabled={!query} onClick={() => { setQuery(''); search.current?.focus() }}>Clear</button></div>
     <nav className="library-breadcrumbs" aria-label="Capture folders"><button aria-current={!searching && allCaptures ? 'page' : undefined} onClick={() => { setAllCaptures(true); setFolderId(null); setQuery(''); setEditor(null) }}>All captures</button><span aria-hidden="true">/</span><button {...targetProps(null)} data-drag-over={dragOver === 'root'} aria-current={!searching && !allCaptures && !currentId ? 'page' : undefined} onClick={() => openFolder(null)}>My folders</button>{trail.map(folder => <span className="library-crumb" key={folder.id}><span aria-hidden="true">/</span><button {...targetProps(folder.id)} data-drag-over={dragOver === folder.id} aria-current={!searching && !allCaptures && folder.id === currentId ? 'page' : undefined} onClick={() => openFolder(folder.id)}>{folder.emoji} {folder.name}</button></span>)}</nav>
     {error && <p role="alert" className="library-error">{error}</p>}
@@ -93,8 +95,10 @@ export function CaptureLibrary({ objects, library, onChange, onOpen, focusReques
     <p className="library-result-count" role="status">{searching ? `${results.length} ${results.length === 1 ? 'result' : 'results'} across all captures` : allCaptures ? `${results.length} captures · all folders` : `${results.length} ${results.length === 1 ? 'capture' : 'captures'}${currentId ? ' in this folder' : ' not in a folder'}`}</p>
     <div className="library-captures">{results.map(object => <article className="library-capture" key={object.id} draggable onDragStart={event => startDrag(event, { type: 'capture', id: object.id })}>
       <button className="library-capture-open" draggable onClick={() => onOpen(object.id)}><strong>{object.currentContent ?? object.originalContent}</strong>{searching && object.currentContent && object.currentContent !== object.originalContent && <small>Original: {object.originalContent}</small>}<small>{folderTrail(library, captureFolderId(library, object.id)).map(folder => folder.name).join(' / ') || 'Unfiled'} · {object.status} · {new Date(object.createdAt).toLocaleDateString()}</small></button>
-      <button className="library-move" aria-label={`Move capture ${object.currentContent ?? object.originalContent}`} title="Move to folder" onClick={() => begin({ type: 'move-capture', id: object.id, name: object.currentContent ?? object.originalContent, destination: captureFolderId(library, object.id) ?? '' })}>↗</button>
+      <div className="library-capture-actions"><button type="button" className="library-done" aria-label={`${isCaptureCompleted(library, object) ? 'Reopen' : 'Mark completed'}: ${object.currentContent ?? object.originalContent}`} aria-pressed={isCaptureCompleted(library, object)} onClick={() => apply({ type: 'complete-capture', id: object.id, completed: !isCaptureCompleted(library, object) }, isCaptureCompleted(library, object) ? 'Capture reopened.' : 'Capture marked completed. Linked actions and events are unchanged.')}>{isCaptureCompleted(library, object) ? 'Reopen' : 'Done'}</button><button className="library-move" aria-label={`Move capture ${object.currentContent ?? object.originalContent}`} title="Move to folder" onClick={() => begin({ type: 'move-capture', id: object.id, name: object.currentContent ?? object.originalContent, destination: captureFolderId(library, object.id) ?? '' })}>↗</button></div>
     </article>)}</div>
-    {!results.length && <p className="library-empty">{searching ? 'No captures match. Try fewer words or Clear to browse.' : 'No captures here yet. Move one here from All captures.'}</p>}
+    {!results.length && <p className="library-empty">{completion !== 'all'
+      ? searching ? 'No matches in this view. Try All or change your search.' : completion === 'completed' ? 'No completed captures here. Choose All to see the rest.' : 'No unfinished captures here. Choose All to see the rest.'
+      : searching ? 'No captures match. Try fewer words or Clear to browse.' : allCaptures ? 'No captures yet. Capture a thought to get started.' : 'No captures here yet. Move one here from All captures.'}</p>}
   </section>
 }

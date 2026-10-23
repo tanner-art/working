@@ -54,9 +54,9 @@ export function clearPinchInteraction(interaction: PinchInteraction) {
   interaction.start = null
 }
 
-/** Mirrors the visible edit state into the reducer before a resize pointer-down. */
-export function reduceResizePointerDown(state: GestureState, sample: PointerSample, id: string, editMode: boolean): GestureResult {
-  const prepared = editMode ? reduceCanvasGesture(state, { type: 'enter-edit-mode' }) : { state, effects: [] }
+/** A visible selected-node handle authorizes resize without requiring the advanced edit menu. */
+export function reduceResizePointerDown(state: GestureState, sample: PointerSample, id: string, selected: boolean): GestureResult {
+  const prepared = selected ? reduceCanvasGesture(state, { type: 'enter-edit-mode' }) : { state, effects: [] }
   const result = reduceCanvasGesture(prepared.state, { type: 'pointer-down', sample, target: { kind: 'resize', id } })
   return { state: result.state, effects: [...prepared.effects, ...result.effects] }
 }

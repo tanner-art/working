@@ -16,8 +16,8 @@ const thought = (kind: ThoughtObject['kind'], status: ThoughtObject['status'], c
 }
 
 describe('beta home preview', () => {
-  it('is opt-in and leaves the configured production start page unchanged', () => {
-    expect(previewStartView('', 'today')).toBe('today')
+  it('replaces the legacy Today start with Home while preserving other preferences', () => {
+    expect(previewStartView('', 'today')).toBe('beta-home')
     expect(previewStartView('?preview=anything-else', 'capture')).toBe('capture')
     expect(previewStartView('?preview=home', 'canvas')).toBe('beta-home')
   })
@@ -82,6 +82,10 @@ describe('beta home preview', () => {
     expect(html).toContain('>Home</p>')
     expect(html).not.toContain('Secondary home · Preview')
     expect(html).not.toContain('Make it yours')
+    expect(html).toContain('Settings')
+    expect(html).toContain('Organize')
+    expect(html).toContain('Plan')
+    expect(html).not.toContain('Return to Today')
     expect(html).not.toContain('Manage your account, data, install, and recovery controls.')
   })
 })

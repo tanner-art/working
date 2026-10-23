@@ -67,7 +67,7 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     onRegisterCommitTitle?.(() => commitTitleRef.current())
     return () => onRegisterCommitTitle?.(null)
   }, [onRegisterCommitTitle])
-  const [panPreview, setPanPreview] = useState<{ x: number; y: number } | null>(null)
+  const [panPreview, setPanPreview] = useState<CanvasViewport | null>(null)
   const [pinchPreview, setPinchPreview] = useState<CanvasViewport | null>(null)
   // React state renders the preview; this mutable interaction state lets pointer-up
   // commit the most recent move even if React has not rendered it yet.
@@ -110,7 +110,7 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     setSelectedStrokeIds(next.selectedStrokeIds)
     setRefinementCandidateId(next.refinementCandidateId)
   }
-  const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: { x: number; y: number }; dx: number; dy: number; moved: boolean } | null>(null)
+  const drag = useRef<{ pointerId: number; resize?: CanvasElement; id?: string; startX: number; startY: number; originalX?: number; originalY?: number; pan?: boolean; originalPan?: CanvasViewport; dx: number; dy: number; moved: boolean } | null>(null)
   const positioned = (id?: string) => {
     const item = elements.find(value => value.id === id)
     if (!item) return undefined
@@ -149,9 +149,9 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     }
     if (effect.type === 'preview-move') { if (drag.current) { const dx = effect.delta.x / scale, dy = effect.delta.y / scale; drag.current.dx = dx; drag.current.dy = dy; setDragOffset({ id: effect.id, dx, dy }) }; return }
     if (effect.type === 'commit-move') { const item = elements.find(value => value.id === effect.id); if (item) onCommit(moveCanvasNode(elements, effect.id, item.x + effect.delta.x / scale, item.y + effect.delta.y / scale)); drag.current = null; setDragOffset(null); return }
-    if (effect.type === 'begin-pan') { drag.current = { pointerId: effect.start.pointerId, startX: effect.start.x, startY: effect.start.y, originalPan: pan, dx: 0, dy: 0, moved: true }; return }
-    if (effect.type === 'preview-pan') { if (drag.current) { drag.current.dx = effect.delta.x; drag.current.dy = effect.delta.y; setPanPreview({ x: drag.current.originalPan!.x + effect.delta.x, y: drag.current.originalPan!.y + effect.delta.y }) }; return }
-    if (effect.type === 'commit-pan') { if (drag.current?.originalPan) onViewport({ x: drag.current.originalPan.x + effect.delta.x, y: drag.current.originalPan.y + effect.delta.y, scale }); drag.current = null; setPanPreview(null); return }
+    if (effect.type === 'begin-pan') { const start = pinchStart ?? pan; drag.current = { pointerId: effect.start.pointerId, startX: effect.start.x, startY: effect.start.y, originalPan: start, dx: 0, dy: 0, moved: true }; setPanPreview(start); return }
+    if (effect.type === 'preview-pan') { if (drag.current?.originalPan) { drag.current.dx = effect.delta.x; drag.current.dy = effect.delta.y; setPanPreview({ ...drag.current.originalPan, x: drag.current.originalPan.x + effect.delta.x, y: drag.current.originalPan.y + effect.delta.y }) }; return }
+    if (effect.type === 'commit-pan') { if (drag.current?.originalPan) onViewport({ ...drag.current.originalPan, x: drag.current.originalPan.x + effect.delta.x, y: drag.current.originalPan.y + effect.delta.y }); drag.current = null; setPanPreview(null); return }
     if (effect.type === 'begin-resize') { const item = elements.find(value => value.id === effect.id); if (item) drag.current = { pointerId: effect.start.pointerId, resize: item, id: effect.id, startX: effect.start.x, startY: effect.start.y, dx: 0, dy: 0, moved: true }; return }
     if (effect.type === 'preview-resize') { const item = elements.find(value => value.id === effect.id); if (item) setResizePreview(resizeCanvasNode([item], item.id, canvasSize(item).width + effect.delta.x / scale, canvasSize(item).height + effect.delta.y / scale)[0]); return }
     if (effect.type === 'commit-resize') { const item = elements.find(value => value.id === effect.id); if (item) { const size = canvasSize(item); onCommit(resizeCanvasNode(elements, item.id, size.width + effect.delta.x / scale, size.height + effect.delta.y / scale)) }; drag.current = null; setResizePreview(null); return }
@@ -173,11 +173,11 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     // delta now; React's panPreview may not have rendered its latest value yet.
     const panDrag = previousMode === 'panning' ? drag.current : null
     const visiblePan = panDrag?.originalPan
-      ? { x: panDrag.originalPan.x + panDrag.dx, y: panDrag.originalPan.y + panDrag.dy }
+      ? { ...panDrag.originalPan, x: panDrag.originalPan.x + panDrag.dx, y: panDrag.originalPan.y + panDrag.dy }
       : null
-    const previousPinch = pinchInteraction.current.preview
+    const previousPinch = pinchInteraction.current.preview ?? pinchInteraction.current.start?.viewport ?? null
     const preservePinchPreview = visiblePan !== null || previousPinch !== null
-    const pinchStart = result.effects.some(effect => effect.type === 'begin-pinch')
+    const pinchStart = result.effects.some(effect => effect.type === 'begin-pinch' || effect.type === 'begin-pan')
       ? viewportAtPinchStart(viewport, visiblePan, previousPinch)
       : undefined
     gesture.current = result.state
@@ -193,9 +193,19 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
   const down = (event: React.PointerEvent, item?: CanvasElement, resize = false) => {
     if (event.button !== 0) return
     dismissRefinementPreview()
+    // Continuing fingers always belong to the viewport gesture, even over text
+    // or while the pen/lasso tool remains selected.
+    if (Object.keys(gesture.current.pointers).length > 0) {
+      event.preventDefault()
+      ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+      dispatchGesture({ type: 'pointer-down', sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, target: { kind: 'canvas' } })
+      clearHold()
+      return
+    }
     if (tool === 'pen' || tool === 'lasso') {
       const active = penStroke.current ?? lassoPath.current
       if (active) {
+        event.preventDefault()
         ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
         if (lassoPath.current) setSelectedStrokeIds(new Set())
         penStroke.current = null; lassoPath.current = null; setPenPreview(null); setLassoPreview(null)
@@ -215,7 +225,7 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
     const sample = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
     if (resize) {
-      applyGestureResult(reduceResizePointerDown(gesture.current, sample, item!.id, editMode), gesture.current.mode)
+      applyGestureResult(reduceResizePointerDown(gesture.current, sample, item!.id, selected === item!.id), gesture.current.mode)
     } else dispatchGesture({ type: 'pointer-down', sample, target })
     clearHold()
     if (target.kind === 'node') holdTimer.current = window.setTimeout(() => dispatchGesture({ type: 'hold', pointerId: event.pointerId }), 1500)
@@ -225,20 +235,25 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     const active = penStroke.current
     if (active?.pointerId === event.pointerId) {
       const points = [...active.points, worldPoint(event)]
-      penStroke.current = { ...active, points }
+      penStroke.current = { ...active, sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, points }
       setPenPreview({ points, appearance: active.appearance })
       return
     }
     const lasso = lassoPath.current
     if (lasso?.pointerId === event.pointerId) {
       const points = [...lasso.points, worldPoint(event)]
-      lassoPath.current = { ...lasso, points }
+      lassoPath.current = { ...lasso, sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY }, points }
       setLassoPreview(points)
       return
     }
     dispatchGesture({ type: 'pointer-move', sample: { pointerId: event.pointerId, x: event.clientX, y: event.clientY } })
   }
   const cancel = () => { const hadLasso = lassoPath.current !== null; dispatchGesture({ type: 'reset' }); clearInteraction(); if (hadLasso) setSelectedStrokeIds(new Set()) }
+  const lostPointerCapture = (event: React.PointerEvent) => {
+    // Browsers release capture after pointer-up. That normal release must not
+    // cancel the other finger retained by a pinch-to-pan handoff.
+    if (gesture.current.pointers[event.pointerId] || penStroke.current?.pointerId === event.pointerId || lassoPath.current?.pointerId === event.pointerId) cancel()
+  }
   const end = (event: React.PointerEvent) => {
     const active = penStroke.current
     if (active?.pointerId === event.pointerId) {
@@ -492,7 +507,7 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     </>}
     </div>
     <div className="canvas-note">{tool === 'pen' ? 'Pen active · draw a stroke · use two fingers to zoom' : tool === 'lasso' ? selectedStrokeIds.size > 0 ? `${selectedStrokeIds.size} ${selectedStrokeIds.size === 1 ? 'stroke' : 'strokes'} selected · ${selectedStrokeIds.size === 1 ? 'preview refinement or Delete' : 'Delete selection'}` : 'Lasso active · circle strokes to select · use two fingers to zoom' : connectFrom ? 'Select another thought to draw the connection.' : 'Use the grip to move thoughts · drag empty space to pan · edit text directly'}</div>
-    <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select') { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
+    <div ref={canvasRef} className="canvas" style={{ '--canvas-resize-target-size': `${CANVAS_RESIZE_TARGET_SIZE}px` } as CSSProperties} onPointerDown={event => down(event)} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={lostPointerCapture} onKeyDown={event => { if (event.key === 'Escape') cancel() }} onClick={() => { if (tool === 'select' && Object.keys(gesture.current.pointers).length === 0) { dispatchGesture({ type: 'outside-tap' }); setSelected(null); setSelectedStrokeIds(new Set()); setEditMode(false) } }}>
     <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` }}>
     <svg className="canvas-strokes" aria-hidden="true">{strokes.map(stroke => {
       const appearance = canvasInkAppearance(stroke), isSelected = selectedStrokeIds.has(stroke.id)
@@ -503,7 +518,7 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     <svg className="arrows">{arrows.map((arrow, index) => { const shown = renderedArrow(arrow), from = positioned(shown.fromId), to = positioned(shown.toId); if (!from || !to) return null; const d = canvasConnectorPath(from, to, shown.connectionPath, shown); return <g key={arrow.id} className={selected === arrow.id ? 'selected' : ''}><path className="canvas-arrow-visible" d={d} style={connectionAppearance(shown)} markerEnd={`url(#head-${index})`}/><path className="canvas-arrow-hit" d={d} role="button" tabIndex={0} aria-label={`Connection from ${from.text || 'block'} to ${to.text || 'block'}`} onClick={event => { event.stopPropagation(); if (tool === 'select') { setEditMode(false); selectObject(arrow.id) } }} onKeyDown={event => { if (tool === 'select' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setEditMode(false); selectObject(arrow.id) } }}/></g> })}<defs>
     {arrows.map((arrow, index) => <marker key={arrow.id} id={`head-${index}`} markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" style={connectionMarkerAppearance(renderedArrow(arrow))} /></marker>)}
     </defs>
-    </svg>{elements.filter(item => item.type === 'text' || item.type === 'container').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown), '--canvas-node-fill': shown.fillColor } as CSSProperties} onClick={event => clickNode(event, item.id)}>
+    </svg>{elements.filter(item => item.type === 'text' || item.type === 'container').map(item => { const shown = positioned(item.id)!; return <div key={item.id} className={`canvas-node ${item.type} shape-${canvasNodeShape(item)} ${selected === item.id ? 'selected' : ''}`} style={{ left: shown.x, top: shown.y, ...canvasSize(shown), '--canvas-node-fill': shown.fillColor } as CSSProperties} onPointerDown={event => { event.stopPropagation(); down(event, item) }} onClick={event => clickNode(event, item.id)}>
     {(item.shape === 'ellipse' || item.shape === 'diamond') && <svg className="canvas-shape-outline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{item.shape === 'ellipse' ? <ellipse cx="50" cy="50" rx="50" ry="50" /> : <polygon points="50,0 100,50 50,100 0,50" />}</svg>}
     <div className="canvas-drag-handle" title="Move thought" onPointerDown={event => { event.stopPropagation(); down(event, item) }}>
     <span>
@@ -512,8 +527,8 @@ export function Canvas({ title, autoFocusTitle, autoFocusCanvas = false, onRegis
     </span>
     <span>
     </span>
-    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') selectObject(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select') down(event) }} />
-    {editMode && selected === item.id && <button className="canvas-resize-handle" aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => selectObject(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
+    </div>{item.type === 'container' && <small>GROUP</small>}<textarea className={item.nodeVariant === 'bulleted-list' ? 'canvas-bulleted-text' : undefined} value={showBulletedText(item)} aria-label="Block text" onFocus={() => { if (tool === 'select' && selected !== item.id) setEditMode(false); if (tool === 'select') selectObject(item.id) }} onChange={event => onText(item.id, readBulletedText(item, event.target.value))} onBlur={onFinishText} onPointerDown={event => { event.stopPropagation(); if (tool !== 'select' || Object.keys(gesture.current.pointers).length > 0) down(event) }} />
+    {tool === 'select' && selected === item.id && <button className="canvas-resize-handle" style={{ transform: `scale(${1 / scale})`, transformOrigin: 'bottom right' }} aria-label="Resize block" title="Resize block: drag or use arrow keys" onFocus={() => selectObject(item.id)} onClick={event => event.stopPropagation()} onPointerDown={event => { event.stopPropagation(); down(event, item, true) }} onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const size = canvasSize(item), step = event.shiftKey ? 10 : 1; onCommit(resizeCanvasNode(elements, item.id, size.width + (event.key === 'ArrowRight' ? step : event.key === 'ArrowLeft' ? -step : 0), size.height + (event.key === 'ArrowDown' ? step : event.key === 'ArrowUp' ? -step : 0))) }}>↘</button>}
     </div> })}{arrows.filter(arrow => selected === arrow.id).map(arrow => {
       const positions = connectionHandlePositions(arrow)
       if (!positions) return null

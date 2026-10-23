@@ -1,4 +1,5 @@
 import { buildMorningDigest, confirmedSemanticObjects, localDateKey } from './morningDigest'
+import './mobileProduct.css'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
 import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
@@ -23,6 +24,8 @@ import { CalendarView } from './CalendarView'
 import { buildCalendarTimeGrid } from './calendar'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
+import { WorkspaceHub } from './WorkspaceHub'
+import { CopyCaptureButton } from './CopyCaptureButton'
 import { previewStartView } from './betaHomeState'
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { AppState, CanvasElement, ObjectKind, PersistedState, SemanticObject, ThoughtObject } from './domain'
@@ -47,11 +50,10 @@ import { readReviewTargets } from './reviewTargets'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
 import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
-import { closeMoreMenu, dismissMoreMenuOutside } from './navigationMenu'
 
-type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
+type View = 'today' | 'capture' | 'review' | 'organize' | 'plan' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }
+  { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'organize', label: 'Organize', icon: '◇' }, { id: 'plan', label: 'Plan', icon: '▦' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -271,12 +273,6 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     updateZoom()
     return () => viewport.removeEventListener('resize', updateZoom)
   }, [])
-  const moreMenu = useRef<HTMLDetailsElement>(null)
-  useEffect(() => {
-    const dismiss = (event: PointerEvent) => { dismissMoreMenuOutside(moreMenu.current, event.target) }
-    document.addEventListener('pointerdown', dismiss)
-    return () => document.removeEventListener('pointerdown', dismiss)
-  }, [])
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
@@ -492,9 +488,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       setCaptureBusy(false)
     }
   }
+  const [pendingActionNavigation, setPendingActionNavigation] = useState(false)
   const resolveReviewObject = (resolved: ThoughtObject) => {
     update(current => ({ ...current, objects: current.objects.map(item => item.id === resolved.id ? resolved : item) }))
-    if (resolved.kind === 'action') navigate('schedule')
+    if (resolved.kind === 'action') setPendingActionNavigation(true)
   }
   const resolveCommitment = (id: string, details: CommitmentDetails) => update(current =>
     resolveCommitmentInState(current, id, details, readSearchModel))
@@ -539,14 +536,22 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   }
   const exitCanvas = () => { finishCanvasEditing(); closeCanvasEditor() }
   const navigate = (next: View) => {
+    if (!searchHandoffGuards.canLeave()) { setWorkspaceRouteError('Finish or cancel your open edit before leaving this screen.'); return }
+    setWorkspaceRouteError('')
     swipeStart.current = null
-    closeMoreMenu(moreMenu.current)
     if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
     setFocusCanvasEntry(false)
     setFocusedActionId(null); setFocusedReminderId(null); setSelectedCaptureId(null)
     setView(next)
   }
+  useEffect(() => {
+    if (!pendingActionNavigation) return
+    // Wait for the resolved row to unmount and remove its busy guard. Other
+    // mounted drafts must still be protected by the normal navigation check.
+    setPendingActionNavigation(false)
+    navigate('schedule')
+  }, [pendingActionNavigation])
   const onContentPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if (!event.isPrimary) { swipeStart.current = null; return }
     const allowed = canBeginSwipe({ pointerType: event.pointerType, isPrimary: event.isPrimary, view,
@@ -664,7 +669,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
   return <>{workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} />}
   <div hidden={!!activeWorkspaceSurface} inert={!!activeWorkspaceSurface}><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
-    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape' && closeMoreMenu(event.currentTarget, true)) { event.preventDefault(); event.stopPropagation() } }}><summary aria-label={view === 'settings' ? 'More options, Settings current page' : 'More options'}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" aria-current={view === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}>Settings</button></div></details></aside>
+    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => {
+      const active = view === item.id || (item.id === 'organize' && ['review', 'canvas'].includes(view)) || (item.id === 'plan' && ['schedule', 'calendar', 'commitments'].includes(view))
+      return <button className={active ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={active ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'organize' && reviewCount > 0 && <b>{reviewCount}</b>}</button>
+    })}</nav></aside>
     <section className={viewportZoomed ? 'content' : 'content swipe-navigation-surface'} onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
@@ -702,6 +710,9 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
       {view === 'today' && <Today state={state} onCapture={() => setView('capture')} onOpen={setSelectedObjectId}
         readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
       {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
+      {(view === 'organize' || view === 'plan') && <WorkspaceHub kind={view} onOpen={navigate} />}
+      {(['review', 'canvas'].includes(view) && !openCanvasId) && <div className="hub-back"><button type="button" className="secondary" onClick={() => navigate('organize')}>← Organize</button></div>}
+      {['schedule', 'calendar', 'commitments'].includes(view) && <div className="hub-back"><button type="button" className="secondary" onClick={() => navigate('plan')}>← Plan</button></div>}
       {view === 'capture' && <Capture library={captureLibrary} registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
       {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={reviewTargets.targets} targetsError={reviewTargets.error} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveCommitment={resolveCommitment} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} library={<CaptureLibrary registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} library={captureLibrary} focusRequest={searchRequest} onOpen={setSelectedObjectId} onChange={change => update(current => ({ ...current, captureLibrary: changeCaptureLibrary(captureLibraryFor(current.objects, current.captureLibrary), current.objects, change) }))} />} />}
       {view === 'review' && <ReminderProjections state={state} readModel={readSearchModel} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
@@ -746,7 +757,7 @@ function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: A
   return <div className="panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
     <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="source-capture-title">
       <header><div><p className="eyebrow">Preserved source</p><h2 id="source-capture-title">Original capture</h2></div><button ref={closeButton} className="close-button" type="button" onClick={onClose} aria-label="Close original capture">×</button></header>
-      <div className="panel-scroll">{source?.capture ? <><p>{source.capture.originalContent}</p>{source.correction && <p>Current corrected wording: {source.correction.correctedContent}</p>}<small>Captured {new Date(source.capture.createdAt).toLocaleString()}</small></> : <p role="alert">This capture is no longer available. Refresh Search and try again.</p>}</div>
+      <div className="panel-scroll">{source?.capture ? <><p className="selectable-capture">{source.capture.originalContent}</p><CopyCaptureButton text={source.capture.originalContent} />{source.correction && <p>Current corrected wording: {source.correction.correctedContent}</p>}<small>Captured {new Date(source.capture.createdAt).toLocaleString()}</small></> : <p role="alert">This capture is no longer available. Refresh Search and try again.</p>}</div>
     </aside>
   </div>
 }
@@ -827,7 +838,7 @@ function SettingsPage({ registerSearchHandoffGuard, accountActive, dataControls,
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
       <form onSubmit={event => { event.preventDefault(); setFailure(''); setMessage(''); try { onSave({ ...draft, displayName: draft.displayName.trim() }); setDraft({ ...draft, displayName: draft.displayName.trim() }); setMessage(accountActive ? 'Settings updated. Account save status is shown in Data.' : 'Settings saved on this device.') } catch { setFailure('Settings could not be saved. Your edits are still here; check browser storage and retry.') } }}>
         <fieldset disabled={!!error}><label>Display name / profile label<input maxLength={80} autoComplete="nickname" value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })} placeholder="Personal space" /></label>
-          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Today</option><option value="capture">Capture</option><option value="canvas">Canvas Bank</option></select></label>
+          <label>Open Threadline to<select value={draft.startPage} onChange={event => setDraft({ ...draft, startPage: event.target.value as LocalSettings['startPage'] })}><option value="today">Home</option><option value="capture">Capture</option><option value="canvas">Canvas Bank</option></select></label>
           <button className="primary" type="submit">Save settings</button></fieldset>
       </form><p role="status">{message}</p>
     </section>
@@ -1018,7 +1029,7 @@ export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspe
     <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="object-panel-title">
       <header><div><p className="eyebrow">Object workbench</p><h2 id="object-panel-title">Shape this thought</h2></div><button ref={closeButton} className="close-button" onClick={closePanel} aria-label="Close object details">×</button></header>
       <div className="panel-scroll">
-        <section className="raw-thought"><p className="section-label">Current thought</p><p>{history.currentText}</p><small>{object.source} · first captured {new Date(object.createdAt).toLocaleString()}</small>{history.currentText !== history.immutableSource && <p className="preserved-note">The first capture is preserved in version history.</p>}</section>
+        <section className="raw-thought"><p className="section-label">Current thought</p><p className="selectable-capture">{history.currentText}</p><CopyCaptureButton text={history.currentText} /><small>{object.source} · first captured {new Date(object.createdAt).toLocaleString()}</small>{history.currentText !== history.immutableSource && <p className="preserved-note">The first capture is preserved in version history.</p>}</section>
         <section className="interpretation"><p className="section-label">AI proposal</p><strong>{object.interpretation.summary}</strong><small>{Math.round(object.confidence * 100)}% confident · {object.interpretation.rationale}</small></section>
         <section className="thought-editors" aria-labelledby="thought-editing-heading"><div><p className="section-label">Edit without losing history</p><h3 id="thought-editing-heading">Revise this thought</h3><p>Each save adds a version. The original capture always stays available below.</p></div>
           {hasUnsavedFieldEdits && <p role="status">Save your object field changes before revising the thought text or organized meaning.</p>}

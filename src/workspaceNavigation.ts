@@ -117,7 +117,7 @@ export function recoverRejectedWorkspacePopstate(history: Readonly<{ go: (steps:
 
 /** A clean source view must never prevent a valid Search result handoff. */
 export function canOpenSearchResultFromView(view: string, unsavedChildWork: boolean): boolean {
-  return !unsavedChildWork && ['today', 'capture', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home'].includes(view)
+  return !unsavedChildWork && ['today', 'capture', 'organize', 'plan', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home'].includes(view)
 }
 
 const unavailable = 'This result has changed or is no longer available. Refresh Search and try again.'

@@ -117,6 +117,7 @@ export function mergeAccountData(accountValue: AccountData, deviceValue: Account
   const captureLibrary = account.model.captureLibrary || device.model.captureLibrary ? {
     folders: mergeRecords(accountLibrary.folders, deviceLibrary.folders, 'folder').merged,
     placements: mergeRecords(accountLibrary.placements, deviceLibrary.placements, 'capture folder placement').merged,
+    ...(accountLibrary.completions || deviceLibrary.completions ? { completions: mergeRecords(accountLibrary.completions ?? [], deviceLibrary.completions ?? [], 'capture completion').merged } : {}),
   } : undefined
   if (captureLibrary && !isCaptureLibrary(captureLibrary, legacyUiIds)) throw Error('Merge stopped: folder names or destinations conflict. Rename or move the conflicting folders and preview again. Both sources are untouched.')
   const model: PersistedState = {

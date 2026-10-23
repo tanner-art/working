@@ -4,10 +4,10 @@ import { buildMorningDigest } from './morningDigest'
 import { bankObjects, reviewObjects } from './objectWorkflow'
 import { canvasBankForState } from './canvasBank'
 
-export type BetaHomeDestination = 'today' | 'capture' | 'review' | 'calendar' | 'canvas' | 'settings' | 'digest'
+export type BetaHomeDestination = 'today' | 'capture' | 'review' | 'organize' | 'plan' | 'calendar' | 'canvas' | 'settings' | 'digest'
 
 export function previewStartView(search: string, fallback: BetaHomeDestination | 'commitments'): BetaHomeDestination | 'commitments' | 'beta-home' {
-  return new URLSearchParams(search).get('preview') === 'home' ? 'beta-home' : fallback
+  return new URLSearchParams(search).get('preview') === 'home' || fallback === 'today' ? 'beta-home' : fallback
 }
 
 export function buildBetaHomeSnapshot(state: AppState, now = new Date()) {
