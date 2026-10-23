@@ -37,13 +37,12 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
     finally { setBusy(false) }
   }
   return <main className={`beta-welcome${signedIn || previewSetup ? '' : ' beta-welcome-immersive'}`}>
-    {!signedIn && !previewSetup && <BetaSkyHero preview={preview} />}
-    <div className="beta-wrap">
-      {(signedIn || previewSetup) && <header className="beta-nav"><a className="beta-wordmark" href="/beta" aria-label="Threadline beta"><span aria-hidden="true">⊹</span> threadline</a><span className="beta-badge">EARLY ACCESS</span>
-        {preview ? <a className="beta-nav-link" href="/settings">Back to Settings</a> : !signedIn && <a className="beta-nav-link" href="#join">Sign in <span aria-hidden="true">↗</span></a>}
-      </header>}
-      {preview && <p className="beta-preview-label">Design preview · no emails are sent and no account data is changed.</p>}
-      {signedIn || previewSetup ? <section className="beta-setup" aria-labelledby="beta-setup-title">
+    {signedIn || previewSetup ? <div className="beta-wrap">
+      <header className="beta-nav"><a className="beta-wordmark" href="/beta" aria-label="Threadline beta"><span aria-hidden="true">⊹</span> threadline</a><span className="beta-badge">EARLY ACCESS</span>
+        {preview && <a className="beta-nav-link" href="/settings">Back to Settings</a>}
+      </header>
+      {preview && <p className="beta-preview-note">Design preview · no emails are sent and no account data is changed.</p>}
+      <section className="beta-setup" aria-labelledby="beta-setup-title">
         <div className="beta-setup-icon" aria-hidden="true">⊹</div><p className="beta-overline">{previewSetup ? 'SETUP PREVIEW' : 'YOU’RE SIGNED IN'}</p>
         <h1 id="beta-setup-title" ref={heading} tabIndex={-1}>Good thoughts.<br />Always within reach.</h1>
         <p className="beta-lead">Give Threadline a place on your home screen. Your next thought is only a tap away.</p>
@@ -54,28 +53,9 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
           <p>You can also keep using your browser. Installation is optional.</p>
           {!previewSetup && <p className="beta-fine">This opens your existing account or creates an empty synced workspace. Any separate device copy stays preserved; you can combine it later in Settings → Data.</p>}
         </div>
-      </section> : <>
-        <section className="beta-hero" id="beta-story" aria-labelledby="beta-story-title">
-          <div className="beta-hero-copy"><p className="beta-overline"><span /> A LITTLE SPACE FOR YOUR MIND</p>
-            <h2 className="beta-story-title" id="beta-story-title">A thought is only<br />the beginning.</h2>
-            <p className="beta-lead">Catch a thought before it disappears. Find it when you need it. Make room to see how it all connects.</p>
-            <a className="beta-cta" href="#join">Make room for your thoughts <span aria-hidden="true">↗</span></a><p className="beta-small">On your phone. On your laptop. In your own rhythm.</p>
-          </div>
-          <figure className="beta-product" aria-label="Illustrative Threadline workspace: capture a thought, organize it, and connect ideas on a canvas">
-            <div className="beta-product-bar"><span>⊹ threadline</span><span>YOUR SPACE</span></div>
-            <div className="beta-demo-capture"><span className="beta-overline">CAPTURE</span><p>A little studio.<br />A place to make things.</p><span className="beta-demo-saved">✓ Thought captured</span></div>
-            <div className="beta-demo-canvas"><svg viewBox="0 0 420 230" aria-hidden="true"><path d="M94 126 C180 126 130 48 245 48 M94 126 C175 126 150 181 275 181" /></svg><span className="beta-node beta-node-root">A little studio</span><span className="beta-node beta-node-one">Room to experiment</span><span className="beta-node beta-node-two">Something of my own</span><span className="beta-canvas-caption">A BIGGER PICTURE, ONE THOUGHT AT A TIME</span></div>
-            <figcaption>Less to hold in your head. More to build on.</figcaption>
-          </figure>
-        </section>
-        <section className="beta-principles" aria-label="What you can do with Threadline">
-          <article><span className="beta-step-number">01 / CAPTURE</span><h2>Start with a thought.</h2><p>A note, an idea, a thing to do. Write it down without deciding where it belongs.</p></article>
-          <article><span className="beta-step-number">02 / ORGANIZE</span><h2>Find your own order.</h2><p>Review when you’re ready. Use folders and search to keep good thoughts close.</p></article>
-          <article><span className="beta-step-number">03 / CONNECT</span><h2>See beyond the list.</h2><p>Spread ideas across a canvas. Draw connections. Give your thinking room to grow.</p></article>
-        </section>
-        <section className="beta-join" id="join" aria-labelledby="beta-join-title">
-          <div><p className="beta-overline">COME MAKE IT YOURS</p><h2 id="beta-join-title">Your next thought<br />starts here.</h2><p>We’re opening Threadline to early testers. Use it in everyday life, tell us what feels good, and help us make the rough edges better.</p><p className="beta-small">A web-app beta. No App Store download or TestFlight invitation needed.</p></div>
-          <div className="beta-signup"><h3>{showCode ? 'Check your email' : 'Join Threadline'}</h3><p>{showCode ? 'Enter the code from your email here, or open its sign-in link. Use the same email on every device.' : 'One email. No password to remember. New here? We’ll create your account. Already here? We’ll sign you in.'}</p>
+      </section>
+    </div> : <BetaSkyHero preview={preview}>
+      <div className="beta-signup">{preview && <p className="beta-preview-note">Design preview · no emails are sent and no account data is changed.</p>}<h3>{showCode ? 'Check your email' : 'Join Threadline'}</h3><p>{showCode ? 'Enter the code from your email here, or open its sign-in link. Use the same email on every device.' : 'One email. No password. Your space on every device.'}</p>
             {(state.status === 'error' || state.status === 'unconfigured') && <div className="beta-error" role="alert"><p>{state.status === 'unconfigured' ? 'Signup isn’t available in this preview. Please return to the shared beta link.' : state.message}</p>{state.status === 'error' && <button className="beta-text-button" onClick={onRetry}>Retry connection</button>}</div>}
             {state.status === 'signed-out' && state.message && <p className={codeSent ? 'beta-feedback' : 'beta-error'} role={codeSent ? 'status' : 'alert'}>{state.message}</p>}
             <form className="beta-signup-form" onSubmit={event => { event.preventDefault(); if (preview) { setPreviewSetup(true); return } if (waiting || state.status !== 'signed-out') return; onLogin(email.trim()); }}>
@@ -89,16 +69,13 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
             <p className="beta-fine">Your email is used for your account and sign-in. This does not subscribe you to a mailing list.</p>
             <details className="beta-local"><summary>Have captures saved only on this device?</summary><p>They stay here. Signing up won’t upload or replace them. You can combine them with your account in Settings → Data.</p><button className="beta-text-button" onClick={onLocal} disabled={waiting}>Continue with device data</button></details>
           </div>
-        </section>
-        <section className="beta-faq" aria-labelledby="beta-faq-title"><h2 id="beta-faq-title">A few things to know.</h2>
-          <details><summary>Will my phone and laptop show the same things?</summary><p>Sign in with the same email to open your account workspace on each device. Account changes save online; other devices refresh when you’re not editing. Separate local-only work is preserved until you choose to combine it.</p></details>
-          <details><summary>How do I put it on my home screen?</summary><p>After signing in, we’ll walk you through it. On iPhone, use Safari’s Share menu, then Add to Home Screen. On Android, look for Install app in Chrome’s menu. You can always use a browser instead.</p></details>
-          <details><summary>What should I expect from the beta?</summary><p>This is an early product with rough edges. Avoid sensitive information, keep an export of important work, and share feedback with the person who invited you. Home-screen installation does not enable push notifications.</p></details>
-          <details><summary>Where does my data live?</summary><p>Signed-in work is stored in your account using Supabase. Device-only work stays in that browser. You can export your work in Settings → Recovery. This beta does not yet offer self-service account deletion.</p></details>
-        </section>
-      </>}
-      <footer className="beta-bottom"><span>⊹ threadline</span><span>A little more room to think.</span><span>Built with early feedback.</span></footer>
-    </div>
+      <details className="beta-beta-details"><summary>A little about this beta</summary>
+        <p>Capture thoughts, organize them, and connect ideas on a canvas. Sign in with the same email on your phone and laptop. After sign-in, we’ll show you how to add Threadline to your home screen.</p>
+        <p>Account work is stored using Supabase; device-only work stays in that browser until you choose to combine it. Export important work in Settings → Recovery. Self-service account deletion and push notifications aren’t available yet.</p>
+        <p>This is an early beta. Avoid sensitive information, keep an export of important work, and send feedback to the person who invited you.</p>
+      </details>
+      <p className="beta-arrival-footer">⊹ threadline · A little more room to grow.</p>
+    </BetaSkyHero>}
   </main>
 }
 

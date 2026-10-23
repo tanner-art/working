@@ -22,13 +22,17 @@ const contrast = (a: string, b: string) => {
 }
 
 describe('nature-inspired beta palette', () => {
-  it('bounds introductory motion and image weight for mobile visitors', () => {
+  it('provides static reduced motion and bounds landscape image weight', () => {
     expect(skyCss).toContain('@media (prefers-reduced-motion: reduce)')
-    expect(skyCss).toContain('animation: none; transform: none;')
+    expect(skyCss).toContain('opacity: 1; transform: none;')
     expect(skyCss).not.toContain('infinite')
+    expect(skyCss).toMatch(/\.beta-journey-chapters\s*\{[^}]*overflow: clip/)
     expect(statSync(new URL('../public/images/beta-alpine-sky.jpg', import.meta.url)).size).toBeLessThan(400_000)
-    // 80% opaque pine scrim over a pure-white image is the brightest copy backdrop.
-    expect(contrast('#ffffff', '#416171')).toBeGreaterThanOrEqual(4.5)
+    const assets = ['beta-alpine-sky.jpg', 'beta-grounded-meadow.jpg', 'beta-cloud-layer.png']
+    expect(assets.reduce((bytes, name) => bytes + statSync(new URL(`../public/images/${name}`, import.meta.url)).size, 0)).toBeLessThan(1_500_000)
+    // 93% snow over pure black conservatively bounds the translucent copy surfaces.
+    expect(contrast('#203b38', '#eaebe7')).toBeGreaterThanOrEqual(4.5)
+    expect(contrast('#086585', '#eaebe7')).toBeGreaterThanOrEqual(4.5)
   })
   it('keeps text readable even against a conservative dark bound of the decorative washes', () => {
     // Minimum channel values across the backdrop stops also bound their interpolations.

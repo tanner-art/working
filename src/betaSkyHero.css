@@ -1,38 +1,66 @@
-.beta-welcome.beta-welcome-immersive { padding: 0; }
-.beta-welcome-immersive > .beta-wrap { padding: 0 max(22px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); }
-.beta-sky { position: relative; isolation: isolate; overflow: hidden; min-height: 760px; min-height: max(760px, 100svh); background: #21668d; color: #fff; }
-.beta-sky-image { position: absolute; z-index: -2; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; animation: beta-sky-arrive 4.5s ease-out both; }
-.beta-sky::after { content: ''; position: absolute; z-index: -1; inset: 0; pointer-events: none; background: linear-gradient(180deg, #103d5655 0%, transparent 30%, #123a4dcc 52%, #123a4de8 100%); }
-.beta-sky-nav { display: flex; align-items: center; gap: 16px; min-height: 90px; padding: max(20px, env(safe-area-inset-top)) max(26px, env(safe-area-inset-right)) 18px max(26px, env(safe-area-inset-left)); }
-.beta-sky-brand { display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 10px; background: #123a4de8; font-size: 22px; font-weight: 700; letter-spacing: -.05em; }
+.beta-welcome.beta-welcome-immersive { padding: 0; background: #86bde1; }
+.beta-journey { position: relative; isolation: isolate; --journey-sky-opacity: 1; --journey-ground-opacity: 0; --journey-cloud-opacity: 1; --journey-sky-y: 0svh; --journey-cloud-y: 0svh; --journey-ground-y: 18svh; --journey-wordmark-opacity: 1; --journey-wordmark-y: 0svh; }
+.beta-journey-stage { position: sticky; top: 0; height: 100svh; min-height: 540px; pointer-events: none; }
+.beta-journey-art { position: absolute; inset: 0; overflow: hidden; background: linear-gradient(#277cbe, #a8d3eb); }
+.beta-journey-art img { position: absolute; width: 100%; height: 100%; object-fit: cover; pointer-events: none; user-select: none; }
+.beta-journey-sky { inset: 0 0 auto; height: 155% !important; object-position: center top; opacity: var(--journey-sky-opacity); transform: translate3d(0, var(--journey-sky-y), 0); }
+.beta-journey-ground { inset: 0; object-position: 20% bottom; opacity: var(--journey-ground-opacity); transform: translate3d(0, var(--journey-ground-y), 0); }
+.beta-journey-art .beta-journey-clouds { inset: -8% -12%; width: 124%; height: 116%; object-fit: fill; opacity: var(--journey-cloud-opacity); transform: translate3d(0, var(--journey-cloud-y), 0); }
+.beta-glass-wordmark { position: absolute; top: 24%; left: 0; width: 100%; padding: 12px 20px; text-align: center; font: italic 500 clamp(64px, 15.3vw, 230px)/1.18 'Playfair Display', Georgia, serif; letter-spacing: -.075em; color: #e3f6ff; background: linear-gradient(155deg, #ffffffed 4%, #e8f9ff25 35%, #fff 49%, #cef3ff40 56%, #efffffdb 85%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 1px #e5faffb3; filter: drop-shadow(1px 3px 0 #2184b178) drop-shadow(0 8px 10px #16495d40); opacity: var(--journey-wordmark-opacity); transform: translate3d(0, var(--journey-wordmark-y), 0) rotate(-2deg); user-select: none; }
+.beta-sky-nav { position: relative; z-index: 5; display: flex; align-items: center; gap: 16px; min-height: 88px; padding: max(18px, env(safe-area-inset-top)) max(26px, env(safe-area-inset-right)) 18px max(26px, env(safe-area-inset-left)); pointer-events: auto; }
+.beta-sky-brand { display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 10px; background: #123a4ded; color: #fff !important; font-size: 22px; font-weight: 700; letter-spacing: -.05em; }
 .beta-sky-brand span { color: #d9ed9e; font-size: 29px; }
-.beta-sky-badge { padding: 7px 10px; border-radius: 20px; background: #123a4de8; font: 9px 'DM Mono', monospace; letter-spacing: .1em; }
-.beta-welcome .beta-sky-signin, .beta-welcome .beta-sky-join { display: inline-flex; justify-content: center; align-items: center; gap: 24px; min-height: 48px; padding: 13px 21px; border: 1px solid #fff; border-radius: 12px; background: #fcfdf9; color: #203b38; font-size: 14px; font-weight: 600; box-shadow: 0 3px 14px #153f561a; }
-.beta-welcome .beta-sky-signin { margin-left: auto; }
-.beta-welcome .beta-sky-join:hover, .beta-welcome .beta-sky-signin:hover { background: #eef4df; }
-.beta-sky :is(a, button):focus-visible { outline: 3px solid #fff; outline-offset: 5px; box-shadow: 0 0 0 8px #123a4d; }
-.beta-sky-stage { display: flex; flex-direction: column; align-items: center; justify-content: space-between; min-height: 670px; min-height: max(670px, calc(100svh - 90px)); padding: 45px 22px max(30px, env(safe-area-inset-bottom)); }
-.beta-glass-wordmark { margin: auto 0; padding: 10px 0 34px; max-width: 100%; font: italic 500 clamp(72px, 15.3vw, 230px)/1.18 'Playfair Display', Georgia, serif; letter-spacing: -.075em; color: #e3f6ff; background: linear-gradient(155deg, #ffffffed 4%, #e8f9ff25 35%, #fff 49%, #cef3ff40 56%, #efffffdb 85%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 1px #e5faffb3; filter: drop-shadow(1px 3px 0 #2184b178) drop-shadow(0 8px 10px #16495d40); transform-origin: center; animation: beta-wordmark-arrive 4s cubic-bezier(.2,.65,.3,1) both; user-select: none; }
-.beta-sky-message { text-align: center; max-width: 620px; padding-top: 40px; }
+.beta-sky-badge { padding: 7px 10px; border-radius: 20px; background: #123a4ded; color: #fff; font: 9px 'DM Mono', monospace; letter-spacing: .1em; }
+.beta-welcome .beta-sky-signin { display: inline-flex; justify-content: center; align-items: center; gap: 24px; min-height: 48px; margin-left: auto; padding: 13px 21px; border: 1px solid #fff; border-radius: 12px; background: #fcfdf9; color: #203b38; font-size: 14px; font-weight: 600; box-shadow: 0 3px 14px #153f561a; }
+.beta-welcome .beta-sky-signin:hover { background: #eef4df; }
+.beta-journey :is(a, button, input, summary):focus-visible { outline: 3px solid #086585; outline-offset: 4px; box-shadow: 0 0 0 7px #fcfdf9; }
+.beta-journey-chapters { position: relative; margin-top: -100svh; overflow: clip; pointer-events: none; }
+.beta-journey-chapter { min-height: 100svh; min-height: max(540px, 100svh); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 100px 22px 80px; }
+.beta-journey-dream { justify-content: flex-end; padding-bottom: max(7svh, 28px); }
+.beta-journey-copy { position: relative; isolation: isolate; text-align: center; max-width: 620px; padding: 22px 30px 16px; color: #203b38; pointer-events: auto; }
+.beta-journey-copy::before { content: ''; position: absolute; z-index: -1; inset: -85px -150px; background: radial-gradient(ellipse, #fcfdf9fa 0%, #fcfdf9f2 48%, transparent 74%); pointer-events: none; }
 .beta-sky-eyebrow { font: 10px/1.5 'DM Mono', monospace; letter-spacing: .14em; }
-.beta-sky .beta-sky-message h1 { margin: 17px 0; color: #fff; font: 500 clamp(34px, 3.5vw, 51px)/1.12 'Playfair Display', Georgia, serif; letter-spacing: -.045em; }
-.beta-sky-message > p:not(.beta-sky-eyebrow) { margin: 0 0 25px; color: #fff; font-size: 15px; line-height: 1.7; }
-.beta-welcome .beta-sky-explore { display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 44px; margin-top: 16px; font-size: 11px; color: #fff; text-decoration: underline; text-underline-offset: 4px; }
-.beta-story-title { margin: 23px 0; font: 500 clamp(36px, 4vw, 52px)/1.12 'Playfair Display', Georgia, serif; letter-spacing: -.05em; }
-.beta-hero#beta-story { scroll-margin-top: 28px; }
-/* Finite, compositor-only entrance. No scroll listeners, autoplay video or perpetual motion. */
-@keyframes beta-sky-arrive { from { transform: scale(1.065) translateY(-1%); } to { transform: scale(1) translateY(0); } }
-@keyframes beta-wordmark-arrive { from { transform: perspective(900px) rotateY(-14deg) rotateZ(-4deg) translateY(25px); } to { transform: perspective(900px) rotateY(0) rotateZ(-2deg) translateY(0); } }
+.beta-journey h1, .beta-journey h2 { color: #203b38; font: 500 clamp(36px, 4vw, 54px)/1.12 'Playfair Display', Georgia, serif; letter-spacing: -.045em; margin: 15px 0; }
+.beta-journey-copy :is(h1, h2) { color: #203b38; }
+.beta-journey-copy > p:not(.beta-sky-eyebrow) { font-size: 15px; line-height: 1.7; margin: 12px 0 8px; }
+.beta-welcome .beta-sky-explore { display: flex; justify-content: center; align-items: center; gap: 12px; min-height: 44px; font-size: 12px; text-decoration: underline; text-underline-offset: 4px; color: #086585; }
+.beta-journey-arrival { min-height: 100svh; min-height: max(540px, 100svh); display: flex; align-items: center; flex-direction: column; padding: 110px 22px max(24svh, 130px); scroll-margin-top: 0; }
+.beta-arrival-heading { text-align: center; padding: 16px 28px; width: min(100%, 440px); background: #fcfdf9f2; border-radius: 22px 22px 0 0; color: #203b38; pointer-events: auto; }
+.beta-arrival-heading h2 { font-size: clamp(33px, 3vw, 43px); }.beta-arrival-heading > p:last-child { margin: 12px 0 0; font-size: 13px; }
+.beta-journey-arrival .beta-signup { width: min(100%, 440px); padding: 24px 28px 12px; border: 0; border-radius: 0; background: #fcfdf9f2; box-shadow: none; pointer-events: auto; }
+.beta-journey-arrival .beta-signup h3 { font-size: 23px; }.beta-journey-arrival .beta-signup > p { font-size: 13px; line-height: 1.7; }
+.beta-journey-arrival .beta-signup-form { margin-top: 15px; }
+.beta-journey-arrival .beta-local { margin-top: 5px; }
+.beta-preview-note { font-size: 11px !important; line-height: 1.7; color: #4c655f; padding-bottom: 10px; border-bottom: 1px solid #cddbd1; }
+.beta-beta-details { width: min(100%, 440px); padding: 0 28px 14px; border-radius: 0 0 22px 22px; background: #fcfdf9f2; font-size: 12px; color: #203b38; line-height: 1.8; pointer-events: auto; }
+.beta-beta-details summary { min-height: 44px; text-decoration: underline; text-underline-offset: 4px; }
+.beta-arrival-footer { padding: 8px 15px; border-radius: 20px; background: #fcfdf9ed; color: #203b38; font-size: 11px; }
+/* Preserve the ground's vertical proportion on wide displays instead of cropping its horizon. */
+@media (min-aspect-ratio: 3/2) { .beta-journey-art .beta-journey-ground { object-fit: fill; } }
 @media (max-width: 760px) {
-  .beta-sky { min-height: max(710px, 100svh); }
-  .beta-sky-image { object-position: 18% center; }
-  .beta-sky-nav { gap: 8px; min-height: 78px; padding: max(16px, env(safe-area-inset-top)) 16px 14px; }
-  .beta-sky-brand { font-size: 18px; padding: 5px 9px; }.beta-sky-brand span { font-size: 25px; }
-  .beta-sky-badge { display: none; }
+  .beta-sky-nav { gap: 8px; padding: max(14px, env(safe-area-inset-top)) 16px 14px; min-height: 76px; }
+  .beta-sky-brand { font-size: 18px; padding: 5px 9px; }.beta-sky-brand span { font-size: 25px; }.beta-sky-badge { display: none; }
   .beta-welcome .beta-sky-signin { padding: 11px 14px; font-size: 12px; gap: 14px; }
-  .beta-sky-stage { min-height: max(632px, calc(100svh - 78px)); padding: 26px 18px max(22px, env(safe-area-inset-bottom)); }
-  .beta-glass-wordmark { font-size: 17vw; letter-spacing: -.075em; padding-bottom: 10px; -webkit-text-stroke-width: .7px; }
-  .beta-sky-message { padding-top: 35px; }.beta-sky .beta-sky-message h1 { font-size: 36px; }
+  .beta-glass-wordmark { top: 27%; font-size: 17vw; -webkit-text-stroke-width: .7px; }
+  .beta-journey-sky { object-position: 18% top; }
+  .beta-journey-chapter { padding-left: 18px; padding-right: 18px; }
+  .beta-journey-copy { padding: 18px 20px 12px; border-radius: 18px; }
+  .beta-journey h1, .beta-journey h2 { font-size: 36px; }
+  .beta-journey-arrival { padding: 98px 18px max(24svh, 130px); }
+  .beta-arrival-heading { padding: 16px 22px 8px; }.beta-arrival-heading h2 { font-size: 33px; }
+  .beta-journey-arrival .beta-signup { padding: 18px 22px 8px; }.beta-beta-details { padding: 0 22px 12px; }
 }
-@media (prefers-reduced-motion: reduce) { .beta-sky-image, .beta-glass-wordmark { animation: none; transform: none; } }
-@media (forced-colors: active) { .beta-glass-wordmark { -webkit-text-fill-color: CanvasText; -webkit-text-stroke: 0; filter: none; }.beta-sky::after { background: Canvas; } }
+@media (max-height: 539px) { .beta-journey-chapters { margin-top: -540px; } }
+/* Native scrolling remains available. Reduced motion uses a static landscape, no parallax. */
+@media (prefers-reduced-motion: reduce) {
+  .beta-journey-art .beta-journey-sky, .beta-journey-art .beta-journey-clouds, .beta-glass-wordmark { display: none; }
+  .beta-journey-art .beta-journey-ground { opacity: 1; transform: none; }
+  .beta-journey-stage { position: sticky; }
+}
+@media (forced-colors: active) {
+  .beta-journey-art { display: none; }
+  .beta-journey-copy::before { display: none; }
+  .beta-journey-copy, .beta-arrival-heading, .beta-journey-arrival .beta-signup, .beta-beta-details { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }
+  .beta-journey h1, .beta-journey h2 { color: CanvasText; }
+  .beta-welcome .beta-sky-explore { color: LinkText; }
+}
