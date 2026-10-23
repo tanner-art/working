@@ -27,10 +27,12 @@ describe('nature-inspired beta palette', () => {
     expect(skyCss).toContain('animation: none !important;')
     expect(skyCss).toContain('animation-play-state: paused;')
     expect(skyCss).toContain('overflow-x: hidden;')
-    expect(skyCss).toMatch(/\.beta-ascent-stage\s*\{[^}]*overflow: clip/)
+    expect(skyCss).toMatch(/\.beta-ascent-world\s*\{[^}]*overflow: clip/)
+    expect(skyCss).not.toContain('--ascent-ground-opacity')
+    expect(skyCss).not.toContain('--ascent-mountain-opacity')
     expect(skyCss).toContain('.beta-information :is(a, button, input, summary):focus-visible { outline: 3px solid #086585;')
     expect(statSync(new URL('../public/images/beta-alpine-sky.jpg', import.meta.url)).size).toBeLessThan(400_000)
-    const assets = ['beta-alpine-sky.jpg', 'beta-ascent-ground.jpg', 'beta-ascent-ground-mobile.jpg', 'beta-ascent-mountain.jpg', 'beta-ascent-stars.jpg', 'beta-cloud-layer.png']
+    const assets = ['beta-continuous-world.jpg', 'beta-continuous-tree.png']
     expect(assets.reduce((bytes, name) => bytes + statSync(new URL(`../public/images/${name}`, import.meta.url)).size, 0)).toBeLessThan(2_500_000)
     // 93% snow over pure black conservatively bounds the translucent copy surfaces.
     expect(contrast('#203b38', '#eaebe7')).toBeGreaterThanOrEqual(4.5)

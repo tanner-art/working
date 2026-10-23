@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { observeJourney, moveJourney } from './betaJourney'
+import { observeJourney } from './betaJourney'
 import './betaSkyHero.css'
 
 const informationHash = () => typeof window !== 'undefined' && ['#info', '#join'].includes(window.location.hash)
@@ -38,22 +38,16 @@ function AscentScene({ initialProgress, onProgress, onOpen }: { initialProgress:
   // Place the native scroll area at its bottom before first paint, without input interception.
   useLayoutEffect(() => root.current ? observeJourney(root.current, window, initialProgress, value => progressCallback.current(value)) : undefined, [initialProgress])
   return <div className="beta-ascent" ref={root} tabIndex={0} role="region" aria-label="Landscape ascent. Scroll upward from the river and tree, past mountains and clouds, into the stars." data-paused={paused}>
-    <div className="beta-ascent-stage">
+    <div className="beta-ascent-world">
       <div className="beta-ascent-art" aria-hidden="true">
-        <img className="beta-ascent-stars" src="/images/beta-ascent-stars.jpg" alt="" width="1536" height="1024" decoding="async" />
-        <img className="beta-ascent-sky" src="/images/beta-alpine-sky.jpg" alt="" width="1536" height="1024" decoding="async" />
-        <img className="beta-ascent-mountain" src="/images/beta-ascent-mountain.jpg" alt="" width="1536" height="1024" decoding="async" />
-        <picture className="beta-ascent-ground"><source media="(max-aspect-ratio: 3/4)" srcSet="/images/beta-ascent-ground-mobile.jpg" /><img src="/images/beta-ascent-ground.jpg" alt="" width="1536" height="1024" fetchPriority="high" /></picture>
-        <img className="beta-ascent-clouds" src="/images/beta-cloud-layer.png" alt="" width="960" height="640" decoding="async" />
+        <img className="beta-ascent-panorama" src="/images/beta-continuous-world.jpg" alt="" width="724" height="2172" fetchPriority="high" />
+        <img className="beta-ascent-tree" src="/images/beta-continuous-tree.png" alt="" width="800" height="1200" decoding="async" />
       </div>
       <a className="beta-ascent-skip" href="#info" onClick={onOpen}>Skip to Threadline information</a>
       <div className="beta-ascent-prize">
         <a className="beta-star-wordmark" href="#info" onClick={onOpen} aria-label="Threadline — open information and signup"><span className="beta-star-symbol" aria-hidden="true">⊹</span><span>threadline</span></a>
         <button className="beta-motion-control" aria-label={paused ? 'Resume wordmark motion' : 'Pause wordmark motion'} aria-pressed={paused} onClick={() => setPaused(value => !value)}>{paused ? '▷' : 'Ⅱ'}</button>
       </div>
-      <button className="beta-ascent-rise" aria-label="Continue upward" onClick={() => root.current && moveJourney(root.current, 'up')}>↑</button>
-      <button className="beta-ascent-return" aria-label="Return to the ground" onClick={() => root.current && moveJourney(root.current, 'ground')}>↓</button>
     </div>
-    <div className="beta-ascent-distance" aria-hidden="true" />
   </div>
 }

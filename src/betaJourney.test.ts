@@ -1,30 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { journeyFrame, observeJourney, moveJourney } from './betaJourney'
-
-describe('ground-to-stars progression', () => {
-  it('opens on the ground and ends with stars and the wordmark', () => {
-    expect(journeyFrame(0)['--ascent-ground-opacity']).toBe('1')
-    expect(journeyFrame(0)['--ascent-stars-opacity']).toBe('0')
-    expect(journeyFrame(1)['--ascent-ground-opacity']).toBe('0')
-    expect(journeyFrame(1)['--ascent-stars-opacity']).toBe('1')
-    expect(journeyFrame(1)['--ascent-prize-opacity']).toBe('1')
-  })
-  it('passes mountains, sky and clouds in order', () => {
-    expect(Number(journeyFrame(.3)['--ascent-mountain-opacity'])).toBe(1)
-    expect(Number(journeyFrame(.6)['--ascent-cloud-opacity'])).toBe(1)
-    expect(Number(journeyFrame(.6)['--ascent-sky-opacity'])).toBe(1)
-    expect(Number(journeyFrame(.8)['--ascent-stars-opacity'])).toBeGreaterThan(0)
-    expect(journeyFrame(.8)['--ascent-prize-opacity']).toBe('0')
-  })
-  it('clamps overscroll and invalid positions and reverses deterministically', () => {
-    expect(journeyFrame(-2)).toEqual(journeyFrame(0))
-    expect(journeyFrame(2)).toEqual(journeyFrame(1))
-    expect(journeyFrame(NaN)).toEqual(journeyFrame(0))
-    const midpoint = journeyFrame(.5)
-    journeyFrame(1)
-    expect(journeyFrame(.5)).toEqual(midpoint)
-  })
-})
+import { observeJourney } from './betaJourney'
 
 function harness(reduced = false, initial = 0) {
   let nextId = 0
@@ -59,13 +34,12 @@ describe('native upward scroll lifecycle', () => {
   it('initializes at the bottom and coalesces upward scrolling without an animation loop', () => {
     const h = harness()
     expect(h.root.scrollTop).toBe(3200)
-    expect(h.properties.get('--ascent-ground-opacity')).toBe('1')
+    expect(h.onProgress).toHaveBeenLastCalledWith(0)
     expect(h.root.addEventListener).toHaveBeenCalledWith('scroll', expect.any(Function), { passive: true })
     h.scroll(2800); h.scroll(1600); h.scroll(0)
     expect(h.callbacks.size).toBe(1)
     h.flush()
-    expect(h.properties.get('--ascent-stars-opacity')).toBe('1')
-    expect(h.root.dataset.summit).toBe('true')
+    expect(h.root.style.setProperty).not.toHaveBeenCalled()
     expect(h.onProgress).toHaveBeenLastCalledWith(1)
     expect(h.callbacks.size).toBe(0)
     h.cleanup()
@@ -94,20 +68,20 @@ describe('native upward scroll lifecycle', () => {
     const h = harness(true)
     expect(h.root.dataset.motion).toBe('still')
     h.scroll(0); h.flush()
-    expect(h.root.dataset.summit).toBe('true')
-    expect(h.properties.get('--ascent-cloud-y')).toBe('0svh')
-    expect(h.properties.get('--ascent-mountain-y')).toBe('0svh')
+    expect(h.onProgress).toHaveBeenLastCalledWith(1)
+    expect(h.root.style.setProperty).not.toHaveBeenCalled()
     h.reduce(false); h.flush()
     expect(h.root.dataset.motion).toBe('scroll')
     h.cleanup()
   })
-  it('makes arrow controls native smooth scroll, or instant under reduced motion', () => {
-    const h = harness()
-    moveJourney(h.root as unknown as HTMLElement, 'up', h.view as unknown as Window)
-    expect(h.root.scrollTo).toHaveBeenLastCalledWith({ top: 2400, behavior: 'smooth' })
-    h.reduce(true)
-    moveJourney(h.root as unknown as HTMLElement, 'ground', h.view as unknown as Window)
-    expect(h.root.scrollTo).toHaveBeenLastCalledWith({ top: 3200, behavior: 'instant' })
+  it('clamps invalid saved positions and native overscroll without changing artwork styles', () => {
+    const h = harness(false, NaN)
+    expect(h.root.scrollTop).toBe(3200)
+    h.scroll(-50); h.flush()
+    expect(h.onProgress).toHaveBeenLastCalledWith(1)
+    h.scroll(4000); h.flush()
+    expect(h.onProgress).toHaveBeenLastCalledWith(0)
+    expect(h.root.style.setProperty).not.toHaveBeenCalled()
     h.cleanup()
   })
 })

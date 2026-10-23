@@ -58,7 +58,7 @@ Additional generated assets, optimized from built-in image generation (no third-
 - [Apple: turn a website into an app](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios)
 - [Chrome: use web apps](https://support.google.com/chrome/answer/9658361)
 
-## Ground-to-stars ascent — latest owner direction
+## Ground-to-stars ascent — previous iteration
 
 This supersedes the cloud-to-ground design above. The entrance now contains only original scenery and icon controls: meadow/soil and river beside a left-edge tree, an elevated alpine mountain view, cloud passage, then space with a gold Threadline wordmark and existing symbol. The wordmark gently oscillates and gleams; it links to the existing information/signup content, not directly to installation or account creation. Product copy is absent from the visual scene.
 
@@ -92,3 +92,24 @@ Use case: photorealistic-natural. Asset type: understated starfield background f
 ### portrait
 
 Use case: photorealistic-natural. Asset type: portrait 1024x1536 mobile background for the first screen of an alpine ascent website. Fine-art photographic Swiss alpine valley in late morning. A leafy deciduous tree hugs extreme LEFT edge, trunk x=3percent, branches mainly leftquarter and top leftcorner; keep center open. Tall frame top45percent luminous rich blue sky. A commanding but distant snowcapped mountain peak centered at x=62percent y=50percent, mountainrange spansmiddle. Clear turquoise river crossing lowerquarter winds into valley. Fresh green grass at bottom14percent and thin rich brown soil cross-section bottom5percent. Warm natural sunlight, photographic texture, atmospheric bluegraymountains, serene but vivid. No buildings, people, roads, text, logos, watermarks or UI. Layout must keep tree trunk, river and central mountain simultaneously visible in a narrow portrait crop.
+
+## Continuous landscape — current owner direction
+
+Supersedes the staged ascent above. One tall panorama now moves directly with native scrolling, without crossfaded panels, snapping, scroll-driven zoom, sticky stages or journey arrow controls. The opening shows a broader grass/soil surface and the tree trunk at the left edge; scrolling reveals the large canopy, then the alpine mountain, clouds and stars. The gold wordmark still opens the existing information/signup view. Its pause control and reduced-motion support remain. A keyboard-only shortcut can bypass the scenery.
+
+The world is 440svh tall, with a 500svh panorama clipped below the soil and a separate transparent tree anchored to the grass line. The passive scroll observer only remembers position for navigation/resize and never updates artwork opacity or transforms. No auth, persistence, Factory or production changes.
+
+Verification: 116 suites / 1,076 tests, build and API typecheck passed; no lint configured. Independent reviewer /root/mobile_polish_review approved against d7b60dd, with 19 focused tests passing and no unresolved blockers. Desktop and 390×844 browser checks confirm loaded transparent imagery, ground initialization, progressive tree reveal and no horizontal overflow. Physical-phone touch performance is not measured. The existing large application bundle warning remains.
+
+New generated assets (originals preserved; combined budget below 2.5 MB):
+
+- public/images/beta-continuous-world.jpg — 724×2172 continuous panorama, JPEG quality 82.
+- public/images/beta-continuous-tree.png — transparent foreground tree, optimized to 800×1200.
+
+### Continuous panorama generation prompt
+
+Use case: photorealistic-natural. Asset type: one continuous tall background panorama for a vertical scrolling website. Render PORTRAIT 1024x3072 (1:3 ratio), a single uninterrupted world from underground at bottom to outer space at top, NOT panels or a collage. Fine art cinematic alpine nature with precise vertical composition: bottom7percent detailed rich dark brown earth cross-section with fine roots and stones; y=88-93percent lush sunlit green grass bank; y=80-88percent a clear turquoise river across a wide Swiss alpine valley with meadow and gentle foothills; y=48-80percent grand distant Swiss snow-capped mountains, commanding central peak at x=50percent y=51percent, natural expansive scale, layered atmospheric foothills. y=25-50percent luminous blue atmosphere with large soft white cumulus clouds you could rise through. y=0-25percent night sky graduating seamlessly from cobalt to deep midnight navy, many delicate tiny stars, almost black quiet center at x50percent y10percent for a live golden logo. All transitions are spatially continuous, no hard horizontal boundaries, no vignettes between scenes, no images stacked as panels. Photographic textures, soft natural sunlight in valley, realistic snow and stone. The very bottom is a broad flat ground surface with plenty of soil; river and central mountain remain visible within narrow center crop. NO foreground trees (a separate tree is composited later), no buildings, people, roads, text, logos, UI, watermark or frames. The bottom quarter should be a welcoming earthbound scene while the rest rewards a continuous upward journey.
+
+### Transparent tree generation prompt
+
+Use case: photorealistic-natural. Asset type: transparent foreground tree layer for a parallax scrolling website. Render portrait1024x1536 PNG with GENUINELY TRANSPARENT BACKGROUND. One magnificent tall deciduous tree, graceful elongated oak-like trunk with detailed warm gray-brown bark, visible roots at bottom, lush natural green leafy spreading canopy in upper45percent, long branching trunk lower55percent. Tree is centered horizontally, entire crown and roots within the canvas. Fine realistic leaf edges with transparency between branches and foliage. Soft warm late morning sunlight from upper right, naturally shaded trunk. Photographic not cartoon, no sky, no grass, no ground rectangle, no cast shadow rectangle, no border, no text, no logo. Roots taper naturally to transparency along bottom. This tree will be placed hugging the left edge of an alpine valley, with only its lower trunk visible initially and its broad crown revealed during upward scrolling.
