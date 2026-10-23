@@ -1,0 +1,38 @@
+.beta-welcome.beta-welcome-immersive { padding: 0; }
+.beta-welcome-immersive > .beta-wrap { padding: 0 max(22px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left)); }
+.beta-sky { position: relative; isolation: isolate; overflow: hidden; min-height: 760px; min-height: max(760px, 100svh); background: #21668d; color: #fff; }
+.beta-sky-image { position: absolute; z-index: -2; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; animation: beta-sky-arrive 4.5s ease-out both; }
+.beta-sky::after { content: ''; position: absolute; z-index: -1; inset: 0; pointer-events: none; background: linear-gradient(180deg, #103d5655 0%, transparent 30%, #123a4dcc 52%, #123a4de8 100%); }
+.beta-sky-nav { display: flex; align-items: center; gap: 16px; min-height: 90px; padding: max(20px, env(safe-area-inset-top)) max(26px, env(safe-area-inset-right)) 18px max(26px, env(safe-area-inset-left)); }
+.beta-sky-brand { display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 10px; background: #123a4de8; font-size: 22px; font-weight: 700; letter-spacing: -.05em; }
+.beta-sky-brand span { color: #d9ed9e; font-size: 29px; }
+.beta-sky-badge { padding: 7px 10px; border-radius: 20px; background: #123a4de8; font: 9px 'DM Mono', monospace; letter-spacing: .1em; }
+.beta-welcome .beta-sky-signin, .beta-welcome .beta-sky-join { display: inline-flex; justify-content: center; align-items: center; gap: 24px; min-height: 48px; padding: 13px 21px; border: 1px solid #fff; border-radius: 12px; background: #fcfdf9; color: #203b38; font-size: 14px; font-weight: 600; box-shadow: 0 3px 14px #153f561a; }
+.beta-welcome .beta-sky-signin { margin-left: auto; }
+.beta-welcome .beta-sky-join:hover, .beta-welcome .beta-sky-signin:hover { background: #eef4df; }
+.beta-sky :is(a, button):focus-visible { outline: 3px solid #fff; outline-offset: 5px; box-shadow: 0 0 0 8px #123a4d; }
+.beta-sky-stage { display: flex; flex-direction: column; align-items: center; justify-content: space-between; min-height: 670px; min-height: max(670px, calc(100svh - 90px)); padding: 45px 22px max(30px, env(safe-area-inset-bottom)); }
+.beta-glass-wordmark { margin: auto 0; padding: 10px 0 34px; max-width: 100%; font: italic 500 clamp(72px, 15.3vw, 230px)/1.18 'Playfair Display', Georgia, serif; letter-spacing: -.075em; color: #e3f6ff; background: linear-gradient(155deg, #ffffffed 4%, #e8f9ff25 35%, #fff 49%, #cef3ff40 56%, #efffffdb 85%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; -webkit-text-stroke: 1px #e5faffb3; filter: drop-shadow(1px 3px 0 #2184b178) drop-shadow(0 8px 10px #16495d40); transform-origin: center; animation: beta-wordmark-arrive 4s cubic-bezier(.2,.65,.3,1) both; user-select: none; }
+.beta-sky-message { text-align: center; max-width: 620px; padding-top: 40px; }
+.beta-sky-eyebrow { font: 10px/1.5 'DM Mono', monospace; letter-spacing: .14em; }
+.beta-sky .beta-sky-message h1 { margin: 17px 0; color: #fff; font: 500 clamp(34px, 3.5vw, 51px)/1.12 'Playfair Display', Georgia, serif; letter-spacing: -.045em; }
+.beta-sky-message > p:not(.beta-sky-eyebrow) { margin: 0 0 25px; color: #fff; font-size: 15px; line-height: 1.7; }
+.beta-welcome .beta-sky-explore { display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 44px; margin-top: 16px; font-size: 11px; color: #fff; text-decoration: underline; text-underline-offset: 4px; }
+.beta-story-title { margin: 23px 0; font: 500 clamp(36px, 4vw, 52px)/1.12 'Playfair Display', Georgia, serif; letter-spacing: -.05em; }
+.beta-hero#beta-story { scroll-margin-top: 28px; }
+/* Finite, compositor-only entrance. No scroll listeners, autoplay video or perpetual motion. */
+@keyframes beta-sky-arrive { from { transform: scale(1.065) translateY(-1%); } to { transform: scale(1) translateY(0); } }
+@keyframes beta-wordmark-arrive { from { transform: perspective(900px) rotateY(-14deg) rotateZ(-4deg) translateY(25px); } to { transform: perspective(900px) rotateY(0) rotateZ(-2deg) translateY(0); } }
+@media (max-width: 760px) {
+  .beta-sky { min-height: max(710px, 100svh); }
+  .beta-sky-image { object-position: 18% center; }
+  .beta-sky-nav { gap: 8px; min-height: 78px; padding: max(16px, env(safe-area-inset-top)) 16px 14px; }
+  .beta-sky-brand { font-size: 18px; padding: 5px 9px; }.beta-sky-brand span { font-size: 25px; }
+  .beta-sky-badge { display: none; }
+  .beta-welcome .beta-sky-signin { padding: 11px 14px; font-size: 12px; gap: 14px; }
+  .beta-sky-stage { min-height: max(632px, calc(100svh - 78px)); padding: 26px 18px max(22px, env(safe-area-inset-bottom)); }
+  .beta-glass-wordmark { font-size: 17vw; letter-spacing: -.075em; padding-bottom: 10px; -webkit-text-stroke-width: .7px; }
+  .beta-sky-message { padding-top: 35px; }.beta-sky .beta-sky-message h1 { font-size: 36px; }
+}
+@media (prefers-reduced-motion: reduce) { .beta-sky-image, .beta-glass-wordmark { animation: none; transform: none; } }
+@media (forced-colors: active) { .beta-glass-wordmark { -webkit-text-fill-color: CanvasText; -webkit-text-stroke: 0; filter: none; }.beta-sky::after { background: Canvas; } }

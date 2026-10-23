@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AuthState } from './auth'
 import { installPlatform, type InstallPlatform } from './betaWelcome'
 import './betaWelcome.css'
+import { BetaSkyHero } from './BetaSkyHero'
 
 export interface BetaWelcomeProps {
   state: AuthState
@@ -35,11 +36,12 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
     catch { setError('We couldn’t open your synced workspace. Check your connection and try again. Nothing on this device has been changed.') }
     finally { setBusy(false) }
   }
-  return <main className="beta-welcome">
+  return <main className={`beta-welcome${signedIn || previewSetup ? '' : ' beta-welcome-immersive'}`}>
+    {!signedIn && !previewSetup && <BetaSkyHero preview={preview} />}
     <div className="beta-wrap">
-      <header className="beta-nav"><a className="beta-wordmark" href="/beta" aria-label="Threadline beta"><span aria-hidden="true">⊹</span> threadline</a><span className="beta-badge">EARLY ACCESS</span>
+      {(signedIn || previewSetup) && <header className="beta-nav"><a className="beta-wordmark" href="/beta" aria-label="Threadline beta"><span aria-hidden="true">⊹</span> threadline</a><span className="beta-badge">EARLY ACCESS</span>
         {preview ? <a className="beta-nav-link" href="/settings">Back to Settings</a> : !signedIn && <a className="beta-nav-link" href="#join">Sign in <span aria-hidden="true">↗</span></a>}
-      </header>
+      </header>}
       {preview && <p className="beta-preview-label">Design preview · no emails are sent and no account data is changed.</p>}
       {signedIn || previewSetup ? <section className="beta-setup" aria-labelledby="beta-setup-title">
         <div className="beta-setup-icon" aria-hidden="true">⊹</div><p className="beta-overline">{previewSetup ? 'SETUP PREVIEW' : 'YOU’RE SIGNED IN'}</p>
@@ -53,11 +55,11 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
           {!previewSetup && <p className="beta-fine">This opens your existing account or creates an empty synced workspace. Any separate device copy stays preserved; you can combine it later in Settings → Data.</p>}
         </div>
       </section> : <>
-        <section className="beta-hero" aria-labelledby="beta-title">
+        <section className="beta-hero" id="beta-story" aria-labelledby="beta-story-title">
           <div className="beta-hero-copy"><p className="beta-overline"><span /> A LITTLE SPACE FOR YOUR MIND</p>
-            <h1 id="beta-title">Life has threads.<br /><em>Keep yours together.</em></h1>
+            <h2 className="beta-story-title" id="beta-story-title">A thought is only<br />the beginning.</h2>
             <p className="beta-lead">Catch a thought before it disappears. Find it when you need it. Make room to see how it all connects.</p>
-            <a className="beta-cta" href="#join">Join the beta <span aria-hidden="true">↗</span></a><p className="beta-small">On your phone. On your laptop. In your own rhythm.</p>
+            <a className="beta-cta" href="#join">Make room for your thoughts <span aria-hidden="true">↗</span></a><p className="beta-small">On your phone. On your laptop. In your own rhythm.</p>
           </div>
           <figure className="beta-product" aria-label="Illustrative Threadline workspace: capture a thought, organize it, and connect ideas on a canvas">
             <div className="beta-product-bar"><span>⊹ threadline</span><span>YOUR SPACE</span></div>

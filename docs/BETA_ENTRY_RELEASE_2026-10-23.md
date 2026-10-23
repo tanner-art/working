@@ -29,7 +29,17 @@
 
 This is a web-app beta, not an Apple TestFlight binary. No domain purchase, production auth setting, email sender, database policy, Factory component, or real capture data was changed. Physical keyboard, native install and email delivery are not claimed verified by synthetic tests. Feedback currently goes back to the person who invited the tester; no new feedback backend was added.
 
-## References checked
+## Immersive nature follow-up
+
+Owner's October 23 screen recording established a full-screen photographic scene and floating glass-like wordmark as the visual direction, beyond the earlier palette-only revision. The new `BetaSkyHero` is decorative and isolated from authentication. Signup is available immediately. The scene uses a short, finite transform animation (at most 4.5 seconds), disabled under reduced motion; no video, WebGL, timers or scroll listeners were added. Existing signed-in installation instructions do not load the hero image.
+
+The original background asset is `public/images/beta-alpine-sky.jpg` (about 321 KB), generated with the built-in image-generation tool and compressed for the page. The reference website's assets and logo were not copied. Final generation prompt:
+
+> Use case: photorealistic-natural. Asset type: original full-bleed background photograph for Threadline's immersive landing page. Generate a landscape 1536x1024 image, no text or logos. A luminous alpine blue sky with soft three-dimensional white cumulus clouds drifting around the outer edges, large serene open sky in the middle for a live glass wordmark. At the very bottom edge, subtle distant green alpine meadow ridgeline and pine silhouettes, with warm pale yellow-green sunlight. Fresh saturated sky blue, mist white, meadow green, pine green. Dreamy but genuinely photographic, delicate atmospheric depth, no heavy vignette. Clouds have beautiful light and detail but not stormy. Keep central 60 percent mostly open blue sky; preserve a beautiful centered crop for portrait mobile. No UI, no typography, no watermarks. This is a background asset, not a website screenshot.
+
+Tests cover one meaningful heading, immediate signup and story anchors, decorative media semantics, absence of the scene in signed-in setup, safe preview labels, reduced-motion CSS, finite motion and a 400 KB image budget. Physical-phone frame-rate and external signup checks remain unverified.
+
+## Reference documentation
 
 - [Supabase passwordless signup and email codes](https://supabase.com/docs/guides/auth/auth-email-passwordless)
 - [Apple: turn a website into an app](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios)

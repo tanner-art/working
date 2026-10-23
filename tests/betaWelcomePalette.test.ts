@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 
 const css = readFileSync(new URL('../src/betaWelcome.css', import.meta.url), 'utf8')
+const skyCss = readFileSync(new URL('../src/betaSkyHero.css', import.meta.url), 'utf8')
 
 const token = (name: string) => {
   const value = css.match(new RegExp(`--beta-${name}: (#[0-9a-f]{6});`))?.[1]
@@ -21,6 +22,14 @@ const contrast = (a: string, b: string) => {
 }
 
 describe('nature-inspired beta palette', () => {
+  it('bounds introductory motion and image weight for mobile visitors', () => {
+    expect(skyCss).toContain('@media (prefers-reduced-motion: reduce)')
+    expect(skyCss).toContain('animation: none; transform: none;')
+    expect(skyCss).not.toContain('infinite')
+    expect(statSync(new URL('../public/images/beta-alpine-sky.jpg', import.meta.url)).size).toBeLessThan(400_000)
+    // 80% opaque pine scrim over a pure-white image is the brightest copy backdrop.
+    expect(contrast('#ffffff', '#416171')).toBeGreaterThanOrEqual(4.5)
+  })
   it('keeps text readable even against a conservative dark bound of the decorative washes', () => {
     // Minimum channel values across the backdrop stops also bound their interpolations.
     const surfaces = [token('snow'), token('leaf'), '#cee5c8', '#d5edd5']
