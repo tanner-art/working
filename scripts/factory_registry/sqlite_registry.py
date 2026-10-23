@@ -5563,6 +5563,11 @@ class SQLiteRegistry:
                     "SELECT * FROM preserved_artifacts ORDER BY kind, external_identity, id",
                     ("metadata_json",),
                 ),
+                historical_reconciliations=(
+                    decoded_rows(
+                        "SELECT * FROM historical_package_reconciliations ORDER BY recorded_at, id"
+                    ) if "historical_package_reconciliations" in tables else ()
+                ),
             )
             connection.commit()
         return snapshot

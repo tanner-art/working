@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -1130,6 +1131,57 @@ class OperatorFixture(unittest.TestCase):
             ).fetchone()[0], "INTEGRATED_ELSEWHERE")
             with self.assertRaisesRegex(sqlite3.IntegrityError, "APPEND_ONLY"):
                 connection.execute("DELETE FROM historical_package_reconciliations WHERE id='historical-cli'")
+
+    def test_preservation_accepts_only_audited_retirement_on_next_verification(self):
+        database = self.root / "preserved-reconciliation.sqlite3"
+        registry = SQLiteRegistry(database)
+        registry.initialize()
+        source = json.loads(self.preservation.read_text())
+        source["open_task_mapping"] = [
+            {"issue": 101, "task": "TASK-PRESERVED", "title": "Preserved task", "status": "BLOCKED"},
+            {"issue": 102, "task": "TASK-NEXT", "title": "Another preserved task", "status": "ON DECK"},
+        ]
+        preservation = self.root / "preserved-reconciliation.json"
+        preservation.write_text(json.dumps(source, sort_keys=True))
+        preservation.chmod(0o600)
+        digest = hashlib.sha256(preservation.read_bytes()).hexdigest()
+        registry.import_preservation_snapshot(
+            source, source_uri=str(preservation), source_sha256=digest,
+            imported_at="2026-09-25T08:00:00Z",
+        )
+        observed_at = "2026-09-28T11:00:01Z"
+        with mock.patch.object(operator_module, "APPROVED_PRESERVATION_SHA256", digest):
+            before = registry.control_center_snapshot(observed_at=observed_at)
+            verify_preservation(before, preservation)
+            revision = registry.reconcile_historical_package(
+                reconciliation_id="preserved-retirement", package_id="TASK-PRESERVED",
+                disposition="SUPERSEDED", historical_commit="b" * 40,
+                integration_commit="c" * 40, repository_head="c" * 40,
+                evidence_uri="https://github.com/example/repo/issues/1#issuecomment-2",
+                expected_revision=before.revision, recorded_at=observed_at,
+            )
+            after = registry.control_center_snapshot(observed_at=observed_at)
+            self.assertEqual(after.revision, revision)
+            self.assertEqual(verify_preservation(after, preservation)["tasks"], 2)
+            self.assertEqual(
+                {item["id"]: item["status"] for item in after.work_packages}
+                ["TASK-PRESERVED"], "DONE",
+            )
+            without_event = replace(after, events=tuple(
+                event for event in after.events
+                if event["event_type"] != "HISTORICAL_PACKAGE_RECONCILED"
+            ))
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(without_event, preservation)
+            without_record = replace(after, historical_reconciliations=())
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(without_record, preservation)
+            altered = replace(after, work_packages=tuple(
+                {**item, "title": "Changed identity"} if item["id"] == "TASK-PRESERVED" else item
+                for item in after.work_packages
+            ))
+            with self.assertRaisesRegex(OperatorError, "preservation reconciliation mismatch"):
+                verify_preservation(altered, preservation)
 
     def test_reviewed_registry_v5_migration_preserves_v4_history(self):
         self.registry.register_feature(
