@@ -54,7 +54,7 @@ export function BetaWelcome({ state, onLogin, onVerify, onRetry, onLocal, onOpen
           {!previewSetup && <p className="beta-fine">This opens your existing account or creates an empty synced workspace. Any separate device copy stays preserved; you can combine it later in Settings → Data.</p>}
         </div>
       </section>
-    </div> : <BetaSkyHero preview={preview}>
+    </div> : <BetaSkyHero preview={preview} informationRequested={codeSent}>
       <div className="beta-signup">{preview && <p className="beta-preview-note">Design preview · no emails are sent and no account data is changed.</p>}<h3>{showCode ? 'Check your email' : 'Join Threadline'}</h3><p>{showCode ? 'Enter the code from your email here, or open its sign-in link. Use the same email on every device.' : 'One email. No password. Your space on every device.'}</p>
             {(state.status === 'error' || state.status === 'unconfigured') && <div className="beta-error" role="alert"><p>{state.status === 'unconfigured' ? 'Signup isn’t available in this preview. Please return to the shared beta link.' : state.message}</p>{state.status === 'error' && <button className="beta-text-button" onClick={onRetry}>Retry connection</button>}</div>}
             {state.status === 'signed-out' && state.message && <p className={codeSent ? 'beta-feedback' : 'beta-error'} role={codeSent ? 'status' : 'alert'}>{state.message}</p>}

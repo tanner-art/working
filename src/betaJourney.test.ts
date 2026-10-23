@@ -1,34 +1,36 @@
 import { describe, expect, it, vi } from 'vitest'
-import { journeyFrame, observeJourney } from './betaJourney'
+import { journeyFrame, observeJourney, moveJourney } from './betaJourney'
 
-describe('cloud-to-ground progression', () => {
-  it('starts in the clouds and lands at the ground without changing its final scale', () => {
-    expect(journeyFrame(0)['--journey-sky-opacity']).toBe('1')
-    expect(journeyFrame(0)['--journey-ground-opacity']).toBe('0')
-    expect(journeyFrame(1)['--journey-ground-opacity']).toBe('1')
-    expect(journeyFrame(1)['--journey-ground-y']).toBe('0svh')
-    expect(journeyFrame(1)['--journey-cloud-opacity']).toBe('0')
-    expect(journeyFrame(1)['--journey-wordmark-opacity']).toBe('0')
+describe('ground-to-stars progression', () => {
+  it('opens on the ground and ends with stars and the wordmark', () => {
+    expect(journeyFrame(0)['--ascent-ground-opacity']).toBe('1')
+    expect(journeyFrame(0)['--ascent-stars-opacity']).toBe('0')
+    expect(journeyFrame(1)['--ascent-ground-opacity']).toBe('0')
+    expect(journeyFrame(1)['--ascent-stars-opacity']).toBe('1')
+    expect(journeyFrame(1)['--ascent-prize-opacity']).toBe('1')
   })
-  it('clamps overscroll, invalid positions and reverse scrolling deterministically', () => {
+  it('passes mountains, sky and clouds in order', () => {
+    expect(Number(journeyFrame(.3)['--ascent-mountain-opacity'])).toBe(1)
+    expect(Number(journeyFrame(.6)['--ascent-cloud-opacity'])).toBe(1)
+    expect(Number(journeyFrame(.6)['--ascent-sky-opacity'])).toBe(1)
+    expect(Number(journeyFrame(.8)['--ascent-stars-opacity'])).toBeGreaterThan(0)
+    expect(journeyFrame(.8)['--ascent-prize-opacity']).toBe('0')
+  })
+  it('clamps overscroll and invalid positions and reverses deterministically', () => {
     expect(journeyFrame(-2)).toEqual(journeyFrame(0))
     expect(journeyFrame(2)).toEqual(journeyFrame(1))
     expect(journeyFrame(NaN)).toEqual(journeyFrame(0))
     const midpoint = journeyFrame(.5)
     journeyFrame(1)
     expect(journeyFrame(.5)).toEqual(midpoint)
-    expect(Number(midpoint['--journey-ground-opacity'])).toBeGreaterThan(0)
-    expect(Number(midpoint['--journey-ground-opacity'])).toBeLessThan(1)
   })
 })
 
-function harness(reduced = false) {
-  let top = 0
+function harness(reduced = false, initial = 0) {
   let nextId = 0
   const callbacks = new Map<number, FrameRequestCallback>()
   const listeners = new Map<string, () => void>()
-  let preferenceChanged = () => {}
-  const preference = { matches: reduced, addEventListener: vi.fn((_name, fn) => { preferenceChanged = fn }), removeEventListener: vi.fn() }
+  const preference = { matches: reduced, addEventListener: vi.fn((_name, fn) => listeners.set('preference', fn)), removeEventListener: vi.fn() }
   const view = {
     matchMedia: () => preference,
     requestAnimationFrame: vi.fn((fn: FrameRequestCallback) => { callbacks.set(++nextId, fn); return nextId }),
@@ -38,47 +40,74 @@ function harness(reduced = false) {
   }
   const properties = new Map<string, string>()
   const root = {
-    dataset: {} as Record<string, string>,
+    dataset: {} as Record<string, string>, scrollTop: 0, scrollHeight: 4000, clientHeight: 800,
     style: { setProperty: vi.fn((key, value) => properties.set(key, value)) },
-    getBoundingClientRect: () => ({ top }),
-    querySelector: () => ({ getBoundingClientRect: () => ({ top: top + 1600 }) }),
+    addEventListener: vi.fn((name, fn) => listeners.set(name, fn)),
+    removeEventListener: vi.fn((name) => listeners.delete(name)),
+    scrollTo: vi.fn(),
   }
-  const cleanup = observeJourney(root as unknown as HTMLElement, view as unknown as Window)
-  return { root, view, preference, properties, callbacks, cleanup,
-    scroll: (value: number) => { top = value; listeners.get('scroll')?.() },
+  const onProgress = vi.fn()
+  const cleanup = observeJourney(root as unknown as HTMLElement, view as unknown as Window, initial, onProgress)
+  return { root, view, preference, properties, callbacks, cleanup, onProgress,
+    scroll: (value: number) => { root.scrollTop = value; listeners.get('scroll')?.() },
+    resize: () => listeners.get('resize')?.(),
     flush: () => { const entries = [...callbacks.values()]; callbacks.clear(); entries.forEach(fn => fn(0)) },
-    reduce: (value: boolean) => { preference.matches = value; preferenceChanged() },
+    reduce: (value: boolean) => { preference.matches = value; listeners.get('preference')?.() },
   }
 }
-describe('scroll observer lifecycle', () => {
-  it('coalesces rapid native scroll events without a perpetual animation loop', () => {
+describe('native upward scroll lifecycle', () => {
+  it('initializes at the bottom and coalesces upward scrolling without an animation loop', () => {
     const h = harness()
-    expect(h.view.addEventListener).toHaveBeenCalledWith('scroll', expect.any(Function), { passive: true })
-    h.scroll(-300); h.scroll(-800); h.scroll(-1600)
+    expect(h.root.scrollTop).toBe(3200)
+    expect(h.properties.get('--ascent-ground-opacity')).toBe('1')
+    expect(h.root.addEventListener).toHaveBeenCalledWith('scroll', expect.any(Function), { passive: true })
+    h.scroll(2800); h.scroll(1600); h.scroll(0)
     expect(h.callbacks.size).toBe(1)
     h.flush()
-    expect(h.properties.get('--journey-ground-opacity')).toBe('1')
+    expect(h.properties.get('--ascent-stars-opacity')).toBe('1')
+    expect(h.root.dataset.summit).toBe('true')
+    expect(h.onProgress).toHaveBeenLastCalledWith(1)
     expect(h.callbacks.size).toBe(0)
     h.cleanup()
   })
-  it('cleans up pending work and all listeners on sign-in/unmount', () => {
-    const h = harness(); h.scroll(-100)
+  it('restores progress when returning from information and preserves it across viewport resize', () => {
+    const h = harness(false, .5)
+    expect(h.root.scrollTop).toBe(1600)
+    h.root.scrollHeight = 6000; h.root.clientHeight = 1000
+    h.resize(); h.flush()
+    expect(h.root.scrollTop).toBe(2500)
+    expect(h.onProgress).toHaveBeenLastCalledWith(.5)
+    h.cleanup()
+  })
+  it('cleans up pending work and all listeners', () => {
+    const h = harness(); h.scroll(100)
     h.cleanup()
     expect(h.callbacks.size).toBe(0)
-    expect(h.view.removeEventListener).toHaveBeenCalledTimes(2)
+    expect(h.root.removeEventListener).toHaveBeenCalledWith('scroll', expect.any(Function))
+    expect(h.view.removeEventListener).toHaveBeenCalledWith('resize', expect.any(Function))
     expect(h.preference.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function))
     const writes = h.root.style.setProperty.mock.calls.length
-    h.scroll(-1600); h.flush()
+    h.scroll(0); h.flush()
     expect(h.root.style.setProperty).toHaveBeenCalledTimes(writes)
   })
-  it('honors reduced motion initially and when changed during a pending frame', () => {
+  it('keeps all destinations reachable in reduced motion without parallax', () => {
     const h = harness(true)
     expect(h.root.dataset.motion).toBe('still')
-    expect(h.root.style.setProperty).not.toHaveBeenCalled()
-    h.reduce(false); h.scroll(-800)
+    h.scroll(0); h.flush()
+    expect(h.root.dataset.summit).toBe('true')
+    expect(h.properties.get('--ascent-cloud-y')).toBe('0svh')
+    expect(h.properties.get('--ascent-mountain-y')).toBe('0svh')
+    h.reduce(false); h.flush()
+    expect(h.root.dataset.motion).toBe('scroll')
+    h.cleanup()
+  })
+  it('makes arrow controls native smooth scroll, or instant under reduced motion', () => {
+    const h = harness()
+    moveJourney(h.root as unknown as HTMLElement, 'up', h.view as unknown as Window)
+    expect(h.root.scrollTo).toHaveBeenLastCalledWith({ top: 2400, behavior: 'smooth' })
     h.reduce(true)
-    expect(h.callbacks.size).toBe(0)
-    expect(h.root.dataset.motion).toBe('still')
+    moveJourney(h.root as unknown as HTMLElement, 'ground', h.view as unknown as Window)
+    expect(h.root.scrollTo).toHaveBeenLastCalledWith({ top: 3200, behavior: 'instant' })
     h.cleanup()
   })
 })

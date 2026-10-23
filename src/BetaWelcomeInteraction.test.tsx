@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { isValidElement, type ReactElement } from 'react'
 import { BetaWelcome, type BetaWelcomeProps } from './BetaWelcomeView'
+import { BetaSkyHero } from './BetaSkyHero'
 
 const hooks = vi.hoisted(() => ({ index: 0, values: [] as unknown[] }))
 vi.mock('react', async original => ({ ...await original<typeof import('react')>(),
@@ -28,6 +29,13 @@ function setup() {
 }
 beforeEach(() => { hooks.index = 0; hooks.values = [] })
 describe('signup interaction handlers (synthetic hook render)', () => {
+  it('can return to the landscape after an email-code request without discarding the form', () => {
+    const render = () => { hooks.index = 0; return BetaSkyHero({ informationRequested: true, children: <input id="preserved-email" value="tester@example.com" readOnly /> }) }
+    expect(find(render(), e => e.props.id === 'info').props.hidden).toBe(false)
+    find(render(), e => e.props['aria-label'] === 'Return to the landscape').props.onClick()
+    expect(find(render(), e => e.props.id === 'info').props.hidden).toBe(true)
+    expect(find(render(), e => e.props.id === 'preserved-email').props.value).toBe('tester@example.com')
+  })
   it('retains email and code across loading, invalid code, connection retry and resending', () => {
     const ui = setup()
     ui.element('beta-email').props.onChange({ target: { value: 'tester@example.com' } })

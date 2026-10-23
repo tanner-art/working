@@ -57,3 +57,38 @@ Additional generated assets, optimized from built-in image generation (no third-
 - [Supabase passwordless signup and email codes](https://supabase.com/docs/guides/auth/auth-email-passwordless)
 - [Apple: turn a website into an app](https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios)
 - [Chrome: use web apps](https://support.google.com/chrome/answer/9658361)
+
+## Ground-to-stars ascent — latest owner direction
+
+This supersedes the cloud-to-ground design above. The entrance now contains only original scenery and icon controls: meadow/soil and river beside a left-edge tree, an elevated alpine mountain view, cloud passage, then space with a gold Threadline wordmark and existing symbol. The wordmark gently oscillates and gleams; it links to the existing information/signup content, not directly to installation or account creation. Product copy is absent from the visual scene.
+
+The native scroll container initializes at its bottom before paint. Scrolling UP decreases scrollTop and raises the viewpoint. Arrow buttons are an optional native-scroll aid; keyboard Home/PageUp also work, and a focus-visible skip link opens information directly. No wheel/touch events are intercepted. Returning from information retains the ascent position and entered form contents. Direct #info / legacy #join links work, including history navigation; email-code requests reveal the form without forcing the user to stay there. Signed-in installation flow remains unchanged.
+
+Accessibility/performance: passive scroll updates coalesced to one pending frame; no React render per scroll. The sticky viewport uses overflow:clip so focusing controls cannot silently scroll its art internally. Reduced motion removes translations and wordmark animation while retaining all destinations; the floating wordmark has a pause control. Signup keeps a contrasting dark focus outline. No new dependencies, account writes, Factory changes or production deployment.
+
+Verification: 116 suites / 1,079 tests, build and API typecheck passed; no lint configured. Independent review approved after correcting forced-open information and focus contrast. Browser QA verified native upward movement, ground initialization, desktop/mobile artwork, wordmark pause, information entry/return, retained synthetic form input and preview home-screen setup. Physical touch/frame-rate testing is not claimed. Existing application bundle warning remains.
+
+Generated image assets (built-in image generation, originals preserved; JPEG optimized to 1280px):
+
+- public/images/beta-ascent-ground.jpg — desktop meadow/river/tree.
+- public/images/beta-ascent-ground-mobile.jpg — dedicated portrait composition.
+- public/images/beta-ascent-mountain.jpg — elevated alpine view.
+- public/images/beta-ascent-stars.jpg — starfield.
+
+Prompts:
+
+### ground
+
+Use case: photorealistic-natural. Asset type: full viewport photographic background for the ground stage of a vertical ascent website, 1536x1024 landscape. Cinematic Swiss alpine valley in fresh late morning light, vivid natural green grass with fine wild grasses and a very thin rich brown soil cross-section along bottom 6 percent, foreground meadow bottom 18 percent. A narrow clear turquoise river curves across the lower third and winds toward the distant valley. A beautiful leafy deciduous tree hugs the extreme LEFT edge, trunk at x=6 percent and sweeping canopy occupying left quarter, naturally cropped by the left edge, with open center and right. A grand distant snow-capped alpine mountain range commands the central horizon around y=40-68 percent, not a close-up rock face. Top40percent clear luminous blue sky with delicate white clouds. Refined fine-art landscape photography, atmospheric depth, crisp natural texture, no overprocessed HDR. Clean composition, generous open sky and valley. No buildings, people, signage, typography, logos, watermarks, UI or frames.
+
+### mountain
+
+Use case: photorealistic-natural. Asset type: mountain stage background of a vertical ascent website, 1536x1024 landscape. Elevated viewpoint looking OVER the forest canopy toward a commanding distant Swiss alpine snow-capped mountain massif, central peak fills middle half of screen but remains across a spacious valley, not a close-up rock face. Lower20percent deep green treetops and atmospheric foothills, snowy mountains from y=32to76percent, top third luminous rich alpine blue sky. Thin drifting white mist at lower edge and a few sunlit cumulus clouds near the peak. Peaceful late-morning light, detailed fine-art landscape photography, natural blue gray stone, warm snow, meadow green. Match a fresh alpine meadow-and-river scene. No foreground tree trunk, no buildings, people, text, UI, watermark, planets or fantasy castles.
+
+### stars
+
+Use case: photorealistic-natural. Asset type: understated starfield background for a premium full screen website, landscape1536x1024. Looking into quiet deep space: midnight navy almost black upper sky, a delicate realistic field of tiny silver and warm white distant stars, a very subtle blue-violet galactic haze toward lower right, no huge bright objects. Central60percent quiet and very dark for a live golden wordmark. Bottomedge has a faint cobalt atmospheric glow which fades smoothly into deep navy upwards, suggesting ascent from Earth but NO visible planet or horizon line. Sophisticated cinematic astrophotography, restrained, serene, delicate luminous pinpoints, not busy or kitschy, no nebula explosions, no sci-fi spacecraft, no text, no logos, no watermark, no UI.
+
+### portrait
+
+Use case: photorealistic-natural. Asset type: portrait 1024x1536 mobile background for the first screen of an alpine ascent website. Fine-art photographic Swiss alpine valley in late morning. A leafy deciduous tree hugs extreme LEFT edge, trunk x=3percent, branches mainly leftquarter and top leftcorner; keep center open. Tall frame top45percent luminous rich blue sky. A commanding but distant snowcapped mountain peak centered at x=62percent y=50percent, mountainrange spansmiddle. Clear turquoise river crossing lowerquarter winds into valley. Fresh green grass at bottom14percent and thin rich brown soil cross-section bottom5percent. Warm natural sunlight, photographic texture, atmospheric bluegraymountains, serene but vivid. No buildings, people, roads, text, logos, watermarks or UI. Layout must keep tree trunk, river and central mountain simultaneously visible in a narrow portrait crop.
