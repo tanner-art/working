@@ -24,11 +24,11 @@ describe('selected Canvas block controls', () => {
   it('does not show resize controls for an unselected block', () => {
     expect(render(1)).not.toContain('aria-label="Resize block"')
   })
-  it.each([.55, 1, 1.6])('shows resize without advanced edit mode and compensates for scale %s', scale => {
+  it.each([.2, .55, 1, 1.6, 4])('shows resize without advanced edit mode and compensates for scale %s', scale => {
     selection.id = 'block'
     const html = render(scale)
     expect(html).toContain('aria-label="Resize block"')
-    expect(html).toContain(`transform:scale(${1 / scale});transform-origin:bottom right`)
+    expect(html).toContain(`transform:scale(${1 / scale});transform-origin:center`)
     expect(html).toContain('--canvas-resize-target-size:44px')
     expect(html).not.toContain('aria-label="Block width"')
     expect(44 * (1 / scale) * scale).toBeCloseTo(44)

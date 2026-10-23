@@ -12,6 +12,8 @@ export const CANVAS_COLORS = [DEFAULT_CANVAS_COLOR, '#e8f4dc', '#dcecf7', '#f7e3
 export const CONNECTION_COLORS = ['#829687', '#42624f', '#316b8a', '#9a5d2e', '#9b3f4e', '#6c4a91'] as const
 export const DEFAULT_CONNECTION_COLOR = CONNECTION_COLORS[0]
 export const CANVAS_SIZE = { minWidth: 120, minHeight: 100, maxWidth: 1200, maxHeight: 900 } as const
+export const CANVAS_TEXT_MIN_SIZE = { minWidth: 48, minHeight: 40 } as const
+export const canvasMinimumSize = (node: CanvasElement) => node.type === 'text' && !node.shape && node.autoSize !== undefined ? CANVAS_TEXT_MIN_SIZE : CANVAS_SIZE
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)))
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 export const CURVE_HANDLE_LIMIT = 1.5
@@ -41,17 +43,36 @@ export function normalizeCurveHandle(handle: unknown): CanvasCurveHandle | undef
 
 // Explicit fallbacks keep legacy nodes, rendered bounds and connector anchors aligned.
 export function canvasSize(node: CanvasElement) {
+  if (node.type === 'text' && !node.shape && node.autoSize) return compactTextSize(node.text ?? '', node.nodeVariant === 'bulleted-list')
+  const minimum = canvasMinimumSize(node)
   return {
-    width: clamp(Number.isFinite(node.width) ? node.width! : node.type === 'container' ? 320 : 190, CANVAS_SIZE.minWidth, CANVAS_SIZE.maxWidth),
-    height: clamp(Number.isFinite(node.height) ? node.height! : node.type === 'container' ? 210 : 100, CANVAS_SIZE.minHeight, CANVAS_SIZE.maxHeight),
+    width: clamp(Number.isFinite(node.width) ? node.width! : node.type === 'container' ? 320 : 190, minimum.minWidth, CANVAS_SIZE.maxWidth),
+    height: clamp(Number.isFinite(node.height) ? node.height! : node.type === 'container' ? 210 : 100, minimum.minHeight, CANVAS_SIZE.maxHeight),
   }
+}
+
+/** Deterministic sizing shared by rendering, ports and fit-to-view; no DOM reads
+ * during gestures. Conservative glyph widths leave room for proportional fonts. */
+export function compactTextSize(text: string, bullets = false) {
+  const lineWidths = text.split('\n').map(line => [...line].reduce((width, char) => width +
+    (/\s/.test(char) ? 5 : /[ilI.,'!|]/.test(char) ? 5 : /[MWmw@#]/.test(char) ? 16 : /[^\x00-\x7f]/.test(char) ? 18 : /[A-Z]/.test(char) ? 12 : 10), bullets && line ? 16 : 0))
+  const width = clamp(lineWidths.reduce((max, value) => Math.max(max, value), 24) + 26, 50, 320)
+  const rows = lineWidths.reduce((count, line) => count + Math.max(1, Math.ceil(line / (width - 26))), 0)
+  return { width, height: clamp(rows * 24 + 18, 42, CANVAS_SIZE.maxHeight) }
+}
+
+export function fitCanvasText(elements: CanvasElement[], id: string): CanvasElement[] {
+  return elements.map(node => node.id === id && node.type === 'text' && !node.shape
+    ? { ...node, autoSize: true, width: undefined, height: undefined } : node)
 }
 export function resizeCanvasNode(elements: CanvasElement[], id: string, width: number, height: number): CanvasElement[] {
   if (!Number.isFinite(width) || !Number.isFinite(height)) return elements
   return elements.map(node => {
     if (node.id !== id || node.type === 'arrow') return node
-    const before = canvasSize(node), next = canvasSize({ ...node, width, height })
-    return before.width === next.width && before.height === next.height ? node : { ...node, ...next }
+    const compact = node.type === 'text' && !node.shape && (node.autoSize !== undefined || (width > 0 && width < CANVAS_SIZE.minWidth) || (height > 0 && height < CANVAS_SIZE.minHeight))
+    const sizing = compact ? { autoSize: false } : {}
+    const before = canvasSize(node), next = canvasSize({ ...node, ...sizing, width, height })
+    return before.width === next.width && before.height === next.height ? node : { ...node, ...sizing, ...next }
   })
 }
 export function convertCanvasNode(elements: CanvasElement[], id: string, shape: CanvasShape): CanvasElement[] {
@@ -61,7 +82,7 @@ export function convertCanvasNode(elements: CanvasElement[], id: string, shape: 
   return elements.map(node => {
     if (target.type === 'container' && node.groupId === id && type !== 'container') return { ...node, groupId: undefined }
     return node.id === id
-      ? { ...node, ...canvasSize(node), type, shape: shape === 'text' || shape === 'container' ? undefined : shape,
+      ? { ...node, ...canvasSize(node), ...(node.autoSize !== undefined ? { autoSize: undefined } : {}), type, shape: shape === 'text' || shape === 'container' ? undefined : shape,
         groupId: type === 'container' ? undefined : node.groupId } : node
   })
 }
