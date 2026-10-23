@@ -7,9 +7,9 @@ import type { AppState } from './domain'
  * Surface modules are discovered by `src/surfaces/index.ts`. This module owns
  * validation only; it does not own rendering or persistence capabilities.
  */
-export type AppSurface = 'app' | 'settings' | 'landing-preview' | 'tutorial-preview' | 'dashboard' | (string & {})
+export type AppSurface = 'app' | 'settings' | 'landing-preview' | 'tutorial-preview' | (string & {})
 
-export type SurfacePersistence = 'workspace' | 'none' | 'factory-projection'
+export type SurfacePersistence = 'workspace' | 'none'
 
 export type AppSurfaceDefinition = Readonly<{
   id: AppSurface
@@ -29,7 +29,7 @@ export type RenderedWorkspaceSurfaceModule = Readonly<{
 }>
 
 const definitionKeys = ['id', 'path', 'persistence'] as const
-const persistenceValues = new Set<SurfacePersistence>(['workspace', 'none', 'factory-projection'])
+const persistenceValues = new Set<SurfacePersistence>(['workspace', 'none'])
 
 export const defaultAppSurface: AppSurfaceDefinition = Object.freeze({
   id: 'app',

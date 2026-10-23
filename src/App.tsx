@@ -618,7 +618,7 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
     </section>
     {dataControls}
     <AiInterpretationSection />
-    <section className="settings-card"><h2>Beta previews and build room</h2><p>Replay the landing page and first-run tutorial without changing your saved onboarding progress, or open the hosted build dashboard and task queue.</p><div className="settings-actions"><a className="secondary" href="/preview/landing">Test landing page and tutorial</a><a className="secondary" href="/dashboard">Open agent dashboard</a></div></section>
+    <section className="settings-card"><h2>Beta previews</h2><p>Replay the landing page and first-run tutorial without changing your saved onboarding progress.</p><div className="settings-actions"><a className="secondary" href="/preview/landing">Test landing page and tutorial</a></div></section>
     <MobileInstallSection installOpener={installOpener} onInstallHelp={onInstallHelp} />
     <DigestSection onOpen={onOpenDigest} />
     <section className="settings-card"><h2>Recovery</h2><p>Export thoughts, canvas, local profile and digest preferences as JSON. Backup import is not available yet.</p><div className="settings-actions"><button className="secondary" onClick={() => { setFailure(''); try { onExport() } catch (error) { setFailure((error as Error).message) } }}>Download full export</button><button className="secondary" onClick={onBackup}>Download thoughts backup</button></div>
