@@ -103,4 +103,15 @@ describe('Commitment Review workflow', () => {
     expect(retrieveCommitment(state, route)).toMatchObject({ status: 'found', routeId: route, object: { id: resolved.id, kind: 'commitment' } })
     expect(retrieveCommitment(state, 'action:commitment%2Fone')).toMatchObject({ status: 'stale' })
   })
+
+  it('keeps the original kind proposal when Review chooses Commitment instead', () => {
+    const proposed = review({ interpretation: { summary: 'Deliver the draft', suggestedKind: 'idea', rationale: 'An idea was proposed' } })
+    const baseline = legacyUiProjection(migrateLegacyState({ objects: [proposed], canvas: [] }))
+    const resolved = resolveCommitment(proposed, { title: 'Deliver the draft', dependencyIds: [] })
+    expect(resolved.interpretation.suggestedKind).toBe('idea')
+    const saved = reconcileLegacyUi({ ...baseline, objects: [resolved] })
+    expect(saved.interpretations[0].legacy.interpretation.suggestedKind).toBe('idea')
+    expect(saved.interpretations.at(-1)?.legacy.interpretation.suggestedKind).toBe('idea')
+    expect(saved.semanticObjects).toMatchObject([{ id: proposed.id, kind: 'commitment', status: 'confirmed' }])
+  })
 })

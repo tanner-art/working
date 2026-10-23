@@ -1,5 +1,5 @@
-import type { AppState, CommitmentSetupAudit, SemanticObject, ThoughtObject } from './domain'
-import { confirmObject } from './objectWorkflow'
+import type { AppState, CommitmentSetupAudit, PersistedState, SemanticObject, ThoughtObject } from './domain'
+import { confirmObject, hasCreatedReminderInstruction } from './objectWorkflow'
 import { reconcileLegacyUi } from './migration'
 
 export interface CommitmentDetails { title: string; date?: string; time?: string; dependencyIds: readonly string[] }
@@ -20,6 +20,7 @@ function setup(details: CommitmentDetails): CommitmentSetupAudit {
 
 /** Resolves the obligation only; it deliberately does not create a CalendarEvent. */
 export function resolveCommitment(object: ThoughtObject, details: CommitmentDetails, at = new Date().toISOString()): ThoughtObject {
+  if (hasCreatedReminderInstruction(object)) throw new Error('A created Reminder instruction cannot be reclassified as a Commitment.')
   if (object.status !== 'review') throw new Error('This capture is no longer awaiting Commitment setup. Refresh Review and try again.')
   const choice = setup(details)
   // Classification and its dedicated confirmation happen in this single Review
@@ -34,6 +35,23 @@ export function resolveCommitment(object: ThoughtObject, details: CommitmentDeta
     metadata: { ...otherMetadata, ...(choice.date ? { deadline: choice.date } : {}) },
     relationships: choice.dependencyIds.map(targetId => ({ targetId, type: 'depends_on' })),
     history: [...commitment.history, ...revision, { at, event: 'Set Commitment details', commitmentSetup: choice }] })
+}
+
+/** Recheck Review's selected dependencies against the latest session projection at the gesture boundary. */
+export function resolveCommitmentInState(state: AppState, objectId: string, details: CommitmentDetails,
+  readModel: (current: AppState) => PersistedState, at = new Date().toISOString()): AppState {
+  const object = state.objects.find(item => item.id === objectId)
+  if (!object) throw new Error('This capture is no longer available. Refresh Review and try again.')
+  const resolved = resolveCommitment(object, details, at)
+  const targets = readModel(state).semanticObjects
+  if (details.dependencyIds.some(id => !targets.some(target => target.id === id))) {
+    throw new Error('A selected dependency is no longer available. Refresh Review and try again.')
+  }
+  const next = { ...state, objects: state.objects.map(item => item.id === objectId ? resolved : item) }
+  // Validate the candidate before App installs it. A migration rejection must
+  // stay inside the Review form's recoverable error path, not blank the root.
+  readModel(next)
+  return next
 }
 
 export function commitmentRouteId(objectId: string): string { return `commitment:${encodeURIComponent(objectId)}` }

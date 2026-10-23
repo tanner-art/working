@@ -4,12 +4,25 @@ import { hasConfirmation } from './migration'
 
 export { hasConfirmation } from './migration'
 
+/** Review's explicit Action-staging gesture resolves classification without
+ * granting execution eligibility. It also permits later user lifecycle edits. */
+export function hasStagedActionResolution(object: ThoughtObject): boolean {
+  if (object.kind !== 'action' || object.status === 'review' || object.status === 'inbox') return false
+  const stageIndex = object.history.findIndex(entry => entry.event === 'Staged as Action' &&
+    entry.actionStage?.source === 'review-action-staging' && Number.isFinite(Date.parse(entry.at)))
+  return stageIndex >= 0 && !object.history.slice(stageIndex + 1).some(entry =>
+    entry.reviewDecision || entry.reviewRevision || entry.event.startsWith('Changed type') ||
+    entry.event === 'Marked review' || entry.event === 'Marked inbox' ||
+    entry.event.includes('status to review') || entry.event.includes('status to inbox'))
+}
+
 export const activeObjects = (objects: ThoughtObject[]) =>
   objects.filter(item => item.status !== 'archived')
 
 /** Rejected proposals retain their evidence but leave the pending decisions queue. */
 export const reviewObjects = (objects: ThoughtObject[]) => objects.filter(item =>
-  item.status === 'review' && item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision !== 'rejected')
+  item.status === 'review' && !hasCreatedReminderInstruction(item) &&
+  item.history.slice().reverse().find(entry => entry.reviewDecision || entry.confirmation)?.reviewDecision !== 'rejected')
 
 /** Ideas are visible only after the dedicated Review resolution completes. */
 export const resolvedIdeas = (objects: ThoughtObject[]) =>
@@ -41,7 +54,18 @@ export function confirmObject(object: ThoughtObject, kind: ObjectKind = object.k
   }] }
 }
 
+/** A created Reminder instruction is append-only, including after handling or dismissal. */
+export const hasCreatedReminderInstruction = (object: ThoughtObject): boolean =>
+  object.history.some(entry => entry.reminderInstruction?.action === 'created')
+
+function requireCompatibleReminderKind(object: ThoughtObject, kind: ObjectKind) {
+  if (kind !== object.kind && hasCreatedReminderInstruction(object)) {
+    throw new Error('This Reminder has an instruction history. Its type cannot be changed; edit its details instead.')
+  }
+}
+
 export function updateObject(original: ThoughtObject, draft: ThoughtObject): ThoughtObject {
+  requireCompatibleReminderKind(original, draft.kind)
   const status = draft.kind !== original.kind ? 'review' : compatibleStatus(original, draft.status)
   const changes = describeChanges(original, { ...draft, status })
   // A generic save accepts editable fields only. It cannot import a draft's gesture/history or source evidence.
@@ -52,15 +76,30 @@ export function updateObject(original: ThoughtObject, draft: ThoughtObject): Tho
 
 export function setObjectStatus(object: ThoughtObject, status: ObjectStatus): ThoughtObject {
   const safeStatus = compatibleStatus(object, status)
-  return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` : `Kept in review; ${status} requires confirmation`)
+  return withHistory({ ...object, status: safeStatus }, safeStatus === status ? `Marked ${status}` :
+    hasCreatedReminderInstruction(object) ? 'Kept resolved Reminder status; a created instruction cannot return to Review' :
+    hasStagedActionResolution(object) ? 'Kept staged Action status; use Withdraw staged Action to return to Organize' :
+      `Kept in review; ${status} requires confirmation`)
 }
 
 function compatibleStatus(object: ThoughtObject, status: ObjectStatus): ObjectStatus {
+  if (hasCreatedReminderInstruction(object)) {
+    if (object.status === 'review' || object.status === 'inbox') {
+      throw new Error('This created Reminder has an invalid Review status. Its history was left unchanged; recovery needs an explicit decision.')
+    }
+    // A created instruction is already resolved. The generic complete/archive →
+    // confirmed rule would incorrectly send it back to Review.
+    return status === 'review' || status === 'inbox' ? object.status : status
+  }
+  if (hasStagedActionResolution(object) && (status === 'review' || status === 'inbox' ||
+    (['complete', 'archived'].includes(object.status) && status === 'confirmed'))) return object.status
   return (['complete', 'archived'].includes(object.status) && status === 'confirmed') || object.status === 'review' || object.status === 'inbox' ||
-    ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object)) ? 'review' : status
+    ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !hasStagedActionResolution(object)) ? 'review' : status
 }
 
 export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtObject {
+  requireCompatibleReminderKind(object, kind)
+  if (hasCreatedReminderInstruction(object) && kind === object.kind) return object
   return { ...object, kind, status: 'review', history: [...object.history, {
     at: new Date().toISOString(), event: `Changed type to ${kind}`, reviewDecision: 'superseded'
   }] }
@@ -68,6 +107,9 @@ export function setObjectKind(object: ThoughtObject, kind: ObjectKind): ThoughtO
 
 /** Withdraw only this item's current interpretation. Never claim to undo external effects. */
 export function reverseObject(object: ThoughtObject, decision: 'rejected' | 'reversed' = 'reversed'): ThoughtObject {
+  if (hasCreatedReminderInstruction(object)) {
+    throw new Error('A created Reminder instruction cannot return to Review. Its history was left unchanged.')
+  }
   return { ...object, status: 'review', history: [...object.history, {
     at: new Date().toISOString(), event: decision === 'rejected' ? 'Rejected interpretation; retained for review' : 'Reversed confirmation; external effects unchanged',
     reviewDecision: decision

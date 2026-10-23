@@ -48,10 +48,25 @@ export function loadStateResult(): { state: AppState; error?: string } {
     return { state }
   } catch { return { state: seed, error: 'Saved thoughts could not be read. Your stored data has been left untouched.' } }
 }
+/** Reconcile against the latest validated save for the active storage mode,
+ * never the model object originally loaded before one or more autosaves. */
+export function reconcileCurrentSession(state: AppState, accountModel?: PersistedState): PersistedState {
+  const session = state.model && sessions.get(state.model)
+  if (accountModel && session) throw new Error('An account snapshot cannot replace a local storage session.')
+  return reconcileLegacyUi({ ...state, model: accountModel ?? session?.model ?? state.model })
+}
 /** Serialize against the last saved evidence, including revisions added in this session. */
 export function serializeState(state: AppState): PersistedState {
+  return reconcileCurrentSession(state)
+}
+/** Advance a validated projection. Local projections retain their CAS revision;
+ * account projections carry the supplied account-session base without being
+ * registered as local storage. */
+export function advanceModelProjection(state: AppState, accountModel?: PersistedState): AppState {
+  const projection = reconcileCurrentSession(state, accountModel)
   const session = state.model && sessions.get(state.model)
-  return reconcileLegacyUi({ ...state, model: session?.model ?? state.model })
+  if (session && !accountModel) sessions.set(projection, { model: projection, raw: session.raw })
+  return { ...state, model: projection }
 }
 /** Anchor a multi-step transition to its validated evidence without losing local
  * session ownership. Carry the original expected storage value, never refresh it:
@@ -138,9 +153,22 @@ function isHistoryEvent(value: unknown): value is HistoryEvent {
   const item = value as Partial<HistoryEvent>
   const priority = (value: unknown): value is 1 | 2 | 3 | 4 | 5 => [1, 2, 3, 4, 5].includes(value as 1 | 2 | 3 | 4 | 5)
   return typeof item.at === 'string' && typeof item.event === 'string' &&
+    (item.relationshipConfirmation === undefined || (!!item.relationshipConfirmation && typeof item.relationshipConfirmation === 'object' &&
+      typeof item.relationshipConfirmation.id === 'string' && !!item.relationshipConfirmation.id &&
+      typeof item.relationshipConfirmation.targetId === 'string' && !!item.relationshipConfirmation.targetId &&
+      item.relationshipConfirmation.type === 'relates_to' && item.relationshipConfirmation.source === 'user-confirmed-link' &&
+      Number.isFinite(Date.parse(item.at)))) &&
+    (item.relationshipReversal === undefined || (!!item.relationshipReversal && typeof item.relationshipReversal === 'object' &&
+      typeof item.relationshipReversal.id === 'string' && !!item.relationshipReversal.id &&
+      typeof item.relationshipReversal.reverses === 'string' && !!item.relationshipReversal.reverses &&
+      typeof item.relationshipReversal.targetId === 'string' && !!item.relationshipReversal.targetId &&
+      item.relationshipReversal.source === 'user-reversed-link' && Number.isFinite(Date.parse(item.at)))) &&
+    !(item.relationshipConfirmation && item.relationshipReversal) &&
     (item.actionStage === undefined || (priority(item.actionStage.priority) && item.actionStage.source === 'review-action-staging')) &&
     (item.actionPriority === undefined || (priority(item.actionPriority.priority) && item.actionPriority.source === 'schedule-priority-selection')) &&
     (item.actionSchedule === undefined || (typeof item.actionSchedule.eventId === 'string' && typeof item.actionSchedule.startsAt === 'string' && typeof item.actionSchedule.temporalContext === 'string')) &&
+    (item.planEligibility === undefined || (typeof item.planEligibility.objectId === 'string' && !!item.planEligibility.objectId &&
+      typeof item.planEligibility.eligible === 'boolean' && item.planEligibility.source === 'schedule-plan-eligibility')) &&
     (item.reminderInstruction === undefined || isReminderInstructionAudit(item.reminderInstruction)) &&
     (item.commitmentSetup === undefined || isCommitmentSetupAudit(item.commitmentSetup)) &&
     (item.commitmentSchedule === undefined || isCommitmentScheduleAudit(item.commitmentSchedule))

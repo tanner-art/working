@@ -1,4 +1,4 @@
-import { buildMorningDigest } from './morningDigest'
+import { buildMorningDigest, confirmedSemanticObjects, localDateKey } from './morningDigest'
 import { providerStatus, readProviderConfig } from './aiInterpretation'
 import { reconcileLegacyUi } from './migration'
 import { accountData, createAccountAdapter, createAccountSession, guardAccountMergePreview, type AccountData, type AccountMergeChoices, type AccountMergePlan, type AccountSession } from './accountStorage'
@@ -11,6 +11,7 @@ import { Canvas } from './Canvas'
 import { CanvasBank } from './CanvasBankView'
 import { CaptureLibrary } from './CaptureLibraryView'
 import { captureLibraryFor, changeCaptureLibrary, folderDestinations, folderTrail, type CaptureLibraryState } from './captureLibrary'
+import { connectThoughts, removeThoughtConnection, safeConnectionGraph } from './semanticLinks'
 import { useCanvasWorkspace } from './useCanvasWorkspace'
 import { createCanvasTextSaveQueue } from './canvasTextSaveQueue'
 import { DEFAULT_CANVAS_VIEWPORT } from './canvasDocument'
@@ -19,28 +20,38 @@ import { useWorkspaceExitGuard } from './useWorkspaceExitGuard'
 import { TemporalReview } from './TemporalReview'
 import { MorningDigest } from './DigestPanel'
 import { CalendarView } from './CalendarView'
+import { buildCalendarTimeGrid } from './calendar'
 import { ScheduleView } from './ScheduleView'
 import { BetaHome } from './BetaHome'
 import { previewStartView } from './betaHomeState'
-import { useEffect, useRef, useState } from 'react'
-import type { AppState, CanvasElement, ObjectKind, SemanticObject, SemanticRelationship, ThoughtObject } from './domain'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import type { AppState, CanvasElement, ObjectKind, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { objectLabels } from './domain'
 import { createInterpretedObject } from './captureInterpretation'
-import { reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
-import { loadStateResult, makeObject, saveState, serializeState } from './store'
+import { bankFolders, bankObjects, reviewObjects, resolvedIdeas, canvasObjectDraft, hasConfirmation, hasCreatedReminderInstruction, hasStagedActionResolution, reverseObject, fixedCommitments, recentObjects, confirmedActions, setObjectStatus, updateObject } from './objectWorkflow'
+import { loadStateResult, makeObject, reconcileCurrentSession, saveState, serializeState } from './store'
+import { activeTemporalDecisions, temporalFactIsCurrent } from './temporalConfirmation'
 import { correctOriginal, hasUnsavedReviewDrafts, reviseInterpretation, revisionNeedsReconfirmation, revisionReviewNotice, reviewTextSnapshot } from './reviewRevision'
 import { BETA_LANDING_DISMISSED_KEY, betaLandingVisibility, readBetaLandingInput } from './betaLanding'
 import { appSurfaceDefinitionForPath, workspaceSurfaceModuleForPath } from './surfaces'
 import { WorkspaceSurfaceRenderer } from './surfaces/surfaceRendering'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import { createSearchHandoffGuards, type RegisterSearchHandoffGuard } from './searchHandoffGuards'
+import { findWorkspaceReturnFocusTarget } from './workspaceFocus'
+import { canOpenSearchResultFromView, enterWorkspaceHistory, isRecoveredWorkspaceLocation, leaveWorkspaceHistory, performWorkspaceNavigation, performWorkspaceRouteTransition, prepareFocusedCanvasSearchExit, recoverRejectedWorkspacePopstate, workspaceHistoryLocation, type WorkspaceHistoryLocation, type WorkspaceNavigationRequest, type WorkspaceNavigationOutcome } from './workspaceNavigation'
 import { OnboardingTutorial } from './OnboardingTutorial'
 import { initialTutorialState, startTutorial, type TutorialState } from './onboarding'
 import { ReviewResolution } from './ReviewResolutionControl'
+import { resolveCommitmentInState, type CommitmentDetails } from './commitmentWorkflow'
+import { readReviewTargets } from './reviewTargets'
 import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
+import { canBeginSwipe, isViewportZoomed, swipeDestination, swipeTargetIsBlocked } from './navigationSwipe'
+import { closeMoreMenu, dismissMoreMenuOutside } from './navigationMenu'
 
 type View = 'today' | 'capture' | 'review' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
-  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }, { id: 'settings', label: 'Settings', icon: '⚙' }
+  { id: 'today', label: 'Today', icon: '◉' }, { id: 'capture', label: 'Capture', icon: '＋' }, { id: 'review', label: 'Organize', icon: '◇' }, { id: 'schedule', label: 'Schedule', icon: '✓' }, { id: 'calendar', label: 'Calendar', icon: '▦' }, { id: 'canvas', label: 'Bank', icon: '⌁' }
 ]
 
 /** Single shared account subscription; several Settings cards read the same state. */
@@ -191,6 +202,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
 }) {
   const [initial] = useState(() => cloud ? { state: cloud.state, error: undefined } : loadStateResult())
   const [state, setState] = useState<AppState>(initial.state)
+  const snapshotToken = useMemo(() => crypto.randomUUID(), [state])
   const latestState = useRef(state)
   latestState.current = state
   const [saveError, setSaveError] = useState<string | undefined>()
@@ -203,6 +215,9 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [digest, setDigest] = useState(() => cloud?.data.digest)
   const latestDigest = useRef(digest)
   latestDigest.current = digest
+  const readSearchModel = (current: AppState): PersistedState => cloud
+    ? cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model
+    : reconcileCurrentSession(current)
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountMessage, setAccountMessage] = useState('')
   const [cloudStatus, setCloudStatus] = useState(cloud ? 'Synced with your account.' : '')
@@ -239,9 +254,29 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     if (focusInstallHelp) installOpener.current?.focus()
     setFocusInstallHelp(false)
   }
-// The secondary home is reviewable by URL without changing anyone's saved/default start page.
+  // Keep existing saved start-page choices; the brand provides a Home path from every tab.
   const [view, setView] = useState<View>(() => previewStartView(window.location.search,
     appSurfaceDefinitionForPath(window.location.pathname).id === 'settings' ? 'settings' : preferences.value.startPage))
+  const swipeStart = useRef<{ pointerId: number; x: number; y: number; view: View } | null>(null)
+  const [viewportZoomed, setViewportZoomed] = useState(() => isViewportZoomed(window.visualViewport?.scale))
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const updateZoom = () => {
+      const zoomed = isViewportZoomed(viewport.scale)
+      setViewportZoomed(zoomed)
+      if (zoomed) swipeStart.current = null
+    }
+    viewport.addEventListener('resize', updateZoom)
+    updateZoom()
+    return () => viewport.removeEventListener('resize', updateZoom)
+  }, [])
+  const moreMenu = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    const dismiss = (event: PointerEvent) => { dismissMoreMenuOutside(moreMenu.current, event.target) }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [])
   const [clearRequested, setClearRequested] = useState(false)
   const clearing = useRef(false)
   const capturePending = useRef(false)
@@ -250,8 +285,21 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [captureBusy, setCaptureBusy] = useState(false)
   const [captureSuccess, setCaptureSuccess] = useState(0)
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  const [selectedCaptureId, setSelectedCaptureId] = useState<string | null>(null)
   const [openCanvasId, setOpenCanvasId] = useState<string | null>(null)
+  const [focusedActionId, setFocusedActionId] = useState<string | null>(null)
+  const [focusedReminderId, setFocusedReminderId] = useState<string | null>(null)
+  const [focusedReviewId, setFocusedReviewId] = useState<string | null>(null)
+  const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
+  const [workspaceRouteError, setWorkspaceRouteError] = useState('')
+  const searchSession = useRef(crypto.randomUUID())
+  const recoveringHistory = useRef<WorkspaceHistoryLocation | null>(null)
+  const acceptedHistory = useRef(workspaceHistoryLocation(window.location.href, window.history.state))
   const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
+  const [focusCanvasEntry, setFocusCanvasEntry] = useState(false)
+  const canvasCommitTitle = useRef<(() => void) | null>(null)
+  const [searchHandoffGuards] = useState(createSearchHandoffGuards)
+  const registerSearchHandoffGuard = searchHandoffGuards.register
   const [bankFocusTarget, setBankFocusTarget] = useState<'create' | string | null>(null)
   const update = (fn: (current: AppState) => AppState) => {
     if (mergePlan) onCancelMerge()
@@ -259,7 +307,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     latestState.current = next
     setState(next)
   }
-  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null)
+  const canvas = useCanvasWorkspace(state, update, view === 'canvas' ? openCanvasId : null, !activeWorkspaceSurface)
   const saveSequence = useRef(0)
   const firstAccountSave = useRef(!!cloud)
   const persistRef = useRef<(retry: boolean) => Promise<boolean>>(async () => false)
@@ -288,13 +336,13 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     const focusedEditor = !!element?.matches('input, textarea, select, [contenteditable="true"]')
       && !(element.getAttribute('aria-label') === 'Raw thought' && !draft)
     if (!canRefreshWorkspace({ view, draft, selected: !!selectedObjectId, busy: capturePending.current || accountBusy || cloudStatus === 'Saving account changes…', saveError: !!saveError || !!initial.error,
-      pendingCanvas: canvasTextSaveQueue.hasPending(), focusedEditor, customSurface: !!workspaceSurface })) return undefined
+      pendingCanvas: canvasTextSaveQueue.hasPending(), focusedEditor, customSurface: !!activeWorkspaceSurface || !!selectedCaptureId })) return undefined
     return JSON.stringify([latestState.current, latestPreferences.current, latestDigest.current])
   }
   switchGuard.current = () => refreshGuard.current()
   useEffect(() => {
     if (waitingForSafeOpen && !cloud && refreshGuard.current() !== undefined) onSafeOpen()
-  }, [waitingForSafeOpen, view, draft, selectedObjectId, accountBusy, cloudStatus, saveError])
+  }, [waitingForSafeOpen, view, draft, selectedObjectId, selectedCaptureId, activeWorkspaceSurface, accountBusy, cloudStatus, saveError])
   useEffect(() => {
     if (!cloud) return
     let disposed = false
@@ -399,7 +447,10 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     {accountMessage && <p role="alert">{accountMessage}</p>}
   </section>
   const downloadBackup = () => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify({ ...state, model: cloud ? cloud.session.snapshot(state, preferences.value, digest!).model : serializeState(state) }, null, 2)], { type: 'application/json' }))
+    let payload: unknown
+    try { payload = { ...state, model: cloud ? cloud.session.snapshot(state, preferences.value, digest!).model : serializeState(state) } }
+    catch { payload = { ...state, backupWarning: 'Canonical validation failed; this is the unverified in-tab state, preserved without modification.' } }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
     link.href = url; link.download = 'threadline-backup.json'; link.click()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
@@ -414,7 +465,7 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     } catch { throw new Error('Export could not read browser storage. Use Download thoughts backup to preserve the work in this tab.') }
   }
   const reviewCount = reviewObjects(state.objects).length
-  const [searchRequest, setSearchRequest] = useState(0)
+  const searchRequest = 0
   const captureLibrary = captureLibraryFor(state.objects, state.captureLibrary)
   const capture = async (details?: CaptureDetails) => {
     const content = draft.trim()
@@ -445,8 +496,12 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     update(current => ({ ...current, objects: current.objects.map(item => item.id === resolved.id ? resolved : item) }))
     if (resolved.kind === 'action') navigate('schedule')
   }
-  const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice))
-  const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState))
+  const resolveCommitment = (id: string, details: CommitmentDetails) => update(current =>
+    resolveCommitmentInState(current, id, details, readSearchModel))
+  const resolveReminder = (id: string, choice: ReminderChoice) => update(current => resolveReminderInState(current, id, choice,
+    new Date().toISOString(), cloud ? readSearchModel(current) : undefined))
+  const updateReminderDelivery = (id: string, deliveryState: 'handled' | 'dismissed') => update(current => setReminderDeliveryState(current, id, deliveryState,
+    new Date().toISOString(), cloud ? readSearchModel(current) : undefined))
   const withdraw = (id: string, decision: 'rejected' | 'reversed') => update(current => ({ ...current, objects: current.objects.map(item => item.id === id ? reverseObject(item, decision) : item) }))
   const saveObject = (updated: ThoughtObject) => update(current => ({ ...current, objects: current.objects.map(item => item.id === updated.id ? updateObject(item, updated) : item) }))
   const captureCanvasObject = (element: CanvasElement) => {
@@ -459,6 +514,8 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const selectedObject = state.objects.find(item => item.id === selectedObjectId)
   const canvasBank = canvasBankForState(state)
   const openCanvas = openCanvasId ? canvasBank.canvases.find(item => item.id === openCanvasId) : undefined
+  const connectionProjection = useMemo(() => view === 'canvas' && !openCanvasId ? safeConnectionGraph(state) : undefined,
+    [state, view, openCanvasId])
   const createCanvas = () => {
     const record = createCanvasRecord()
     update(current => addCanvas(current, record))
@@ -471,23 +528,144 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     setFocusCanvasTitle(false)
     setOpenCanvasId(id)
   }
-  const exitCanvas = () => {
+  const finishCanvasEditing = () => {
+    canvasCommitTitle.current?.()
     canvas?.finishText()
     canvasTextSaveQueue.flush()
-    setOpenCanvasId(null)
   }
+  const closeCanvasEditor = () => {
+    setOpenCanvasId(null)
+    setFocusCanvasEntry(false)
+  }
+  const exitCanvas = () => { finishCanvasEditing(); closeCanvasEditor() }
   const navigate = (next: View) => {
-    if (openCanvasId) { canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+    swipeStart.current = null
+    closeMoreMenu(moreMenu.current)
+    if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
     if (next === 'canvas') setBankFocusTarget(null)
+    setFocusCanvasEntry(false)
+    setFocusedActionId(null); setFocusedReminderId(null); setSelectedCaptureId(null)
     setView(next)
   }
+  const onContentPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!event.isPrimary) { swipeStart.current = null; return }
+    const allowed = canBeginSwipe({ pointerType: event.pointerType, isPrimary: event.isPrimary, view,
+      deepCanvas: !!openCanvasId, modalOpen: !!selectedObject, mobile: window.matchMedia('(max-width: 720px)').matches,
+      viewportZoomed: viewportZoomed || isViewportZoomed(window.visualViewport?.scale),
+      blockedTarget: swipeTargetIsBlocked(event.target, event.currentTarget) })
+    swipeStart.current = allowed ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY, view } : null
+  }
+  const onContentPointerUp = (event: ReactPointerEvent<HTMLElement>) => {
+    const start = swipeStart.current
+    swipeStart.current = null
+    if (!start || start.pointerId !== event.pointerId || start.view !== view || selectedObject || openCanvasId || isViewportZoomed(window.visualViewport?.scale)) return
+    const next = swipeDestination(start.view, event.clientX - start.x, event.clientY - start.y)
+    if (next) navigate(next)
+  }
+  const routeContext = () => {
+    const currentAccount = auth.getState()
+    return {
+      available: !accountBusy && accountValid && !initial.error && !clearing.current,
+      accountUserId: cloud?.session.userId,
+      authenticatedUserId: currentAccount.status === 'signed-in' ? currentAccount.session.user.id : undefined,
+      prepareCanvasExit: () => prepareFocusedCanvasSearchExit({
+        editing: !!openCanvasId,
+        currentState: () => latestState.current,
+        finishEditing: finishCanvasEditing,
+        accountMode: !!cloud,
+        accountSavePending: () => canvasTextSaveQueue.hasPending() || !!saveError || cloudStatus === 'Saving account changes…',
+        saveLocal: () => { const error = saveState(latestState.current); setSaveError(error); return !error },
+        exit: closeCanvasEditor,
+      }),
+    }
+  }
+  const openSearch = () => {
+    const searchSurface = workspaceSurfaceModuleForPath('/search')
+    if (!searchSurface) return
+    const outcome = performWorkspaceRouteTransition('workspace', routeContext(), { enterSurface: () => {
+      enterWorkspaceHistory(window.history, window.location.href, searchSession.current)
+      acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+      setActiveWorkspaceSurface(searchSurface)
+    }, leaveSurface: () => undefined })
+    if (!outcome.ok) setWorkspaceRouteError(outcome.message)
+    else setWorkspaceRouteError('')
+  }
+  const focusAfterSearch = () => requestAnimationFrame(() => {
+    findWorkspaceReturnFocusTarget(document)?.focus()
+  })
+  const exitWorkspaceRoute = () => {
+    leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
+    if (window.location.pathname !== '/search') acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+    setActiveWorkspaceSurface(undefined)
+  }
+  const navigateWorkspace = (request: WorkspaceNavigationRequest): WorkspaceNavigationOutcome => {
+    const liveAccount = auth.getState()
+    return performWorkspaceNavigation(request, {
+      state: latestState.current, snapshotToken, stateIsCurrent: latestState.current === state,
+      available: !!activeWorkspaceSurface && !accountBusy && accountValid && !initial.error && !clearing.current,
+      accountUserId: cloud?.session.userId,
+      authenticatedUserId: liveAccount.status === 'signed-in' ? liveAccount.session.user.id : undefined,
+      readModel: readSearchModel,
+    }, {
+      canOpen: () => canOpenSearchResultFromView(view, !searchHandoffGuards.canLeave()),
+      close: () => {
+        exitWorkspaceRoute()
+        focusAfterSearch()
+      },
+      open: destination => {
+        exitWorkspaceRoute()
+        setSelectedObjectId(null); setSelectedCaptureId(null); setFocusedActionId(null); setFocusedReminderId(null); setFocusedReviewId(null)
+        if (openCanvasId) { canvasCommitTitle.current?.(); canvas?.finishText(); canvasTextSaveQueue.flush(); setOpenCanvasId(null) }
+        if (destination.view === 'canvas') {
+          setView('canvas'); setBankFocusTarget(destination.canvasId); setFocusCanvasTitle(false); setFocusCanvasEntry(true); setOpenCanvasId(destination.canvasId)
+        } else if ('reminderId' in destination) {
+          setView('review'); setFocusedReminderId(destination.reminderId)
+        } else if ('pendingReviewId' in destination) {
+          setView('review'); setFocusedReviewId(destination.pendingReviewId)
+        } else if ('captureId' in destination) {
+          setView('review'); setSelectedCaptureId(destination.captureId)
+        } else if ('actionId' in destination) {
+          setView('schedule'); setFocusedActionId(destination.actionId)
+        } else {
+          setView(destination.view); setSelectedObjectId(destination.objectId)
+        }
+      },
+    })
+  }
+  useEffect(() => {
+    const onPopState = () => {
+      if (recoveringHistory.current) {
+        const expected = recoveringHistory.current
+        recoveringHistory.current = null
+        if (isRecoveredWorkspaceLocation(expected, workspaceHistoryLocation(window.location.href, window.history.state))) return
+      }
+      const target = workspaceSurfaceModuleForPath(window.location.pathname)
+      const outcome = performWorkspaceRouteTransition(target ? 'workspace' : 'app', routeContext(), {
+        enterSurface: () => setActiveWorkspaceSurface(target),
+        leaveSurface: () => setActiveWorkspaceSurface(undefined),
+      })
+      if (!outcome.ok) {
+        // Undo Back/Forward without overwriting either history entry.
+        recoveringHistory.current = acceptedHistory.current
+        recoverRejectedWorkspacePopstate(window.history, !!activeWorkspaceSurface)
+        setWorkspaceRouteError(outcome.message)
+      } else {
+        acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+        setWorkspaceRouteError('')
+        if (!target && activeWorkspaceSurface) focusAfterSearch()
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  })
+  const reviewTargets = view === 'review' ? readReviewTargets(state, readSearchModel) : { targets: [] }
   if (!accountValid) return <main className="page"><h1>Account session changed</h1><p>Editing is paused. Export unsaved account work before returning to this device’s local data.</p><button onClick={downloadExport}>Download full export</button><button onClick={account.retry}>Retry checking account</button><button onClick={() => { if (window.confirm('Return to local data? Export any unsaved account edits first.')) onUseDevice() }}>Return to local data</button></main>
   if (clearRequested) return <ClearLocalData onBackup={downloadBackup} />
   if (initial.error) return <main className="page"><h1>Unable to load your thoughts</h1><p role="alert">{initial.error}</p><p>Editing is paused to protect your saved work. Retry after browser storage is available, or recover the saved data before continuing.</p><button className="primary" onClick={() => window.location.reload()}>Retry loading</button></main>
-  if (workspaceSurface) return <WorkspaceSurfaceRenderer module={workspaceSurface} state={state} update={update} />
-  return <><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject}>
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">⊹</span><span>threadline</span></div><nav><button className="nav-item" aria-label="Search captures" onClick={() => { navigate('review'); setSearchRequest(value => value + 1) }}><span aria-hidden="true">⌕</span>Search</button>{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><button className="sidebar-bottom" aria-label="Account settings" onClick={() => navigate('settings')}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span>{preferences.value.displayName || (cloud ? 'Synced account' : 'Personal space')}</span></button></aside>
-    <section className="content">
+  return <>{workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} />}
+  <div hidden={!!activeWorkspaceSurface} inert={!!activeWorkspaceSurface}><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
+    <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => <button className={view === item.id ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={view === item.id ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'review' && reviewCount > 0 && <b>{reviewCount}</b>}</button>)}</nav><details className="sidebar-more" ref={moreMenu} onKeyDown={event => { if (event.key === 'Escape' && closeMoreMenu(event.currentTarget, true)) { event.preventDefault(); event.stopPropagation() } }}><summary aria-label={view === 'settings' ? 'More options, Settings current page' : 'More options'}><span className="avatar">{preferences.value.displayName.slice(0, 1).toUpperCase() || '○'}</span><span className="sidebar-more-label">{preferences.value.displayName || 'Personal space'}</span><span aria-hidden="true">⋯</span></summary><div className="sidebar-more-menu"><button type="button" aria-current={view === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}>Settings</button></div></details></aside>
+    <section className={viewportZoomed ? 'content' : 'content swipe-navigation-surface'} onPointerDown={onContentPointerDown} onPointerUp={onContentPointerUp} onPointerCancel={() => { swipeStart.current = null }}>
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>
         <p>Capture a thought, then open Organize to review its meaning. You can use Threadline in this browser or add it to your home screen.</p>
@@ -516,32 +694,67 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
           <MorningDigest state={state} visible inline onShow={() => setView('digest')} />
         </details> : <MorningDigest state={state} visible={view === 'digest'} onShow={() => setView('digest')} />}
       </>
-      {view === 'settings' && <SettingsPage accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
+      {view === 'settings' && <SettingsPage registerSearchHandoffGuard={registerSearchHandoffGuard} accountActive={!!cloud} dataControls={dataControls} installOpener={installOpener} onInstallHelp={() => { setInstallHelp(true); setFocusInstallHelp(true); installHeading.current?.focus() }} settings={preferences.value} error={preferences.error} authState={account.state} onRetryAccount={account.retry} onSave={value => {
         onCancelMerge()
         if (!cloud) writeSettings(localStorage, value)
         setPreferences({ value, error: '' })
       }} onResetSettings={() => { onCancelMerge(); setPreferences({ value: cloud ? { ...defaultSettings } : resetSettings(localStorage), error: '' }) }} onExport={downloadExport} onBackup={downloadBackup} onClear={() => { clearing.current = true; setClearRequested(true) }} onOpenDigest={() => setView('digest')} />}
-      {view === 'today' && <Today objects={state.objects} relationships={state.model?.relationships ?? []} onCapture={() => setView('capture')} onOpen={setSelectedObjectId} />}
-      {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={setView} />}
-      {view === 'capture' && <Capture library={captureLibrary} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
-      {view === 'review' && <Review objects={state.objects} targets={state.model?.semanticObjects ?? []} onResolve={resolveReviewObject} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} library={<CaptureLibrary objects={state.objects} library={captureLibrary} focusRequest={searchRequest} onOpen={setSelectedObjectId} onChange={change => update(current => ({ ...current, captureLibrary: changeCaptureLibrary(captureLibraryFor(current.objects, current.captureLibrary), current.objects, change) }))} />} />}
-      {view === 'review' && <ReminderProjections state={state} onDeliveryState={updateReminderDelivery} />}
-      {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update} /></details>}
+      {view === 'today' && <Today state={state} onCapture={() => setView('capture')} onOpen={setSelectedObjectId}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined} />}
+      {view === 'beta-home' && <BetaHome state={state} displayName={preferences.value.displayName} onNavigate={navigate} />}
+      {view === 'capture' && <Capture library={captureLibrary} registerSearchHandoffGuard={registerSearchHandoffGuard} draft={draft} busy={captureBusy} success={saveError ? 0 : captureSuccess} onDraft={value => { setDraft(value); setCaptureSuccess(0) }} onCapture={capture} />}
+      {view === 'review' && <Review registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} targets={reviewTargets.targets} targetsError={reviewTargets.error} focusObjectId={focusedReviewId} onFocusHandled={() => setFocusedReviewId(null)} onResolve={resolveReviewObject} onResolveCommitment={resolveCommitment} onResolveReminder={resolveReminder} onReject={id => withdraw(id, 'rejected')} onOpen={setSelectedObjectId} library={<CaptureLibrary registerSearchHandoffGuard={registerSearchHandoffGuard} objects={state.objects} library={captureLibrary} focusRequest={searchRequest} onOpen={setSelectedObjectId} onChange={change => update(current => ({ ...current, captureLibrary: changeCaptureLibrary(captureLibraryFor(current.objects, current.captureLibrary), current.objects, change) }))} />} />}
+      {view === 'review' && <ReminderProjections state={state} readModel={readSearchModel} focusInstructionId={focusedReminderId} onFocusHandled={() => setFocusedReminderId(null)} onDeliveryState={updateReminderDelivery} />}
+      {view === 'review' && <details className="timing-details"><summary>Timing</summary><TemporalReview state={state} onUpdate={update}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} /></details>}
       {view === 'commitments' && <Commitments objects={state.objects} onAdd={() => { setDraft(''); setView('capture') }} onOpen={setSelectedObjectId} />}
-      {view === 'calendar' && <CalendarView state={state} onOpen={setSelectedObjectId} onUpdate={update} />}
-      {view === 'schedule' && <ScheduleView state={state} update={update} />}
-      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
+      {view === 'calendar' && <CalendarView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} onOpen={setSelectedObjectId} onUpdate={update}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} />}
+      {view === 'schedule' && <ScheduleView registerSearchHandoffGuard={registerSearchHandoffGuard} state={state} update={update} focusActionId={focusedActionId} onFocusHandled={() => setFocusedActionId(null)}
+        readAccountModel={cloud ? current => cloud.session.snapshot(current, latestPreferences.current.value, latestDigest.current!).model : undefined}
+        readDecisionModel={cloud ? current => cloud.session.decisionModel(current, latestPreferences.current.value, latestDigest.current!) : undefined}
+        decisionBlocked={cloud?.session.decisionBlockReason()} />}
+      {view === 'canvas' && (!openCanvas || !canvas ? <CanvasBank bank={canvasBank} ideas={resolvedIdeas(state.objects)} connections={connectionProjection?.graph} connectionsUnavailable={connectionProjection?.unavailable} focusTarget={bankFocusTarget} onCreate={createCanvas} onOpen={openSavedCanvas} onOpenIdea={setSelectedObjectId} onConnect={(sourceId, targetId) => update(current => connectThoughts(current, sourceId, targetId))} onDisconnect={id => update(current => removeThoughtConnection(current, id))} onBackup={downloadBackup} /> : <Canvas key={openCanvas.id} title={openCanvas.title} autoFocusTitle={focusCanvasTitle} autoFocusCanvas={focusCanvasEntry} onRegisterCommitTitle={commit => { canvasCommitTitle.current = commit }} elements={openCanvas.elements} viewport={openCanvas.viewport ?? DEFAULT_CANVAS_VIEWPORT} onTitle={title => { update(current => renameCanvas(current, openCanvas.id, title)); setFocusCanvasTitle(false) }} onViewport={canvas.setViewport} onCommit={canvas.commit} onText={(id, text) => { canvas.editText(id, text); if (cloud) { canvasTextSaveQueue.edited(); setCloudStatus('Account changes waiting to save…') } }} onFinishText={() => { canvas.finishText(); canvasTextSaveQueue.flush() }} canUndo={canvas.canUndo} canRedo={canvas.canRedo} onUndo={canvas.undo} onRedo={canvas.redo} onCaptureObject={captureCanvasObject} onExit={exitCanvas} saveStatus={saveError ? 'Not saved — use Retry saving or Download backup above.' : cloud ? cloudStatus : 'Saved on this device'} />)}
     </section>
-  </main>{selectedObject && <ObjectPanel object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
+  </main>{selectedCaptureId && <SourceCapturePanel state={state} captureId={selectedCaptureId} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedCaptureId(null)} />}{selectedObject && <ObjectPanel key={selectedObject.id} registerSearchHandoffGuard={registerSearchHandoffGuard} object={selectedObject} history={reviewTextSnapshot(state, selectedObject.id)} suspended={!!activeWorkspaceSurface} onClose={() => setSelectedObjectId(null)} onSave={saveObject}
       onRevise={summary => update(current => reviseInterpretation(current, selectedObject.id, summary))}
       onCorrect={content => update(current => correctOriginal(current, selectedObject.id, content, true))}
-      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}
+      onReverse={() => withdraw(selectedObject.id, 'reversed')} />}</div>
   </>
 }
 
-function AccountSection({ state, onRetry, active }: { state: AuthState; onRetry: () => void; active: boolean }) {
+function SourceCapturePanel({ state, captureId, suspended, onClose }: { state: AppState; captureId: string; suspended: boolean; onClose: () => void }) {
+  const closeButton = useRef<HTMLButtonElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const source = (() => {
+    try {
+      const model = reconcileLegacyUi(state)
+      return { capture: model.captures.find(item => item.id === captureId), correction: model.sourceCorrections?.filter(item => item.captureId === captureId).at(-1) }
+    } catch { return undefined }
+  })()
+  useEffect(() => {
+    if (!suspended) closeButton.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); onCloseRef.current() } }
+    if (!suspended) document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [suspended])
+  return <div className="panel-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <aside className="object-panel" role="dialog" aria-modal="true" aria-labelledby="source-capture-title">
+      <header><div><p className="eyebrow">Preserved source</p><h2 id="source-capture-title">Original capture</h2></div><button ref={closeButton} className="close-button" type="button" onClick={onClose} aria-label="Close original capture">×</button></header>
+      <div className="panel-scroll">{source?.capture ? <><p>{source.capture.originalContent}</p>{source.correction && <p>Current corrected wording: {source.correction.correctedContent}</p>}<small>Captured {new Date(source.capture.createdAt).toLocaleString()}</small></> : <p role="alert">This capture is no longer available. Refresh Search and try again.</p>}</div>
+    </aside>
+  </div>
+}
+
+function AccountSection({ registerSearchHandoffGuard, state, onRetry, active }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; state: AuthState; onRetry: () => void; active: boolean }) {
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'account-login', () => state.status !== 'signed-out' || (!email && !code))
   return <section className="settings-card"><h2>Account</h2>
     <p role="status" className={state.status === 'signed-in' ? 'status-pill positive' : 'status-pill'}>{accountLabel(state)}</p>
     <p>{dataOwnershipLabel(state, active)}</p>
@@ -593,7 +806,8 @@ function DigestSection({ onOpen }: { onOpen: () => void }) {
   </section>
 }
 
-function SettingsPage({ accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+function SettingsPage({ registerSearchHandoffGuard, accountActive, dataControls, installOpener, onInstallHelp, settings, error, authState, onRetryAccount, onSave, onResetSettings, onExport, onBackup, onClear, onOpenDigest }: {
+  registerSearchHandoffGuard?: RegisterSearchHandoffGuard
   accountActive: boolean; dataControls: React.ReactNode
   installOpener: React.RefObject<HTMLButtonElement | null>; onInstallHelp: () => void
   settings: LocalSettings; error: string; authState: AuthState; onRetryAccount: () => void
@@ -605,8 +819,9 @@ function SettingsPage({ accountActive, dataControls, installOpener, onInstallHel
   const [failure, setFailure] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [confirmation, setConfirmation] = useState('')
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'settings', () => JSON.stringify(draft) === JSON.stringify(settings) && !confirming)
   return <div className="page settings-page"><Header eyebrow="Your space" title="Settings / Account" />
-    <AccountSection active={accountActive} state={authState} onRetry={onRetryAccount} />
+    <AccountSection registerSearchHandoffGuard={registerSearchHandoffGuard} active={accountActive} state={authState} onRetry={onRetryAccount} />
     <section className="settings-card"><h2>Profile</h2><p>{dataOwnershipLabel(authState, accountActive)}</p>
       {error && <p role="alert">{error}</p>}
       {error && <div className="settings-recovery"><p>Resetting affects only your display name and start page — it does not touch your thoughts, canvas or digest settings.</p><button className="secondary" onClick={() => { setFailure(''); setMessage(''); try { onResetSettings(); setDraft(defaultSettings); setMessage('Settings reset to defaults on this device.') } catch { setFailure('Settings could not be reset. Check browser storage and retry.') } }}>Reset settings to defaults</button></div>}
@@ -641,16 +856,29 @@ function ClearLocalData({ onBackup }: { onBackup: () => void }) {
 }
 
 function Header({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) { return <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1></div>{action}</header> }
-function Today({ objects, relationships, onCapture, onOpen }: { objects: ThoughtObject[]; relationships: SemanticRelationship[]; onCapture: () => void; onOpen: (id: string) => void }) {
-  const commitments = fixedCommitments(objects)
-  const actions = confirmedActions(objects, relationships)
+export function Today({ state, onCapture, onOpen, readAccountModel, now = new Date() }: { state: AppState; onCapture: () => void; onOpen: (id: string) => void; readAccountModel?: (current: AppState) => PersistedState; now?: Date }) {
+  const { objects } = state
+  const actions = confirmedActions(objects, state.model?.relationships ?? [])
   const focus = actions[0]
   const recent = recentObjects(objects)
-  const date = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())
+  const date = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(now)
+  let commitments: { eventId: string; startsAt: string; eventTitle: string; id: string; summary: string }[] = []
+  let commitmentError = ''
+  try {
+    const model = reconcileCurrentSession(state, readAccountModel?.(state))
+    const confirmedIds = new Set(confirmedSemanticObjects(model).filter(item => item.kind === 'commitment').map(item => item.id))
+    const eventIds = new Set(activeTemporalDecisions(model).flatMap(entry =>
+      (entry.target.kind === 'event-scheduling' || entry.target.kind === 'direct-calendar-event') && temporalFactIsCurrent(model, entry)
+        ? [entry.target.eventId] : []))
+    const day = buildCalendarTimeGrid(model, localDateKey(now), 1, now, event => eventIds.has(event.id) && event.status === 'scheduled').days[0]
+    commitments = day.events.flatMap(({ event, linkedObjects }) => linkedObjects
+      .filter(item => item.kind === 'commitment' && confirmedIds.has(item.id))
+      .map(item => ({ eventId: event.id, startsAt: event.startsAt, eventTitle: event.title, id: item.id, summary: item.summary })))
+  } catch { commitmentError = 'Unable to verify fixed commitments. Retry saving or download a backup.' }
   return <div className="page"><Header eyebrow={date} title="Make space for the work that matters." action={<button className="primary" onClick={onCapture}>Capture a thought <span>↵</span></button>} />
     <section className="today-grid"><div className="focus-card"><p className="section-label">Recommended focus</p><h2>{focus?.originalContent ?? 'Start with a clean capture'}</h2><p>One meaningful action, selected from confirmed work—not an overflowing task list.</p><div className="focus-meta"><span>◒ {focus?.metadata.effort ?? 'small'} effort</span><span>◌ {focus?.metadata.attentionLoad ?? 'low'} attention</span></div><button className="quiet-button" disabled={!focus} onClick={() => focus && onOpen(focus.id)}>{focus ? `Open ${objectLabels[focus.kind].toLowerCase()}` : 'Capture first'} →</button></div>
       <div className="day-summary"><p className="section-label">Attention budget</p><div className="orb"><b>{Math.max(2, 5 - actions.length)}</b><span>open hours</span></div><p>Keep the plan spacious. It can move as your day changes.</p></div></section>
-    <section className="list-section"><div className="section-heading"><div><p className="section-label">Fixed commitments</p><h2>Today</h2></div><span>{commitments.length} scheduled</span></div>{commitments.length ? commitments.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No fixed commitments today. Your execution plan is free to adapt." />}</section>
+    <section className="list-section"><div className="section-heading"><div><p className="section-label">Fixed commitments</p><h2>Today</h2></div>{!commitmentError && <span>{commitments.length} scheduled</span>}</div>{commitmentError ? <p role="status">{commitmentError}</p> : commitments.length ? commitments.map(item => <button className="commitment-row clickable-row commitment-accent" key={`${item.eventId}:${item.id}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.summary}</strong><small><time dateTime={item.startsAt}>{new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(item.startsAt))}</time> · {item.eventTitle}</small></div><span className="kind-chip">Commitment</span></button>) : <Empty text="No fixed commitments today. Your execution plan is free to adapt." />}</section>
     <section className="list-section"><div className="section-heading"><div><p className="section-label">Object workbench</p><h2>Recent captures</h2></div><span>{recent.length} visible</span></div>{recent.length ? recent.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} />) : <Empty text="Capture something and it will appear here for shaping." />}</section>
   </div>
 }
@@ -661,10 +889,11 @@ function applyCaptureDetails(item: ThoughtObject, details = emptyCaptureDetails)
   const suggestedDate = details.date ? [details.date, details.time].filter(Boolean).join(' ') : item.interpretation.suggestedDate
   return { ...item, context, metadata: { ...item.metadata, deadline: details.date || item.metadata.deadline }, interpretation: { ...item.interpretation, suggestedDate } }
 }
-function Capture({ library, draft, busy, success, onDraft, onCapture }: { library: CaptureLibraryState; draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
+function Capture({ library, registerSearchHandoffGuard, draft, busy, success, onDraft, onCapture }: { library: CaptureLibraryState; registerSearchHandoffGuard?: RegisterSearchHandoffGuard; draft: string; busy: boolean; success: number; onDraft: (v: string) => void; onCapture: (details?: CaptureDetails) => void }) {
   const input = useRef<HTMLTextAreaElement>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [details, setDetails] = useState<CaptureDetails>(emptyCaptureDetails)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'capture', () => !busy && !details.folder && !details.date && !details.time)
   useEffect(() => { if (success) { input.current?.focus(); setDetails(emptyCaptureDetails); setDetailsOpen(false) } }, [success])
   return <div className="page capture-page"><Header eyebrow="Raw capture" title="What’s on your mind?" />
     <div className="capture-box"><textarea ref={input} autoFocus aria-label="Raw thought" value={draft} onChange={event => onDraft(event.target.value)} placeholder="A thought, a loose end, an idea…" onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); onCapture(details) } }} />
@@ -681,15 +910,32 @@ function interpretationSourceLabel(item: ThoughtObject) {
   return edited ? 'Interpretation edited by you; original source was not recorded' : 'Interpretation source was not recorded'
 }
 
-export function Review({ objects, targets = [], onResolve, onResolveReminder, onReject, onOpen, library }: { objects: ThoughtObject[]; targets?: readonly SemanticObject[]; onResolve: (object: ThoughtObject) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void; library?: React.ReactNode }) {
+export function focusPendingReviewChoice(disclosure: HTMLDetailsElement | null, card: HTMLElement | undefined, onFocused?: () => void): boolean {
+  if (!disclosure || !card) return false
+  const choice = card.querySelector<HTMLButtonElement>('.review-actions button:not(:disabled)')
+  if (!choice) return false
+  disclosure.open = true
+  choice.focus()
+  onFocused?.()
+  return true
+}
+
+export function Review({ registerSearchHandoffGuard, objects, targets = [], targetsError, focusObjectId = null, onFocusHandled, onResolve, onResolveCommitment, onResolveReminder, onReject, onOpen, library }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; objects: ThoughtObject[]; targets?: readonly SemanticObject[]; targetsError?: string; focusObjectId?: string | null; onFocusHandled?: () => void; onResolve: (object: ThoughtObject) => void; onResolveCommitment?: (id: string, details: CommitmentDetails) => void; onResolveReminder?: (id: string, choice: ReminderChoice) => void; onReject: (id: string) => void; onOpen: (id: string) => void; library?: React.ReactNode }) {
   const [rejecting, setRejecting] = useState<string | null>(null)
+  const disclosure = useRef<HTMLDetailsElement>(null)
+  const cards = useRef(new Map<string, HTMLElement>())
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'review', () => !rejecting)
   const pending = reviewObjects(objects)
   const ideas = resolvedIdeas(objects)
-  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" /><details className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id}>
+  useEffect(() => {
+    if (!focusObjectId) return
+    focusPendingReviewChoice(disclosure.current, cards.current.get(focusObjectId), onFocusHandled)
+  }, [focusObjectId, objects, onFocusHandled])
+  return <div className="page organize-page"><Header eyebrow="Your thoughts" title="Organize" />{targetsError && <p role="alert">{targetsError}</p>}<details ref={disclosure} className="compact-disclosure review-disclosure"><summary>Review {pending.length}<span className="disclosure-caret" aria-hidden="true" /></summary>{pending.length === 0 ? <Empty text="All caught up." /> : <div className="review-list">{pending.map(item => <article className="review-card" key={item.id} ref={node => { if (node) cards.current.set(item.id, node); else cards.current.delete(item.id) }}>
     <button className="review-dismiss" aria-label={`Dismiss ${item.interpretation.summary}`} onClick={() => setRejecting(item.id)}>×</button>
     <div className="source-line"><span>{item.currentContent ? 'Current thought · original preserved' : 'Current thought'}</span><time>{new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div><blockquote>{item.currentContent ?? item.originalContent}</blockquote>
     <div className="proposal"><div><p>Proposed {objectLabels[item.kind]}</p><p>{item.interpretation.summary}</p><small>{interpretationSourceLabel(item)}</small></div></div>
-    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution object={item} onComplete={onResolve} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
+    {rejecting === item.id ? <div className="reject-confirmation" role="group" aria-label="Confirm dismissal"><p>Dismiss this proposal from Review? Your original capture and history are kept.</p><button className="secondary" autoFocus onClick={() => setRejecting(null)}>Cancel</button><button className="secondary danger-button" onClick={() => { onReject(item.id); setRejecting(null) }}>Dismiss from Review</button></div> : <ReviewResolution registerSearchHandoffGuard={registerSearchHandoffGuard} object={item} onComplete={onResolve} onResolveCommitment={onResolveCommitment} onResolveReminder={onResolveReminder} reminderTargets={targets} onEdit={() => onOpen(item.id)} />}
   </article>)}</div>}</details>
     {library}
     <section className="bank-section" aria-labelledby="ideas-heading"><h2 id="ideas-heading">Ideas</h2>
@@ -702,18 +948,25 @@ function ObjectRow({ item, onOpen, accent }: { item: ThoughtObject; onOpen: (id:
   return <button className={`commitment-row clickable-row ${accent === 'commitment' ? 'commitment-accent' : ''}`} onClick={() => onOpen(item.id)}><span className="time-dot"/><div><strong>{item.originalContent}</strong><small>{detail}</small></div><span className="status-chip">{item.status}</span><span className="kind-chip">{objectLabels[item.kind]}</span></button>
 }
 function Commitments({ objects, onAdd, onOpen }: { objects: ThoughtObject[]; onAdd: () => void; onOpen: (id: string) => void }) { const items = fixedCommitments(objects); const now = new Date(); return <div className="page"><Header eyebrow="External time" title="Commitments stay put." action={<button className="primary" onClick={onAdd}>Add commitment</button>} /><p className="lede">Meetings, appointments, deadlines, and events. This is separate from the flexible execution plan.</p><div className="calendar-grid"><div className="calendar-day"><p className="section-label">Today</p><b>{now.getDate()}</b><span>{new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now)}</span></div><div className="calendar-list">{items.length ? items.map(item => <ObjectRow item={item} key={item.id} onOpen={onOpen} accent="commitment" />) : <Empty text="No commitments captured yet." />}</div></div></div> }
-function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, onReverse }: { object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
+export function ObjectPanel({ registerSearchHandoffGuard, object, history, suspended = false, onClose, onSave, onRevise, onCorrect, onReverse }: { registerSearchHandoffGuard?: RegisterSearchHandoffGuard; object: ThoughtObject; history: ReturnType<typeof reviewTextSnapshot>; suspended?: boolean; onClose: () => void; onSave: (object: ThoughtObject) => void; onRevise: (summary: string) => void; onCorrect: (content: string) => void; onReverse: () => void }) {
   const [draft, setDraft] = useState(object)
   const [revision, setRevision] = useState(object.interpretation.summary)
   const [correction, setCorrection] = useState(history.currentText)
+  const [fieldError, setFieldError] = useState('')
   const closeButton = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
   useEffect(() => setDraft(object), [object])
   useEffect(() => setRevision(object.interpretation.summary), [object.id, object.interpretation.summary])
   useEffect(() => setCorrection(history.currentText), [object.id, history.currentText])
-  const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object))
+  const stagedActionResolved = hasStagedActionResolution(object)
+  const reminderTypeLocked = object.kind === 'reminder' && hasCreatedReminderInstruction(object)
+  const pendingClassification = reviewObjects([object]).length > 0
+  const awaitingConfirmation = draft.kind !== object.kind || object.status === 'review' || object.status === 'inbox' || ((object.kind === 'action' || object.kind === 'commitment') && !hasConfirmation(object) && !stagedActionResolved)
   const hasUnsavedFieldEdits = JSON.stringify(draft) !== JSON.stringify(object)
   const hasUnsavedThoughtDrafts = hasUnsavedReviewDrafts(object, history.currentText, correction, revision)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'object-panel', () => !hasUnsavedFieldEdits && !hasUnsavedThoughtDrafts)
   const confirmDiscard = (includeFields: boolean) => {
     if (!(hasUnsavedThoughtDrafts || (includeFields && hasUnsavedFieldEdits))) return true
     return window.confirm('Discard the unsaved changes in this panel? Saved versions and the original capture will stay available.')
@@ -721,6 +974,10 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   const closePanel = () => { if (confirmDiscard(true)) onClose() }
   const saveAndClose = (updated: ThoughtObject) => {
     if (!confirmDiscard(false)) return
+    if (hasCreatedReminderInstruction(object) && updated.kind !== object.kind) {
+      setFieldError('This Reminder already has an instruction. Its type cannot be changed; your other edits were not saved.')
+      return
+    }
     onSave(updated)
     onClose()
   }
@@ -732,15 +989,18 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
   useEffect(() => {
     closeButton.current?.focus()
     const opener = returnFocus.current
-    return () => opener?.focus()
+    return () => {
+      if (!suspendedRef.current) requestAnimationFrame(() => (opener?.isConnected && opener !== document.body ? opener : document.querySelector<HTMLElement>('.sidebar .nav-item'))?.focus())
+    }
   }, [])
+  useEffect(() => { if (!suspended) closeButton.current?.focus() }, [suspended])
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
       closePanel()
     }
-    document.addEventListener('keydown', onKeyDown)
+    if (!suspended) document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   })
   const field = (key: keyof ThoughtObject, value: unknown) => setDraft(current => ({ ...current, [key]: value }))
@@ -768,20 +1028,22 @@ function ObjectPanel({ object, history, onClose, onSave, onRevise, onCorrect, on
           {revisionNeedsReconfirmation(object) && <p role="note">{revisionReviewNotice(object)}</p>}
           <button className="secondary" disabled={hasUnsavedFieldEdits || !revision.trim() || revision.trim() === object.interpretation.summary} onClick={() => onRevise(revision)}>Save meaning version</button>
         </section>
+        {pendingClassification ? <p role="note">Choose Action, Commitment, Reminder, or Idea in Review when you are ready.</p> : <>
         {awaitingConfirmation && <p>Complete and Archive require confirmation in Organize.</p>}
         <div className="form-grid">
-          <label>Type<select value={draft.kind} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select></label>
+          <label>Type<select value={draft.kind} disabled={reminderTypeLocked} aria-describedby={reminderTypeLocked ? 'reminder-type-note' : undefined} onChange={event => field('kind', event.target.value as ObjectKind)}>{(Object.keys(objectLabels) as ObjectKind[]).map(kind => <option key={kind} value={kind}>{objectLabels[kind]}</option>)}</select>{reminderTypeLocked && <small id="reminder-type-note">Type is fixed after a Reminder is created. You can still edit its other details.</small>}</label>
           <label>Context<select value={folderValue} onChange={event => field('context', event.target.value || undefined)}><option value="">Unspecified</option><option value="Personal">Personal</option><option value="Business">Business</option></select></label>
           <label>Proposed date<input type="date" value={draft.metadata.deadline ?? ''} onChange={event => metadata('deadline', event.target.value)} /></label>
           <label>Time<input type="time" value={proposedTime} onChange={event => setProposedTime(event.target.value)} /></label>
           <label>Effort<select value={draft.metadata.effort ?? ''} onChange={event => metadata('effort', event.target.value)}><option value="">Unspecified</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
-          <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
-        </div>
+          <details className="wide advanced-object-details"><summary>Advanced</summary><div className="form-grid"><label>Status<select disabled={awaitingConfirmation || stagedActionResolved} value={awaitingConfirmation ? 'review' : draft.status} onChange={event => field('status', event.target.value as ThoughtObject['status'])}>{['inbox', 'review', 'confirmed', 'complete', 'archived'].map(status => <option key={status} value={status} disabled={reminderTypeLocked && (status === 'inbox' || status === 'review')}>{status}</option>)}</select></label><label>Urgency{scoreSelect('urgency')}</label></div></details>
+        </div></>}
+        {fieldError && <p role="alert">{fieldError}</p>}
         <details className="thought-progression" open><summary>Version history ({history.progression.length})</summary><ol>{history.progression.slice().reverse().map(entry => <li key={entry.id}><div><strong>{entry.label}</strong><time>{new Date(entry.at).toLocaleString()}</time></div><p>{entry.text}</p>{entry.previousText && <details><summary>Previous version</summary><p>{entry.previousText}</p></details>}</li>)}</ol></details>
         <details><summary>Decision history ({object.history.length})</summary><ol>{object.history.slice().reverse().map((entry, index) => <li key={`${entry.at}-${index}`}><p>{entry.event}</p><time>{entry.at}</time>{entry.confirmation && <small>{entry.confirmation.transition}: {entry.confirmation.summary}</small>}</li>)}</ol></details>
-        {hasConfirmation(object) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>Reverse confirmation</button></>}
+        {(hasConfirmation(object) || stagedActionResolved) && <><p>Return this item to Organize.</p><button className="secondary" onClick={reverseAndClose}>{stagedActionResolved && !hasConfirmation(object) ? 'Withdraw staged Action' : 'Reverse confirmation'}</button></>}
       </div>
-      <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>
+      {!pendingClassification && <footer><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'archived'))}>Archive</button><button disabled={awaitingConfirmation} className="secondary" onClick={() => saveAndClose(setObjectStatus(draft, 'complete'))}>Complete</button><button className="primary" onClick={() => saveAndClose(draft)}>Save changes</button></footer>}
     </aside>
   </div>
 }

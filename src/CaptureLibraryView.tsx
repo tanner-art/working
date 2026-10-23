@@ -3,6 +3,8 @@ import type { ThoughtObject } from './domain'
 import { captureFolderId, folderDestinations, folderTrail, searchCaptures, type CaptureLibraryState, type LibraryChange } from './captureLibrary'
 import { folderColors, type FolderColor } from './organization'
 import './captureLibrary.css'
+import { useSearchHandoffGuard } from './useSearchHandoffGuard'
+import type { RegisterSearchHandoffGuard } from './searchHandoffGuards'
 
 type FolderEditor = { id: string; name: string; color: FolderColor; emoji: string }
 type MoveEditor = { id: string; name: string; destination: string }
@@ -11,13 +13,14 @@ type Editor = ({ type: 'create' } & FolderEditor) | ({ type: 'edit' } & FolderEd
 const dragType = 'application/x-threadline-library'
 type DragItem = { type: 'folder' | 'capture'; id: string }
 
-export function CaptureLibrary({ objects, library, onChange, onOpen, focusRequest = 0 }: {
-  objects: readonly ThoughtObject[]; library: CaptureLibraryState; onChange: (change: LibraryChange) => void; onOpen: (id: string) => void; focusRequest?: number
+export function CaptureLibrary({ objects, library, onChange, onOpen, focusRequest = 0, registerSearchHandoffGuard }: {
+  objects: readonly ThoughtObject[]; library: CaptureLibraryState; onChange: (change: LibraryChange) => void; onOpen: (id: string) => void; focusRequest?: number; registerSearchHandoffGuard?: RegisterSearchHandoffGuard
 }) {
   const [query, setQuery] = useState('')
   const [folderId, setFolderId] = useState<string | null>(null)
   const [allCaptures, setAllCaptures] = useState(true)
   const [editor, setEditor] = useState<Editor | null>(null)
+  useSearchHandoffGuard(registerSearchHandoffGuard, 'capture-library', () => !editor)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [dragOver, setDragOver] = useState<string | null>(null)

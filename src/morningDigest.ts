@@ -45,7 +45,8 @@ export function buildMorningDigest(model: PersistedState, now = new Date()): Mor
   const byId = (a: SemanticObject, b: SemanticObject) => a.id.localeCompare(b.id)
   // Temporal buckets require full canonical validation, including journal targets.
   const temporal = isPersistedState(model) ? activeTemporalDecisions(model).filter(e => temporalFactIsCurrent(model, e)) : []
-  const events = model.calendarEvents.filter(e => e.status === 'scheduled' && temporal.some(t => t.target.kind === 'event-scheduling' && t.target.eventId === e.id))
+  const events = model.calendarEvents.filter(e => e.status === 'scheduled' && temporal.some(t =>
+    (t.target.kind === 'event-scheduling' || t.target.kind === 'direct-calendar-event') && t.target.eventId === e.id))
   const deadlines = confirmed.flatMap(o => {
     const evidence = temporal.find(t => t.target.kind === 'fixed-deadline' && t.target.objectId === o.id)
     return evidence?.target.kind === 'fixed-deadline' ? [{ ...o, metadata: { ...o.metadata, deadline: evidence.target.date } }] : []

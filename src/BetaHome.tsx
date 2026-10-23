@@ -15,7 +15,6 @@ const featureLinks: { destination: BetaHomeDestination; eyebrow: string; title: 
   { destination: 'review', eyebrow: 'Decide', title: 'Review', description: 'Confirm proposed meaning and keep uncertain work visible.', icon: '◇' },
   { destination: 'calendar', eyebrow: 'See time', title: 'Calendar', description: 'View confirmed events and proposed timing separately.', icon: '▦' },
   { destination: 'canvas', eyebrow: 'Think spatially', title: 'Bank', description: 'Open saved canvases or start a new visual workspace.', icon: '⌁' },
-  { destination: 'settings', eyebrow: 'Make it yours', title: 'Settings', description: 'Manage your account, data, install, and recovery controls.', icon: '⚙' },
 ]
 
 function EmptyDigestLine({ children }: { children: React.ReactNode }) {
@@ -41,7 +40,7 @@ export function BetaHome({ state, displayName, onNavigate, now: fixedNow }: Beta
   return <div className="beta-home">
     <header className="beta-home-hero">
       <div>
-        <p className="beta-preview-label">Secondary home · Preview</p>
+        <p className="beta-preview-label">Home</p>
         <p className="beta-home-date">{date}</p>
         <h1>{greeting}</h1>
         <p className="beta-home-lede">A calmer place to capture what is present, review what needs a decision, and return to ideas when they are useful.</p>

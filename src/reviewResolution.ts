@@ -1,5 +1,5 @@
 import type { ThoughtObject } from './domain'
-import { confirmObject, reviewObjects, setObjectKind } from './objectWorkflow'
+import { confirmObject, hasCreatedReminderInstruction, reviewObjects, setObjectKind } from './objectWorkflow'
 import { actionResolution } from './resolutions/action'
 import { commitmentResolution } from './resolutions/commitment'
 import { reminderResolution } from './resolutions/reminder'
@@ -52,16 +52,18 @@ export async function resolveReviewCapture(
   kind: ReviewResolutionKind,
   continuations: ReviewContinuations = registeredReviewContinuations,
 ): Promise<ReviewResolutionResult> {
+  if (hasCreatedReminderInstruction(object)) {
+    return { status: 'recoverable-error', message: 'This Reminder already has a created instruction. Refresh Review; its history was left unchanged.' }
+  }
   if (!reviewObjects([object]).length) {
     return { status: 'recoverable-error', message: 'This capture is no longer awaiting review. Refresh Review and try again.' }
   }
 
-  const classified = object.kind === kind ? object : setObjectKind(object, kind)
-  if (kind === 'idea') return { status: 'completed', object: confirmObject(classified, 'idea') }
-
-  const continuation = continuations[kind]
-  if (!continuation) return unavailable(kind)
   try {
+    const classified = object.kind === kind ? object : setObjectKind(object, kind)
+    if (kind === 'idea') return { status: 'completed', object: confirmObject(classified, 'idea') }
+    const continuation = continuations[kind]
+    if (!continuation) return unavailable(kind)
     const result = await continuation(classified)
     if (result.status === 'needs-input') return result
     if (result.status !== 'completed') return { status: 'recoverable-error', message: result.message }
