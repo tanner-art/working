@@ -328,6 +328,7 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
     const old = projection.objects.find(o => o.id === item.id)
     if (old && equal(old, item)) continue
     if (old && (!equal(item.history.slice(0, old.history.length), old.history) || item.confidence !== old.confidence)) return fail()
+    const additions = old ? item.history.slice(old.history.length) : item.history
     if (old) {
       // Only the summary may change, and only through recorded revisions; other interpretation fields are frozen.
       const { summary: _next, ...nextRest } = item.interpretation
@@ -344,7 +345,6 @@ export function reconcileLegacyUi(state: AppState): PersistedState {
       }
       if (summary !== item.interpretation.summary) return fail()
     }
-    const additions = old ? item.history.slice(old.history.length) : item.history
     if (additions.some(h => h.event.startsWith('Confirmed as ') && !h.confirmation)) return fail()
     // A capture can be reviewed while its first save is pending/failed. Retain a
     // proposed baseline before recording the dedicated gestures in that same save.

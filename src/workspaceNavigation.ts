@@ -1,6 +1,7 @@
 import type { AppState, PersistedState } from './domain'
 import { canvasBankForState } from './canvasBank'
 import { reconcileCurrentSession } from './store'
+import { reviewObjects } from './objectWorkflow'
 import { searchDocumentsFromModel, type SearchDocument, type SearchField } from './universalSearch'
 
 export type WorkspaceNavigationRequest =
@@ -11,6 +12,7 @@ export type WorkspaceNavigationOutcome = Readonly<{ ok: true }> | Readonly<{ ok:
 
 export type SearchDestination =
   | Readonly<{ view: 'review'; objectId: string }>
+  | Readonly<{ view: 'review'; pendingReviewId: string }>
   | Readonly<{ view: 'review'; reminderId: string }>
   | Readonly<{ view: 'review'; captureId: string }>
   | Readonly<{ view: 'schedule'; actionId: string }>
@@ -40,6 +42,30 @@ export type WorkspaceRouteContext = Readonly<{
   authenticatedUserId?: string
   prepareCanvasExit: () => boolean
 }>
+
+/** Search may replace focused Canvas only after its current edits are safely handed off. */
+export function prepareFocusedCanvasSearchExit(context: Readonly<{
+  editing: boolean
+  currentState: () => unknown
+  finishEditing: () => void
+  accountMode: boolean
+  accountSavePending: () => boolean
+  saveLocal: () => boolean
+  exit: () => void
+}>): boolean {
+  if (!context.editing) return true
+  try {
+    const before = context.currentState()
+    context.finishEditing()
+    // A new account edit starts an async save on the next render. Keep the editor
+    // mounted until that save finishes; flush() alone cannot attest success.
+    if (context.accountMode
+      ? context.currentState() !== before || context.accountSavePending()
+      : !context.saveLocal()) return false
+    context.exit()
+    return true
+  } catch { return false }
+}
 
 /** Browser history and the Search button share one fail-closed route gate. */
 export function performWorkspaceRouteTransition(
@@ -113,6 +139,7 @@ export function resolveSearchDestination(state: AppState, requested: SearchDocum
     if (fresh.kind === 'capture') {
       if (!model.captures.some(capture => capture.id === fresh.id)) return undefined
       const object = state.objects.find(item => `capture:${item.id}` === fresh.id)
+      if (object && reviewObjects([object]).length) return { view: 'review', pendingReviewId: object.id }
       return object ? { view: 'review', objectId: object.id } : { view: 'review', captureId: fresh.id }
     }
     if (fresh.kind === 'action' || fresh.kind === 'commitment' || fresh.kind === 'idea') {

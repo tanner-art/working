@@ -1,4 +1,4 @@
-import type { AppState, CommitmentSetupAudit, SemanticObject, ThoughtObject } from './domain'
+import type { AppState, CommitmentSetupAudit, PersistedState, SemanticObject, ThoughtObject } from './domain'
 import { confirmObject, hasCreatedReminderInstruction } from './objectWorkflow'
 import { reconcileLegacyUi } from './migration'
 
@@ -35,6 +35,23 @@ export function resolveCommitment(object: ThoughtObject, details: CommitmentDeta
     metadata: { ...otherMetadata, ...(choice.date ? { deadline: choice.date } : {}) },
     relationships: choice.dependencyIds.map(targetId => ({ targetId, type: 'depends_on' })),
     history: [...commitment.history, ...revision, { at, event: 'Set Commitment details', commitmentSetup: choice }] })
+}
+
+/** Recheck Review's selected dependencies against the latest session projection at the gesture boundary. */
+export function resolveCommitmentInState(state: AppState, objectId: string, details: CommitmentDetails,
+  readModel: (current: AppState) => PersistedState, at = new Date().toISOString()): AppState {
+  const object = state.objects.find(item => item.id === objectId)
+  if (!object) throw new Error('This capture is no longer available. Refresh Review and try again.')
+  const resolved = resolveCommitment(object, details, at)
+  const targets = readModel(state).semanticObjects
+  if (details.dependencyIds.some(id => !targets.some(target => target.id === id))) {
+    throw new Error('A selected dependency is no longer available. Refresh Review and try again.')
+  }
+  const next = { ...state, objects: state.objects.map(item => item.id === objectId ? resolved : item) }
+  // Validate the candidate before App installs it. A migration rejection must
+  // stay inside the Review form's recoverable error path, not blank the root.
+  readModel(next)
+  return next
 }
 
 export function commitmentRouteId(objectId: string): string { return `commitment:${encodeURIComponent(objectId)}` }

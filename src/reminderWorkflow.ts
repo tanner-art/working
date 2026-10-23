@@ -1,4 +1,4 @@
-import type { AppState, ReminderInstructionAudit, ResolvedReminderInstruction, SemanticObject, ThoughtObject } from './domain'
+import type { AppState, PersistedState, ReminderInstructionAudit, ResolvedReminderInstruction, SemanticObject, ThoughtObject } from './domain'
 import { hasCreatedReminderInstruction, setObjectKind } from './objectWorkflow'
 import { advanceModelProjection, reconcileCurrentSession } from './store'
 
@@ -31,8 +31,8 @@ function sourceObjectId(instruction: ResolvedReminderInstruction): string {
 }
 
 /** Handle or dismiss an active instruction without removing its source evidence. */
-export function setReminderDeliveryState(state: AppState, instructionId: string, deliveryState: 'handled' | 'dismissed', at = new Date().toISOString()): AppState {
-  const model = reconcileCurrentSession(state)
+export function setReminderDeliveryState(state: AppState, instructionId: string, deliveryState: 'handled' | 'dismissed', at = new Date().toISOString(), accountModel?: PersistedState): AppState {
+  const model = reconcileCurrentSession(state, accountModel)
   const instruction = model.reminderInstructions?.find(value => value.id === instructionId)
   if (!instruction || instruction.deliveryState !== 'active') throw new Error('This reminder is no longer active. Refresh and try again.')
   const objectId = sourceObjectId(instruction)
@@ -41,15 +41,15 @@ export function setReminderDeliveryState(state: AppState, instructionId: string,
   const audit: ReminderInstructionAudit = { instructionId, action: deliveryState }
   return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId
     ? { ...value, history: [...value.history, { at, event: deliveryState === 'handled' ? 'Handled reminder' : 'Dismissed reminder', reminderInstruction: audit }] }
-    : value) })
+    : value) }, accountModel)
 }
 
 /** Mounted Review boundary: records explicit input, then returns a fresh persisted projection. */
-export function resolveReminderInState(state: AppState, objectId: string, choice: ReminderChoice, at = new Date().toISOString()): AppState {
+export function resolveReminderInState(state: AppState, objectId: string, choice: ReminderChoice, at = new Date().toISOString(), accountModel?: PersistedState): AppState {
   const object = state.objects.find(value => value.id === objectId)
   if (!object) throw new Error('This capture is no longer available. Refresh Review and try again.')
   if (hasCreatedReminderInstruction(object)) throw new Error('This Reminder already has a created instruction. Its history was left unchanged.')
-  const model = reconcileCurrentSession(state)
+  const model = reconcileCurrentSession(state, accountModel)
   const resolved = resolveReminder(object.kind === 'reminder' ? object : setObjectKind(object, 'reminder'), model.semanticObjects, choice, at)
-  return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId ? resolved : value) })
+  return advanceModelProjection({ ...state, objects: state.objects.map(value => value.id === objectId ? resolved : value) }, accountModel)
 }

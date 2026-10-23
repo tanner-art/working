@@ -14,7 +14,7 @@ const reminder = (created: boolean): ThoughtObject => ({
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Reminder object detail Type affordance', () => {
-  it.each([true, false])('is read-only exactly when a created instruction exists (%s)', created => {
+  it.each([true, false])('keeps the legacy editor only after Review resolution (%s)', created => {
     vi.stubGlobal('document', { activeElement: null })
     vi.stubGlobal('HTMLElement', class {})
     const object = reminder(created)
@@ -22,12 +22,21 @@ describe('Reminder object detail Type affordance', () => {
       currentText: object.originalContent, revisions: [], corrections: [], progression: [] }}
       onClose={() => undefined} onSave={() => undefined} onRevise={() => undefined}
       onCorrect={() => undefined} onReverse={() => undefined} />)
-    expect(markup).toMatch(created ? /Type<select[^>]*disabled=""[^>]*aria-describedby="reminder-type-note"/
-      : /Type<select[^>]*><option/)
+    if (created) expect(markup).toMatch(/Type<select[^>]*disabled=""[^>]*aria-describedby="reminder-type-note"/)
+    else {
+      expect(markup).not.toContain('Type<select')
+      expect(markup).not.toContain('>Folder<select')
+      expect(markup).not.toContain('>Proposed date<input')
+      expect(markup).not.toContain('>Time<input')
+      expect(markup).not.toContain('>Effort<select')
+      expect(markup).toContain('Thought text<textarea')
+      expect(markup).toContain('Organized meaning<textarea')
+      expect(markup).toContain('Choose Action, Commitment, Reminder, or Idea in Review')
+    }
     expect(markup.includes('Type is fixed after a Reminder is created.')).toBe(created)
     expect(markup.includes('<option value="review" disabled=""')).toBe(created)
     expect(markup.includes('<option value="inbox" disabled=""')).toBe(created)
-    expect(markup).toContain('>Folder<select')
+    if (created) expect(markup).toContain('>Context<select')
   })
 
   it.each(['complete', 'archived'] as const)('keeps Confirmed selectable for a %s created Reminder', status => {
