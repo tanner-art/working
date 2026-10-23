@@ -89,5 +89,6 @@ export function GlobalSearchView({ state, snapshotToken, navigate, readModel, in
         </button></li>
       })}</ul>{visible < results.length && <button type="button" className="secondary" onClick={() => setVisible(count => nextVisibleSearchCount(count, results.length))}>Show more results</button>}</> : <p className="empty">{incomplete ? 'No indexed matches. Some items could not be searched.' : 'No matches. Try another word.'}</p>}
     </section> : <p className="empty">Find captures, actions, commitments, reminders, ideas, and canvases.</p>}
+    <section className="search-coming-soon" aria-label="AI native search coming soon"><h2>AI native</h2><p>Coming soon</p></section>
   </main>
 }

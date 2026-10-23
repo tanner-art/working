@@ -1,0 +1,31 @@
+.workspace-hub-blocks { display: grid; gap: 18px; }
+.workspace-hub-blocks > button { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 132px; padding: 24px; border: 1px solid #cbd6c7; border-radius: 14px; background: #fffefa; color: #24372b; text-align: left; font: inherit; }
+.workspace-hub-blocks > button:hover { background: #edf3e7; }
+.workspace-hub-blocks > button:focus-visible { outline: 3px solid #587e36; outline-offset: 3px; }
+.workspace-hub-blocks strong, .workspace-hub-blocks small { display: block; }
+.workspace-hub-blocks strong { font-size: 23px; margin-bottom: 8px; }
+.workspace-hub-blocks small { color: #5c6d60; line-height: 1.6; }
+.workspace-hub-icon { font-size: 28px; }
+.hub-back { margin: 20px 24px 0; min-height: 44px; }
+.home-corner { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+.home-corner button { min-height: 44px; }
+.copy-capture { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.copy-capture button { min-height: 44px; }
+.copy-capture [role="status"] { font-size: 13px; color: #526359; }
+.selectable-capture { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.search-coming-soon { margin-top: 30px; padding: 24px; border: 1px dashed #b9c7b3; border-radius: 12px; background: #edf3e7; }
+.search-coming-soon h2 { margin: 0 0 6px; font-size: 22px; }
+.search-coming-soon p { margin: 0; color: #5c6d60; }
+
+@media (max-width: 720px), (pointer: coarse) {
+  /* Editable controls below 16px trigger focus zoom in mobile Safari. Keep
+     native pinch zoom available; larger capture/title typography stays large. */
+  #root :is(.app-shell, .object-panel, .universal-search, .beta-landing) :is(input, select, textarea) { font-size: 16px; }
+  #root .app-shell .capture-box textarea { font-size: 23px; }
+  #root .app-shell .canvas-title-input { font-size: 29px; }
+}
+@media (max-width: 720px) {
+  /* Don't stretch the navigation grid row when the browser chrome or keyboard moves. */
+  #root .app-shell { min-height: 100svh; align-content: start; }
+  .workspace-hub-blocks > button { padding: 20px 16px; gap: 12px; }
+}

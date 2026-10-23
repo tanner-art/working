@@ -12,9 +12,8 @@ type BetaHomeProps = {
 
 const featureLinks: { destination: BetaHomeDestination; eyebrow: string; title: string; description: string; icon: string }[] = [
   { destination: 'capture', eyebrow: 'Start here', title: 'Capture', description: 'Put down a thought before deciding what it is.', icon: '＋' },
-  { destination: 'review', eyebrow: 'Decide', title: 'Review', description: 'Confirm proposed meaning and keep uncertain work visible.', icon: '◇' },
-  { destination: 'calendar', eyebrow: 'See time', title: 'Calendar', description: 'View confirmed events and proposed timing separately.', icon: '▦' },
-  { destination: 'canvas', eyebrow: 'Think spatially', title: 'Bank', description: 'Open saved canvases or start a new visual workspace.', icon: '⌁' },
+  { destination: 'organize', eyebrow: 'Your library', title: 'Organize', description: 'Browse captures, folders, and canvases.', icon: '◇' },
+  { destination: 'plan', eyebrow: 'See time', title: 'Plan', description: 'Open Schedule or Calendar.', icon: '▦' },
 ]
 
 function EmptyDigestLine({ children }: { children: React.ReactNode }) {
@@ -38,6 +37,7 @@ export function BetaHome({ state, displayName, onNavigate, now: fixedNow }: Beta
   const greeting = displayName.trim() ? `Welcome back, ${displayName.trim()}.` : 'Welcome to your workspace.'
 
   return <div className="beta-home">
+    <div className="home-corner"><button type="button" className="secondary" aria-label="Settings" onClick={() => onNavigate('settings')}>⚙ Settings</button></div>
     <header className="beta-home-hero">
       <div>
         <p className="beta-preview-label">Home</p>
@@ -47,7 +47,6 @@ export function BetaHome({ state, displayName, onNavigate, now: fixedNow }: Beta
       </div>
       <div className="beta-home-actions">
         <button className="beta-primary-action" onClick={() => onNavigate('capture')}>Capture a thought <span aria-hidden="true">↗</span></button>
-        <button className="beta-secondary-action" onClick={() => onNavigate('today')}>Return to Today</button>
       </div>
     </header>
 

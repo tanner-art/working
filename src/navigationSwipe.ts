@@ -1,4 +1,4 @@
-export const SWIPE_VIEWS = ['beta-home', 'today', 'capture', 'review', 'schedule', 'calendar', 'canvas'] as const
+export const SWIPE_VIEWS = ['beta-home', 'capture', 'organize', 'plan'] as const
 export type SwipeView = typeof SWIPE_VIEWS[number]
 
 export interface SwipeStartGate {

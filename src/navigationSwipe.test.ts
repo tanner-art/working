@@ -5,25 +5,26 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('mobile primary navigation gestures', () => {
   it('moves one adjacent primary tab at a time, including the brand Home', () => {
-    expect(SWIPE_VIEWS).toEqual(['beta-home', 'today', 'capture', 'review', 'schedule', 'calendar', 'canvas'])
-    expect(swipeDestination('beta-home', -90, 5)).toBe('today')
-    expect(swipeDestination('today', 90, 5)).toBe('beta-home')
-    expect(swipeDestination('schedule', -90, 0)).toBe('calendar')
-    expect(swipeDestination('schedule', 90, 0)).toBe('review')
+    expect(SWIPE_VIEWS).toEqual(['beta-home', 'capture', 'organize', 'plan'])
+    expect(swipeDestination('beta-home', -90, 5)).toBe('capture')
+    expect(swipeDestination('capture', 90, 5)).toBe('beta-home')
+    expect(swipeDestination('organize', -90, 0)).toBe('plan')
+    expect(swipeDestination('organize', 90, 0)).toBe('capture')
     expect(swipeDestination('beta-home', 90, 0)).toBeUndefined()
-    expect(swipeDestination('canvas', -90, 0)).toBeUndefined()
+    expect(swipeDestination('plan', -90, 0)).toBeUndefined()
+    for (const view of ['today', 'review', 'schedule', 'calendar', 'canvas']) expect(swipeDestination(view, -90, 0)).toBeUndefined()
   })
 
   it('does not interpret short or primarily vertical motions as navigation', () => {
-    expect(swipeDestination('today', -71, 0)).toBeUndefined()
-    expect(swipeDestination('today', -90, 90)).toBeUndefined()
-    expect(swipeDestination('today', -90, 60)).toBeUndefined()
+    expect(swipeDestination('capture', -71, 0)).toBeUndefined()
+    expect(swipeDestination('capture', -90, 90)).toBeUndefined()
+    expect(swipeDestination('capture', -90, 60)).toBeUndefined()
     expect(swipeDestination('settings', -100, 0)).toBeUndefined()
     expect(swipeDestination('digest', -100, 0)).toBeUndefined()
   })
 
   it('does not begin in desktop, editing, modal, horizontal-scroll, or focused Canvas contexts', () => {
-    const eligible = { pointerType: 'touch', isPrimary: true, view: 'review', deepCanvas: false,
+    const eligible = { pointerType: 'touch', isPrimary: true, view: 'organize', deepCanvas: false,
       modalOpen: false, blockedTarget: false, mobile: true, viewportZoomed: false }
     expect(canBeginSwipe(eligible)).toBe(true)
     for (const patch of [
@@ -36,7 +37,7 @@ describe('mobile primary navigation gestures', () => {
     expect(isViewportZoomed(undefined)).toBe(false)
     expect(isViewportZoomed(1)).toBe(false)
     expect(isViewportZoomed(1.25)).toBe(true)
-    expect(canBeginSwipe({ pointerType: 'touch', isPrimary: true, view: 'today', deepCanvas: false,
+    expect(canBeginSwipe({ pointerType: 'touch', isPrimary: true, view: 'capture', deepCanvas: false,
       modalOpen: false, blockedTarget: false, mobile: true, viewportZoomed: isViewportZoomed(1.25) })).toBe(false)
   })
 

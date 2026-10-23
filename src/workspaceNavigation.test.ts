@@ -25,6 +25,17 @@ function fixture(): AppState {
 const document = (state: AppState, kind: SearchDocument['kind']) => searchDocumentsFromAppState(state).find(item => item.kind === kind)!
 
 describe('workspace search navigation contract', () => {
+  it.each(['organize', 'plan'])('opens all six result types from the clean %s hub', view => {
+    const state = fixture()
+    for (const kind of ['capture', 'action', 'commitment', 'reminder', 'idea', 'canvas'] as const) {
+      const opened: SearchDestination[] = []
+      const result = performWorkspaceNavigation({ type: 'open-search-result', document: document(state, kind), snapshotToken: 'current' },
+        { state, snapshotToken: 'current', stateIsCurrent: true, available: true },
+        { canOpen: () => canOpenSearchResultFromView(view, false), open: destination => opened.push(destination), close: () => undefined })
+      expect(result).toEqual({ ok: true })
+      expect(opened).toEqual([resolveSearchDestination(state, document(state, kind))])
+    }
+  })
   it('returns an unresolved Capture to its four-choice Review row instead of generic object details', () => {
     const state = legacyUiProjection(migrateLegacyState({ canvas: [], objects: [thought('pending', 'idea')] }))
     const before = structuredClone(state)
@@ -203,7 +214,7 @@ describe('workspace search navigation contract', () => {
     recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, true)
     recoverRejectedWorkspacePopstate({ go: step => steps.push(step) }, false)
     expect(steps).toEqual([1, -1])
-    for (const view of ['today', 'capture', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home']) {
+    for (const view of ['today', 'capture', 'organize', 'plan', 'review', 'commitments', 'calendar', 'schedule', 'canvas', 'settings', 'digest', 'beta-home']) {
       expect(canOpenSearchResultFromView(view, false)).toBe(true)
       expect(canOpenSearchResultFromView(view, true)).toBe(false)
     }

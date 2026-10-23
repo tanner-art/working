@@ -7,9 +7,9 @@ const editorState = vi.hoisted(() => ({ value: null as unknown, calls: 0 }))
 vi.mock('react', async importOriginal => {
   const actual = await importOriginal<typeof import('react')>()
   return { ...actual, useState: (initial: unknown) => {
-    // The library's fourth state slot is its child-owned create/edit/move draft.
+    // The library's fifth state slot is its child-owned create/edit/move draft.
     editorState.calls += 1
-    return actual.useState(editorState.calls === 4 ? editorState.value : initial)
+    return actual.useState(editorState.calls === 5 ? editorState.value : initial)
   } }
 })
 vi.mock('./useSearchHandoffGuard', () => ({
