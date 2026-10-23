@@ -64,6 +64,7 @@ export function reduceCanvasGesture(state: GestureState, action: GestureAction):
   if (action.type === 'enter-edit-mode') return { state: { ...state, mode: 'edit-menu', menuOpened: true }, effects: [] }
 
   if (action.type === 'pointer-down') {
+    if (state.pointers[action.sample.pointerId]) return { state, effects: [] }
     const pointers = { ...state.pointers, [action.sample.pointerId]: action.sample }
     if (Object.keys(pointers).length > 1) {
       const [first, second] = pinchPair(pointers)
@@ -108,6 +109,8 @@ export function reduceCanvasGesture(state: GestureState, action: GestureAction):
 
   if (action.type === 'pointer-up' || action.type === 'pointer-cancel') {
     const pointer = state.pointers[action.pointerId]
+    if (!pointer) return { state, effects: [] }
+    if (action.type === 'pointer-cancel') return { state: idleGestureState(), effects: [{ type: 'cancel' }] }
     const effects: GestureEffect[] = []
     if (pointer && state.primary?.pointerId === action.pointerId) {
       const delta = pointDelta(state.primary, pointer)
@@ -117,8 +120,18 @@ export function reduceCanvasGesture(state: GestureState, action: GestureAction):
       if (action.type === 'pointer-up' && state.mode === 'resizing' && state.target?.kind === 'resize') effects.push({ type: 'commit-resize', id: state.target.id, delta })
     }
     const next = clearPointer(state, action.pointerId)
-    if (state.mode === 'pinch-zooming') return { state: idleGestureState(), effects: action.type === 'pointer-cancel' ? [{ type: 'cancel' }] : [{ type: 'commit-pinch' }] }
-    return { state: idleGestureState(), effects: action.type === 'pointer-cancel' ? [{ type: 'cancel' }] : effects }
+    if (state.mode === 'pinch-zooming') {
+      if (!pinchPair(state.pointers).some(sample => sample.pointerId === action.pointerId)) return { state: next, effects: [] }
+      const remaining = activePointers(next.pointers)
+      if (remaining.length >= 2) return { state: next, effects: [{ type: 'commit-pinch' }, { type: 'begin-pinch', first: remaining[0], second: remaining[1] }] }
+      const primary = remaining[0]
+      if (primary) return {
+        state: { mode: 'panning', target: { kind: 'canvas' }, primary, pointers: next.pointers, menuOpened: false },
+        effects: [{ type: 'commit-pinch' }, { type: 'begin-pan', start: primary }],
+      }
+      return { state: idleGestureState(), effects: [{ type: 'commit-pinch' }] }
+    }
+    return { state: idleGestureState(), effects }
   }
   return { state, effects: [] }
 }

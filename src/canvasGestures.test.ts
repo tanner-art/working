@@ -83,8 +83,8 @@ describe('canvasGestures', () => {
     result = step(result.state, { type: 'pointer-move', sample: node(2, 110, 30) })
     expect(result.effects[0].type).toBe('preview-pinch')
     result = step(result.state, { type: 'pointer-up', pointerId: 2 })
-    expect(result.effects).toEqual([{ type: 'commit-pinch' }])
-    expect(result.state.mode).toBe('idle')
+    expect(result.effects).toEqual([{ type: 'commit-pinch' }, { type: 'begin-pan', start: node() }])
+    expect(result.state.mode).toBe('panning')
   })
 
   it('continues a pinch after its cancellation effect has cleaned up the prior tool gesture', () => {
@@ -97,6 +97,43 @@ describe('canvasGestures', () => {
     expect(stateAfterCleanup.mode).toBe('pinch-zooming')
     result = step(stateAfterCleanup, { type: 'pointer-move', sample: node(2, 112, 30) })
     expect(result.effects).toContainEqual({ type: 'preview-pinch', first: node(), second: node(2, 112, 30) })
+  })
+
+  it.each([1, 2])('retains the remaining finger after finger %s lifts, then rejoins pinch', released => {
+    let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: thought })
+    result = step(result.state, { type: 'pointer-down', sample: node(2, 100, 30), target: { kind: 'textarea', id: 'thought' } })
+    result = step(result.state, { type: 'pointer-move', sample: node(2, 140, 30) })
+    const survivor = result.state.pointers[released === 1 ? 2 : 1]
+    result = step(result.state, { type: 'pointer-up', pointerId: released })
+    expect(result.state.primary).toEqual(survivor)
+    expect(result.state.target).toEqual(canvas)
+    expect(Object.keys(result.state.pointers)).toHaveLength(1)
+    const carried = result.state
+    expect(step(carried, { type: 'pointer-up', pointerId: released })).toEqual({ state: carried, effects: [] })
+    result = step(carried, { type: 'pointer-move', sample: { ...survivor, x: survivor.x + 20 } })
+    expect(result.effects).toEqual([{ type: 'preview-pan', delta: { x: 20, y: 0 } }])
+    result = step(result.state, { type: 'pointer-down', sample: node(released, 220, 30), target: thought })
+    expect(result.state.mode).toBe('pinch-zooming')
+    expect(result.effects.map(effect => effect.type)).toEqual(['cancel', 'begin-pinch'])
+  })
+
+  it('rebases a three-finger pinch when an active finger leaves, but ignores an unused finger release', () => {
+    let result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: canvas })
+    result = step(result.state, { type: 'pointer-down', sample: node(2, 100, 30), target: canvas })
+    result = step(result.state, { type: 'pointer-down', sample: node(3, 200, 30), target: canvas })
+    const three = result.state
+    const unused = step(three, { type: 'pointer-up', pointerId: 3 })
+    expect(unused.effects).toEqual([])
+    expect(unused.state.mode).toBe('pinch-zooming')
+    result = step(three, { type: 'pointer-up', pointerId: 1 })
+    expect(result.effects).toEqual([{ type: 'commit-pinch' }, { type: 'begin-pinch', first: node(2, 100, 30), second: node(3, 200, 30) }])
+    expect(result.state.mode).toBe('pinch-zooming')
+  })
+
+  it('ignores duplicate downs and unknown releases without destroying an active gesture', () => {
+    const result = step(idleGestureState(), { type: 'pointer-down', sample: node(), target: canvas })
+    expect(step(result.state, { type: 'pointer-down', sample: node(), target: thought })).toEqual({ state: result.state, effects: [] })
+    expect(step(result.state, { type: 'pointer-cancel', pointerId: 99 })).toEqual({ state: result.state, effects: [] })
   })
 
   it('commits the latest pinch preview even before React renders that preview', () => {
