@@ -748,18 +748,58 @@ class SQLiteRegistry:
                     ).fetchone()[0])
                     scope = _bounded_run_scope(bounded_run, active_parent_limit=limit)
                     if scope is not None:
-                        known = {
-                            item["id"] for item in connection.execute(
-                                "SELECT id FROM work_packages WHERE status='READY'"
-                            ).fetchall()
-                        }
-                        if not set(scope["package_ids"]).issubset(known):
-                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
                         scoped = connection.execute(
-                            "SELECT id, kind FROM work_packages WHERE id IN ("
+                            "SELECT id, kind, status, source_system, source_ref, "
+                            "provider_diagnostics_json FROM work_packages WHERE id IN ("
                             + ",".join("?" for _ in scope["package_ids"]) + ")",
                             tuple(scope["package_ids"]),
                         ).fetchall()
+                        if len(scoped) != len(scope["package_ids"]):
+                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
+                        waiting_reviews = [row for row in scoped if row["status"] == "ON_DECK"]
+                        if any(row["status"] not in {"READY", "ON_DECK"} for row in scoped):
+                            raise RegistryConflict("RUN_PACKAGE_NOT_READY")
+                        if waiting_reviews:
+                            # An ON_DECK entry is authorization for a later
+                            # review, not permission to claim it now. Legacy
+                            # and dependent implementation rows cannot enter
+                            # this progression envelope.
+                            by_id = {row["id"]: row for row in scoped}
+                            if not any(row["kind"] == "PARENT" and row["status"] == "READY"
+                                       for row in scoped):
+                                raise RegistryConflict("RUN_READY_ROOT_REQUIRED")
+                            for row in scoped:
+                                diagnostics = json.loads(row["provider_diagnostics_json"])
+                                if (row["kind"] not in {"PARENT", "REVIEW"}
+                                        or diagnostics.get("readiness_schema_version") != 2
+                                        or row["source_system"] != "github_issue"
+                                        or not isinstance(row["source_ref"], str)
+                                        or not row["source_ref"].isdigit()):
+                                    raise RegistryConflict("RUN_V2_PAIR_REQUIRED", row["id"])
+                                self._require_ready_row_contract(connection, row["id"])
+                                dependencies = connection.execute(
+                                    "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                                    (row["id"],),
+                                ).fetchall()
+                                if row["kind"] == "PARENT":
+                                    if row["status"] != "READY" or dependencies:
+                                        raise RegistryConflict("RUN_INDEPENDENT_ROOT_REQUIRED", row["id"])
+                                elif (row["status"] != "ON_DECK"
+                                      or len(dependencies) != 1
+                                      or dependencies[0]["dependency_id"] not in by_id
+                                      or by_id[dependencies[0]["dependency_id"]]["kind"] != "PARENT"):
+                                    raise RegistryConflict("RUN_REVIEW_PAIR_REQUIRED", row["id"])
+                            review_targets = [
+                                connection.execute(
+                                    "SELECT dependency_id FROM task_dependencies WHERE package_id=?",
+                                    (row["id"],),
+                                ).fetchone()["dependency_id"]
+                                for row in scoped if row["kind"] == "REVIEW"
+                            ]
+                            if (len(review_targets) != len(set(review_targets))
+                                    or {row["id"] for row in scoped if row["kind"] == "PARENT"}
+                                    != set(review_targets)):
+                                raise RegistryConflict("RUN_REVIEW_PAIR_REQUIRED")
                         if scoped and all(row["kind"] == "REVIEW" for row in scoped):
                             for row in scoped:
                                 target = connection.execute(
@@ -3141,6 +3181,93 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def classify_historical_no_commit_batch(
+        self, *, cleanup_id: str, targets: Mapping[str, tuple[str, str]],
+        evidence_uri: str, expected_revision: int, recorded_at: str,
+    ) -> int:
+        """Atomically remove a pinned, no-commit legacy batch from dispatch.
+
+        The append-only event and operation receipt describe supersession or
+        deferral; DONE here never implies implementation or review approval.
+        """
+        recorded_at = _normalize_timestamp(recorded_at)
+        if not cleanup_id or not targets or not evidence_uri:
+            raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION")
+        request = {
+            "id": cleanup_id, "targets": {key: list(value) for key, value in sorted(targets.items())},
+            "evidence_uri": evidence_uri,
+        }
+        operation_id = f"historical-no-commit:{cleanup_id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("NO_COMMIT_CLASSIFICATION_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                for package_id, (previous, target) in targets.items():
+                    if target not in {"DONE", "BLOCKED"} or previous not in {"ON_DECK", "READY", "BLOCKED"}:
+                        raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION", package_id)
+                    package = connection.execute(
+                        "SELECT status, pr_url FROM work_packages WHERE id=?", (package_id,)
+                    ).fetchone()
+                    if package is None:
+                        raise RegistryNotFound(f"work package {package_id}")
+                    if package["status"] != previous or package["pr_url"] is not None:
+                        raise RegistryConflict("NO_COMMIT_PACKAGE_CHANGED", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
+                        (package_id,),
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM evidence WHERE package_id=? LIMIT 1", (package_id,)
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM review_outcomes WHERE review_package_id=? LIMIT 1", (package_id,)
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_PROVENANCE_PRESENT", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM task_events WHERE event_type='HISTORICAL_NO_COMMIT_CLASSIFIED' "
+                        "AND package_id=? LIMIT 1", (package_id,),
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_ALREADY_CLASSIFIED", package_id)
+                for package_id, (previous, target) in sorted(targets.items()):
+                    connection.execute(
+                        "UPDATE work_packages SET status=?, updated_at=? WHERE id=?",
+                        (target, recorded_at, package_id),
+                    )
+                    self._insert_event(
+                        connection, "HISTORICAL_NO_COMMIT_CLASSIFIED", recorded_at,
+                        package_id, None, None, {
+                            "operation_id": cleanup_id, "evidence_uri": evidence_uri,
+                            "previous_status": previous, "new_status": target,
+                            "review_passed": False,
+                        },
+                    )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at,
+                )
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
     def record_native_review_ci(
         self, review_package_id: str, review_input_id: str,
         implementation_commit: str, base_commit: str, pr_url: str, run_url: str,
@@ -3308,6 +3435,98 @@ class SQLiteRegistry:
         if len(inputs) != 1 and (not attempts or not attempts[0]["worker_id"]):
             reasons.append(f"REVIEW_SUCCESSFUL_ATTEMPT_MISSING:{target['id']}")
         return tuple(sorted(set(reasons)))
+
+    def promote_bounded_review(
+        self, review_package_id: str, *, expected_revision: int,
+        expected_run_id: str, expected_contract_sha256: str,
+        changed_at: str,
+    ) -> int:
+        """CAS-promote one pre-authorized review; never unlock a successor parent.
+
+        The caller verifies the exact GitHub contract, pinned Git tree, CI and
+        reviewer pairing against the snapshot at expected_revision. This
+        transaction rejects any intervening Registry change and rechecks the
+        authoritative run, dependency, and immutable input before publication.
+        """
+        changed_at = _normalize_timestamp(changed_at)
+        operation_id = (
+            f"bounded-review-ready:{expected_run_id}:{review_package_id}:"
+            f"{expected_contract_sha256}:{expected_revision}"
+        )
+        request = {
+            "review_package_id": review_package_id,
+            "expected_revision": expected_revision,
+            "expected_run_id": expected_run_id,
+            "expected_contract_sha256": expected_contract_sha256,
+        }
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if (control is None or control["dispatch_mode"] != "LIVE"
+                        or control["kill_switch_engaged"]):
+                    raise RegistryConflict("DISPATCH_NOT_AUTHORIZED")
+                # A caller timestamp can become stale while GitHub and Git
+                # checks run. The Registry clock must independently enforce
+                # the persisted deadline at the moment of the write.
+                scope = self._assert_scope_membership(connection, review_package_id, changed_at)
+                self._assert_scope_membership(connection, review_package_id, _utc_now())
+                if scope is None or scope["run_id"] != expected_run_id:
+                    raise RegistryConflict("RUN_SCOPE_CHANGED")
+                package = connection.execute(
+                    "SELECT feature_id, kind, status, source_system, source_ref, "
+                    "provider_diagnostics_json FROM work_packages WHERE id=?",
+                    (review_package_id,),
+                ).fetchone()
+                if package is None or package["kind"] != "REVIEW" or package["status"] != "ON_DECK":
+                    raise RegistryConflict("REVIEW_NOT_ON_DECK", review_package_id)
+                diagnostics = json.loads(package["provider_diagnostics_json"])
+                if (diagnostics.get("readiness_schema_version") != 2
+                        or diagnostics.get("queue_contract_sha256") != expected_contract_sha256
+                        or package["source_system"] != "github_issue"
+                        or not str(package["source_ref"] or "").isdigit()):
+                    raise RegistryConflict("REVIEW_CONTRACT_CHANGED", review_package_id)
+                feature_id = self._require_ready_row_contract(connection, review_package_id)
+                reasons = self._review_readiness_reasons(connection, review_package_id)
+                if reasons:
+                    raise RegistryConflict("REVIEW_NOT_READY", ",".join(reasons))
+                self._promote_feature_for_ready_package(connection, feature_id, changed_at)
+                connection.execute(
+                    "UPDATE work_packages SET status='READY', ready_at=?, updated_at=? WHERE id=?",
+                    (changed_at, changed_at, review_package_id),
+                )
+                self._insert_event(
+                    connection, "BOUNDED_REVIEW_READY", changed_at,
+                    review_package_id, None, None,
+                    {"run_id": expected_run_id, "queue_contract_sha256": expected_contract_sha256},
+                )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                    result={"revision": revision}, recorded_at=changed_at,
+                )
+                connection.commit()
+                return revision
+            except Exception as error:
+                connection.rollback()
+                self._record_operation_rejection(
+                    operation_id=operation_id,
+                    operation_kind="PROMOTE_BOUNDED_REVIEW", request=request,
+                    error=error, recorded_at=changed_at,
+                )
+                raise
 
     @staticmethod
     def _expire_leases(connection: sqlite3.Connection, now: str) -> int:
@@ -5493,7 +5712,7 @@ class SQLiteRegistry:
                     connection, item["id"]
                 )}
                 if (item["kind"] == PackageKind.REVIEW.value
-                    and item["status"] == TaskStatus.READY.value
+                    and item["status"] in {TaskStatus.ON_DECK.value, TaskStatus.READY.value}
                     and item["provider_diagnostics"].get("readiness_schema_version") == 2)
                 else item
                 for item in control_packages
@@ -5562,6 +5781,11 @@ class SQLiteRegistry:
                 preserved_artifacts=decoded_rows(
                     "SELECT * FROM preserved_artifacts ORDER BY kind, external_identity, id",
                     ("metadata_json",),
+                ),
+                historical_reconciliations=(
+                    decoded_rows(
+                        "SELECT * FROM historical_package_reconciliations ORDER BY recorded_at, id"
+                    ) if "historical_package_reconciliations" in tables else ()
                 ),
             )
             connection.commit()

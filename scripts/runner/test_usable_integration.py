@@ -168,6 +168,7 @@ class BoundedRunnerMainTests(unittest.TestCase):
             control = Mock()
             control.registry.dispatch_control.return_value = {"bounded_run": {"run_id": "pilot"}}
             control.bounded_source_issues.return_value = (701, 702)
+            control.advance_bounded_reviews.return_value = ()
             control.proposed_worker.return_value = "codex-b"
             control.pre_claim.return_value = 3
             control.claim_with_retry.side_effect = RegistryConflict("PACKAGE_NOT_READY")
