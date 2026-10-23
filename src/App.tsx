@@ -51,6 +51,8 @@ import { ReminderProjections } from './ReminderResolution'
 import { resolveReminderInState, setReminderDeliveryState, type ReminderChoice } from './reminderWorkflow'
 import { createNavigationSwipe, isViewportZoomed, swipeTargetIsBlocked } from './navigationSwipe'
 import { AccountSyncNotice } from './AccountSyncNotice'
+import { BetaWelcome } from './BetaWelcomeView'
+import { BETA_SETUP_PENDING, betaSetupRequested, betaEntryVisible, needsFirstAccountSetup, openBetaAccount } from './betaWelcome'
 
 type View = 'today' | 'capture' | 'review' | 'organize' | 'plan' | 'commitments' | 'calendar' | 'schedule' | 'canvas' | 'settings' | 'digest' | 'beta-home'
 const nav: { id: View; label: string; icon: string }[] = [
@@ -77,6 +79,7 @@ type PreparedMerge = { session: AccountSession; plan: AccountMergePlan }
 export function App() {
   const account = useAuthState()
   const surface = appSurfaceDefinitionForPath(window.location.pathname)
+  const [betaRequested, setBetaRequested] = useState(() => betaSetupRequested(window.location.pathname, window.location.search, localStorage))
   const [landingDismissed, setLandingDismissed] = useState(() => {
     try { return localStorage.getItem(BETA_LANDING_DISMISSED_KEY) === 'dismissed' } catch { return false }
   })
@@ -91,7 +94,7 @@ export function App() {
   const switchGuard = useRef<() => string | undefined>(() => '')
   const signedInId = account.state.status === 'signed-in' ? account.state.session.user.id : undefined
   useEffect(() => {
-    if (!signedInId || cloud || deviceChoice.current === signedInId || surface.id === 'tutorial-preview' || surface.id === 'landing-preview') return
+    if (!signedInId || cloud || betaRequested || deviceChoice.current === signedInId || surface.id === 'tutorial-preview' || surface.id === 'landing-preview') return
     const request = ++opening.current
     let cancelled = false
     const before = switchGuard.current()
@@ -107,6 +110,10 @@ export function App() {
         const result = await openSignedInWorkspace(accountAdapter, signedInId, currentUser)
         if (cancelled || request !== opening.current) return
         if (switchGuard.current() !== before) throw Error('Your device changed while account data loaded. Finish your edit, then open your synced account.')
+        if (!workspaceShown.current && needsFirstAccountSetup(!!result, localStorage)) {
+          try { localStorage.setItem(BETA_SETUP_PENDING, 'pending') } catch { /* In-memory routing remains available. */ }
+          setBetaRequested(true)
+        }
         if (result) { setCloud(result); setGeneration(value => value + 1) }
         setStartup({ userId: signedInId, checking: false, message: result ? '' : 'Sync this device once to see the same captures on your phone and laptop.' })
       } catch (error) {
@@ -114,7 +121,7 @@ export function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [signedInId, safeOpenAttempt])
+  }, [signedInId, safeOpenAttempt, betaRequested])
   const useDevice = () => {
     opening.current++
     deviceChoice.current = signedInId
@@ -151,13 +158,44 @@ export function App() {
   }
   const landingInput = readBetaLandingInput(localStorage, account.state)
   const landingVisibility = betaLandingVisibility({ ...landingInput, dismissed: landingDismissed || landingInput.dismissed })
+  const finishBetaEntry = () => {
+    try { localStorage.removeItem(BETA_SETUP_PENDING) } catch { /* In-memory routing still works. */ }
+    // Remove the explicit beta/callback entry without a reload or loss of auth.
+    if (surface.id === 'beta' || new URLSearchParams(window.location.search).get('welcome') === '1') window.history.replaceState(null, '', '/')
+    setBetaRequested(false)
+  }
+  const betaProps = {
+    state: account.state,
+    onLogin: (email: string) => {
+      try { localStorage.setItem(BETA_SETUP_PENDING, 'pending') } catch { /* Callback also carries entry intent. */ }
+      setBetaRequested(true)
+      void auth.act('login', email, '', true)
+    },
+    onVerify: (email: string, code: string) => {
+      try { localStorage.setItem(BETA_SETUP_PENDING, 'pending') } catch { /* In-memory fallback. */ }
+      setBetaRequested(true); void auth.act('verify-code', email, code)
+    },
+    onRetry: () => { setBetaRequested(true); account.retry() },
+    onLocal: () => {
+      try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Available for this visit. */ }
+      finishBetaEntry(); setLandingDismissed(true)
+    },
+    onOpen: async () => {
+      if (!signedInId || !accountAdapter) throw Error('Account storage is unavailable')
+      const request = ++opening.current
+      const result = await openBetaAccount(accountAdapter, signedInId, () => {
+        const current = auth.getState(); return current.status === 'signed-in' ? current.session.user.id : undefined
+      })
+      if (request !== opening.current) throw Error('Account opening changed')
+      setCloud(result); setGeneration(value => value + 1)
+      setStartup({ userId: signedInId, checking: false, message: '' })
+      finishBetaEntry()
+    },
+  }
   if (surface.id === 'tutorial-preview') return <TutorialPreview />
-  if (surface.id === 'landing-preview') return <BetaLanding preview state={account.state} onContinue={() => window.location.assign('/preview/tutorial')} />
+  if (surface.id === 'landing-preview') return <BetaWelcome {...betaProps} preview state={{ status: 'signed-out' }} onLocal={() => window.location.assign('/preview/tutorial')} />
+  if (betaEntryVisible({ requested: betaRequested, landing: landingVisibility, workspaceShown: workspaceShown.current, auth: account.state.status })) return <BetaWelcome {...betaProps} />
   if (landingVisibility === 'loading' && !workspaceShown.current) return <main className="beta-loading" role="status"><p>Checking your account…</p></main>
-  if (landingVisibility === 'landing' && !workspaceShown.current) return <BetaLanding state={account.state} onContinue={() => {
-    try { localStorage.setItem(BETA_LANDING_DISMISSED_KEY, 'dismissed') } catch { /* Continue remains available for this visit. */ }
-    setLandingDismissed(true)
-  }} />
   if (signedInId && !workspaceShown.current && (!startup || startup.userId !== signedInId || startup.checking)) return <main className="beta-loading" role="status"><p>Opening your synced captures…</p></main>
   workspaceShown.current = true
   return <ThreadlineApp key={generation} account={account} cloud={cloud} workspaceSurface={workspaceSurfaceModuleForPath(window.location.pathname)} onOpenAccount={open}
@@ -166,23 +204,6 @@ export function App() {
     mergePlan={preparedMerge?.plan} onPreviewMerge={previewMerge} onConfirmMerge={confirmMerge} onCancelMerge={() => setPreparedMerge(undefined)} />
 }
 
-function BetaLanding({ state, onContinue, preview = false }: { state: AuthState; onContinue: () => void; preview?: boolean }) {
-  const [email, setEmail] = useState('')
-  const [code, setCode] = useState('')
-  const codeRef = useRef<HTMLInputElement>(null)
-  const codeSent = state.status === 'signed-out' && state.emailCodeSent
-  useEffect(() => { if (codeSent) codeRef.current?.focus() }, [codeSent])
-  return <main className="beta-landing"><div className="beta-landing-inner">
-    <header className="beta-landing-header"><p className="eyebrow">Friends &amp; family beta</p><p className="beta-brand"><span className="brand-mark">⊹</span> threadline</p>{preview && <a className="beta-preview-return" href="/settings">Back to Settings</a>}</header>
-    <section className="beta-landing-hero" aria-labelledby="beta-landing-title"><div><p className="beta-kicker">Capture less. Understand more.</p><h1 id="beta-landing-title">A calm path from thought to action.</h1><p className="beta-intro">Threadline keeps your raw thoughts close, helps you organize their meaning, and gives you a clear place to act on them.</p></div><div className="beta-loop" aria-label="Threadline loop"><div><strong>Capture</strong><span>Get it out quickly.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Organize</strong><span>Shape the meaning.</span></div><span className="beta-arrow" aria-hidden="true">→</span><div><strong>Calendar / Canvas</strong><span>Plan or see the bigger picture.</span></div></div></section>
-    <section className="beta-landing-card" aria-labelledby="beta-sign-in-title"><h2 id="beta-sign-in-title">Sign in to Threadline</h2><p className="beta-copy">Use your email to receive a sign-in link and a one-time code. The code lets you sign in on this device even when the email was requested elsewhere.</p>
-      {state.status === 'unconfigured' && <p className="beta-alert" role="alert">Sign-in is not available in this deployment yet. You can continue on this device.</p>}{state.status === 'error' && <p className="beta-alert" role="alert">{state.message}</p>}{state.status === 'signed-out' && state.message && <p className="beta-message" role={codeSent ? 'status' : 'alert'}>{state.message}</p>}
-      {state.status === 'signed-out' && <form className="beta-form" onSubmit={event => { event.preventDefault(); setEmail(email.trim()); setCode(''); void auth.act('login', email) }}><label htmlFor="beta-email">Email address</label><input id="beta-email" type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /><button className="primary" type="submit">Email me a sign-in link and code</button></form>}
-      {state.status === 'signed-out' && <form className="beta-form beta-code-form" onSubmit={event => { event.preventDefault(); void auth.act('verify-code', email, code) }}><label htmlFor="beta-code">6–10 digit email code</label><input ref={codeRef} id="beta-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6,10}" maxLength={10} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, '').slice(0, 10))} /><button className="primary" type="submit">Continue with code</button></form>}
-      {state.status === 'loading' && <p className="beta-message" role="status">Checking your account…</p>}<button className="beta-device-button" type="button" onClick={onContinue}>Continue on this device</button><p className="beta-note"><strong>Your data stays yours.</strong> Sign in to open your synced captures. Existing device-only captures stay preserved until you choose to sync or combine them. AI suggestions always require your review.</p>
-    </section><p className="beta-footer">Private by default · Local-first · Built for thinking in motion</p>
-  </div></main>
-}
 
 function TutorialPreview() {
   const [tutorial, setTutorial] = useState<TutorialState>(() => startTutorial(initialTutorialState()))

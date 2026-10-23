@@ -5,6 +5,7 @@ describe('hosted app routes', () => {
   it('maps the stable hosted utility routes', () => {
     expect(appSurfaceForPath('/dashboard')).toBe('dashboard')
     expect(appSurfaceForPath('/settings')).toBe('settings')
+    expect(appSurfaceForPath('/beta')).toBe('beta')
     expect(appSurfaceForPath('/preview/landing')).toBe('landing-preview')
     expect(appSurfaceForPath('/preview/tutorial')).toBe('tutorial-preview')
   })
