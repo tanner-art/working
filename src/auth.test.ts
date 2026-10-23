@@ -144,6 +144,8 @@ describe('Supabase email auth adapter', () => {
 
     await client.sendEmailLink('person@example.com')
     expect(signInWithOtp).toHaveBeenCalledExactlyOnceWith({ email: 'person@example.com', options: { emailRedirectTo: 'https://app.example.com' } })
+    await client.sendEmailLink('person@example.com', true)
+    expect(signInWithOtp).toHaveBeenLastCalledWith({ email: 'person@example.com', options: { emailRedirectTo: 'https://app.example.com/?welcome=1' } })
     await expect(client.verifyEmailCode('person@example.com', '123456')).resolves.toEqual(session)
     expect(verifyOtp).toHaveBeenCalledExactlyOnceWith({ email: 'person@example.com', token: '123456', type: 'email' })
   })

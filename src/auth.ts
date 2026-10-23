@@ -4,7 +4,7 @@ import { createClient, type Session, type SupabaseClient } from '@supabase/supab
 export interface AuthSession { user: { id: string; email?: string } }
 export interface AuthClient {
   getSession(): Promise<AuthSession | null>
-  sendEmailLink(email: string): Promise<void>
+  sendEmailLink(email: string, welcome?: boolean): Promise<void>
   verifyEmailCode(email: string, code: string): Promise<AuthSession | null>
   signOut(): Promise<void>
   onSessionChange(listener: (session: AuthSession | null) => void): () => void
@@ -38,8 +38,9 @@ export function createSupabaseAuthClient(config: Extract<AuthConfig, { status: '
       if (error) throw error
       return authSession(data.session)
     },
-    async sendEmailLink(email: string) {
-      const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: redirectTo } })
+    async sendEmailLink(email: string, welcome = false) {
+      const destination = welcome ? new URL('/?welcome=1', redirectTo).href : redirectTo
+      const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: destination } })
       if (error) throw error
     },
     async verifyEmailCode(email: string, code: string) {
@@ -99,7 +100,7 @@ export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
       })
       return () => { active = false; revision++; unsubscribe() }
     },
-    async act(action: 'login' | 'verify-code' | 'logout', email = '', code = '') {
+    async act(action: 'login' | 'verify-code' | 'logout', email = '', code = '', welcome = false) {
       if (!client || config.status !== 'configured' || pending || (action === 'logout' ? state.status !== 'signed-in' : state.status !== 'signed-out')) return
       if ((action === 'login' || action === 'verify-code') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
         publish({ status: 'signed-out', message: 'Enter a valid email address.', emailCodeSent: action === 'verify-code' }); return
@@ -112,7 +113,8 @@ export function createAuthBoundary(config: AuthConfig, client?: AuthClient) {
       publish({ status: 'loading' })
       try {
         if (action === 'login') {
-          await client.sendEmailLink(email.trim())
+          if (welcome) await client.sendEmailLink(email.trim(), true)
+          else await client.sendEmailLink(email.trim())
           if (current === revision) publish({ status: 'signed-out', message: 'Check your email. Enter its code here, or use the sign-in link in a browser.', emailCodeSent: true })
         } else if (action === 'verify-code') {
           const session = await client.verifyEmailCode(email.trim(), code.trim())
