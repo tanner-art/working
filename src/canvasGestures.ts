@@ -96,11 +96,11 @@ export function reduceCanvasGesture(state: GestureState, action: GestureAction):
     if (!moved(state.primary, action.sample)) return { state: { ...state, pointers }, effects: [] }
     if (isNodeTarget(state.target)) {
       if (state.mode === 'moving-node') return { state: { ...state, pointers }, effects: [{ type: 'preview-move', id: state.target.id, delta }] }
-      return { state: { ...state, mode: 'moving-node', pointers, menuOpened: false }, effects: [{ type: 'cancel' }, { type: 'begin-move', id: state.target.id, start: state.primary }] }
+      return { state: { ...state, mode: 'moving-node', pointers, menuOpened: false }, effects: [{ type: 'cancel' }, { type: 'begin-move', id: state.target.id, start: state.primary }, { type: 'preview-move', id: state.target.id, delta }] }
     }
     if (state.target?.kind === 'canvas') {
       if (state.mode === 'panning') return { state: { ...state, pointers }, effects: [{ type: 'preview-pan', delta }] }
-      return { state: { ...state, mode: 'panning', pointers }, effects: [{ type: 'cancel' }, { type: 'begin-pan', start: state.primary }] }
+      return { state: { ...state, mode: 'panning', pointers }, effects: [{ type: 'cancel' }, { type: 'begin-pan', start: state.primary }, { type: 'preview-pan', delta }] }
     }
     if (state.mode === 'pressed') return { state: { ...state, mode: 'idle', pointers }, effects: [{ type: 'cancel' }] }
     return { state: { ...state, pointers }, effects: [] }

@@ -96,7 +96,7 @@ describe('canvas interaction bridge', () => {
     expect(commitPinchInteraction(interaction)).toEqual(preview)
   })
 
-  it('starts resize from visible edit mode even when it was not opened by hold', () => {
+  it('starts resize from a selected handle without a hold or advanced edit menu', () => {
     const result = reduceResizePointerDown(idleGestureState(), first, 'thought', true)
 
     expect(result.state).toMatchObject({ mode: 'resizing', target: { kind: 'resize', id: 'thought' }, menuOpened: true })
