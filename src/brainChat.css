@@ -1,0 +1,44 @@
+.brain-page, .chat-page { max-width: 1100px; margin: auto; }
+.brain-page button, .chat-page button { min-height: 44px; }
+.brain-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, 240px); gap: 16px; }
+.brain-controls label { display: grid; gap: 8px; font-size: .85rem; }
+.brain-controls input, .brain-controls select, .chat-composer textarea { width: 100%; font-size: 16px; min-width: 0; }
+.brain-controls input, .brain-controls select { min-height: 48px; padding: 12px; border: 1px solid #aab9a5; border-radius: 12px; background: #fffef8; color: #233b31; }
+.brain-view-controls, .brain-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0; }
+.brain-view-controls [role=group] { display: flex; gap: 6px; }
+.brain-view-controls button { border: 1px solid #cbd5c6; background: #f4f6ee; color: #233b31; border-radius: 24px; padding: 8px 18px; }
+.brain-view-controls button[aria-pressed=true] { background: #233b31; color: #fff; }
+.brain-map-shell { position: relative; border: 1px solid #d4ddcd; border-radius: 20px; overflow: hidden; background: #eff4e8; }
+.brain-map-scroll { height: min(62svh, 640px); min-height: 320px; overflow: auto; overscroll-behavior: contain; background-image: radial-gradient(#acbda966 1px, transparent 1px); background-size: 24px 24px; }
+.brain-map { display: block; max-width: none; }
+.brain-map line { stroke: #829b88; stroke-width: 1.3; opacity: .6; }
+.brain-map line.highlight { stroke: #245c45; stroke-width: 3; opacity: 1; }
+.brain-node { cursor: pointer; fill: #537f68; outline: none; }
+.brain-node .brain-hit { fill: transparent; }
+.brain-node text { font: 12px system-ui, sans-serif; fill: #243e32; paint-order: stroke; stroke: #eff4e8; stroke-width: 4px; stroke-linejoin: round; }
+.brain-node.kind-idea { fill: #936a35; }.brain-node.kind-action { fill: #496b91; }.brain-node.kind-canvas { fill: #8b6292; }.brain-node.kind-reminder { fill: #a85b50; }
+.brain-node.selected circle:not(.brain-hit), .brain-node:focus-visible .brain-hit { stroke: #152e23; stroke-width: 3; }
+.brain-zoom { display: flex; gap: 6px; padding: 10px; border-bottom: 1px solid #d4ddcd; }
+.brain-caption { padding: 0 16px; font-size: .8rem; color: #526352; }
+.brain-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 18px; }
+.brain-group { padding: 20px; background: #f0f4eb; border: 1px solid #d4ddcd; border-radius: 18px; min-width: 0; }
+.brain-group h2 { font-size: 1.1rem; overflow-wrap: anywhere; }
+.brain-group button { display: grid; width: 100%; text-align: left; gap: 6px; padding: 12px; margin-bottom: 8px; border: 1px solid #d4ddcd; border-radius: 10px; background: #fffef8; color: #233b31; }
+.brain-group span, .brain-detail h2, .brain-detail button { overflow-wrap: anywhere; }
+.brain-group small, .brain-detail small { color: #526352; font-size: .75rem; }
+.brain-detail { border: 1px solid #d4ddcd; border-radius: 18px; padding: 20px; margin-top: 18px; background: #fffef8; }
+.brain-detail li { display: grid; gap: 5px; margin: 10px 0; }.brain-detail ul { padding: 0; list-style: none; }
+.chat-page { max-width: 800px; }
+.chat-privacy { font-size: .85rem; color: #546252; line-height: 1.6; }
+.chat-transcript { min-height: 230px; max-height: 50svh; overflow: auto; overscroll-behavior: contain; padding: 10px 4px; }
+.chat-welcome { padding: 30px 10px; text-align: center; color: #53674f; }.chat-welcome > span { font-size: 42px; }
+.chat-message { padding: 16px 20px; border-radius: 18px; margin: 12px 0; background: #edf2e7; max-width: 92%; }
+.chat-message.user { margin-left: auto; background: #203e31; color: #fff; }
+.chat-message p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; margin-bottom: 0; }
+.chat-message strong { font-size: .8rem; }
+.chat-composer { display: grid; gap: 10px; margin: 20px 0; padding-bottom: env(safe-area-inset-bottom); }
+.chat-composer textarea { resize: vertical; min-height: 90px; max-height: 240px; border: 1px solid #aab9a5; border-radius: 16px; padding: 14px; }
+.chat-composer > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.chat-composer small { color: #546252; max-width: 70%; }.chat-error { color: #8b302d; }
+.brain-page :is(button, input, select, [tabindex]):focus-visible, .chat-page :is(button, textarea):focus-visible { outline: 3px solid #547f46; outline-offset: 3px; }
+@media(max-width: 600px) { .brain-controls { grid-template-columns: 1fr; gap: 12px; }.brain-page, .chat-page { padding: 20px 16px; }.brain-view-controls { flex-wrap: wrap; }.chat-message { max-width: 96%; } }

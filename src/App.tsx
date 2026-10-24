@@ -304,6 +304,11 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
   const [activeWorkspaceSurface, setActiveWorkspaceSurface] = useState(workspaceSurface)
   const [workspaceRouteError, setWorkspaceRouteError] = useState('')
   const searchSession = useRef(crypto.randomUUID())
+  const surfaceExitGuard = useRef<(() => boolean) | null>(null)
+  const [registerExitGuard] = useState(() => (guard: () => boolean) => {
+    surfaceExitGuard.current = guard
+    return () => { if (surfaceExitGuard.current === guard) surfaceExitGuard.current = null }
+  })
   const recoveringHistory = useRef<WorkspaceHistoryLocation | null>(null)
   const acceptedHistory = useRef(workspaceHistoryLocation(window.location.href, window.history.state))
   const [focusCanvasTitle, setFocusCanvasTitle] = useState(false)
@@ -603,13 +608,15 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
         saveLocal: () => { const error = saveState(latestState.current); setSaveError(error); return !error },
         exit: closeCanvasEditor,
       }),
+      canLeaveSurface: () => surfaceExitGuard.current?.() ?? true,
     }
   }
-  const openSearch = () => {
-    const searchSurface = workspaceSurfaceModuleForPath('/search')
+  const openSearch = () => openWorkspaceSurface('/search')
+  const openWorkspaceSurface = (path: '/search' | '/brain' | '/chat') => {
+    const searchSurface = workspaceSurfaceModuleForPath(path)
     if (!searchSurface) return
     const outcome = performWorkspaceRouteTransition('workspace', routeContext(), { enterSurface: () => {
-      enterWorkspaceHistory(window.history, window.location.href, searchSession.current)
+      enterWorkspaceHistory(window.history, window.location.href, searchSession.current, path)
       acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
       setActiveWorkspaceSurface(searchSurface)
     }, leaveSurface: () => undefined })
@@ -620,11 +627,15 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     findWorkspaceReturnFocusTarget(document)?.focus()
   })
   const exitWorkspaceRoute = () => {
+    // The surface's guard has already accepted this exit. Clear it before Back
+    // can deliver popstate, rather than waiting for React effect cleanup.
+    surfaceExitGuard.current = null
     leaveWorkspaceHistory(window.history, window.location.pathname, searchSession.current)
-    if (window.location.pathname !== '/search') acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
+    if (!workspaceSurfaceModuleForPath(window.location.pathname)) acceptedHistory.current = workspaceHistoryLocation(window.location.href, window.history.state)
     setActiveWorkspaceSurface(undefined)
   }
   const navigateWorkspace = (request: WorkspaceNavigationRequest): WorkspaceNavigationOutcome => {
+    if (surfaceExitGuard.current && !surfaceExitGuard.current()) return { ok: false, message: 'Your conversation was kept open.' }
     const liveAccount = auth.getState()
     return performWorkspaceNavigation(request, {
       state: latestState.current, snapshotToken, stateIsCurrent: latestState.current === state,
@@ -692,12 +703,12 @@ function ThreadlineApp({ account, cloud, workspaceSurface, onOpenAccount, mergeP
     onPointerMove={event => swipeGesture.current.move({ pointerId: event.pointerId, x: event.clientX, y: event.clientY })}
     onPointerCancel={() => swipeGesture.current.cancel()}
     onClickCapture={event => { if (swipeGesture.current.consumeClick(event.detail)) { event.preventDefault(); event.stopPropagation() } }}>
-    {workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} />}
+    {workspaceRouteError && <div role="alert" className="storage-alert">{workspaceRouteError}</div>}{activeWorkspaceSurface && <WorkspaceSurfaceRenderer module={activeWorkspaceSurface} state={state} snapshotToken={snapshotToken} update={update} navigate={navigateWorkspace} readModel={readSearchModel} registerExitGuard={registerExitGuard} />}
   <div hidden={!!activeWorkspaceSurface} inert={!!activeWorkspaceSurface}><div role="status">{accountBusy ? 'Opening account data…' : ''}</div><main className="app-shell" inert={accountBusy || !!selectedObject || !!selectedCaptureId}>
     <aside className="sidebar"><button type="button" className="brand" aria-label="Threadline Home" aria-current={view === 'beta-home' ? 'page' : undefined} onClick={() => navigate('beta-home')}><span className="brand-mark">⊹</span><span>threadline</span></button><nav aria-label="Primary navigation">{workspaceSurfaceModuleForPath('/search') && <button className="nav-item" aria-label="Search" onClick={openSearch}><span>⌕</span>Search</button>}{nav.map(item => {
       const active = view === item.id || (item.id === 'organize' && ['review', 'canvas'].includes(view)) || (item.id === 'plan' && ['schedule', 'calendar', 'commitments'].includes(view))
       return <button className={active ? 'nav-item active' : 'nav-item'} key={item.id} aria-label={item.label} aria-current={active ? 'page' : undefined} onClick={() => navigate(item.id)}><span>{item.icon}</span>{item.label}{item.id === 'organize' && reviewCount > 0 && <b>{reviewCount}</b>}</button>
-    })}</nav></aside>
+    })}<button className="nav-item" aria-label="Brain" onClick={() => openWorkspaceSurface('/brain')}><span>⌘</span>Brain</button><button className="nav-item" aria-label="Chat" onClick={() => openWorkspaceSurface('/chat')}><span>☏</span>Chat</button></nav></aside>
     <section className="content">
       {installHelp && <section className="install-help" aria-labelledby="install-help-title">
         <h2 id="install-help-title" ref={installHeading} tabIndex={-1}>Keep Threadline close</h2>

@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/brain", "destination": "/index.html" },
+    { "source": "/chat", "destination": "/index.html" },
     { "source": "/search", "destination": "/index.html" },
     { "source": "/dashboard", "destination": "/index.html" },
     { "source": "/settings", "destination": "/index.html" },
