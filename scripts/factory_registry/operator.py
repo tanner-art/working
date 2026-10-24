@@ -134,6 +134,24 @@ V5_TO_V6_STATEMENTS = (
 )
 HEARTBEAT_FRESH_SECONDS = 180
 USAGE_FRESH_SECONDS = 900
+NO_COMMIT_CLEANUP_ID = "no-commit-cleanup-20261009"
+NO_COMMIT_CLEANUP_EVIDENCE = "https://github.com/tanner-art/working/issues/365#issuecomment-6073222435"
+# One owner-authorized, independently auditable cleanup. Statuses are pinned so
+# drift or a later implementation cannot silently be classified as historical.
+NO_COMMIT_CLEANUP = {
+    "TASK-102": ("ON_DECK", "DONE"),
+    "TASK-110": ("ON_DECK", "DONE"),
+    "TASK-113": ("BLOCKED", "DONE"),
+    "TASK-214": ("BLOCKED", "DONE"),
+    "TASK-215": ("BLOCKED", "DONE"),
+    "TASK-329": ("BLOCKED", "DONE"),
+    "TASK-330": ("READY", "DONE"),
+    "TASK-401": ("READY", "DONE"),
+    "TASK-402": ("READY", "DONE"),
+    "TASK-422": ("BLOCKED", "DONE"),
+    "TASK-423": ("READY", "DONE"),
+    "TASK-425": ("READY", "BLOCKED"),
+}
 SENSITIVE_KEY_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
 REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/__init__.py",
@@ -144,6 +162,14 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/control_center_projection.py",
     "scripts/factory_registry/control_center_server.py",
     "scripts/factory_registry/controlled_restart.py",
+    "scripts/factory_registry/delivery_cli.py",
+    "scripts/factory_registry/delivery_coordinator.py",
+    "scripts/factory_registry/delivery_integration.py",
+    "scripts/factory_registry/delivery_plan.py",
+    "scripts/factory_registry/delivery_planner_barrier.py",
+    "scripts/factory_registry/delivery_repair.py",
+    "scripts/factory_registry/delivery_runtime.py",
+    "scripts/factory_registry/delivery_service.py",
     "scripts/factory_registry/live_observation.py",
     "scripts/factory_registry/live_observation_cli.py",
     "scripts/factory_registry/lifecycle.py",
@@ -155,6 +181,7 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/factory_registry/schema.sql",
     "scripts/factory_registry/shadow_dispatch.py",
     "scripts/factory_registry/sqlite_registry.py",
+    "scripts/factory_registry/sqlite_delivery.py",
     "scripts/runner/claude_keychain.py",
     "scripts/runner/factory_dashboard.html",
     "scripts/runner/factory_dashboard.py",
@@ -168,6 +195,7 @@ REQUIRED_RELEASE_FILES = frozenset({
     "scripts/runner/review_protocol.py",
     "scripts/runner/runner.py",
     "scripts/runner/usage_policy.py",
+    "scripts/runner/capacity_publication.py",
 })
 
 
@@ -450,6 +478,68 @@ def verify_preservation(
                 "preservation_import_id": import_id,
             },
         }
+    # The preservation snapshot pins the imported identity and original state.
+    # A reviewed, append-only reconciliation may retire that state later; require
+    # its exact Registry record and matching event before accepting DONE.
+    reconciliations = {
+        str(item.get("package_id")): item
+        for item in registry_snapshot.historical_reconciliations
+    }
+    for task_id, preserved in expected_packages.items():
+        record = reconciliations.get(task_id)
+        if record is None:
+            continue
+        request = {
+            key: record.get(key) for key in (
+                "id", "package_id", "disposition", "historical_commit",
+                "integration_commit", "repository_head", "evidence_uri",
+            )
+        }
+        events = [
+            event for event in registry_snapshot.events
+            if event.get("event_type") == "HISTORICAL_PACKAGE_RECONCILED"
+            and event.get("package_id") == task_id
+        ]
+        valid = (
+            preserved["status"] in {"ON_DECK", "READY", "VERIFY_REVIEW", "BLOCKED"}
+            and record.get("disposition") in {"INTEGRATED_ELSEWHERE", "SUPERSEDED"}
+            and all(re.fullmatch(r"[0-9a-f]{40,64}", str(record.get(key, "")))
+                    for key in ("historical_commit", "integration_commit", "repository_head"))
+            and isinstance(record.get("evidence_uri"), str)
+            and bool(record["evidence_uri"])
+            and len(events) == 1
+            and events[0].get("recorded_at") == record.get("recorded_at")
+            and all((events[0].get("detail") or {}).get(key) == value
+                    for key, value in request.items())
+            and (events[0].get("detail") or {}).get("previous_status") == preserved["status"]
+            and (events[0].get("detail") or {}).get("review_passed") is False
+        )
+        if not valid:
+            mismatches.setdefault("invalid_historical_reconciliations", []).append(task_id)
+            continue
+        preserved["status"] = "DONE"
+    for task_id, (previous, target) in NO_COMMIT_CLEANUP.items():
+        if task_id not in expected_packages:
+            continue
+        events = [
+            event for event in registry_snapshot.events
+            if event.get("event_type") == "HISTORICAL_NO_COMMIT_CLASSIFIED"
+            and event.get("package_id") == task_id
+        ]
+        if not events:
+            continue
+        detail = events[0].get("detail") or {}
+        if (len(events) != 1 or expected_packages[task_id]["status"] != previous
+                or detail != {
+                    "operation_id": NO_COMMIT_CLEANUP_ID,
+                    "evidence_uri": NO_COMMIT_CLEANUP_EVIDENCE,
+                    "previous_status": previous,
+                    "new_status": target,
+                    "review_passed": False,
+                }):
+            mismatches.setdefault("invalid_no_commit_classification", []).append(task_id)
+            continue
+        expected_packages[task_id]["status"] = target
     actual_packages = {
         str(item.get("id")): {
             key: item.get(key)
@@ -2107,10 +2197,7 @@ def bounded_run_worker_gate(
         raise OperatorError("bounded run package allowlist is not registered READY work")
     parents = [item for item in run_packages if item.get("kind") == "PARENT"]
     reviews = [item for item in run_packages if item.get("kind") == "REVIEW"]
-    review_only = not parents
-    if ((not review_only and len(reviews) != len(parents))
-            or (review_only and not reviews)
-            or len(parents) + len(reviews) != len(run_packages)):
+    if not reviews or len(parents) + len(reviews) != len(run_packages):
         raise OperatorError("bounded run requires matched implementation/review pairs or reviews")
     dependencies = tuple(item for item in snapshot.dependencies if item.get("package_id") in allowed)
     dependency_rows = {
@@ -2125,14 +2212,20 @@ def bounded_run_worker_gate(
     required_ids = allowed | {str(item.get("dependency_id")) for item in dependencies}
     packages = tuple(item for item in snapshot.work_packages if item.get("id") in required_ids)
     review_targets = {review_id: rows[0] for review_id, rows in dependency_rows.items()}
-    if not review_only and {review_targets.get(str(item.get("id"))) for item in reviews} != {str(item.get("id")) for item in parents}:
+    parent_ids = {str(item.get("id")) for item in parents}
+    # A resumed run may contain new implementation pairs and reviews whose
+    # completed implementations remain outside the dispatch allowlist. Every
+    # runnable parent still needs exactly one matched review; context parents
+    # must prove the same provenance as a review-only run.
+    if any(list(review_targets.values()).count(parent_id) != 1 for parent_id in parent_ids):
         raise OperatorError("bounded run review dependencies do not exactly match implementations")
-    if review_only:
+    external_reviews = [review for review in reviews if review_targets[str(review["id"])] not in parent_ids]
+    review_implementers: dict[str, str] = {}
+    if external_reviews:
         if review_input_lookup is None or (successful_attempt_worker is None and review_implementer_worker is None):
             raise OperatorError("bounded review provenance lookup is required")
         targets = {str(item.get("id")): item for item in packages}
-        review_implementers: dict[str, str] = {}
-        for review in reviews:
+        for review in external_reviews:
             target_id = review_targets.get(str(review.get("id")))
             target = targets.get(target_id or "")
             if target is None or target.get("kind") != "PARENT" or target.get("status") != "VERIFY_REVIEW":
@@ -2142,11 +2235,14 @@ def bounded_run_worker_gate(
                 attempt_id = review_input.get("implementation_attempt_id")
                 if review_input.get("target_package_id") != target_id or not isinstance(attempt_id, str) or not attempt_id:
                     raise OperatorError("bounded review input does not bind its target")
-                review_implementers[str(review["id"])] = (
+                implementer = (
                     review_implementer_worker(str(review["id"]))
                     if review_implementer_worker is not None else
                     successful_attempt_worker(target_id, attempt_id)
                 )
+                if not isinstance(implementer, str) or not implementer:
+                    raise OperatorError("bounded review input has no authoritative implementer")
+                review_implementers[str(review["id"])] = implementer
             except RegistryError as error:
                 raise OperatorError("bounded review provenance gate failed: " + str(error)) from error
     candidate = DispatchSnapshot(
@@ -2182,7 +2278,7 @@ def bounded_run_worker_gate(
             and set(parent.get("required_capabilities", ())) <= set(workers[worker_id].get("capabilities", ()))
         } for parent in parents
     }
-    if not review_only and any(not choices for choices in potential_assignments.values()):
+    if any(not choices for choices in potential_assignments.values()):
         raise OperatorError("no capable implementation worker for a bounded run package")
     review_choices = {}
     for review in reviews:
@@ -2195,22 +2291,19 @@ def bounded_run_worker_gate(
         }
         if not review_choices[str(review.get("id"))]:
             raise OperatorError("bounded run has no capable independent reviewer")
-    if review_only:
-        independent = [
-            (str(review.get("id")), review_implementers[str(review.get("id"))], reviewer)
-            for review in reviews for reviewer in review_choices[str(review.get("id"))]
-            if reviewer != review_implementers[str(review.get("id"))]
-        ]
-    else:
-        independent = sorted({
-            (parent_id, implementer, reviewer)
-            for parent_id, implementers in potential_assignments.items()
-            for implementer in implementers
-            for review in reviews if review_targets[str(review.get("id"))] == parent_id
-            for reviewer in review_choices[str(review.get("id"))] if reviewer != implementer
-        })
-    if not independent:
-        raise OperatorError("bounded run has no independent reviewer")
+    independent = []
+    for review in reviews:
+        review_id = str(review["id"])
+        parent_id = review_targets[review_id]
+        implementers = (potential_assignments[parent_id] if parent_id in parent_ids
+                        else {review_implementers[review_id]})
+        pairs = {(parent_id if parent_id in parent_ids else review_id, implementer, reviewer)
+                 for implementer in implementers for reviewer in review_choices[review_id]
+                 if reviewer != implementer}
+        # One healthy pair must not hide another pair that can only self-review.
+        if not pairs:
+            raise OperatorError("bounded run has no independent reviewer for " + review_id)
+        independent.extend(sorted(pairs))
     return {
         "run_package_ids": sorted(allowed),
         "implementation_assignments": {key: sorted(value) for key, value in assignments.items()},
@@ -2219,6 +2312,25 @@ def bounded_run_worker_gate(
         "independent_pairs": [list(value) for value in independent],
         "decision_id": decision.decision_id,
     }
+
+
+def coordinator_continuation_gate(registry, dispatch, bounded_run, config_path):
+    """Empty worker scope needs a native approval certificate and bound service."""
+    from .delivery_coordinator import require_coordinator_health
+    from .delivery_service import load_coordinator
+    try:
+        certificate = registry.delivery_activation_preflight(bounded_run, observed_at=dispatch.observed_at)
+        if certificate.get("coordinator_only") is not True:
+            raise OperatorError("coordinator-only activation certificate required")
+        coordinator = load_coordinator(config_path, registry.database)
+        if (coordinator.run_id != certificate["run_id"]
+                or coordinator.planner.worker_id != certificate["coordinator_worker_id"]):
+            raise OperatorError("coordinator-only activation service binding mismatch")
+        require_coordinator_health(scope_dispatch_snapshot(dispatch, [], bounded_run["parent_limit"]),
+                                   coordinator.planner)
+        return {"run_package_ids": [], "continuation_certificate": certificate}
+    except RegistryError as error:
+        raise OperatorError("coordinator-only activation failed: " + str(error)) from error
 
 
 def preflight(
@@ -2238,6 +2350,7 @@ def preflight(
     require_kill_switch: bool = True,
     canary_feature_id: str | None = None,
     run_package_ids: Sequence[str] | None = None,
+    bounded_run: Mapping[str, Any] | None = None,
     allow_allowed_authors_pending_recovery: bool = False,
     allow_stopping_ownership_reconciliation: bool = False,
 ) -> Mapping[str, Any]:
@@ -2298,7 +2411,11 @@ def preflight(
         if require_permissions_gate else {"gate": "deferred-to-prepare-dry-run"}
     )
     dispatch = registry.dispatch_snapshot(observed_at=observed_at)
+    if bounded_run is not None and tuple(bounded_run["package_ids"]) != tuple(run_package_ids or ()):
+        raise OperatorError("bounded run and package allowlist differ")
     workers = (
+        coordinator_continuation_gate(registry, dispatch, bounded_run, config_path)
+        if require_workers and bounded_run is not None and not bounded_run["package_ids"] else
         bounded_run_worker_gate(
             dispatch, run_package_ids,
             review_input_lookup=registry.review_input,
@@ -2888,6 +3005,37 @@ def reconcile_historical_package(
             "previous_revision": expected_revision, "revision": revision}
 
 
+def classify_approved_no_commit_batch(
+    database: Path, config_path: Path, release: Path, preservation_path: Path,
+    expected_commit: str, expected_revision: int, spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Apply the exact owner-reviewed obsolete/deferred no-commit classification."""
+    if (_sensitive_paths(spec) or set(spec) != {"id", "evidence_uri", "recorded_at"}
+            or spec.get("id") != NO_COMMIT_CLEANUP_ID
+            or spec.get("evidence_uri") != NO_COMMIT_CLEANUP_EVIDENCE):
+        raise OperatorError("no-commit cleanup spec does not match the approved decision")
+    recorded_at = str(spec["recorded_at"])
+    _parse_time(recorded_at, "no-commit cleanup recorded_at")
+    preflight(database, config_path, release, preservation_path, expected_commit,
+              expected_revision, observed_at=recorded_at, require_workers=False)
+    revision = SQLiteRegistry(database).classify_historical_no_commit_batch(
+        cleanup_id=NO_COMMIT_CLEANUP_ID, targets=NO_COMMIT_CLEANUP,
+        evidence_uri=NO_COMMIT_CLEANUP_EVIDENCE,
+        expected_revision=expected_revision, recorded_at=recorded_at,
+    )
+    verify_preservation(
+        SQLiteRegistry(database).control_center_snapshot(observed_at=recorded_at),
+        preservation_path,
+    )
+    return {
+        "kind": "threadline-factory-no-commit-cleanup", "passed": True,
+        "operation_id": NO_COMMIT_CLEANUP_ID,
+        "retired_package_ids": sorted(key for key, (_, target) in NO_COMMIT_CLEANUP.items() if target == "DONE"),
+        "deferred_package_ids": sorted(key for key, (_, target) in NO_COMMIT_CLEANUP.items() if target == "BLOCKED"),
+        "review_passed": False, "previous_revision": expected_revision, "revision": revision,
+    }
+
+
 def parse_review_outcome_spec(
     value: Mapping[str, Any],
 ) -> tuple[Evidence, ReviewOutcome]:
@@ -3354,10 +3502,29 @@ def update_allowed_authors(
                 "idempotent_replay": False, **receipt}
 
 
-def _validate_plan(plan: Sequence[tuple[str, Mapping[str, Any]]], release: Path, *, live: bool) -> None:
+def _validate_plan(plan: Sequence[tuple[str, Mapping[str, Any]]], release: Path, *, live: bool,
+                   config: Mapping[str, Any] | None = None, config_path: Path | None = None,
+                   database: Path | None = None) -> None:
     release = release.resolve()
     for label, data in plan:
         arguments = data.get("ProgramArguments", ())
+        if label == "life.threadline.factory.delivery":
+            delivery = config.get("delivery") if isinstance(config, Mapping) else None
+            if (not isinstance(delivery, Mapping)
+                    or not isinstance(delivery.get("run_id"), str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", delivery["run_id"])
+                    or config_path is None or database is None
+                    or not config_path.is_absolute() or not database.is_absolute()
+                    or config.get("registry_database") != str(database)):
+                raise OperatorError("delivery service plan requires exact operator configuration")
+            expected = [sys.executable, "-m", "scripts.factory_registry.delivery_cli",
+                        "tick" if live else "status", "--database", config["registry_database"]]
+            expected += (["--config", str(config_path.resolve())] if live
+                         else ["--run-id", delivery["run_id"]])
+            if (not isinstance(arguments, (list, tuple)) or list(arguments) != expected or data.get("Label") != label
+                    or data.get("WorkingDirectory") != str(release)):
+                raise OperatorError("delivery service plan is not the exact pinned live/status command")
+            continue
         if label != install_launchd.DASHBOARD_LABEL:
             if ("--dry-run" in arguments) == live:
                 raise OperatorError("service plan live/dry-run mismatch")
@@ -3432,7 +3599,7 @@ def prepare_dry_run(
     plan = install_launchd.service_plan(
         migrated, config_path.resolve(), root, mode, False, dashboard_port
     )
-    _validate_plan(plan, release, live=False)
+    _validate_plan(plan, release, live=False, config=migrated, config_path=config_path, database=database)
     state = Path(migrated["state"])
     backup_holder: dict[str, Path] = {}
 
@@ -3501,14 +3668,14 @@ def enable_live(
     evidence = preflight(
         database, config_path, release, preservation_path, expected_commit,
         expected_revision, require_workers=True, canary_feature_id=canary_feature_id,
-        run_package_ids=run_package_ids,
+        run_package_ids=run_package_ids, bounded_run=bounded_run,
     )
     config = _load_object(config_path, "runner config")
     root = release / "scripts" / "runner"
     dry_plan = install_launchd.service_plan(config, config_path.resolve(), root, mode, False, dashboard_port)
     live_plan = install_launchd.service_plan(config, config_path.resolve(), root, mode, True, dashboard_port)
-    _validate_plan(dry_plan, release, live=False)
-    _validate_plan(live_plan, release, live=True)
+    _validate_plan(dry_plan, release, live=False, config=config, config_path=config_path, database=database)
+    _validate_plan(live_plan, release, live=True, config=config, config_path=config_path, database=database)
     kwargs = {}
     if run is not None:
         kwargs["run"] = run
@@ -3527,7 +3694,7 @@ def enable_live(
             database, config_path, release, preservation_path, expected_commit,
             expected_revision, require_workers=True,
             canary_feature_id=canary_feature_id,
-            run_package_ids=run_package_ids,
+            run_package_ids=run_package_ids, bounded_run=bounded_run,
         )
         revision = registry.set_dispatch_control(
             expected_revision=expected_revision,
@@ -3577,7 +3744,7 @@ def parse_bounded_run_scope(value: Mapping[str, Any]) -> dict[str, Any]:
     base_ref = value.get("base_ref")
     limit = value.get("parent_limit")
     if (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id)
-            or not isinstance(packages, list) or not packages or len(set(packages)) != len(packages)
+            or not isinstance(packages, list) or len(set(packages)) != len(packages)
             or any(not isinstance(item, str) or not item for item in packages)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
             or base_ref.startswith("/") or ".." in base_ref.split("/")

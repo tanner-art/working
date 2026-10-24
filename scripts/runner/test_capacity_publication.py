@@ -7,10 +7,35 @@ from unittest.mock import Mock
 
 from runner import RegistryLeaseMonitor, write_collected_usage
 from usage_policy import validate_usage
+from scripts.runner.capacity_publication import usage_path
 from scripts.factory_registry.codex_capacity import normalize_buckets
 
 
 class CapacityPublicationTests(unittest.TestCase):
+    def test_custom_usage_paths_match_the_existing_runner_contract(self):
+        config = {'repo': '/repo', 'state': '/state'}
+        self.assertEqual(usage_path(config), pathlib.Path('/state/usage.json'))
+        self.assertEqual(usage_path({**config, 'usage_file': 'telemetry/usage.json'}),
+                         pathlib.Path('/repo/telemetry/usage.json'))
+        self.assertEqual(usage_path({**config, 'usage_file': '/private/usage.json'}),
+                         pathlib.Path('/private/usage.json'))
+
+    def test_late_producer_cannot_replace_newer_provider_signal_with_old_health(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'usage.json'
+            config = {'agents': {'claude': {'model': 'sonnet', 'capacity_mode': 'provider_signal'}}}
+            def sample(stamp, limit):
+                return [{'worker_id': 'claude', 'observations': ({'observed_at': stamp,
+                    'provider_diagnostics': {'capacity_mode': 'provider_signal',
+                        'service_state': 'healthy' if limit == 'NONE' else 'unhealthy',
+                        'authentication_state': 'valid', 'live_invocation_state': 'succeeded',
+                        'limit_signal': limit}},)}]
+            write_collected_usage(path, config, sample('2026-09-26T10:02:00Z', 'RATE_LIMIT'))
+            expected = validate_usage(json.loads(path.read_text()))
+            write_collected_usage(path, config, sample('2026-09-26T10:01:00Z', 'NONE'))
+            self.assertEqual(validate_usage(json.loads(path.read_text())), expected)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_roundtrip_preserves_other_accounts_and_original_sample_time(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / 'usage.json'

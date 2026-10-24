@@ -40,6 +40,7 @@ from .models import (
     WorkPackage,
 )
 from .repository import RegistryConflict, RegistryNotFound
+from .sqlite_delivery import DeliveryRegistryMixin
 from .lifecycle import (
     TransitionAuthority,
     validate_attempt_completion,
@@ -279,7 +280,7 @@ def _bounded_run_scope(value: Mapping[str, Any] | None, *, active_parent_limit: 
     base_ref = value.get("base_ref")
     parent_limit = value.get("parent_limit", DEFAULT_BOUNDED_RUN_PARENT_LIMIT)
     if (not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,95}", run_id)
-            or not isinstance(package_ids, (list, tuple)) or not package_ids
+            or not isinstance(package_ids, (list, tuple))
             or any(not isinstance(item, str) or not item for item in package_ids)
             or len(set(package_ids)) != len(package_ids)
             or not isinstance(base_ref, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_ref)
@@ -308,14 +309,18 @@ def _legacy_heartbeat_time(value: Any) -> str | None:
         return None
 
 
-class SQLiteRegistry:
+class SQLiteRegistry(DeliveryRegistryMixin):
     """Transactional registry adapter with authoritative lease invariants."""
 
     def __init__(self, database: str | Path) -> None:
         self.database = Path(database)
+        self._snapshot_connection: sqlite3.Connection | None = None
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        if self._snapshot_connection is not None:
+            yield self._snapshot_connection
+            return
         connection = sqlite3.connect(self.database, timeout=10, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -323,6 +328,28 @@ class SQLiteRegistry:
         try:
             yield connection
         finally:
+            connection.close()
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator["SQLiteRegistry"]:
+        """Pin several read APIs to one WAL revision without blocking writers.
+
+        A distinct, query-only reader is scoped to this call, never shared with
+        execution or another request. The retained closed connection makes use
+        after exit fail rather than silently switching back to live reads.
+        """
+        connection = sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro",
+                                     uri=True, timeout=10, isolation_level=None)
+        reader = SQLiteRegistry(self.database)
+        reader._snapshot_connection = connection
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            connection.execute("SELECT value FROM registry_metadata WHERE key='revision'").fetchone()
+            yield reader
+        finally:
+            connection.rollback()
             connection.close()
 
     def _preflight_schema_version(self) -> int | None:
@@ -748,12 +775,16 @@ class SQLiteRegistry:
                     ).fetchone()[0])
                     scope = _bounded_run_scope(bounded_run, active_parent_limit=limit)
                     if scope is not None:
+                        delivery_reviews = self._delivery_activation_packages(connection, scope, changed_at)
                         known = {
                             item["id"] for item in connection.execute(
                                 "SELECT id FROM work_packages WHERE status='READY'"
                             ).fetchall()
                         }
-                        if not set(scope["package_ids"]).issubset(known):
+                        deferred_reviews = {row["id"] for row in connection.execute(
+                            "SELECT id FROM work_packages WHERE status IN ('ON_DECK','VERIFY_REVIEW','BLOCKED','DONE')"
+                        ) if row["id"] in delivery_reviews}
+                        if not set(scope["package_ids"]).issubset(known | deferred_reviews):
                             raise RegistryConflict("RUN_PACKAGE_NOT_READY")
                         scoped = connection.execute(
                             "SELECT id, kind FROM work_packages WHERE id IN ("
@@ -850,6 +881,8 @@ class SQLiteRegistry:
                     if active or running or runtimes:
                         raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
                 validate_dispatch_transition(expected_mode, new_mode)
+                self._delivery_control_transition(connection, new_mode,
+                                                  scope if new_mode == "LIVE" else None, changed_at)
                 connection.execute(
                     """UPDATE factory_control
                        SET dispatch_mode=?, kill_switch_engaged=?, changed_at=?, reason=?
@@ -3141,6 +3174,93 @@ class SQLiteRegistry:
                 connection.rollback()
                 raise
 
+    def classify_historical_no_commit_batch(
+        self, *, cleanup_id: str, targets: Mapping[str, tuple[str, str]],
+        evidence_uri: str, expected_revision: int, recorded_at: str,
+    ) -> int:
+        """Atomically remove a pinned, no-commit legacy batch from dispatch.
+
+        The append-only event and operation receipt describe supersession or
+        deferral; DONE here never implies implementation or review approval.
+        """
+        recorded_at = _normalize_timestamp(recorded_at)
+        if not cleanup_id or not targets or not evidence_uri:
+            raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION")
+        request = {
+            "id": cleanup_id, "targets": {key: list(value) for key, value in sorted(targets.items())},
+            "evidence_uri": evidence_uri,
+        }
+        operation_id = f"historical-no-commit:{cleanup_id}"
+        with self._connection() as connection:
+            self._require_control_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                replay = self._operation_replay(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                )
+                if replay is not None:
+                    connection.rollback()
+                    return int(replay["revision"])
+                self._require_revision(connection, expected_revision)
+                control = connection.execute(
+                    "SELECT dispatch_mode, kill_switch_engaged FROM factory_control WHERE singleton=1"
+                ).fetchone()
+                if control is None or control["dispatch_mode"] != "PAUSED" or not control["kill_switch_engaged"]:
+                    raise RegistryConflict("NO_COMMIT_CLASSIFICATION_REQUIRES_PAUSED")
+                if (connection.execute("SELECT 1 FROM leases WHERE released_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempts WHERE ended_at IS NULL LIMIT 1").fetchone()
+                        or connection.execute("SELECT 1 FROM attempt_runtime_ownership WHERE released_at IS NULL LIMIT 1").fetchone()):
+                    raise RegistryConflict("ACTIVE_OWNERSHIP_PRESENT")
+                for package_id, (previous, target) in targets.items():
+                    if target not in {"DONE", "BLOCKED"} or previous not in {"ON_DECK", "READY", "BLOCKED"}:
+                        raise RegistryConflict("INVALID_NO_COMMIT_CLASSIFICATION", package_id)
+                    package = connection.execute(
+                        "SELECT status, pr_url FROM work_packages WHERE id=?", (package_id,)
+                    ).fetchone()
+                    if package is None:
+                        raise RegistryNotFound(f"work package {package_id}")
+                    if package["status"] != previous or package["pr_url"] is not None:
+                        raise RegistryConflict("NO_COMMIT_PACKAGE_CHANGED", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM attempts WHERE package_id=? AND outcome='SUCCEEDED' LIMIT 1",
+                        (package_id,),
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM evidence WHERE package_id=? LIMIT 1", (package_id,)
+                    ).fetchone() or connection.execute(
+                        "SELECT 1 FROM review_outcomes WHERE review_package_id=? LIMIT 1", (package_id,)
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_PROVENANCE_PRESENT", package_id)
+                    if connection.execute(
+                        "SELECT 1 FROM task_events WHERE event_type='HISTORICAL_NO_COMMIT_CLASSIFIED' "
+                        "AND package_id=? LIMIT 1", (package_id,),
+                    ).fetchone():
+                        raise RegistryConflict("NO_COMMIT_ALREADY_CLASSIFIED", package_id)
+                for package_id, (previous, target) in sorted(targets.items()):
+                    connection.execute(
+                        "UPDATE work_packages SET status=?, updated_at=? WHERE id=?",
+                        (target, recorded_at, package_id),
+                    )
+                    self._insert_event(
+                        connection, "HISTORICAL_NO_COMMIT_CLASSIFIED", recorded_at,
+                        package_id, None, None, {
+                            "operation_id": cleanup_id, "evidence_uri": evidence_uri,
+                            "previous_status": previous, "new_status": target,
+                            "review_passed": False,
+                        },
+                    )
+                revision = self._bump_revision(connection)
+                self._record_operation(
+                    connection, operation_id=operation_id,
+                    operation_kind="HISTORICAL_NO_COMMIT_CLASSIFICATION", request=request,
+                    result={"revision": revision}, recorded_at=recorded_at,
+                )
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
     def record_native_review_ci(
         self, review_package_id: str, review_input_id: str,
         implementation_commit: str, base_commit: str, pr_url: str, run_url: str,
@@ -4357,7 +4477,19 @@ class SQLiteRegistry:
                     "UPDATE work_packages SET status='DONE', updated_at=? WHERE id=?",
                     (decided_at, outcome.review_package_id),
                 )
-                if outcome.state is ReviewOutcomeState.APPROVED:
+                delivery_target = connection.execute(
+                    "SELECT provider_diagnostics_json FROM work_packages WHERE id=?",
+                    (outcome.target_package_id,),
+                ).fetchone()
+                requires_integration = bool(delivery_target and json.loads(
+                    delivery_target["provider_diagnostics_json"]
+                ).get("delivery_feature_id"))
+                if outcome.state is ReviewOutcomeState.APPROVED and requires_integration:
+                    connection.execute(
+                        "UPDATE features SET status='VERIFY_REVIEW',updated_at=? WHERE id=?",
+                        (decided_at, review_package["feature_id"]),
+                    )
+                if outcome.state is ReviewOutcomeState.APPROVED and not requires_integration:
                     connection.execute(
                         "UPDATE work_packages SET status='DONE', updated_at=? WHERE id=?",
                         (decided_at, outcome.target_package_id),
@@ -5343,7 +5475,9 @@ class SQLiteRegistry:
         """Return one consistent, read-only scheduler input at a registry revision."""
         observed_at = _normalize_timestamp(observed_at)
         with self._connection() as connection:
-            connection.execute("BEGIN")
+            owns_transaction = not connection.in_transaction
+            if owns_transaction:
+                connection.execute("BEGIN")
             metadata = {
                 row["key"]: row["value"]
                 for row in connection.execute(
@@ -5423,7 +5557,8 @@ class SQLiteRegistry:
                     if key in diagnostics:
                         item[key] = diagnostics[key]
                 usage.append(item)
-            connection.commit()
+            if owns_transaction:
+                connection.commit()
         return DispatchSnapshot(
             revision=int(metadata["revision"]),
             observed_at=observed_at,
@@ -5442,7 +5577,9 @@ class SQLiteRegistry:
         observed_at = _normalize_timestamp(observed_at)
         with self._connection() as connection:
             connection.execute("PRAGMA query_only = ON")
-            connection.execute("BEGIN")
+            owns_transaction = not connection.in_transaction
+            if owns_transaction:
+                connection.execute("BEGIN")
             metadata = {
                 row["key"]: row["value"]
                 for row in connection.execute("SELECT key, value FROM registry_metadata")
@@ -5563,6 +5700,12 @@ class SQLiteRegistry:
                     "SELECT * FROM preserved_artifacts ORDER BY kind, external_identity, id",
                     ("metadata_json",),
                 ),
+                historical_reconciliations=(
+                    decoded_rows(
+                        "SELECT * FROM historical_package_reconciliations ORDER BY recorded_at, id"
+                    ) if "historical_package_reconciliations" in tables else ()
+                ),
             )
-            connection.commit()
+            if owns_transaction:
+                connection.commit()
         return snapshot

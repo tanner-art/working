@@ -106,6 +106,15 @@ DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8787
 REFRESH_SECONDS = 10
 
+# Only Registry-owned constants are public diagnostics. A shape check alone
+# can accidentally publish an uppercase token from a provider failure detail.
+DELIVERY_PUBLIC_REASONS = frozenset({
+    'DELIVERY_GENERATION_BUDGET_EXHAUSTED',
+    'DELIVERY_ATTEMPT_BLOCKED_RECONCILIATION_REQUIRED',
+    'DELIVERY_PLANNING_ATTEMPTS_EXHAUSTED',
+    'DELIVERY_INTEGRATION_ATTEMPTS_EXHAUSTED',
+})
+
 DEFAULT_STALE_AFTER_SECONDS = fstatus.DEFAULT_STALE_AFTER_SECONDS
 DEFAULT_UTILIZATION_WINDOW_DAYS = fstatus.DEFAULT_UTILIZATION_WINDOW_DAYS
 DEFAULT_UTILIZATION_TARGET_WORKERS = fstatus.DEFAULT_UTILIZATION_TARGET_WORKERS
@@ -214,62 +223,76 @@ def load_registry_report(config, observed_at):
         return unavailable
 
     try:
-        registry = SQLiteRegistry(database)
-        projection = build_control_center_projection(registry, observed_at=observed_at)
-        control = dict(registry.dispatch_control())
-        if int(projection['registryRevision']) != control['revision']:
-            raise RuntimeError('Registry changed during dashboard observation')
-        active_attempts = sum(
-            1
-            for feature in projection['features']
-            for package in feature['packages']
-            for attempt in package['attempts']
-            if attempt['outcome'] == 'active'
-        )
-        active_leases = sum(
-            1
-            for feature in projection['features']
-            for package in feature['packages']
-            if package['currentLease'] is not None
-        )
-        ownership = {
-            'active_leases': active_leases,
-            'active_attempts': active_attempts,
-            'active_runtimes': None,
-            'active_unbound_leases': None,
-            'runtime_orphans': None,
-            'error': None,
-        }
-        try:
-            ownership.update({
-                'active_runtimes': len(registry.active_attempt_runtimes()),
-                'active_unbound_leases': len(registry.active_unbound_leases()),
-                'runtime_orphans': len(registry.runtime_orphans(observed_at=observed_at)),
-            })
-            final_control = registry.dispatch_control()
-            if final_control['revision'] != control['revision']:
-                raise RuntimeError('Registry changed during ownership observation')
-        except Exception:
-            ownership['error'] = 'runtime ownership observation failed'
-            ownership.update({
+        with SQLiteRegistry(database).read_snapshot() as registry:
+            projection = build_control_center_projection(registry, observed_at=observed_at)
+            control = dict(registry.dispatch_control())
+            if int(projection['registryRevision']) != control['revision']:
+                raise RuntimeError('Registry changed during dashboard observation')
+            delivery_snapshot = registry.delivery_snapshot(run_id=(control.get('bounded_run') or {}).get('run_id'))
+            if delivery_snapshot['revision'] != control['revision']:
+                raise RuntimeError('Registry changed during delivery observation')
+            delivery = [{
+                'feature_id': item['feature_id'], 'title': item['brief']['title'],
+                'next_action': item['next_action'],
+                'reason': (item['reason'] if isinstance(item['reason'], str)
+                           and item['reason'] in DELIVERY_PUBLIC_REASONS else
+                           'See local delivery evidence for details' if item['reason'] else None),
+                'implementation_id': (item['pair'] or {}).get('implementation_id'),
+                'review_id': (item['pair'] or {}).get('review_id'),
+                'integration_commit': (item['integration'] or {}).get('integration_commit'),
+            } for item in delivery_snapshot['features']]
+            active_attempts = sum(
+                1
+                for feature in projection['features']
+                for package in feature['packages']
+                for attempt in package['attempts']
+                if attempt['outcome'] == 'active'
+            )
+            active_leases = sum(
+                1
+                for feature in projection['features']
+                for package in feature['packages']
+                if package['currentLease'] is not None
+            )
+            ownership = {
+                'active_leases': active_leases,
+                'active_attempts': active_attempts,
                 'active_runtimes': None,
                 'active_unbound_leases': None,
                 'runtime_orphans': None,
-            })
-        return {
-            'available': True,
-            'error': None,
-            'projection': projection,
-            'control': {
-                'dispatch_mode': control['dispatch_mode'],
-                'kill_switch_engaged': control['kill_switch_engaged'],
-                'changed_at': control['changed_at'],
-                'reason': control['reason'],
-                'revision': control['revision'],
-                'bounded_run': control.get('bounded_run'),
-            },
-            'ownership': ownership,
-        }
+                'error': None,
+            }
+            try:
+                ownership.update({
+                    'active_runtimes': len(registry.active_attempt_runtimes()),
+                    'active_unbound_leases': len(registry.active_unbound_leases()),
+                    'runtime_orphans': len(registry.runtime_orphans(observed_at=observed_at)),
+                })
+                final_control = registry.dispatch_control()
+                if final_control['revision'] != control['revision']:
+                    raise RuntimeError('Registry changed during ownership observation')
+            except Exception:
+                ownership['error'] = 'runtime ownership observation failed'
+                ownership.update({
+                    'active_runtimes': None,
+                    'active_unbound_leases': None,
+                    'runtime_orphans': None,
+                })
+            return {
+                'available': True,
+                'error': None,
+                'projection': projection,
+                'control': {
+                    'dispatch_mode': control['dispatch_mode'],
+                    'kill_switch_engaged': control['kill_switch_engaged'],
+                    'changed_at': control['changed_at'],
+                    'reason': control['reason'],
+                    'revision': control['revision'],
+                    'bounded_run': control.get('bounded_run'),
+                },
+                'ownership': ownership,
+                'delivery': delivery,
+            }
     except Exception:
         # Never expose database paths or raw SQLite/provider diagnostics.
         unavailable['error'] = 'authoritative Registry observation failed'
