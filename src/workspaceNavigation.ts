@@ -41,6 +41,7 @@ export type WorkspaceRouteContext = Readonly<{
   accountUserId?: string
   authenticatedUserId?: string
   prepareCanvasExit: () => boolean
+  canLeaveSurface?: () => boolean
 }>
 
 /** Search may replace focused Canvas only after its current edits are safely handed off. */
@@ -75,6 +76,7 @@ export function performWorkspaceRouteTransition(
   if (!context.available || (context.accountUserId !== undefined && context.accountUserId !== context.authenticatedUserId)) {
     return { ok: false, message: 'Account or workspace is unavailable. Navigation was not completed.' }
   }
+  if (context.canLeaveSurface && !context.canLeaveSurface()) return { ok: false, message: 'Your conversation was kept open.' }
   if (destination === 'workspace') {
     if (!context.prepareCanvasExit()) return { ok: false, message: 'Finish saving Canvas changes before leaving the Canvas.' }
     host.enterSurface()
@@ -100,13 +102,13 @@ export function isRecoveredWorkspaceLocation(expected: WorkspaceHistoryLocation,
 }
 
 /** Mark both adjacent entries in this document so Back never crosses a page load. */
-export function enterWorkspaceHistory(history: WorkspaceHistory, currentUrl: string, session: string): void {
+export function enterWorkspaceHistory(history: WorkspaceHistory, currentUrl: string, session: string, path = '/search'): void {
   history.replaceState({ ...historyRecord(history.state), threadlineSearchOrigin: session }, '', currentUrl)
-  history.pushState({ threadlineSearchEntry: session }, '', '/search')
+  history.pushState({ threadlineSearchEntry: session }, '', path)
 }
 
 export function leaveWorkspaceHistory(history: WorkspaceHistory, path: string, session: string): void {
-  if (path === '/search' && historyRecord(history.state).threadlineSearchEntry === session) history.back()
+  if (['/search', '/brain', '/chat'].includes(path) && historyRecord(history.state).threadlineSearchEntry === session) history.back()
   else history.replaceState({}, '', '/')
 }
 

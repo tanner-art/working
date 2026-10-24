@@ -26,6 +26,8 @@ export type WorkspaceSurfaceProps = Readonly<{
   navigate: (request: WorkspaceNavigationRequest) => WorkspaceNavigationOutcome
   /** The host's current validated local or account projection, shared with result navigation. */
   readModel?: (current: AppState) => PersistedState
+  /** A surface can protect transient edits on Close and browser history navigation. */
+  registerExitGuard?: (guard: () => boolean) => () => void
 }>
 
 export type SurfaceModule = Readonly<{ surface: AppSurfaceDefinition }>

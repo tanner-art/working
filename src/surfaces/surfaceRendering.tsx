@@ -1,9 +1,9 @@
 import type { RenderedWorkspaceSurfaceModule, WorkspaceSurfaceProps } from '../appSurfaceRegistry'
 
 /** The only renderer bridge for registered, already-initialized workspace state. */
-export function WorkspaceSurfaceRenderer({ module, state, snapshotToken, update, navigate, readModel }: WorkspaceSurfaceProps & {
+export function WorkspaceSurfaceRenderer({ module, state, snapshotToken, update, navigate, readModel, registerExitGuard }: WorkspaceSurfaceProps & {
   module: RenderedWorkspaceSurfaceModule
 }) {
   const Surface = module.WorkspaceSurface
-  return <Surface state={state} snapshotToken={snapshotToken} update={update} navigate={navigate} readModel={readModel} />
+  return <Surface state={state} snapshotToken={snapshotToken} update={update} navigate={navigate} readModel={readModel} registerExitGuard={registerExitGuard} />
 }
