@@ -1,6 +1,7 @@
 import { getVercelOidcToken } from '@vercel/oidc'
 import { authenticateInterpretCaller } from './interpretAuth'
 import { checkInterpretationRateLimit } from './interpretRateLimit'
+import { AiBudgetError, budgetedMessage } from './aiSpend'
 
 export const config = { runtime: 'edge' }
 declare const process: { env: Record<string, string | undefined> }
@@ -81,16 +82,15 @@ export default async function handler(request: Request): Promise<Response> {
     if (!token) return json(503, { error: 'not_configured' })
     if (controller.signal.aborted) return json(504, { error: 'timeout' })
     try {
-      const response = await fetch('https://ai-gateway.vercel.sh/v1/messages', {
-        method: 'POST', signal: controller.signal,
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify({ model: CHAT_MODEL, max_tokens: 1200, system, messages }),
-      })
+      const response = await budgetedMessage(token, { model: CHAT_MODEL, max_tokens: 1200, system, messages }, controller.signal)
       if (!response.ok) return json(response.status === 429 ? 429 : 502, { error: 'provider_error' })
       const data = await response.json() as { content?: { type: string; text?: string }[]; stop_reason?: string }
       const text = Array.isArray(data.content) ? data.content.filter(block => block.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n').trim() : ''
       if (!text || text.length > 6000) return json(502, { error: 'invalid_response' })
       return json(200, { text, truncated: data.stop_reason === 'max_tokens' })
-    } catch { return json(controller.signal.aborted ? 504 : 502, { error: controller.signal.aborted ? 'timeout' : 'provider_error' }) }
+    } catch (error) {
+      if (error instanceof AiBudgetError) return json(error.status, { error: error.code })
+      return json(controller.signal.aborted ? 504 : 502, { error: controller.signal.aborted ? 'timeout' : 'provider_error' })
+    }
   }
 }

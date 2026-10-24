@@ -3,6 +3,8 @@ import { getVercelOidcToken } from '@vercel/oidc'
 import { authenticateInterpretCaller } from './interpretAuth'
 import { checkInterpretationRateLimit } from './interpretRateLimit'
 import handler, { AI_INTERPRETATION_MODEL } from './interpret'
+import { AiBudgetError, budgetedMessage } from './aiSpend'
+vi.mock('./aiSpend', async importOriginal => ({ ...await importOriginal<typeof import('./aiSpend')>(), budgetedMessage: vi.fn((token, payload, signal) => fetch('https://ai-gateway.vercel.sh/v1/messages', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(payload), signal })) }))
 
 vi.mock('@vercel/oidc', () => ({ getVercelOidcToken: vi.fn() }))
 vi.mock('./interpretAuth', () => ({ authenticateInterpretCaller: vi.fn() }))
@@ -50,6 +52,13 @@ afterEach(() => {
 })
 
 describe('API endpoint', () => {
+  it('applies the same budget to capture interpretation', async () => {
+    process.env.AI_GATEWAY_API_KEY = 'test-key'
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(budgetedMessage).mockRejectedValueOnce(new AiBudgetError(402, 'budget_exhausted'))
+    expect((await handler(request())).status).toBe(402)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
   it('rejects non-POST requests', async () => {
     process.env.AI_GATEWAY_API_KEY = 'test-key'
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(validProviderResponse)))

@@ -1,6 +1,7 @@
 import { getVercelOidcToken } from '@vercel/oidc'
 import { authenticateInterpretCaller } from './interpretAuth'
 import { checkInterpretationRateLimit } from './interpretRateLimit'
+import { AiBudgetError, budgetedMessage } from './aiSpend'
 
 // Vercel Edge Function backing src/aiInterpretation.ts's provider client. This file is
 // deployed independently of the Vite SPA bundle (see docs/AI_INTERPRETATION.md), so it
@@ -132,20 +133,14 @@ async function requestProviderInterpretation(capture: CaptureInput, token: strin
   const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
   let response: Response
   try {
-    const authHeader = `Bearer ${token}`
-    response = await fetch('https://ai-gateway.vercel.sh/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'authorization': authHeader },
-      body: JSON.stringify({
+    response = await budgetedMessage(token, {
         model,
         max_tokens: 400,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildUserPrompt(capture) }],
         tools: [PROPOSE_INTERPRETATION_TOOL],
         tool_choice: { type: 'tool', name: 'propose_interpretation' },
-      }),
-      signal: controller.signal,
-    })
+      }, controller.signal)
   } finally { clearTimeout(timeout) }
   if (!response.ok) throw new Error(`Provider request failed with status ${response.status}.`)
   const data = await response.json() as { content?: Array<{ type: string; input?: unknown }> }
@@ -201,6 +196,7 @@ export default async function handler(request: Request): Promise<Response> {
     const proposal = await requestProviderInterpretation(capture, bearerToken ?? oidcToken!, AI_INTERPRETATION_MODEL)
     return json(200, proposal)
   } catch (error) {
+    if (error instanceof AiBudgetError) return json(error.status, { error: error.code, message: error.status === 402 ? 'The monthly AI budget is used or reserved. Your capture is saved.' : 'AI spending protection is unavailable. Your capture is saved.' })
     return json(502, { error: 'provider_error', message: error instanceof Error ? error.message : 'Unknown provider error.' })
   }
 }

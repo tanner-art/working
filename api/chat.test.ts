@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import handler, { CHAT_MODEL, validateChat } from './chat'
 import { authenticateInterpretCaller } from './interpretAuth'
 import { checkInterpretationRateLimit } from './interpretRateLimit'
+import { AiBudgetError, budgetedMessage } from './aiSpend'
+vi.mock('./aiSpend', async importOriginal => ({ ...await importOriginal<typeof import('./aiSpend')>(), budgetedMessage: vi.fn((token, payload, signal) => fetch('https://ai-gateway.vercel.sh/v1/messages', { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(payload), signal })) }))
 vi.mock('@vercel/oidc', () => ({ getVercelOidcToken: vi.fn(async () => undefined) }))
 vi.mock('./interpretAuth', () => ({ authenticateInterpretCaller: vi.fn() }))
 vi.mock('./interpretRateLimit', () => ({ checkInterpretationRateLimit: vi.fn() }))
@@ -15,6 +17,11 @@ beforeEach(() => {
 })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); delete process.env.AI_INTERPRETATION_PROVIDER; delete process.env.AI_GATEWAY_API_KEY })
 describe('authenticated bounded conversational API', () => {
+  it('reports an exhausted shared budget without calling the provider', async () => {
+    vi.mocked(budgetedMessage).mockRejectedValueOnce(new AiBudgetError(402, 'budget_exhausted'))
+    expect((await handler(request())).status).toBe(402)
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it('preserves conversation roles, returns text, and cannot execute tools', async () => {
     const response = await handler(request())
     expect(response.status).toBe(200); expect(await response.json()).toEqual({ text: 'Hello.', truncated: false })

@@ -35,7 +35,7 @@ describe('Chat transport', () => {
     controller.abort(); await expect(pending).rejects.toThrow('cancelled')
     resolve({ userId: 'a', token: 'test' }); await Promise.resolve(); expect(fetcher).not.toHaveBeenCalled()
   })
-  it.each([401, 403, 429, 502, 503, 504])('surfaces %s as a failure, never an assistant message', async status => {
+  it.each([401, 402, 403, 429, 502, 503, 504])('surfaces %s as a failure, never an assistant message', async status => {
     await expect(sendChat([], 'a', identity, new AbortController().signal, async () => new Response('{}', { status }))).rejects.toThrow()
   })
   it('rejects malformed provider output', async () => {
